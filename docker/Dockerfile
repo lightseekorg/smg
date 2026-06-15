@@ -1,6 +1,8 @@
 ######################## FFMPEG IMAGE ########################
 FROM ubuntu:24.04 AS ffmpeg-image
 
+# TODO: Add a scheduled updater for these source-built media dependencies.
+# Version and SHA256 must be updated together.
 ARG FFMPEG_VERSION=8.0
 ARG FFMPEG_SHA256=b2751fccb6cc4c77708113cd78b561059b6fa904b24162fa0be2d60273d27b8e
 ARG FFMPEG_PREFIX=/opt/ffmpeg
@@ -93,8 +95,8 @@ ARG PYTHON_VERSION=3.12
 # set the environment variables
 ENV PATH="/opt/ffmpeg/bin:/root/.local/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LD_LIBRARY_PATH="/opt/ffmpeg/lib"
-ENV PKG_CONFIG_PATH="/opt/ffmpeg/lib/pkgconfig"
+ENV LD_LIBRARY_PATH="/opt/opencv/lib:/opt/ffmpeg/lib"
+ENV PKG_CONFIG_PATH="/opt/opencv/lib/pkgconfig:/opt/ffmpeg/lib/pkgconfig"
 
 # uv environment variables
 ENV UV_HTTP_TIMEOUT=500
@@ -113,20 +115,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt clean
 
 COPY --from=ffmpeg-image /opt/ffmpeg /opt/ffmpeg
+COPY --from=opencv-image /opt/opencv /opt/opencv
 
 # install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # install python
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
-
-##################### OPENCV BASE IMAGE ######################
-FROM base AS opencv-base
-
-ENV LD_LIBRARY_PATH="/opt/opencv/lib:/opt/ffmpeg/lib"
-ENV PKG_CONFIG_PATH="/opt/opencv/lib/pkgconfig:/opt/ffmpeg/lib/pkgconfig"
-
-COPY --from=opencv-image /opt/opencv /opt/opencv
 
 FROM scratch AS local_src
 COPY . /src
@@ -158,60 +153,8 @@ RUN uv pip install maturin \
     && cargo clean \
     && rm -rf bindings/python/dist/ \
     && cd bindings/python \
-    && ulimit -n 65536 && maturin build --release --features vendored-openssl --out dist \
-    && rm -rf /root/.cache
-
-##################### OPENCV BUILD IMAGE #####################
-FROM opencv-base AS build-image-opencv
-
-# set the environment variables
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# install dependencies
-RUN apt update -y \
-    && apt install -y git build-essential clang libclang-dev libssl-dev patchelf pkg-config protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt clean
-
-# install rustup from rustup.rs
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && rustc --version && cargo --version && protoc --version
-
-# copy source code
-COPY --from=local_src /src /opt/smg
-
-# working directory
-WORKDIR /opt/smg
-
-# install maturin and build the wheel with OpenCV video support
-RUN uv pip install maturin \
-    && cargo clean \
-    && rm -rf bindings/python/dist/ \
-    && cd bindings/python \
     && ulimit -n 65536 && maturin build --release --features vendored-openssl,opencv-video --out dist \
     && rm -rf /root/.cache
-
-################### OPENCV ROUTER IMAGE ######################
-FROM opencv-base AS router-image-opencv
-
-# Copy the built package from the build image
-COPY --from=build-image-opencv /opt/smg/bindings/python/dist/*.whl dist/
-
-# Build the package and install
-RUN uv pip install --force-reinstall dist/*.whl
-
-# Clean up unnecessary files to reduce the image size
-RUN rm -rf /root/.cache dist/ \
-    && apt purge -y --auto-remove curl
-
-# Run as non-root user (SMG only binds to unprivileged ports 30000/29000)
-# UID 65532 follows the nonroot convention used by distroless images.
-# UID 1000 is already taken by the 'ubuntu' user in ubuntu:24.04.
-RUN useradd --system --no-log-init --create-home --uid 65532 smg
-USER smg
-
-# Set the entrypoint to the main command
-ENTRYPOINT ["python3", "-m", "smg.launch_router"]
 
 ######################### ROUTER IMAGE #########################
 FROM base AS router-image
