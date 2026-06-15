@@ -687,6 +687,10 @@ async fn v1_tokenizers_remove(
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Dedicated port for the isolated Kubernetes probe listener. `None`
+    /// leaves the dedicated listener off; probe routes always stay on the
+    /// main `port` regardless.
+    pub health_check_port: Option<u16>,
     pub router_config: RouterConfig,
     pub max_payload_size: usize,
     pub log_dir: Option<String>,
@@ -1289,18 +1293,15 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.router_config.clone(),
     );
 
-    // Optional isolated probe listener (env-only, additive): serves
-    // /liveness, /readiness, /health on `SMG_PROBE_PORT` from a dedicated
-    // single-worker runtime on its own OS thread, so kubelet probes cannot
-    // be starved by the request runtime. The same routes always remain on
-    // the main listener.
-    if let Some(probe_port) = probe::probe_port_from_env()? {
+    // Optional isolated probe listener (additive): when `--health-check-port`
+    // is set, serves /liveness, /readiness, /health on that port from a
+    // dedicated single-worker runtime on its own OS thread, so kubelet probes
+    // cannot be starved by the request runtime. The same routes always remain
+    // on the main listener.
+    if let Some(probe_port) = config.health_check_port {
         let probe_addr =
             probe::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
-        info!(
-            "Probe listener started on {probe_addr} (env {})",
-            probe::PROBE_PORT_ENV
-        );
+        info!("Probe listener started on {probe_addr} (--health-check-port {probe_port})");
     }
 
     let app_state = Arc::new(AppState {

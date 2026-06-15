@@ -19,6 +19,11 @@ pub struct RouterConfig {
     pub policy: PolicyConfig,
     pub host: String,
     pub port: u16,
+    /// Dedicated port for the isolated Kubernetes liveness/readiness/health
+    /// probe listener. `None` means the dedicated listener is off; the probe
+    /// routes always remain available on the main `port` regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_port: Option<u16>,
     pub max_payload_size: usize,
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
@@ -639,6 +644,7 @@ impl Default for RouterConfig {
             policy: PolicyConfig::Random,
             host: "0.0.0.0".to_string(),
             port: 3001,
+            health_check_port: None,
             max_payload_size: 536_870_912,     // 512MB
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
@@ -838,6 +844,34 @@ mod tests {
         assert!(deserialized.discovery.is_none());
         assert!(deserialized.metrics.is_none());
         assert!(deserialized.trace_config.is_none());
+    }
+
+    #[test]
+    fn test_health_check_port_serde_roundtrip_and_backward_compat() {
+        // Default: dedicated probe listener off, and `skip_serializing_if`
+        // keeps the key out of serialized output entirely.
+        let config = RouterConfig::default();
+        assert_eq!(config.health_check_port, None);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("health_check_port"),
+            "None health_check_port must be omitted from serialized config"
+        );
+
+        // Existing config files predating the field deserialize cleanly via
+        // `#[serde(default)]` (→ None).
+        let without: RouterConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(without.health_check_port, None);
+
+        // When set, the value round-trips.
+        let config = RouterConfig::builder()
+            .regular_mode(vec![])
+            .health_check_port(Some(8081))
+            .build_unchecked();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("health_check_port"));
+        let with: RouterConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(with.health_check_port, Some(8081));
     }
 
     #[test]

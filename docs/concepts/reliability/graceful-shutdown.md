@@ -278,22 +278,20 @@ curl http://gateway:30000/readiness
 
 ### Dedicated Probe Port
 
-Under heavy load the main listener's probe routes share the request runtime, so probe responses can lag behind request traffic. Set the `SMG_PROBE_PORT` environment variable to additionally serve `/liveness`, `/readiness`, and `/health` on a dedicated plain-HTTP port, handled by a small isolated runtime on its own OS thread — probe latency then stays flat even when the request runtime is saturated, and the port keeps answering through the entire drain window:
+Under heavy load the main listener's probe routes share the request runtime, so probe responses can lag behind request traffic. Pass the `--health-check-port` flag (Python: `health_check_port`) to additionally serve `/liveness`, `/readiness`, and `/health` on a dedicated plain-HTTP port, handled by a small isolated runtime on its own OS thread — probe latency then stays flat even when the request runtime is saturated, and the port keeps answering through the entire drain window:
 
 ```yaml
 spec:
   containers:
     - name: smg
-      env:
-        - name: SMG_PROBE_PORT
-          value: "30001"
+      args: ["--health-check-port", "30001"]
       livenessProbe:
         httpGet: { path: /liveness, port: 30001 }
       readinessProbe:
         httpGet: { path: /readiness, port: 30001 }
 ```
 
-When `SMG_PROBE_PORT` is unset (or empty) no extra listener is started. The probe routes always remain available on the main port as well.
+When `--health-check-port` is unset no extra listener is started. The probe routes always remain available on the main port as well.
 
 ---
 

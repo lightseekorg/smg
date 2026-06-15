@@ -24,16 +24,15 @@
 //!    registrations, which emit no worker event at all (same recovery
 //!    pattern as the metrics_ws worker collector).
 //!
-//! 2. **Dedicated probe listener.** When the `SMG_PROBE_PORT` environment
-//!    variable is set, `/liveness`, `/readiness`, and `/health` are *also*
-//!    served on that port by a minimal router with no middleware, running on
-//!    a single-worker tokio runtime driven by its own OS thread (the
-//!    `build_in_runtime` pattern), so probes cannot be starved by the
+//! 2. **Dedicated probe listener.** When `--health-check-port` (config
+//!    `health_check_port`) is set, `/liveness`, `/readiness`, and `/health`
+//!    are *also* served on that port by a minimal router with no middleware,
+//!    running on a single-worker tokio runtime driven by its own OS thread
+//!    (the `build_in_runtime` pattern), so probes cannot be starved by the
 //!    request runtime. The routes always remain on the main listener too;
-//!    Kubernetes users point their probes at the dedicated port. Unset (or
-//!    empty) means no extra listener. The listener is plain HTTP and serves
-//!    until process exit, so probes stay answerable through the entire drain
-//!    window.
+//!    Kubernetes users point their probes at the dedicated port. Unset means
+//!    no extra listener. The listener is plain HTTP and serves until process
+//!    exit, so probes stay answerable through the entire drain window.
 //!
 //! # Drain semantics
 //!
@@ -73,11 +72,6 @@ use crate::{
     config::{RouterConfig, RoutingMode},
     worker::{event::WorkerEvent, ConnectionMode, WorkerRegistry, WorkerType},
 };
-
-/// Environment variable naming the port for the dedicated probe listener.
-/// Unset or empty disables the listener; the probe routes always stay on
-/// the main listener regardless.
-pub const PROBE_PORT_ENV: &str = "SMG_PROBE_PORT";
 
 /// How often the maintainer re-derives readiness from the registry even
 /// without worker events. This bounds the staleness of mutations that
@@ -352,30 +346,6 @@ pub fn probe_router(probe_state: Arc<ProbeState>) -> Router {
         .route("/readiness", get(probe_readiness))
         .route("/health", get(probe_liveness))
         .with_state(probe_state)
-}
-
-/// Read [`PROBE_PORT_ENV`]. `Ok(None)` when unset or empty (listener off),
-/// `Err` on an unparsable value — failing startup beats silently serving
-/// probes nowhere while kubelet kills the pod.
-pub fn probe_port_from_env() -> Result<Option<u16>, String> {
-    match std::env::var(PROBE_PORT_ENV) {
-        Ok(raw) => parse_probe_port(&raw),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err @ std::env::VarError::NotUnicode(_)) => {
-            Err(format!("invalid {PROBE_PORT_ENV} value: {err}"))
-        }
-    }
-}
-
-fn parse_probe_port(raw: &str) -> Result<Option<u16>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse::<u16>()
-        .map(Some)
-        .map_err(|err| format!("invalid {PROBE_PORT_ENV} value '{raw}': {err}"))
 }
 
 /// Start the dedicated probe listener on `host:port`.
@@ -853,15 +823,5 @@ mod tests {
         );
 
         handle.abort();
-    }
-
-    #[test]
-    fn parse_probe_port_values() {
-        assert_eq!(parse_probe_port("8081"), Ok(Some(8081)));
-        assert_eq!(parse_probe_port(" 8081 "), Ok(Some(8081)));
-        assert_eq!(parse_probe_port(""), Ok(None));
-        assert_eq!(parse_probe_port("   "), Ok(None));
-        assert!(parse_probe_port("not-a-port").is_err());
-        assert!(parse_probe_port("70000").is_err());
     }
 }

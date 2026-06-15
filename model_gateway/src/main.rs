@@ -143,6 +143,17 @@ struct CliArgs {
     #[arg(long, default_value_t = 30000, help_heading = "Worker Configuration")]
     port: u16,
 
+    /// Dedicated port for Kubernetes liveness/readiness/health probes.
+    ///
+    /// When set, `/liveness`, `/readiness`, and `/health` are additionally
+    /// served on this port by a middleware-free router running on its own
+    /// single-worker runtime and OS thread, isolated from the request
+    /// runtime so probes are never starved (and cannot trigger kubelet
+    /// restarts) under load. The same probe routes always remain available
+    /// on the main `--port` too. Unset = dedicated probe listener off.
+    #[arg(long, help_heading = "Worker Configuration")]
+    health_check_port: Option<u16>,
+
     /// List of worker URLs (supports IPv4 and IPv6)
     #[arg(long, num_args = 0.., help_heading = "Worker Configuration")]
     worker_urls: Vec<String>,
@@ -1239,6 +1250,7 @@ impl CliArgs {
             .connection_mode(connection_mode)
             .host(&self.host)
             .port(self.port)
+            .health_check_port(self.health_check_port)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
@@ -1396,6 +1408,7 @@ impl CliArgs {
         Ok(ServerConfig {
             host: self.host.clone(),
             port: self.port,
+            health_check_port: self.health_check_port,
             router_config,
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
@@ -1506,4 +1519,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse top-level CLI args into the flattened `CliArgs` the binary uses.
+    fn cli_args_from(args: &[&str]) -> CliArgs {
+        let argv: Vec<String> = std::iter::once("smg".to_string())
+            .chain(args.iter().map(|s| (*s).to_string()))
+            .collect();
+        Cli::parse_from(argv).router_args
+    }
+
+    /// `--health-check-port` must flow into BOTH conversion paths
+    /// (`to_router_config` and `to_server_config`), mirroring the main
+    /// listener `--port` field exactly. This is the two-path config-plumbing
+    /// guard: wiring only one path would let the flag be silently ignored on
+    /// the other.
+    #[test]
+    fn health_check_port_flows_into_both_configs() {
+        let cli = cli_args_from(&["--health-check-port", "8081"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(
+            router_config.health_check_port,
+            Some(8081),
+            "health_check_port must reach RouterConfig via to_router_config"
+        );
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.health_check_port,
+            Some(8081),
+            "health_check_port must reach ServerConfig via to_server_config"
+        );
+    }
+
+    /// Unset `--health-check-port` means the dedicated probe listener is off:
+    /// `None` propagates through both conversions (backward-compatible default).
+    #[test]
+    fn health_check_port_defaults_to_none_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.health_check_port, None);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(server_config.health_check_port, None);
+    }
+
+    /// clap rejects out-of-range probe ports at parse time (the `u16`
+    /// value_parser), matching `--port` validation — no runtime crash.
+    #[test]
+    fn health_check_port_out_of_range_is_rejected_at_parse_time() {
+        let argv = ["smg", "--health-check-port", "70000"];
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "a port above u16::MAX must fail clap parsing"
+        );
+    }
 }

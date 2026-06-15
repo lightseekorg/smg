@@ -366,6 +366,7 @@ impl PyPostgresConfig {
 struct Router {
     host: String,
     port: u16,
+    health_check_port: Option<u16>,
     worker_urls: Vec<String>,
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
@@ -685,6 +686,7 @@ impl Router {
             .policy(policy)
             .host(&self.host)
             .port(self.port)
+            .health_check_port(self.health_check_port)
             .connection_mode(self.connection_mode)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
@@ -777,6 +779,7 @@ impl Router {
         policy = PolicyType::RoundRobin,
         host = String::from("0.0.0.0"),
         port = 3001,
+        health_check_port = None,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
         load_monitor_interval = 10,
@@ -893,6 +896,7 @@ impl Router {
         policy: PolicyType,
         host: String,
         port: u16,
+        health_check_port: Option<u16>,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
         load_monitor_interval: u64,
@@ -1016,6 +1020,7 @@ impl Router {
         Ok(Router {
             host,
             port,
+            health_check_port,
             worker_urls,
             policy,
             worker_startup_timeout_secs,
@@ -1187,6 +1192,7 @@ impl Router {
             Box::pin(server::startup(server::ServerConfig {
                 host: self.host.clone(),
                 port: self.port,
+                health_check_port: self.health_check_port,
                 router_config,
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),

@@ -30,6 +30,10 @@ class RouterArgs:
     worker_urls: list[str] = dataclasses.field(default_factory=list)
     host: str = "0.0.0.0"
     port: int = 30000
+    # Dedicated port for k8s liveness/readiness/health probes, served from an
+    # isolated runtime so probes are not starved by the request runtime.
+    # None = dedicated probe listener off (routes stay on the main port).
+    health_check_port: int | None = None
 
     # PD-specific configuration
     pd_disaggregation: bool = False  # Enable PD disaggregated mode
@@ -299,6 +303,18 @@ class RouterArgs:
             help=(
                 "List of worker URLs. Supports IPv4 and IPv6 addresses"
                 " (use brackets for IPv6, e.g., http://[::1]:8000 http://192.168.1.1:8000)"
+            ),
+        )
+        worker_group.add_argument(
+            f"--{prefix}health-check-port",
+            type=int,
+            default=RouterArgs.health_check_port,
+            help=(
+                "Dedicated port for Kubernetes liveness/readiness/health probes."
+                " When set, those routes are also served on this port by an"
+                " isolated runtime so probes are not starved by the request"
+                " runtime. Unset = dedicated probe listener off (routes remain"
+                " available on the main port)."
             ),
         )
 
