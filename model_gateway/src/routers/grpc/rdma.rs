@@ -138,7 +138,7 @@ struct SlotPool {
     /// Available slot indices.
     free: Mutex<Vec<u32>>,
     /// Leased slots keyed by bootstrap_room (free-on-notif + TTL reclaim).
-    occupied: DashMap<i32, OccSlot>,
+    occupied: DashMap<i64, OccSlot>,
 }
 
 impl SlotPool {
@@ -156,7 +156,7 @@ impl SlotPool {
     /// `now`. Returns `(slot, slot_addr)`, or `None` if the image exceeds `slot_bytes`
     /// or no slot is free (caller -> inline). Recording the lease here (rather than in
     /// the caller) keeps the slot and its TTL timestamp atomic w.r.t. the write.
-    fn lease_and_write(&self, room: i32, bytes: &[u8], now: Instant) -> Option<(u32, u64)> {
+    fn lease_and_write(&self, room: i64, bytes: &[u8], now: Instant) -> Option<(u32, u64)> {
         if bytes.len() > self.slot_bytes {
             return None;
         }
@@ -177,7 +177,7 @@ impl SlotPool {
     }
 
     /// Return the slot leased for `room` to the free list (idempotent).
-    fn free_room(&self, room: i32) {
+    fn free_room(&self, room: i64) {
         if let Some((_room, occ)) = self.occupied.remove(&room) {
             self.free.lock().push(occ.slot);
         }
@@ -187,7 +187,7 @@ impl SlotPool {
     /// net). Returns the count reclaimed. `now`/`ttl` are parameters so the reclaim
     /// policy is testable without sleeping.
     fn reap_stale(&self, now: Instant, ttl: Duration) -> usize {
-        let stale: Vec<i32> = self
+        let stale: Vec<i64> = self
             .occupied
             .iter()
             .filter(|e| now.duration_since(e.value().at) >= ttl)
@@ -383,7 +383,7 @@ fn spawn_reaper() {
                 if let Ok(map) = notifs.take_notifs() {
                     for (_agent, tags) in map {
                         for tag in tags {
-                            if let Ok(room) = tag.parse::<i32>() {
+                            if let Ok(room) = tag.parse::<i64>() {
                                 a.pool.free_room(room);
                             }
                         }
@@ -405,7 +405,7 @@ fn spawn_reaper() {
 /// the free list on the worker's free-notif or the TTL. On any failure (no listener
 /// IP, NIXL init, oversized image, or no free slot) returns `Err(bytes)` so the
 /// caller re-attaches them as the inline payload (no behaviour change).
-pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
+pub(crate) fn export_pixel_buffer(room: i64, bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
     if gw_listen_ip().is_empty() {
         // No listener IP configured -> cannot do the cross-node metadata exchange.
         return Err(bytes);

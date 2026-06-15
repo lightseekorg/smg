@@ -332,7 +332,9 @@ pub(crate) fn maybe_inject_tokenspeed_pd_bootstrap(
         let metadata = prefill.metadata();
         let hostname = metadata.bootstrap_host();
         let bootstrap_port = metadata.bootstrap_port().unwrap_or(DEFAULT_BOOTSTRAP_PORT);
-        let room_id = rand::rng().random_range(0..i32::MAX);
+        // 63-bit room (TokenSpeed P->D leg): no dedup, keep the space wide so the
+        // birthday collision rate stays negligible. See the proto field doc.
+        let room_id = rand::rng().random_range(0..i64::MAX);
 
         request.set_disaggregated(hostname.to_string(), bootstrap_port as i32, room_id);
 

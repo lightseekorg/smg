@@ -122,7 +122,9 @@ impl PipelineStage for EncodeStage {
 
         for (global_index, split) in splits.into_iter().enumerate() {
             let worker = encode_pool[(rr_base + global_index) % pool_len].clone();
-            let bootstrap_room = rand::rng().random_range(0..i32::MAX);
+            // 63-bit room: no in-flight dedup, so a 2^31 space birthday-collides
+            // under load (silent embedding cross-wire). See the proto field doc.
+            let bootstrap_room = rand::rng().random_range(0..i64::MAX);
 
             // The handshake points the prefill at THIS worker's Mooncake bootstrap
             // endpoint (host/port), not its gRPC URL. One handshake per image: when

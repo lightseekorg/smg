@@ -1093,7 +1093,7 @@ impl ProtoGenerateRequest {
         &mut self,
         bootstrap_host: String,
         bootstrap_port: i32,
-        bootstrap_room: i32,
+        bootstrap_room: i64,
     ) {
         match self {
             Self::TokenSpeed(req) => {
