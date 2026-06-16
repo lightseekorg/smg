@@ -316,11 +316,16 @@ async def serve_grpc(
     finally:
         logger.info("Shutting down gRPC server")
 
-        # Shutdown request manager first - this closes ZMQ sockets and stops background tasks
-        await servicer.shutdown()
+        # Mark unhealthy first so probes and load balancers stop routing new
+        # requests before we drain.
+        health_servicer.set_not_serving()
 
-        # Stop the gRPC server
+        # Drain in-flight RPCs with the request manager's ZMQ sockets still
+        # open, then tear it down. Closing ZMQ before server.stop() drops the
+        # backing channel out from under streams that are still draining, so
+        # they error instead of completing.
         await server.stop(5.0)
+        await servicer.shutdown()
 
         # Wait for warmup thread to finish
         if warmup_thread.is_alive():
