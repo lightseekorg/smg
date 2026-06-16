@@ -41,6 +41,26 @@ impl BaseReasoningParser {
             || (self.config.think_end_token.starts_with(text)
                 && self.config.think_end_token != text)
     }
+
+    /// Byte length of the longest suffix of `text` that is a non-empty strict
+    /// prefix of `token`. Returns 0 if no such suffix exists.
+    ///
+    /// Used to hold back a token that straddles a chunk boundary: when content
+    /// precedes the partial token, the whole buffer is not a prefix of any token
+    /// (so [`is_partial_token`](Self::is_partial_token) misses it), yet the
+    /// trailing bytes may still complete a token on the next chunk.
+    fn partial_token_suffix_len(text: &str, token: &str) -> usize {
+        // Strict prefixes of `token` end at a char boundary; the longest one
+        // that `text` ends with is the partial token to retain. Slicing at
+        // char-boundary offsets keeps this UTF-8 safe.
+        token
+            .char_indices()
+            .skip(1)
+            .map(|(i, _)| i)
+            .filter(|&len| text.ends_with(&token[..len]))
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl ReasoningParser for BaseReasoningParser {
@@ -127,16 +147,26 @@ impl ReasoningParser for BaseReasoningParser {
 
         // Continue with reasoning content
         if self.in_reasoning && self.config.stream_reasoning {
-            // Stream the content immediately
-            let reasoning_text = current_text;
-            self.buffer.clear();
-            Ok(ParserResult::reasoning(reasoning_text))
+            // The end token may straddle this chunk boundary: retain a trailing
+            // strict prefix of it so it can complete on the next chunk instead
+            // of leaking into the reasoning text.
+            let keep = Self::partial_token_suffix_len(&current_text, &self.config.think_end_token);
+            let split = current_text.len() - keep;
+            self.buffer = current_text.split_off(split);
+            Ok(ParserResult::reasoning(current_text))
         } else if !self.in_reasoning {
-            // Return current_text (buffer included), not just `text`, so a buffered
+            // The start token may straddle this chunk boundary: retain a trailing
+            // strict prefix of it so it can complete on the next chunk. Emit
+            // everything before it (buffer included) so a previously buffered
             // partial token followed by normal text is not dropped.
-            let normal_text = current_text;
-            self.buffer.clear();
-            Ok(ParserResult::normal(normal_text))
+            let keep = if self.stripped_think_start {
+                0
+            } else {
+                Self::partial_token_suffix_len(&current_text, &self.config.think_start_token)
+            };
+            let split = current_text.len() - keep;
+            self.buffer = current_text.split_off(split);
+            Ok(ParserResult::normal(current_text))
         } else {
             // If we are in a reasoning block but no end token is found, buffer it
             Ok(ParserResult::default())
@@ -323,6 +353,71 @@ mod tests {
             .unwrap();
         assert_eq!(result3.normal_text, " normal");
         assert_eq!(result3.reasoning_text, "more");
+    }
+
+    #[test]
+    fn test_streaming_end_token_straddles_chunk_after_content() {
+        // Regression: the end token arrives split across two chunks, after some
+        // reasoning content already streamed. The partial suffix "</th" must be
+        // retained so "</think>" is recognized once it completes, instead of
+        // being leaked into the reasoning text and the following content
+        // misclassified as reasoning.
+        let mut parser = create_test_parser(false, true);
+
+        // Enter reasoning and stream some content.
+        let r1 = parser
+            .parse_reasoning_streaming_incremental("<think>abc")
+            .unwrap();
+        assert_eq!(r1.reasoning_text, "abc");
+        assert_eq!(r1.normal_text, "");
+
+        // Chunk ends with a strict prefix of the end token.
+        let r2 = parser
+            .parse_reasoning_streaming_incremental("def</th")
+            .unwrap();
+        assert_eq!(r2.reasoning_text, "def");
+        assert_eq!(r2.normal_text, "");
+
+        // The end token completes; "</th" must not have been leaked.
+        let r3 = parser
+            .parse_reasoning_streaming_incremental("ink> answer")
+            .unwrap();
+        assert_eq!(r3.reasoning_text, "");
+        assert_eq!(r3.normal_text, " answer");
+
+        let reasoning = format!(
+            "{}{}{}",
+            r1.reasoning_text, r2.reasoning_text, r3.reasoning_text
+        );
+        assert_eq!(reasoning, "abcdef");
+        assert!(!reasoning.contains("</th"));
+    }
+
+    #[test]
+    fn test_streaming_start_token_straddles_chunk_after_content() {
+        // Regression: the start token arrives split across two chunks, after
+        // normal content already streamed. The partial suffix "<th" must be
+        // retained so "<think>" is recognized once it completes, instead of
+        // being leaked into the normal text.
+        let mut parser = create_test_parser(false, true);
+
+        // Normal content whose tail is a strict prefix of the start token.
+        let r1 = parser
+            .parse_reasoning_streaming_incremental("hello <th")
+            .unwrap();
+        assert_eq!(r1.normal_text, "hello ");
+        assert_eq!(r1.reasoning_text, "");
+
+        // The start token completes and reasoning begins.
+        let r2 = parser
+            .parse_reasoning_streaming_incremental("ink>secret")
+            .unwrap();
+        assert_eq!(r2.reasoning_text, "secret");
+        assert_eq!(r2.normal_text, "");
+
+        let normal = format!("{}{}", r1.normal_text, r2.normal_text);
+        assert_eq!(normal, "hello ");
+        assert!(!normal.contains("<th"));
     }
 
     #[test]
