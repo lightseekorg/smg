@@ -95,9 +95,6 @@ pub(crate) fn build_sse_response(
 /// Format and send an SSE event through the channel.
 ///
 /// Returns `true` if the send succeeded, `false` if the receiver was dropped.
-/// The caller supplies a reusable [`SseEncoder`] so the serialization buffer is
-/// shared across every event in the stream (one allocation per event instead of
-/// the previous `to_string` + `format!` pair).
 pub(crate) async fn send_event(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     enc: &mut SseEncoder,
@@ -112,12 +109,7 @@ pub(crate) async fn send_event(
 fn format_sse_event(enc: &mut SseEncoder, event_type: &str, data: &Value) -> Bytes {
     enc.encode_event(event_type, data)
         .unwrap_or_else(|e| match e {
-            // `encode_event` rejected the event type for containing CR/LF. Do NOT
-            // echo it back via `format!` — that would reintroduce the exact framing
-            // break the encoder guards against. Emit a safe, well-formed frame.
             SseEncodeError::InvalidEventType => Bytes::from_static(b"event: error\ndata: {}\n\n"),
-            // Serialization failure (practically impossible for a JSON value). The
-            // event type is known-safe here, so an empty-object data frame is fine.
             SseEncodeError::Json(_) => Bytes::from(format!("event: {event_type}\ndata: {{}}\n\n")),
         })
 }
