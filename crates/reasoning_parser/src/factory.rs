@@ -1,10 +1,8 @@
 // Factory and registry for creating model-specific reasoning parsers.
-// Now with parser pooling support for efficient reuse across requests.
 
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
-use tokio::sync::Mutex;
 
 use crate::{
     parsers::{
@@ -15,20 +13,14 @@ use crate::{
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
-/// Type alias for pooled parser instances.
-/// Uses tokio::Mutex to avoid blocking the async executor.
-pub type PooledParser = Arc<Mutex<Box<dyn ReasoningParser>>>;
-
 /// Type alias for parser creator functions.
 type ParserCreator = Arc<dyn Fn() -> Box<dyn ReasoningParser> + Send + Sync>;
 
-/// Registry for model-specific parsers with pooling support.
+/// Registry for model-specific parsers.
 #[derive(Clone)]
 pub struct ParserRegistry {
-    /// Creator functions for parsers (used when pool is empty)
+    /// Creator functions for parsers
     creators: Arc<RwLock<HashMap<String, ParserCreator>>>,
-    /// Pooled parser instances for reuse
-    pool: Arc<RwLock<HashMap<String, PooledParser>>>,
     /// Model pattern to parser name mappings
     patterns: Arc<RwLock<Vec<(String, String)>>>, // (pattern, parser_name)
 }
@@ -38,7 +30,6 @@ impl ParserRegistry {
     pub fn new() -> Self {
         Self {
             creators: Arc::new(RwLock::new(HashMap::new())),
-            pool: Arc::new(RwLock::new(HashMap::new())),
             patterns: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -59,32 +50,6 @@ impl ParserRegistry {
         patterns.push((pattern.to_string(), parser_name.to_string()));
     }
 
-    /// Get a pooled parser by exact name.
-    /// Returns a shared parser instance from the pool, creating one if needed.
-    pub fn get_pooled_parser(&self, name: &str) -> Option<PooledParser> {
-        // First check if we have a pooled instance
-        {
-            let pool = self.pool.read();
-            if let Some(parser) = pool.get(name) {
-                return Some(Arc::clone(parser));
-            }
-        }
-
-        // If not in pool, create one and add to pool
-        let creators = self.creators.read();
-        if let Some(creator) = creators.get(name) {
-            let parser = Arc::new(Mutex::new(creator()));
-
-            // Add to pool for future use
-            let mut pool = self.pool.write();
-            pool.insert(name.to_string(), Arc::clone(&parser));
-
-            Some(parser)
-        } else {
-            None
-        }
-    }
-
     /// Check if a parser with the given name is registered.
     pub fn has_parser(&self, name: &str) -> bool {
         let creators = self.creators.read();
@@ -96,19 +61,6 @@ impl ParserRegistry {
     pub fn create_parser(&self, name: &str) -> Option<Box<dyn ReasoningParser>> {
         let creators = self.creators.read();
         creators.get(name).map(|creator| creator())
-    }
-
-    /// Find a pooled parser for a given model ID by pattern matching.
-    pub fn find_pooled_parser_for_model(&self, model_id: &str) -> Option<PooledParser> {
-        let patterns = self.patterns.read();
-        let model_lower = model_id.to_lowercase();
-
-        for (pattern, parser_name) in patterns.iter() {
-            if model_lower.contains(&pattern.to_lowercase()) {
-                return self.get_pooled_parser(parser_name);
-            }
-        }
-        None
     }
 
     /// Check if a parser can be created for a specific model without actually creating it.
@@ -146,13 +98,6 @@ impl ParserRegistry {
         parsers.sort_unstable();
         parsers
     }
-
-    /// Clear the parser pool, forcing new instances to be created.
-    /// Useful for testing or when parsers need to be reset globally.
-    pub fn clear_pool(&self) {
-        let mut pool = self.pool.write();
-        pool.clear();
-    }
 }
 
 impl Default for ParserRegistry {
@@ -172,7 +117,6 @@ impl ParserFactory {
     pub fn new() -> Self {
         let registry = ParserRegistry::new();
 
-        // Register base parser
         registry.register_parser("base", || {
             Box::new(BaseReasoningParser::new(ParserConfig::default()))
         });
@@ -180,34 +124,31 @@ impl ParserFactory {
         // Passthrough: explicit `--reasoning-parser passthrough` and unknown-model fallback.
         registry.register_parser("passthrough", || Box::new(PassthroughParser::new()));
 
-        // Register DeepSeek-R1 parser (starts with in_reasoning=true)
+        // starts with in_reasoning=true
         registry.register_parser("deepseek_r1", || Box::new(DeepSeekR1Parser::new()));
 
-        // Register Qwen3 parser (starts with in_reasoning=false)
+        // starts with in_reasoning=false
         registry.register_parser("qwen3", || Box::new(Qwen3Parser::new()));
 
-        // Register Qwen3-thinking parser (starts with in_reasoning=true)
+        // starts with in_reasoning=true
         registry.register_parser("qwen3_thinking", || Box::new(QwenThinkingParser::new()));
 
-        // Register Kimi parser with Unicode tokens (starts with in_reasoning=false)
+        // Unicode tokens, starts with in_reasoning=false
         registry.register_parser("kimi", || Box::new(KimiParser::new()));
 
-        // Register GLM45 parser (same format as Qwen3 but separate for debugging)
+        // glm45/step3 mirror qwen3/deepseek_r1 respectively; kept separate for debugging.
         registry.register_parser("glm45", || Box::new(Glm45Parser::new()));
-
-        // Register Step3 parser (same format as DeepSeek-R1 but separate for debugging)
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
 
-        // Register MiniMax parser (appends <think> token at the beginning)
+        // appends <think> token at the beginning
         registry.register_parser("minimax", || Box::new(MiniMaxParser::new()));
 
-        // Register Cohere Command parser (uses <|START_THINKING|> / <|END_THINKING|>)
+        // uses <|START_THINKING|> / <|END_THINKING|>
         registry.register_parser("cohere_cmd", || Box::new(CohereCmdParser::new()));
 
-        // Register NanoV3 parser (same format as DeepSeek-R1)
         registry.register_parser("nano_v3", || Box::new(NanoV3Parser::new()));
 
-        // Register DeepSeek V3.1 parser (standard think tokens, always_in_reasoning=false)
+        // standard think tokens, always_in_reasoning=false
         registry.register_parser("deepseek_v31", || {
             let config = ParserConfig {
                 think_start_token: "<think>".to_string(),
@@ -219,7 +160,6 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(config).with_model_type("deepseek_v31".to_string()))
         });
 
-        // Register Kimi-K2.5 parser (standard think tokens, always_in_reasoning=false)
         registry.register_parser("kimi_k25", || {
             let config = ParserConfig {
                 think_start_token: "<think>".to_string(),
@@ -231,7 +171,6 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(config).with_model_type("kimi_k25".to_string()))
         });
 
-        // Register Kimi-K2-Thinking parser (standard think tokens, always_in_reasoning=true)
         registry.register_parser("kimi_thinking", || {
             let config = ParserConfig {
                 think_start_token: "<think>".to_string(),
@@ -243,7 +182,6 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(config).with_model_type("kimi_thinking".to_string()))
         });
 
-        // Register model patterns
         registry.register_pattern("deepseek-r1", "deepseek_r1");
         registry.register_pattern("deepseek-v3.1", "deepseek_v31");
         registry.register_pattern("deepseek-v3-1", "deepseek_v31");
@@ -275,25 +213,6 @@ impl ParserFactory {
         Self { registry }
     }
 
-    /// Get a pooled parser for the given model ID.
-    /// Returns a shared instance that can be used concurrently.
-    /// Falls back to the passthrough parser if model is not recognized.
-    #[expect(
-        clippy::expect_used,
-        reason = "passthrough parser is registered eagerly in new(); None indicates a bug in registration logic"
-    )]
-    pub fn get_pooled(&self, model_id: &str) -> PooledParser {
-        // First try to find by pattern
-        if let Some(parser) = self.registry.find_pooled_parser_for_model(model_id) {
-            return parser;
-        }
-
-        // Fall back to passthrough
-        self.registry
-            .get_pooled_parser("passthrough")
-            .expect("passthrough parser is registered in new()")
-    }
-
     /// Create a new parser instance for the given model ID.
     /// Returns a fresh instance (not pooled).
     /// Use this when you need an isolated parser instance.
@@ -322,12 +241,6 @@ impl ParserFactory {
     pub fn list_parsers(&self) -> Vec<String> {
         self.registry.list_parsers()
     }
-
-    /// Clear the parser pool.
-    /// Useful for testing or when parsers need to be reset globally.
-    pub fn clear_pool(&self) {
-        self.registry.clear_pool();
-    }
 }
 
 impl Default for ParserFactory {
@@ -337,10 +250,6 @@ impl Default for ParserFactory {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tokio::spawn is fine in unit tests that await all handles"
-)]
 mod tests {
     use super::*;
 
@@ -439,244 +348,5 @@ mod tests {
 
         let cohere = factory.create("cohere-embed");
         assert_eq!(cohere.model_type(), "cohere_cmd");
-    }
-
-    #[tokio::test]
-    async fn test_pooled_parser_reuse() {
-        let factory = ParserFactory::new();
-
-        // Get the same parser twice - should be the same instance
-        let parser1 = factory.get_pooled("deepseek-r1");
-        let parser2 = factory.get_pooled("deepseek-r1");
-
-        // Both should point to the same Arc
-        assert!(Arc::ptr_eq(&parser1, &parser2));
-
-        // Different models should get different parsers
-        let parser3 = factory.get_pooled("qwen3");
-        assert!(!Arc::ptr_eq(&parser1, &parser3));
-    }
-
-    #[tokio::test]
-    async fn test_pooled_parser_concurrent_access() {
-        let factory = ParserFactory::new();
-        let parser = factory.get_pooled("deepseek-r1");
-
-        // Spawn multiple async tasks that use the same parser
-        let mut handles = vec![];
-
-        for i in 0..3 {
-            let parser_clone = Arc::clone(&parser);
-            let handle = tokio::spawn(async move {
-                let mut parser = parser_clone.lock().await;
-                let input = format!("thread {i} reasoning</think>answer");
-                let result = parser.detect_and_parse_reasoning(&input).unwrap();
-                assert_eq!(result.normal_text, "answer");
-                assert!(result.reasoning_text.contains("reasoning"));
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all tasks to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_pool_clearing() {
-        let factory = ParserFactory::new();
-
-        // Get a pooled parser
-        let parser1 = factory.get_pooled("deepseek-r1");
-
-        // Clear the pool
-        factory.clear_pool();
-
-        // Get another parser - should be a new instance
-        let parser2 = factory.get_pooled("deepseek-r1");
-
-        // They should be different instances (different Arc pointers)
-        assert!(!Arc::ptr_eq(&parser1, &parser2));
-    }
-
-    #[tokio::test]
-    async fn test_passthrough_parser_pooling() {
-        let factory = ParserFactory::new();
-
-        // Unknown models should get passthrough parser
-        let parser1 = factory.get_pooled("unknown-model-1");
-        let parser2 = factory.get_pooled("unknown-model-2");
-
-        // Both should use the same passthrough parser instance
-        assert!(Arc::ptr_eq(&parser1, &parser2));
-
-        let parser = parser1.lock().await;
-        assert_eq!(parser.model_type(), "passthrough");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn test_high_concurrency_parser_access() {
-        use std::{
-            sync::atomic::{AtomicUsize, Ordering},
-            time::Instant,
-        };
-
-        let factory = ParserFactory::new();
-        let num_tasks = 100;
-        let requests_per_task = 50;
-        let models = vec!["deepseek-r1", "qwen3", "kimi", "qwen3-thinking"];
-
-        // Track successful operations
-        let success_count = Arc::new(AtomicUsize::new(0));
-        let error_count = Arc::new(AtomicUsize::new(0));
-
-        let start = Instant::now();
-        let mut handles = vec![];
-
-        for task_id in 0..num_tasks {
-            let factory = factory.clone();
-            let models = models.clone();
-            let success_count = Arc::clone(&success_count);
-            let error_count = Arc::clone(&error_count);
-
-            let handle = tokio::spawn(async move {
-                for request_id in 0..requests_per_task {
-                    // Rotate through different models
-                    let model = &models[(task_id + request_id) % models.len()];
-                    let parser = factory.get_pooled(model);
-
-                    // Use async lock - tokio::Mutex doesn't poison
-                    let mut p = parser.lock().await;
-
-                    // Simulate realistic parsing work with substantial text
-                    // Typical reasoning can be 500-5000 tokens
-                    let product = task_id * request_id;
-                    let reasoning_text = format!(
-                        "Task {task_id} is processing request {request_id}. Let me think through this step by step. \
-                        First, I need to understand the problem. The problem involves analyzing data \
-                        and making calculations. Let me break this down: \n\
-                        1. Initial analysis shows that we have multiple variables to consider. \
-                        2. The data suggests a pattern that needs further investigation. \
-                        3. Computing the values: {task_id} * {request_id} = {product}. \
-                        4. Cross-referencing with previous results indicates consistency. \
-                        5. The mathematical proof follows from the axioms... \
-                        6. Considering edge cases and boundary conditions... \
-                        7. Validating against known constraints... \
-                        8. The conclusion follows logically from premises A, B, and C. \
-                        This reasoning chain demonstrates the validity of our approach.",
-                    );
-
-                    let answer_text = format!(
-                        "Based on my analysis, the answer for task {task_id} request {request_id} is: \
-                        The solution involves multiple steps as outlined in the reasoning. \
-                        The final result is {product} with confidence level high. \
-                        This conclusion is supported by rigorous mathematical analysis \
-                        and has been validated against multiple test cases. \
-                        The implementation should handle edge cases appropriately.",
-                    );
-
-                    let input = format!("<think>{reasoning_text}</think>{answer_text}");
-
-                    match p.detect_and_parse_reasoning(&input) {
-                        Ok(result) => {
-                            // Note: Some parsers with stream_reasoning=true won't accumulate reasoning text
-                            assert!(result.normal_text.contains(&format!("task {task_id}")));
-
-                            // For parsers that accumulate reasoning (stream_reasoning=false)
-                            // the reasoning_text should be populated
-                            if !result.reasoning_text.is_empty() {
-                                assert!(result.reasoning_text.contains(&format!("Task {task_id}")));
-                                assert!(result.reasoning_text.len() > 500); // Ensure substantial reasoning
-                            }
-
-                            // Normal text should always be present
-                            assert!(result.normal_text.len() > 100); // Ensure substantial answer
-                            success_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            #[expect(clippy::print_stderr, reason = "test diagnostic output")]
-                            {
-                                eprintln!("Parse error: {e:?}");
-                            }
-                            error_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-
-                    // Explicitly drop the lock to release it quickly
-                    drop(p);
-                }
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all tasks
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        let duration = start.elapsed();
-        let total_requests = num_tasks * requests_per_task;
-        let successes = success_count.load(Ordering::Relaxed);
-        let errors = error_count.load(Ordering::Relaxed);
-
-        // Print stats for debugging
-        #[expect(clippy::print_stdout, reason = "test diagnostic output")]
-        {
-            println!("High concurrency test: {num_tasks} tasks, {requests_per_task} requests each");
-            println!("Completed in {duration:?}, {successes} successes, {errors} errors");
-            println!(
-                "Throughput: {:.0} requests/sec",
-                (total_requests as f64) / duration.as_secs_f64()
-            );
-        }
-
-        // All requests should succeed
-        assert_eq!(successes, total_requests);
-        assert_eq!(errors, 0);
-
-        // Performance check: should handle at least 1000 req/sec
-        let throughput = (total_requests as f64) / duration.as_secs_f64();
-        assert!(
-            throughput > 1000.0,
-            "Throughput too low: {throughput:.0} req/sec",
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_concurrent_pool_modifications() {
-        let factory = ParserFactory::new();
-        let mut handles = vec![];
-
-        // Task 1: Continuously get parsers
-        let factory1 = factory.clone();
-        handles.push(tokio::spawn(async move {
-            for _ in 0..100 {
-                let _parser = factory1.get_pooled("deepseek-r1");
-            }
-        }));
-
-        // Task 2: Continuously clear pool
-        let factory2 = factory.clone();
-        handles.push(tokio::spawn(async move {
-            for _ in 0..10 {
-                factory2.clear_pool();
-                tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-            }
-        }));
-
-        // Task 3: Get different parsers
-        let factory3 = factory.clone();
-        handles.push(tokio::spawn(async move {
-            for i in 0..100 {
-                let models = ["qwen3", "kimi", "unknown"];
-                let _parser = factory3.get_pooled(models[i % 3]);
-            }
-        }));
-
-        // Wait for all tasks - should not deadlock or panic
-        for handle in handles {
-            handle.await.unwrap();
-        }
     }
 }

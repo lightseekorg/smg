@@ -132,9 +132,8 @@ impl ReasoningParser for BaseReasoningParser {
             self.buffer.clear();
             Ok(ParserResult::reasoning(reasoning_text))
         } else if !self.in_reasoning {
-            // If we're not in a reasoning block, return as normal text
-            // CRITICAL FIX: Return current_text (with buffer) not just text
-            // This prevents buffer loss when partial tokens are followed by normal text
+            // Return current_text (buffer included), not just `text`, so a buffered
+            // partial token followed by normal text is not dropped.
             let normal_text = current_text;
             self.buffer.clear();
             Ok(ParserResult::normal(normal_text))
