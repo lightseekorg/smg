@@ -19,7 +19,7 @@ use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
 use crate::routers::{
-    common::sse::{SseEncodeError, SseEncoder, SseDecodeError, SseDecoder, SseFrame},
+    common::sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
     error::internal_error,
 };
 
