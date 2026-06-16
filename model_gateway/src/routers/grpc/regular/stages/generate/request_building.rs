@@ -93,6 +93,16 @@ impl PipelineStage for GenerateRequestBuildingStage {
             }
         }
 
+        let stop = generate_request
+            .sampling_params
+            .as_ref()
+            .and_then(|sp| sp.stop.as_ref());
+        helpers::apply_mlx_stop_sequences(
+            &mut proto_request,
+            stop,
+            ctx.state.tokenizer.as_deref(),
+        )?;
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }

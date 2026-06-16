@@ -121,6 +121,12 @@ impl PipelineStage for ChatRequestBuildingStage {
             }
         }
 
+        helpers::apply_mlx_stop_sequences(
+            &mut proto_request,
+            chat_request.stop.as_ref(),
+            ctx.state.tokenizer.as_deref(),
+        )?;
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }

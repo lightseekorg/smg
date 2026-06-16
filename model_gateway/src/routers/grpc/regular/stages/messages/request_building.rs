@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::common::StringOrArray;
 use tracing::error;
 use uuid::Uuid;
 
@@ -121,6 +122,16 @@ impl PipelineStage for MessageRequestBuildingStage {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
+
+        let stop_as_string_or_array = messages_request
+            .stop_sequences
+            .as_ref()
+            .map(|v| StringOrArray::Array(v.clone()));
+        helpers::apply_mlx_stop_sequences(
+            &mut proto_request,
+            stop_as_string_or_array.as_ref(),
+            ctx.state.tokenizer.as_deref(),
+        )?;
 
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)

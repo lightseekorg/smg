@@ -11,7 +11,7 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{FunctionCallResponse, StringOrArray, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -182,7 +182,11 @@ impl ResponseProcessor {
             finish_reason_str
         };
 
-        let matched_stop = complete.matched_stop_json();
+        let matched_stop = complete.matched_stop_json_with_context(
+            original_request.stop.as_ref(),
+            original_request.stop_token_ids.as_ref(),
+            tokenizer.as_ref(),
+        );
 
         // Step 4: Convert output logprobs if present
         let logprobs = complete.output_logprobs().map(|ref proto_logprobs| {
@@ -709,7 +713,15 @@ impl ResponseProcessor {
 
         // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
         let finish_reason_str = complete.finish_reason();
-        let matched_stop = complete.matched_stop_json();
+        let stop = messages_request
+            .stop_sequences
+            .as_ref()
+            .map(|v| StringOrArray::Array(v.clone()));
+        let matched_stop = complete.matched_stop_json_with_context(
+            stop.as_ref(),
+            None, // Messages API has no stop_token_ids
+            tokenizer.as_ref(),
+        );
         let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
 
         let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {
@@ -763,7 +775,7 @@ impl ResponseProcessor {
         execution_result: ExecutionResult,
         completion_req: Arc<CompletionRequest>,
         dispatch: DispatchMetadata,
-        _tokenizer: Arc<dyn Tokenizer>,
+        tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
         prompt_text: &str,
     ) -> Result<CompletionResponse, axum::response::Response> {
@@ -825,7 +837,11 @@ impl ResponseProcessor {
                 }
             };
 
-            let matched_stop = complete.matched_stop_json();
+            let matched_stop = complete.matched_stop_json_with_context(
+                completion_req.stop.as_ref(),
+                completion_req.stop_token_ids.as_ref(),
+                tokenizer.as_ref(),
+            );
 
             let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
             let echo_len = if completion_req.echo {

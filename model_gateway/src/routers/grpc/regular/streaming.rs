@@ -492,7 +492,14 @@ impl StreamingProcessor {
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    matched_stops.insert(index, complete.matched_stop_json());
+                    matched_stops.insert(
+                        index,
+                        complete.matched_stop_json_with_context(
+                            original_request.stop.as_ref(),
+                            original_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        ),
+                    );
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
@@ -2006,7 +2013,15 @@ impl StreamingProcessor {
                     prompt_tokens = complete.prompt_tokens();
                     completion_tokens.record_complete(&complete);
                     finish_reason_str = complete.finish_reason().to_string();
-                    matched_stop = complete.matched_stop_json();
+                    let stop = original_request
+                        .stop_sequences
+                        .as_ref()
+                        .map(|v| StringOrArray::Array(v.clone()));
+                    matched_stop = complete.matched_stop_json_with_context(
+                        stop.as_ref(),
+                        None, // Messages API has no stop_token_ids
+                        tokenizer.as_ref(),
+                    );
                 }
                 ProtoResponseVariant::None => continue,
             }
@@ -2411,8 +2426,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: std::mem::take(&mut chunk_text),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2438,8 +2452,7 @@ impl StreamingProcessor {
                                 choices: vec![CompletionStreamChoice {
                                     text: sfx.to_string(),
                                     index,
-                                    logprobs: None,
-                                    finish_reason: None,
+                                    ..Default::default()
                                 }],
                                 model: model.clone(),
                                 system_fingerprint: system_fingerprint.map(String::from),
@@ -2450,23 +2463,8 @@ impl StreamingProcessor {
                                 .map_err(|_| "Channel closed".to_string())?;
                         }
 
-                        let final_chunk = CompletionStreamResponse {
-                            id: request_id.clone(),
-                            object: "text_completion".to_string(),
-                            created,
-                            choices: vec![CompletionStreamChoice {
-                                text: String::new(),
-                                index,
-                                logprobs: None,
-                                finish_reason: Some("stop".to_string()),
-                            }],
-                            model: model.clone(),
-                            system_fingerprint: system_fingerprint.map(String::from),
-                            usage: None,
-                        };
-                        Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
-                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                            .map_err(|_| "Channel closed".to_string())?;
+                        // Defer the finish_reason chunk to the Complete arm so we can
+                        // include matched_stop from the backend Complete message.
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -2476,6 +2474,31 @@ impl StreamingProcessor {
                     total_completion.record_complete(&complete);
 
                     if stopped_indices.contains(&index) {
+                        // Local stop decoder fired first; suffix already emitted. Emit
+                        // finish_reason here (not in the Chunk arm) so matched_stop from
+                        // the backend Complete message can be included.
+                        let matched_stop = complete.matched_stop_json_with_context(
+                            completion_request.stop.as_ref(),
+                            completion_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        );
+                        let final_chunk = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                index,
+                                finish_reason: Some("stop".to_string()),
+                                matched_stop,
+                                ..Default::default()
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
                         continue;
                     }
 
@@ -2491,8 +2514,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: prompt_text.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2514,8 +2536,7 @@ impl StreamingProcessor {
                                     choices: vec![CompletionStreamChoice {
                                         text,
                                         index,
-                                        logprobs: None,
-                                        finish_reason: None,
+                                        ..Default::default()
                                     }],
                                     model: model.clone(),
                                     system_fingerprint: system_fingerprint.map(String::from),
@@ -2536,8 +2557,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: sfx.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2574,6 +2594,12 @@ impl StreamingProcessor {
                         }
                     };
 
+                    let matched_stop = complete.matched_stop_json_with_context(
+                        completion_request.stop.as_ref(),
+                        completion_request.stop_token_ids.as_ref(),
+                        tokenizer.as_ref(),
+                    );
+
                     let final_chunk = CompletionStreamResponse {
                         id: request_id.clone(),
                         object: "text_completion".to_string(),
@@ -2583,6 +2609,7 @@ impl StreamingProcessor {
                             index,
                             logprobs: None,
                             finish_reason,
+                            matched_stop,
                         }],
                         model: model.clone(),
                         system_fingerprint: system_fingerprint.map(String::from),

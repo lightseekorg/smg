@@ -266,11 +266,13 @@ pub struct CompletionStreamResponse {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionStreamChoice {
     pub text: String,
     pub index: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogProbs>,
     pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_stop: Option<Value>,
 }
