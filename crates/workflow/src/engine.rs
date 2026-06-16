@@ -502,7 +502,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             }
 
             // Phase 0: Drain any pending completion signals to ensure dependents are added
-            // This prevents race conditions where tasks finish but their signals aren't processed
             while let Ok((step_id, result)) = rx.try_recv() {
                 tracing::debug!(
                     step_id = %step_id,
@@ -563,9 +562,8 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                     t.clear_waiting(idx);
                 }
 
-                // Collect steps ready to launch, deduplicating indices.
-                // A step with depends_on_any([A, B]) appears in pending_check once
-                // per completed dependency, but must only launch once.
+                // Deduplicate: a depends_on_any step can appear once per satisfied
+                // dependency but must only launch once.
                 let mut seen = HashSet::new();
                 let mut ready: Vec<usize> = Vec::new();
                 for idx in newly_ready_from_wait {
@@ -604,11 +602,8 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 break;
             }
 
-            // Handle blocked workflow (no ready steps, none running/waiting, but work remains)
-            // Use current_running/current_waiting from Phase 1, adjusted for Phase 2 changes.
-            // current_running may be stale-high (tasks completed since), but that's safe -
-            // we'd just do an extra loop iteration. current_waiting needs adjustment for
-            // steps we just added to waiting in Phase 2.
+            // Handle blocked workflow (no ready steps, none running/waiting, but work remains).
+            // current_waiting is from Phase 1, so add the steps Phase 2 just put into waiting.
             let effective_waiting = current_waiting + steps_added_to_waiting;
             if ready_to_launch.is_empty()
                 && current_running == 0
@@ -1212,19 +1207,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> Drop for StartGuard<'_, D, S> 
     }
 }
 
-/// Clone implementation for internal use.
-///
-/// **Note**: This creates a shallow clone that shares state with the original engine.
-/// Both engines will share the same:
-/// - Workflow definitions
-/// - State store
-/// - Event bus
-/// - Shutdown signal
-/// - Active workflow counter
-///
-/// This is intentional for spawning async tasks that need access to the engine.
-/// For most use cases, prefer sharing the engine via `Arc<WorkflowEngine>` rather
-/// than cloning.
+/// Shallow clone: shares all Arc-held state; used for spawning execution tasks.
 impl<D: WorkflowData, S: StateStore<D> + 'static> Clone for WorkflowEngine<D, S> {
     fn clone(&self) -> Self {
         self.clone_for_execution()
