@@ -1,11 +1,6 @@
 //! In-memory storage implementations
 //!
 //! Used for development and testing - no persistence.
-//!
-//! Structure:
-//! 1. MemoryConversationStorage
-//! 2. MemoryConversationItemStorage
-//! 3. MemoryResponseStorage
 
 use std::{
     collections::{BTreeMap, HashMap},

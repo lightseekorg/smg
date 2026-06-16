@@ -1,12 +1,5 @@
-// core.rs
-//
 // Core types for the data connector module.
 // Contains all traits, data types, error types, and IDs for all storage backends.
-//
-// Structure:
-// 1. Conversation types + trait
-// 2. ConversationItem types + trait
-// 3. Response types + trait
 
 use std::{
     collections::{HashMap, HashSet},
@@ -412,36 +405,9 @@ impl ResponseChain {
         }
     }
 
-    /// Get the ID of the most recent response in the chain
-    pub fn latest_response_id(&self) -> Option<&ResponseId> {
-        self.responses.last().map(|r| &r.id)
-    }
-
     /// Add a response to the chain
     pub fn add_response(&mut self, response: StoredResponse) {
         self.responses.push(response);
-    }
-
-    /// Build context from the chain for the next request
-    pub fn build_context(&self, max_responses: Option<usize>) -> Vec<(Value, Value)> {
-        let responses = if let Some(max) = max_responses {
-            let start = self.responses.len().saturating_sub(max);
-            &self.responses[start..]
-        } else {
-            &self.responses[..]
-        };
-
-        responses
-            .iter()
-            .map(|r| {
-                let output = r
-                    .raw_response
-                    .get("output")
-                    .cloned()
-                    .unwrap_or(Value::Array(vec![]));
-                (r.input.clone(), output)
-            })
-            .collect()
     }
 }
 
@@ -902,79 +868,5 @@ mod tests {
         assert_eq!(chain.responses.len(), 2, "chain should have 2 responses");
         assert_eq!(chain.responses[0].id, r1_id, "first response should be r1");
         assert_eq!(chain.responses[1].id, r2_id, "second response should be r2");
-    }
-
-    #[test]
-    fn response_chain_latest_response_id_returns_last() {
-        let mut chain = ResponseChain::new();
-        let r1 = StoredResponse::new(None);
-        let r2 = StoredResponse::new(None);
-        let r2_id = r2.id.clone();
-
-        chain.add_response(r1);
-        chain.add_response(r2);
-
-        assert_eq!(
-            chain.latest_response_id(),
-            Some(&r2_id),
-            "latest_response_id should return the last response's ID"
-        );
-    }
-
-    #[test]
-    fn response_chain_latest_response_id_returns_none_for_empty() {
-        let chain = ResponseChain::new();
-        assert_eq!(
-            chain.latest_response_id(),
-            None,
-            "latest_response_id should return None for empty chain"
-        );
-    }
-
-    #[test]
-    fn response_chain_build_context_returns_input_output_pairs() {
-        use serde_json::json;
-
-        let mut chain = ResponseChain::new();
-
-        let mut r1 = StoredResponse::new(None);
-        r1.input = Value::String("input1".to_string());
-        r1.raw_response = json!({"output": "output1"});
-
-        let mut r2 = StoredResponse::new(None);
-        r2.input = Value::String("input2".to_string());
-        r2.raw_response = json!({"output": "output2"});
-
-        chain.add_response(r1);
-        chain.add_response(r2);
-
-        let context = chain.build_context(None);
-        assert_eq!(context.len(), 2, "should return 2 pairs");
-        assert_eq!(context[0].0, Value::String("input1".to_string()));
-        assert_eq!(context[0].1, Value::String("output1".to_string()));
-        assert_eq!(context[1].0, Value::String("input2".to_string()));
-        assert_eq!(context[1].1, Value::String("output2".to_string()));
-    }
-
-    #[test]
-    fn response_chain_build_context_with_max_responses_limits_output() {
-        use serde_json::json;
-
-        let mut chain = ResponseChain::new();
-
-        for i in 0..5 {
-            let mut resp = StoredResponse::new(None);
-            resp.input = Value::String(format!("input{i}"));
-            resp.raw_response = json!({"output": format!("output{i}")});
-            chain.add_response(resp);
-        }
-
-        let context = chain.build_context(Some(2));
-        assert_eq!(context.len(), 2, "should return only 2 most recent pairs");
-        // Should be the last 2 responses (index 3 and 4)
-        assert_eq!(context[0].0, Value::String("input3".to_string()));
-        assert_eq!(context[0].1, Value::String("output3".to_string()));
-        assert_eq!(context[1].0, Value::String("input4".to_string()));
-        assert_eq!(context[1].1, Value::String("output4".to_string()));
     }
 }

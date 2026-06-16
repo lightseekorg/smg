@@ -28,12 +28,6 @@ const POSTGRES_V3: Migration = Migration {
 pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 3] =
     [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3];
 
-/// Postgres migration list. Append new migrations here.
-///
-/// Versions 4–8 (skills / tenant-alias / bundle-token / continuation-cookie
-/// tables) were removed with the Skills subsystem.
-pub(crate) static POSTGRES_MIGRATIONS: [Migration; 3] = [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3];
-
 fn pg_v1_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     if s.is_skipped("safety_identifier") {
@@ -116,10 +110,8 @@ mod tests {
 
     #[test]
     fn postgres_migrations_are_strictly_increasing() {
-        // Versions must be strictly increasing and unique. A numbering gap is
-        // allowed (skills migrations 4–8 were removed), so we no longer require
-        // `version == index + 1`.
-        for pair in POSTGRES_MIGRATIONS.windows(2) {
+        // Versions must be strictly increasing and unique; a numbering gap is allowed.
+        for pair in POSTGRES_HISTORY_MIGRATIONS.windows(2) {
             assert!(
                 pair[1].version > pair[0].version,
                 "migration versions must strictly increase: {} then {}",

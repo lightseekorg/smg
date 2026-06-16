@@ -1,10 +1,4 @@
 //! Oracle storage implementation using OracleStore helper.
-//!
-//! Structure:
-//! 1. OracleStore helper and common utilities
-//! 2. OracleConversationStorage
-//! 3. OracleConversationItemStorage
-//! 4. OracleResponseStorage
 
 use std::{path::Path, sync::Arc, time::Duration};
 

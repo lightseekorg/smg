@@ -969,13 +969,10 @@ mod tests {
         );
     }
 
-    // ── temp_oracle.rs scenario: hooks + extra columns replace forking ──
+    // ── Hooks + extra columns: end-to-end ──
 
-    /// Simulates the temp_oracle.rs use case end-to-end:
-    /// Instead of forking Oracle to add a TENANT_ID column, configure
-    /// `extra_columns` on the schema and attach a hook that provides values.
-    ///
-    /// This test verifies:
+    /// Configures `extra_columns` on the schema with a hook that provides a
+    /// TENANT_ID value, and verifies:
     /// 1. Hook `before()` is called with `StoreResponse`
     /// 2. ExtraColumns from the hook are available via task-local during write
     /// 3. Hook `after()` is called with the result
@@ -984,8 +981,7 @@ mod tests {
     async fn hook_with_extra_columns_replaces_forked_backend() {
         use crate::context::current_extra_columns;
 
-        /// Hook that returns TENANT_ID extra column, simulating what
-        /// a forked Oracle backend would hardcode.
+        /// Hook that returns a TENANT_ID extra column value.
         struct TenantHook;
 
         #[async_trait]

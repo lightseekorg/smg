@@ -27,12 +27,6 @@ const ORACLE_V3: Migration = Migration {
 /// storage path during normal gateway startup.
 pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 3] = [ORACLE_V1, ORACLE_V2, ORACLE_V3];
 
-/// Oracle migration list. Append new migrations here.
-///
-/// Versions 4–8 (skills / tenant-alias / bundle-token / continuation-cookie
-/// tables) were removed with the Skills subsystem.
-pub(crate) static ORACLE_MIGRATIONS: [Migration; 3] = [ORACLE_V1, ORACLE_V2, ORACLE_V3];
-
 fn oracle_v1_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     if s.is_skipped("safety_identifier") {
@@ -120,10 +114,8 @@ mod tests {
 
     #[test]
     fn oracle_migrations_are_strictly_increasing() {
-        // Versions must be strictly increasing and unique. A numbering gap is
-        // allowed (skills migrations 4–8 were removed), so we no longer require
-        // `version == index + 1`.
-        for pair in ORACLE_MIGRATIONS.windows(2) {
+        // Versions must be strictly increasing and unique; a numbering gap is allowed.
+        for pair in ORACLE_HISTORY_MIGRATIONS.windows(2) {
             assert!(
                 pair[1].version > pair[0].version,
                 "migration versions must strictly increase: {} then {}",
@@ -238,7 +230,7 @@ mod tests {
     #[test]
     fn all_oracle_migration_identifiers_are_within_30_chars() {
         let schema = SchemaConfig::default();
-        let all: Vec<String> = ORACLE_MIGRATIONS
+        let all: Vec<String> = ORACLE_HISTORY_MIGRATIONS
             .iter()
             .flat_map(|m| (m.up)(&schema))
             .collect();

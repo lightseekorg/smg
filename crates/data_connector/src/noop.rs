@@ -1,11 +1,6 @@
 //! NoOp storage implementations
 //!
 //! These implementations do nothing - useful for when persistence is disabled.
-//!
-//! Structure:
-//! 1. NoOpConversationStorage
-//! 2. NoOpConversationItemStorage
-//! 3. NoOpResponseStorage
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

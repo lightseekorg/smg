@@ -1,10 +1,4 @@
 //! Redis storage implementation using RedisStore helper
-//!
-//! Structure:
-//! 1. RedisStore helper and common utilities
-//! 2. RedisConversationStorage
-//! 3. RedisConversationItemStorage
-//! 4. RedisResponseStorage
 
 use std::{collections::HashMap, sync::Arc};
 

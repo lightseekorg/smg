@@ -376,17 +376,13 @@ mod tests {
         assert!(sql.contains("id")); // core cols still there
     }
 
-    // ── Schema config replaces forked Oracle (temp_oracle.rs scenario) ───
+    // ── Schema config drives Oracle-compatible SQL ───
 
-    /// Proves that SchemaConfig with custom names generates the same SQL
-    /// patterns that temp_oracle.rs used with hardcoded strings — without
-    /// forking the backend code.
+    /// SchemaConfig with custom names generates Oracle-compatible SQL.
     #[test]
     fn schema_config_produces_oracle_compatible_sql() {
-        // Build a config matching what temp_oracle.rs hardcoded:
-        // - default table names (conversations, responses, etc.)
-        // - default column names (Oracle uses unquoted identifiers = case-insensitive)
-        // - Oracle owner prefix
+        // Default table/column names with an Oracle owner prefix; Oracle uses
+        // unquoted identifiers, which are case-insensitive.
         let mut cfg = SchemaConfig {
             owner: Some("ADMIN".to_string()),
             ..SchemaConfig::default()
@@ -409,8 +405,7 @@ mod tests {
         }
     }
 
-    /// Proves that adding a TENANT_ID extra column (a common fork reason)
-    /// works purely through config — no code changes needed.
+    /// Adding a TENANT_ID extra column works purely through config.
     #[test]
     fn schema_config_adds_tenant_column_without_forking() {
         let mut cfg = SchemaConfig {
@@ -418,8 +413,6 @@ mod tests {
             ..SchemaConfig::default()
         };
 
-        // Add TENANT_ID — this is the column that temp_oracle.rs would
-        // require forking the entire backend to add
         cfg.responses.extra_columns.insert(
             "TENANT_ID".to_string(),
             crate::schema::ColumnDef {

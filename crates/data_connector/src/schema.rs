@@ -1,8 +1,6 @@
 //! Schema configuration for storage backends.
 //!
 //! Provides YAML-driven customization of table names and column names.
-//! When no schema config is provided, all defaults match the current
-//! hardcoded behavior — zero behavioral change.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,8 +13,8 @@ use serde_json::Value;
 
 /// Top-level schema configuration. Drives all SQL generation and key naming.
 ///
-/// Every field has a default matching current hardcoded behavior, so omitting
-/// the entire `schema:` section in YAML produces identical queries to today.
+/// Every field defaults to its logical name, so omitting the entire `schema:`
+/// section in YAML uses the default table and column names.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SchemaConfig {
