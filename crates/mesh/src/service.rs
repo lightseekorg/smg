@@ -51,7 +51,6 @@ pub struct MeshServerConfig {
 pub struct MeshServerHandler {
     pub state: ClusterState,
     pub self_name: String,
-    _self_addr: SocketAddr,
     signal_tx: watch::Sender<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     /// Shared with the MeshServer so adapters can subscribe to stream
@@ -218,7 +217,6 @@ impl MeshServerBuilder {
             MeshServerHandler {
                 state: self.state.clone(),
                 self_name: self.self_name.clone(),
-                _self_addr: self.advertise_addr,
                 signal_tx,
                 partition_detector: Some(partition_detector),
                 mesh_kv,

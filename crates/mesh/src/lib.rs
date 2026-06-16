@@ -30,7 +30,7 @@ pub use kv::{
     StreamRouting, Subscription,
 };
 pub use metrics::init_mesh_metrics;
-pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
+pub use mtls::{MTLSConfig, MTLSManager};
 pub use partition::PartitionDetector;
 pub use service::{gossip, ClusterState, MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 pub use transport::limits::MAX_STREAM_CHUNK_BYTES;

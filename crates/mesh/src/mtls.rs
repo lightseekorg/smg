@@ -187,6 +187,3 @@ impl MTLSManager {
         self.client_config.read().await.clone()
     }
 }
-
-/// Optional mTLS manager
-pub type OptionalMTLSManager = Option<Arc<MTLSManager>>;

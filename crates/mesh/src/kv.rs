@@ -97,9 +97,7 @@ pub struct Subscription {
 /// Function signature for stream drain callbacks. Called exactly once per
 /// gossip round. Returns accumulated entries to be sent in this round's
 /// batch. Values are `Bytes` so fan-out to N peers is an Arc refcount bump
-/// per peer rather than N heap copies — keeps a single ~1.5 GB tenant-delta
-/// round from ballooning to 20 × 1.5 GB when chunked across every peer's
-/// sender task.
+/// per peer rather than N heap copies.
 pub type StreamDrainFn = Box<dyn Fn() -> Vec<(String, Bytes)> + Send + Sync>;
 
 /// Handle returned by `register_drain`. Dropping unregisters the drain callback.
@@ -121,13 +119,11 @@ impl Drop for DrainHandle {
 
 /// A single subscription event: (key, value). `None` value means deletion.
 ///
-/// Values are a `Vec<Bytes>` — a list of zero-copy buffer fragments. For
-/// single-value writes this is a 1-element Vec; for reassembled chunked
-/// stream receives it is an N-element Vec where each element wraps one
-/// chunk's original allocation. Subscribers that need a contiguous buffer
-/// can concat; those that fan out further can clone the Bytes cheaply.
-/// The fragmented shape avoids the 2× peak a contiguous reassembly would
-/// impose when a near-cap multi-chunk value completes.
+/// Values are a `Vec<Bytes>` of zero-copy fragments: a 1-element Vec for
+/// single-value writes, an N-element Vec for reassembled chunked receives
+/// (each element wraps one chunk's original allocation). The fragmented
+/// shape avoids the 2× peak a contiguous reassembly would impose when a
+/// near-cap multi-chunk value completes.
 type SubscriptionEvent = (String, Option<Vec<Bytes>>);
 
 /// Tracks all active subscriptions by prefix.
