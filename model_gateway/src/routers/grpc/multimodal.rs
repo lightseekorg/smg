@@ -1420,23 +1420,27 @@ fn write_array_as_f32(writer: &mut impl Write, encoder_input: &ArrayD<f32>) -> s
         .as_slice()
         .or_else(|| encoder_input.as_slice_memory_order())
     {
-        #[cfg(target_endian = "little")]
-        {
-            return writer.write_all(bytemuck::cast_slice(encoder_slice));
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            for value in encoder_slice {
-                writer.write_all(&value.to_le_bytes())?;
-            }
-            return Ok(());
-        }
+        return write_f32_slice(writer, encoder_slice);
     }
 
     for value in encoder_input {
         writer.write_all(&value.to_le_bytes())?;
     }
     Ok(())
+}
+
+fn write_f32_slice(writer: &mut impl Write, values: &[f32]) -> std::io::Result<()> {
+    #[cfg(target_endian = "little")]
+    {
+        writer.write_all(bytemuck::cast_slice(values))
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for value in values {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 fn write_array_as_u16<F>(
@@ -1447,6 +1451,24 @@ fn write_array_as_u16<F>(
 where
     F: Fn(f32) -> u16 + Copy,
 {
+    if let Some(encoder_slice) = encoder_input
+        .as_slice()
+        .or_else(|| encoder_input.as_slice_memory_order())
+    {
+        let converted: Vec<u16> = encoder_slice.iter().map(|&value| convert(value)).collect();
+        #[cfg(target_endian = "little")]
+        {
+            return writer.write_all(bytemuck::cast_slice(converted.as_slice()));
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for value in converted {
+                writer.write_all(&value.to_le_bytes())?;
+            }
+            return Ok(());
+        }
+    }
+
     const CHUNK_VALUES: usize = 256 * 1024;
 
     let mut converted = Vec::with_capacity(CHUNK_VALUES);
@@ -1468,19 +1490,10 @@ where
         Ok(())
     };
 
-    if let Some(encoder_slice) = encoder_input.as_slice() {
-        for &value in encoder_slice {
-            converted.push(convert(value));
-            if converted.len() == CHUNK_VALUES {
-                flush(&mut converted)?;
-            }
-        }
-    } else {
-        for &value in encoder_input {
-            converted.push(convert(value));
-            if converted.len() == CHUNK_VALUES {
-                flush(&mut converted)?;
-            }
+    for &value in encoder_input {
+        converted.push(convert(value));
+        if converted.len() == CHUNK_VALUES {
+            flush(&mut converted)?;
         }
     }
     flush(&mut converted)
@@ -1523,7 +1536,10 @@ where
     let element_count = encoder_input.len();
     let mut converted = Vec::with_capacity(element_count);
 
-    if let Some(encoder_slice) = encoder_input.as_slice() {
+    if let Some(encoder_slice) = encoder_input
+        .as_slice()
+        .or_else(|| encoder_input.as_slice_memory_order())
+    {
         converted.extend(encoder_slice.iter().map(|&value| convert(value)));
     } else {
         converted.extend(encoder_input.iter().map(|&value| convert(value)));

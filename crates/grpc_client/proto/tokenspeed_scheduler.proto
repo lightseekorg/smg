@@ -123,9 +123,11 @@ message TensorData {
   oneof payload {
     // Current path: raw little-endian bytes carried in the gRPC message.
     bytes inline = 3;
-    // Same-host CPU shared memory path.
+    // Same-host CPU shared memory path. This is the preferred large-payload
+    // transport when SMG and TokenSpeed share /dev/shm.
     ShmHandle shm = 4;
-    // Transport-specific remote descriptor (NIXL/RDMA/object-store/etc.).
+    // Cross-node or non-shared-memory transport descriptor. NIXL is the
+    // expected remote transport for distributed multimodal tensor payloads.
     RemoteTensorHandle remote = 5;
   }
 }

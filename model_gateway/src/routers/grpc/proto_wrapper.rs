@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     fs::{remove_file, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     path::PathBuf,
     process,
     sync::atomic::{AtomicU64, Ordering},
@@ -402,21 +402,22 @@ fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
 
 pub fn write_tokenspeed_shm_with(
     nbytes: usize,
-    write_fn: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<tokenspeed::ShmHandle> {
     let name = next_tokenspeed_shm_name();
     let path = tokenspeed_shm_path(&name);
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)?;
-    if let Err(error) = write_fn(&mut file) {
-        drop(file);
+    let mut writer = BufWriter::new(file);
+    if let Err(error) = write_fn(&mut writer) {
+        drop(writer);
         let _ = remove_file(&path);
         return Err(error);
     }
-    if let Err(error) = file.flush().and_then(|()| {
-        if file.metadata()?.len() != nbytes as u64 {
+    if let Err(error) = writer.flush().and_then(|()| {
+        if writer.get_ref().metadata()?.len() != nbytes as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "TokenSpeed SHM writer produced an unexpected byte length",
@@ -424,7 +425,7 @@ pub fn write_tokenspeed_shm_with(
         }
         Ok(())
     }) {
-        drop(file);
+        drop(writer);
         let _ = remove_file(&path);
         return Err(error);
     }
