@@ -641,7 +641,7 @@ impl McpOrchestrator {
 
     /// Spawn background handler for inventory refresh requests.
     fn spawn_refresh_handler(&self, mut rx: mpsc::Receiver<RefreshRequest>) {
-        let token = self.shutdown_token.clone(); //
+        let token = self.shutdown_token.clone();
         let tool_inventory = Arc::clone(&self.tool_inventory);
         let static_servers = self.static_servers.clone();
 
@@ -653,7 +653,7 @@ impl McpOrchestrator {
             loop {
                 tokio::select! {
                     // Stop the loop if the shutdown token is triggered
-                    () = token.cancelled() => { //
+                    () = token.cancelled() => {
                         debug!("Refresh handler shutting down");
                         break;
                     }
@@ -1001,9 +1001,8 @@ impl McpOrchestrator {
 
                 let _guard = lock.lock().await;
 
-                // Race condition check:
-                // If the current client in the map is DIFFERENT from the one that failed,
-                // it means another concurrent task already successfully reconnected it.
+                // A client differing from the one that failed means another task
+                // already reconnected it.
                 if let Some(current_entry) = self.static_servers.get(&name) {
                     let already_reconnected = match &initial_client {
                         Some(initial) => !Arc::ptr_eq(initial, &current_entry.client),
@@ -1398,9 +1397,7 @@ impl McpOrchestrator {
             })
             .await?;
 
-        // Load tools from the server
-        // Use server_key (URL) as the tool's server identifier so it matches
-        // what ensure_request_mcp_client adds to server_keys for filtering
+        // Pooled connections are keyed by URL.
         match client.peer().list_all_tools().await {
             Ok(tools) => {
                 info!(

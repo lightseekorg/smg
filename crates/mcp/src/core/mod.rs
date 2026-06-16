@@ -7,7 +7,6 @@ pub const UNKNOWN_SERVER_KEY: &str = "unknown";
 pub mod config;
 pub mod handler;
 pub mod metrics;
-pub mod oauth;
 pub mod orchestrator;
 pub mod pool;
 pub mod proxy;
