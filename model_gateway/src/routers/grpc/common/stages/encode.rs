@@ -23,7 +23,7 @@ use smg_grpc_client::{
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use super::PipelineStage;
+use super::{encode_selection, PipelineStage};
 use crate::{
     routers::{
         error,
@@ -35,8 +35,10 @@ use crate::{
     worker::DEFAULT_BOOTSTRAP_PORT,
 };
 
-/// Process-global cursor so single-image requests rotate across the encode pool
-/// instead of pinning every request to encode_pool[0] (encode data-parallel).
+/// Process-global cursor for the `RoundRobin` encode routing policy so
+/// single-image requests rotate across the encode pool instead of pinning every
+/// request to encode_pool[0] (encode data-parallel). The default `CacheAffinity`
+/// policy ignores this and routes by content hash (see `encode_selection`).
 /// Relaxed is fine: this is a load-balancing hint, not a synchronization point;
 /// usize wrap is harmless because every use is taken `% pool_len`.
 static ENCODE_RR_CURSOR: AtomicUsize = AtomicUsize::new(0);
@@ -109,22 +111,48 @@ impl PipelineStage for EncodeStage {
             return Ok(None);
         }
 
-        // One Encode RPC per image: assign a worker round-robin, mint a unique
-        // rendezvous room, build the request, and record the prefill handshake.
+        // One Encode RPC per image: pick a worker (content-hash affinity by
+        // default, or round-robin), mint a unique rendezvous room, build the
+        // request, and record the prefill handshake.
         let pool_len = encode_pool.len();
         let mut handshakes: Vec<tokenspeed_proto::EncodeItemHandshake> =
             Vec::with_capacity(items.len());
         let mut sends: Vec<tokio::task::JoinHandle<Result<(), String>>> =
             Vec::with_capacity(items.len());
 
+        let policy = encode_selection::routing_policy();
+
+        // Stable, URL-sorted view of the pool so content-hash affinity maps the
+        // same image to the same worker across requests for a fixed pool. Only
+        // CacheAffinity uses it; RoundRobin routes on the raw pool order, so skip
+        // the allocation + sort there.
+        let order: Vec<usize> = match policy {
+            encode_selection::EncodeRoutingPolicy::CacheAffinity => {
+                let mut o: Vec<usize> = (0..pool_len).collect();
+                o.sort_by(|&a, &b| encode_pool[a].url().cmp(encode_pool[b].url()));
+                o
+            }
+            encode_selection::EncodeRoutingPolicy::RoundRobin => Vec::new(),
+        };
+
         // Reserve a contiguous block of cursor slots for this request's images so a
         // multi-image request still spreads and consecutive requests continue where
         // the previous one stopped (cross-request balance for single-image requests).
+        // Only the RoundRobin policy consumes this; CacheAffinity routes by hash.
         let num_images = items.len();
         let rr_base = ENCODE_RR_CURSOR.fetch_add(num_images.max(1), Ordering::Relaxed);
 
         for (global_index, mut item) in items.into_iter().enumerate() {
-            let worker = encode_pool[(rr_base + global_index) % pool_len].clone();
+            // Select this image's encode worker.
+            let worker = match policy {
+                encode_selection::EncodeRoutingPolicy::RoundRobin => {
+                    encode_pool[(rr_base + global_index) % pool_len].clone()
+                }
+                encode_selection::EncodeRoutingPolicy::CacheAffinity => {
+                    let slot = encode_selection::affinity_slot(&item.content_hash, pool_len);
+                    encode_pool[order[slot]].clone()
+                }
+            };
             // 63-bit room: no in-flight dedup, so a 2^31 space birthday-collides
             // under load (silent embedding cross-wire). See the proto field doc.
             let bootstrap_room = rand::rng().random_range(0..i64::MAX);
@@ -208,6 +236,7 @@ impl PipelineStage for EncodeStage {
         debug!(
             num_images = handshakes.len(),
             num_encode_workers = pool_len,
+            policy = ?policy,
             "EPD encode dispatch issued (non-blocking; prefill registers concurrently)"
         );
         ctx.state.encode_handshake = Some(handshakes);

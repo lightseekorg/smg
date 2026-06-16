@@ -29,6 +29,7 @@ pub trait PipelineStage: Send + Sync {
 mod client_acquisition;
 mod dispatch_metadata;
 mod encode;
+mod encode_selection;
 pub(crate) mod helpers;
 mod request_execution;
 mod worker_selection;
