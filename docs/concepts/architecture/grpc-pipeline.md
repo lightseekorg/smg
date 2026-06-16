@@ -151,14 +151,14 @@ smg --reasoning-parser kimi
 
 <div class="card" markdown>
 
-**GLM-4.5**
+**GLM**
 
-- Pattern: `*glm45*`, `*glm47*`
+- Pattern: `*glm*`
 - Initial state: Not in reasoning
 - Tokens: `<think>` / `</think>`
 
 ```bash
-smg --reasoning-parser glm45
+smg --reasoning-parser glm
 ```
 
 </div>
@@ -173,7 +173,7 @@ smg --reasoning-parser glm45
 | `qwen3` | `*qwen3*` | Not in reasoning | `<think>` / `</think>` |
 | `qwen3_thinking` | `*qwen-thinking*` | In reasoning | `<think>` / `</think>` |
 | `kimi` | `*kimi*` | Not in reasoning | Unicode markers |
-| `glm45` | `*glm45*`, `*glm47*` | Not in reasoning | `<think>` / `</think>` |
+| `glm` | `*glm*` | Not in reasoning | `<think>` / `</think>` |
 | `step3` | `*step3*` | In reasoning | `<think>` / `</think>` |
 | `minimax` | `*minimax*`, `*mm-m2*` | In reasoning | `<think>` appended |
 

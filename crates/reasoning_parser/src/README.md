@@ -25,7 +25,7 @@ The reasoning parser layer provides a unified interface for detecting and extrac
 
 ### Architecture Highlights
 
-- **Model-Specific Parsers**: DeepSeek-R1, Qwen3, Kimi, GLM45, GLM47, Step3 variants
+- **Model-Specific Parsers**: DeepSeek-R1, Qwen3, Kimi, GLM, Step3 variants
 - **Parser Pooling**: Singleton instances per model type for memory efficiency
 - **High Concurrency**: Mutex-protected parsers handle 1000+ req/sec
 - **Buffer Overflow Protection**: Configurable max buffer size (default 64KB)
@@ -55,7 +55,7 @@ graph TB
         PP --> QW[Qwen3]
         PP --> QWT[Qwen3-Thinking]
         PP --> KM[Kimi]
-        PP --> GL[GLM45/GLM47]
+        PP --> GL[GLM]
         PP --> S3[Step3]
         PP --> PT[Passthrough]
     end
@@ -196,7 +196,7 @@ classDiagram
         +new() Self
     }
 
-    class Glm45Parser {
+    class GlmParser {
         -base: BaseReasoningParser
         +new() Self
     }
@@ -229,14 +229,14 @@ classDiagram
     ReasoningParser <|.. Qwen3Parser
     ReasoningParser <|.. QwenThinkingParser
     ReasoningParser <|.. KimiParser
-    ReasoningParser <|.. Glm45Parser
+    ReasoningParser <|.. GlmParser
     ReasoningParser <|.. Step3Parser
 
     DeepSeekR1Parser o-- BaseReasoningParser
     Qwen3Parser o-- BaseReasoningParser
     QwenThinkingParser o-- BaseReasoningParser
     KimiParser o-- BaseReasoningParser
-    Glm45Parser o-- BaseReasoningParser
+    GlmParser o-- BaseReasoningParser
     Step3Parser o-- BaseReasoningParser
 
     BaseReasoningParser o-- ParserConfig
@@ -325,7 +325,7 @@ classDiagram
 - `qwen3`: Qwen3 base model (initial_in_reasoning=false)
 - `qwen3_thinking`: Qwen3 thinking variant (initial_in_reasoning=true)
 - `kimi`: Kimi with Unicode tokens
-- `glm45`: GLM-4.5 / GLM-4.6 / GLM-4.7 parser
+- `glm`: GLM series parser (4.5, 4.7, 5, 5.1, etc.)
 - `step3`: Step3 parser
 - `passthrough`: No-op fallback parser
 
@@ -336,8 +336,7 @@ classDiagram
 "qwen-thinking" → "qwen3_thinking"
 "qwen3" → "qwen3"
 "qwen" → "qwen3"
-"glm45" → "glm45"
-"glm47" → "glm45"
+"glm" → "glm"
 "kimi" → "kimi"
 "step3" → "step3"
 ```

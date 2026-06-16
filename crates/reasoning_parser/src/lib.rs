@@ -4,7 +4,7 @@ pub mod traits;
 
 pub use factory::{ParserFactory, ParserRegistry, PooledParser};
 pub use parsers::{
-    BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser, MiniMaxParser,
+    BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, GlmParser, KimiParser, MiniMaxParser,
     NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser, Step3Parser,
 };
 pub use traits::{

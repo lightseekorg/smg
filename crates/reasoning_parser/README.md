@@ -47,7 +47,7 @@ async fn main() {
 | DeepSeek-R1 | `<think>`/`</think>` | Starts in reasoning mode |
 | Qwen3 | `<think>`/`</think>` | Explicit reasoning blocks |
 | Qwen3-Thinking | `<think>`/`</think>` | Starts in reasoning mode |
-| GLM-4.5/4.6/4.7 | `<think>`/`</think>` | Explicit reasoning blocks |
+| GLM (4.5/4.7/5/5.1) | `<think>`/`</think>` | Explicit reasoning blocks |
 | Kimi | `◁think▷`/`◁/think▷` | Unicode delimiters |
 | Step3 | `<think>`/`</think>` | Starts in reasoning mode |
 | MiniMax M2 | `<think>`/`</think>` | Auto-prepends start token |
@@ -252,7 +252,7 @@ Pattern priority (first match wins):
 1. `deepseek-r1` → DeepSeekR1Parser
 2. `qwen3-thinking` / `qwen-thinking` → QwenThinkingParser
 3. `qwen3` / `qwen` → Qwen3Parser
-4. `glm45` / `glm46` / `glm47` → Glm45Parser
+4. `glm` → GlmParser
 5. `kimi` → KimiParser
 6. `step3` → Step3Parser
 7. `minimax` / `mm-m2` → MiniMaxParser
