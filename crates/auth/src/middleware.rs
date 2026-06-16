@@ -285,9 +285,7 @@ pub async fn control_plane_auth_middleware(
                 return next.run(request).await;
             }
             Err(e) => {
-                // If the token looks like a JWT (3 parts separated by dots), it's likely
-                // an invalid JWT, not an API key. Fail fast with a specific error
-                // instead of silently falling back. This provides better feedback.
+                // 3 dot-separated parts => almost certainly a JWT; fail fast instead of trying API key.
                 if token.split('.').count() == 3 {
                     warn!("Invalid JWT provided: {}. Not falling back to API key.", e);
                     auth_state.audit_logger.log_auth_failure(

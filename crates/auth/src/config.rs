@@ -224,13 +224,11 @@ impl ControlPlaneAuthConfig {
     /// Find an API key by its value and return the entry if found.
     /// Uses constant-time hash comparison to prevent timing attacks.
     pub fn find_api_key(&self, key: &str) -> Option<&ApiKeyEntry> {
-        // Iterate through all keys to prevent timing leaks about key existence
-        // We use a variable to track the match to ensure constant-time behavior
+        // Scan all entries (no early return) to avoid leaking which key matched.
         let mut found: Option<&ApiKeyEntry> = None;
         for entry in &self.api_keys {
             if entry.verify(key) {
                 found = Some(entry);
-                // Don't break early to maintain constant-time behavior
             }
         }
         found
