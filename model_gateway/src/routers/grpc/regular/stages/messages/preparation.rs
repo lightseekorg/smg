@@ -156,7 +156,13 @@ impl MessagePreparationStage {
         };
 
         // Step 3: Tokenize the processed text
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+        let encoding = match utils::encode_blocking(
+            tokenizer.clone(),
+            processed_messages.text.clone(),
+            false,
+        )
+        .await
+        {
             Ok(encoding) => encoding,
             Err(e) => {
                 error!(function = "MessagePreparationStage::execute", error = %e, "Tokenization failed");

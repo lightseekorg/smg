@@ -1,13 +1,18 @@
 //! Chat message processing, tool constraints, and shared utilities for gRPC routers.
 
-use std::{collections::HashMap, io, sync::Arc};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, OnceLock},
+};
 
+use anyhow::anyhow;
 use axum::response::Response;
 use bytes::Bytes;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
-    traits::Tokenizer,
+    traits::{Encoding, Tokenizer},
     StopSequenceDecoder,
 };
 use openai_protocol::{
@@ -16,7 +21,7 @@ use openai_protocol::{
     generate::GenerateFinishReason,
 };
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::error;
 use uuid::Uuid;
 
@@ -78,6 +83,47 @@ pub(crate) fn resolve_tokenizer(
     ctx.state.tokenizer = Some(tokenizer.clone());
 
     Ok(tokenizer)
+}
+
+/// Below this input size (in bytes) the `spawn_blocking` + permit round-trip
+/// costs more than the encode itself, so we tokenize inline. Larger prompts —
+/// the ones that actually pin a worker thread — are offloaded.
+const ENCODE_OFFLOAD_MIN_BYTES: usize = 512;
+
+/// Bounds how many CPU-bound encodes run concurrently on the blocking pool.
+/// tokio's blocking pool is otherwise unbounded (grows to 512 threads), so under
+/// a burst of large prompts the offloaded encodes would oversubscribe the CPU
+/// and starve the very request runtime this offload is meant to protect. Sized
+/// to the host's available parallelism.
+fn encode_permits() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        Semaphore::new(n)
+    })
+}
+
+/// Tokenize off the async worker threads so CPU-bound `encode` cannot stall the
+/// runtime, bounded by [`encode_permits`] so concurrent offloaded encodes cannot
+/// oversubscribe the CPU. Small inputs are encoded inline to avoid the offload
+/// round-trip dominating.
+pub(crate) async fn encode_blocking(
+    tokenizer: Arc<dyn Tokenizer>,
+    text: String,
+    add_special_tokens: bool,
+) -> anyhow::Result<Encoding> {
+    if text.len() < ENCODE_OFFLOAD_MIN_BYTES {
+        return tokenizer.encode(&text, add_special_tokens);
+    }
+    let _permit = encode_permits()
+        .acquire()
+        .await
+        .map_err(|e| anyhow!("encode semaphore closed: {e}"))?;
+    tokio::task::spawn_blocking(move || tokenizer.encode(&text, add_special_tokens))
+        .await
+        .map_err(|e| anyhow!("tokenization task failed: {e}"))?
 }
 
 /// Process tool call arguments in messages
