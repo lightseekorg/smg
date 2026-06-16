@@ -38,8 +38,8 @@ use image::{DynamicImage, GenericImageView};
 use ndarray::{self, Array3};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{
         center_crop, expand_to_square, mean_to_rgb, normalize, pil_to_filter, resize, stack_batch,
         to_tensor, TransformError,
@@ -264,7 +264,7 @@ impl LlavaProcessor {
     }
 }
 
-impl ImagePreProcessor for LlavaProcessor {
+impl VisionPreProcessor for LlavaProcessor {
     fn default_mean(&self) -> [f64; 3] {
         CLIP_MEAN
     }
@@ -277,13 +277,13 @@ impl ImagePreProcessor for LlavaProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
 
         // Store original sizes
-        let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
+        let item_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
 
         // Process each image
         let tensors: Vec<Array3<f32>> = images
@@ -292,18 +292,18 @@ impl ImagePreProcessor for LlavaProcessor {
             .collect();
 
         // Stack into batch
-        let pixel_values = stack_batch(&tensors)?;
+        let encoder_input = stack_batch(&tensors)?;
 
         // Calculate token counts
-        let num_img_tokens: Vec<usize> = images
+        let feature_token_counts: Vec<usize> = images
             .iter()
             .map(|_| self.calculate_num_tokens(self.image_size, self.image_size, config))
             .collect();
 
-        Ok(PreprocessedImages::new(
-            pixel_values,
-            num_img_tokens,
-            image_sizes,
+        Ok(PreprocessedEncoderInputs::new(
+            encoder_input,
+            feature_token_counts,
+            item_sizes,
         ))
     }
 
@@ -514,7 +514,7 @@ impl LlavaNextProcessor {
     }
 }
 
-impl ImagePreProcessor for LlavaNextProcessor {
+impl VisionPreProcessor for LlavaNextProcessor {
     fn default_mean(&self) -> [f64; 3] {
         CLIP_MEAN
     }
@@ -527,14 +527,14 @@ impl ImagePreProcessor for LlavaNextProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
 
         let mut patches_per_image: Vec<Vec<Array3<f32>>> = Vec::with_capacity(images.len());
-        let mut num_img_tokens = Vec::with_capacity(images.len());
-        let mut image_sizes = Vec::with_capacity(images.len());
+        let mut feature_token_counts = Vec::with_capacity(images.len());
+        let mut item_sizes = Vec::with_capacity(images.len());
 
         let filter = pil_to_filter(config.resampling);
         let target_size = config
@@ -545,7 +545,7 @@ impl ImagePreProcessor for LlavaNextProcessor {
 
         for image in images {
             let original_size = image.dimensions();
-            image_sizes.push(original_size);
+            item_sizes.push(original_size);
 
             let best_resolution = self.select_best_resolution(original_size);
             let image_padded = self.resize_and_pad_image(image, best_resolution);
@@ -560,14 +560,14 @@ impl ImagePreProcessor for LlavaNextProcessor {
                 .collect();
             patches_per_image.push(patches);
 
-            num_img_tokens.push(self.calculate_num_tokens(
+            feature_token_counts.push(self.calculate_num_tokens(
                 original_size.0,
                 original_size.1,
                 config,
             ));
         }
 
-        // Build 5D pixel_values [num_images, max_patches, C, H, W] matching the
+        // Build 5D encoder_input [num_images, max_patches, C, H, W] matching the
         // HF LlavaNextImageProcessor output that vLLM expects with Batched layout.
         let max_patches = patches_per_image.iter().map(|p| p.len()).max().unwrap_or(0);
         let (c, h, w) = if let Some(first) = patches_per_image.iter().find_map(|p| p.first()) {
@@ -578,24 +578,27 @@ impl ImagePreProcessor for LlavaNextProcessor {
         };
 
         let num_images = images.len();
-        let mut pixel_values = ndarray::Array5::<f32>::zeros((num_images, max_patches, c, h, w));
+        let mut encoder_input = ndarray::Array5::<f32>::zeros((num_images, max_patches, c, h, w));
         for (i, patches) in patches_per_image.iter().enumerate() {
             for (j, patch) in patches.iter().enumerate() {
-                pixel_values
+                encoder_input
                     .slice_mut(ndarray::s![i, j, .., .., ..])
                     .assign(patch);
             }
         }
 
-        // Build image_sizes tensor as [num_images, 2] in (height, width) order
+        // Build model-specific image_sizes tensor as [num_images, 2] in (height, width) order
         // to match the HF LlavaNextImageProcessor output format that vLLM expects.
-        let image_sizes_flat: Vec<i64> = image_sizes
+        let image_sizes_flat: Vec<i64> = item_sizes
             .iter()
             .flat_map(|&(w, h)| [h as i64, w as i64])
             .collect();
 
-        let mut result =
-            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes);
+        let mut result = PreprocessedEncoderInputs::new_dynamic(
+            encoder_input.into_dyn(),
+            feature_token_counts,
+            item_sizes,
+        );
         result.model_specific.insert(
             "image_sizes".to_string(),
             ModelSpecificValue::int_2d(image_sizes_flat, num_images, 2),
@@ -837,7 +840,7 @@ mod tests {
         assert_eq!(result.batch_size(), 1);
         assert_eq!(result.height().unwrap(), 336);
         assert_eq!(result.width().unwrap(), 336);
-        assert_eq!(result.num_img_tokens[0], 576);
+        assert_eq!(result.feature_token_counts[0], 576);
     }
 
     #[test]
@@ -938,7 +941,7 @@ mod tests {
         // 5D: [num_images=1, num_patches, C, H, W]
         assert_eq!(result.batch_size(), 1);
         // Should have multiple patches (original + crops) in the second dimension
-        assert!(result.pixel_values.shape()[1] > 1);
+        assert!(result.encoder_input.shape()[1] > 1);
     }
 
     #[test]

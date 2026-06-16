@@ -21,10 +21,13 @@ use std::ops::Deref;
 use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
-use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
-    preprocessor_config::PreProcessorConfig,
-    transforms::TransformError,
+use crate::{
+    types::RgbFrameRef,
+    vision::{
+        preprocessor_config::PreProcessorConfig,
+        processor::{PreprocessedEncoderInputs, VisionPreProcessor},
+        transforms::TransformError,
+    },
 };
 
 /// Qwen3-VL normalization mean values (simple [0.5, 0.5, 0.5]).
@@ -121,8 +124,14 @@ impl Qwen3VLProcessor {
             inner: QwenVLProcessorBase::new(QwenVLConfig {
                 patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE),
                 merge_size: config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
-                min_pixels: config.min_pixels.unwrap_or(DEFAULT_MIN_PIXELS),
-                max_pixels: config.max_pixels.unwrap_or(DEFAULT_MAX_PIXELS),
+                min_pixels: config
+                    .min_pixels
+                    .or_else(|| config.get_shortest_edge())
+                    .unwrap_or(DEFAULT_MIN_PIXELS),
+                max_pixels: config
+                    .max_pixels
+                    .or_else(|| config.get_longest_edge())
+                    .unwrap_or(DEFAULT_MAX_PIXELS),
                 temporal_patch_size: config
                     .temporal_patch_size
                     .unwrap_or(DEFAULT_TEMPORAL_PATCH_SIZE),
@@ -130,6 +139,20 @@ impl Qwen3VLProcessor {
                 std: QWEN3_STD,
                 model_name: "qwen3-vl",
             }),
+        }
+    }
+
+    fn with_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
+        if config.patch_size.is_some()
+            || config.merge_size.is_some()
+            || config.min_pixels.is_some()
+            || config.max_pixels.is_some()
+            || config.temporal_patch_size.is_some()
+            || config.size.is_some()
+        {
+            Self::from_preprocessor_config(config)
+        } else {
+            self.clone()
         }
     }
 
@@ -198,7 +221,7 @@ impl Deref for Qwen3VLProcessor {
     }
 }
 
-impl ImagePreProcessor for Qwen3VLProcessor {
+impl VisionPreProcessor for Qwen3VLProcessor {
     fn default_mean(&self) -> [f64; 3] {
         self.inner.default_mean()
     }
@@ -211,12 +234,32 @@ impl ImagePreProcessor for Qwen3VLProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
-        self.inner.preprocess(images, config)
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess(images, config)
+    }
+
+    fn preprocess_video(
+        &self,
+        frames: &[DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess_video(frames, config)
+    }
+
+    fn preprocess_video_rgb(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess_video_rgb(frames, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
-        self.inner.calculate_num_tokens(width, height, config)
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.calculate_num_tokens(width, height, config)
     }
 
     fn model_name(&self) -> &'static str {
@@ -230,10 +273,12 @@ impl ImagePreProcessor for Qwen3VLProcessor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use image::{Rgb, RgbImage};
 
     use super::*;
-    use crate::vision::{image_processor::ModelSpecificValue, preprocessor_config::PatchSize};
+    use crate::vision::{preprocessor_config::PatchSize, processor::ModelSpecificValue};
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
         DynamicImage::from(RgbImage::from_pixel(width, height, color))
@@ -341,12 +386,12 @@ mod tests {
         let image = create_test_image(640, 480, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        // pixel_values is patchified: [total_patches, patch_features]
-        assert_eq!(result.pixel_values.ndim(), 2);
-        assert!(result.pixel_values.shape()[0] > 0); // total_patches > 0
+        // encoder_input is patchified: [total_patches, patch_features]
+        assert_eq!(result.encoder_input.ndim(), 2);
+        assert!(result.encoder_input.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
-        let flat = result.pixel_values_flat();
+        let flat = result.encoder_input_flat();
         // After normalization with [0.5, 0.5, 0.5] mean/std:
         // (0.5 - 0.5) / 0.5 = 0.0 for gray
         // Values should be in [-1, 1] range
@@ -357,7 +402,7 @@ mod tests {
         assert!(result.model_specific.contains_key("patches_per_image"));
 
         // Verify token count is reasonable
-        assert!(result.num_img_tokens[0] > 0);
+        assert!(result.feature_token_counts[0] > 0);
     }
 
     #[test]
@@ -377,11 +422,11 @@ mod tests {
         let result = processor.preprocess(&images, &config).unwrap();
 
         // Both images processed
-        assert_eq!(result.image_sizes.len(), 2);
-        assert_eq!(result.num_img_tokens.len(), 2);
+        assert_eq!(result.item_sizes.len(), 2);
+        assert_eq!(result.feature_token_counts.len(), 2);
 
-        // pixel_values is 2D [total_patches, patch_features]
-        assert_eq!(result.pixel_values.ndim(), 2);
+        // encoder_input is 2D [total_patches, patch_features]
+        assert_eq!(result.encoder_input.ndim(), 2);
 
         // Check grid_thw shape
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
@@ -399,12 +444,97 @@ mod tests {
         {
             assert_eq!(shape, &[2]); // 2 images
             assert_eq!(data.len(), 2);
-            // Total patches should match pixel_values first dim
+            // Total patches should match encoder_input first dim
             let total: i64 = data.iter().sum();
-            assert_eq!(total as usize, result.pixel_values.shape()[0]);
+            assert_eq!(total as usize, result.encoder_input.shape()[0]);
         } else {
             panic!("Expected patches_per_image to be IntTensor");
         }
+    }
+
+    #[test]
+    fn test_qwen3_vl_preprocess_video() {
+        let processor = Qwen3VLProcessor::new();
+        let config = PreProcessorConfig {
+            image_mean: Some(QWEN3_MEAN.to_vec()),
+            image_std: Some(QWEN3_STD.to_vec()),
+            ..Default::default()
+        };
+
+        let frames = vec![
+            create_test_image(640, 480, Rgb([100, 100, 100])),
+            create_test_image(640, 480, Rgb([150, 150, 150])),
+            create_test_image(640, 480, Rgb([200, 200, 200])),
+        ];
+
+        let result = processor.preprocess_video(&frames, &config).unwrap();
+        assert_eq!(result.encoder_input.ndim(), 2);
+        assert_eq!(result.feature_token_counts.len(), 1);
+        assert!(result.model_specific.contains_key("video_grid_thw"));
+
+        if let Some(ModelSpecificValue::IntTensor { data, shape }) =
+            result.model_specific.get("video_grid_thw")
+        {
+            assert_eq!(shape, &[1, 3]);
+            assert_eq!(data[0], 2); // 3 frames padded to 4, temporal_patch_size=2
+        } else {
+            panic!("Expected video_grid_thw to be IntTensor");
+        }
+    }
+
+    #[test]
+    fn test_qwen3_vl_preprocess_video_rgb_applies_config() {
+        let processor = Qwen3VLProcessor::new();
+        let config = PreProcessorConfig {
+            patch_size: Some(PatchSize {
+                height: Some(8),
+                width: Some(8),
+            }),
+            merge_size: Some(1),
+            temporal_patch_size: Some(4),
+            min_pixels: Some(1),
+            max_pixels: Some(4096),
+            ..Default::default()
+        };
+
+        let frames = vec![
+            create_test_image(32, 32, Rgb([100, 100, 100])),
+            create_test_image(32, 32, Rgb([150, 150, 150])),
+            create_test_image(32, 32, Rgb([200, 200, 200])),
+        ];
+        let rgb_images: Vec<RgbImage> = frames.iter().map(|frame| frame.to_rgb8()).collect();
+        let rgb_frames: Vec<RgbFrameRef<'_>> = rgb_images
+            .iter()
+            .map(|frame| RgbFrameRef {
+                width: frame.width(),
+                height: frame.height(),
+                data: frame.as_raw(),
+            })
+            .collect();
+
+        let dynamic = processor.preprocess_video(&frames, &config).unwrap();
+        let rgb = processor
+            .preprocess_video_rgb(&rgb_frames, &config)
+            .unwrap();
+
+        assert_eq!(rgb.encoder_input.shape(), dynamic.encoder_input.shape());
+        assert_eq!(rgb.feature_token_counts, dynamic.feature_token_counts);
+        let Some(ModelSpecificValue::IntTensor {
+            data: rgb_grid,
+            shape: rgb_shape,
+        }) = rgb.model_specific.get("video_grid_thw")
+        else {
+            panic!("Expected RGB video_grid_thw to be IntTensor");
+        };
+        let Some(ModelSpecificValue::IntTensor {
+            data: dynamic_grid,
+            shape: dynamic_shape,
+        }) = dynamic.model_specific.get("video_grid_thw")
+        else {
+            panic!("Expected dynamic video_grid_thw to be IntTensor");
+        };
+        assert_eq!(rgb_shape, dynamic_shape);
+        assert_eq!(rgb_grid, dynamic_grid);
     }
 
     #[test]
@@ -428,6 +558,26 @@ mod tests {
         assert_eq!(processor.min_pixels(), 100000);
         assert_eq!(processor.max_pixels(), 500000);
         assert_eq!(processor.temporal_patch_size(), 4);
+    }
+
+    #[test]
+    fn test_qwen3_vl_video_config_uses_size_edges() {
+        let config = PreProcessorConfig {
+            size: Some(HashMap::from([
+                ("shortest_edge".to_string(), 4096),
+                ("longest_edge".to_string(), 25165824),
+            ])),
+            ..Default::default()
+        };
+
+        let processor = Qwen3VLProcessor::from_preprocessor_config(&config);
+
+        assert_eq!(processor.min_pixels(), 4096);
+        assert_eq!(processor.max_pixels(), 25165824);
+        assert_eq!(
+            processor.inner.smart_resize_video(239, 720, 1280).unwrap(),
+            (224, 416)
+        );
     }
 
     #[test]

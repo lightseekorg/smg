@@ -133,7 +133,7 @@ impl WorkerRegistry {
 
     /// Create an empty worker registry.
     ///
-    /// Initialises all indexes and a broadcast channel with capacity 64
+    /// Initialises all indexes and a broadcast channel with capacity 1024
     /// for `WorkerEvent` delivery. Holds no locks. Emits no events.
     pub fn new() -> Self {
         Self {
@@ -146,7 +146,11 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             model_retry_configs: Arc::new(DashMap::new()),
             worker_origins: Arc::new(DashMap::new()),
-            event_tx: broadcast::Sender::new(64),
+            // Sized for fleet-scale bursts (startup registration, probe
+            // storms): a lagged subscriber forces a full state resync, so
+            // the capacity should comfortably exceed realistic worker
+            // counts. ~100 B per slot; fixed cost ~100 KB.
+            event_tx: broadcast::Sender::new(1024),
         }
     }
 
@@ -338,14 +342,10 @@ impl WorkerRegistry {
     /// - `runtime_type`: `Sglang` / `Vllm` / `External` / …
     /// - `healthy_only`: skip workers whose `is_healthy()` is false
     ///
-    /// **Cost note on `runtime_type`:** the registry keeps no runtime-type
-    /// index. This filter is applied in-memory after fetching by model or
-    /// iterating all workers, so the whole candidate set is cloned before
-    /// filtering. Callers on hot paths should prefer pre-filtering by
-    /// model or type when possible.
-    ///
-    /// Always returns an owned `Vec` because each call applies a unique
-    /// filter combination.
+    /// Only workers that pass every filter are cloned; the source collection
+    /// (the per-model index slice, or the worker map when `model_id` is `None`)
+    /// is iterated by reference rather than cloned wholesale first. Returns an
+    /// owned `Vec` because each call applies a unique filter combination.
     pub fn get_workers_filtered(
         &self,
         model_id: Option<&str>,
@@ -354,38 +354,42 @@ impl WorkerRegistry {
         runtime_type: Option<RuntimeType>,
         healthy_only: bool,
     ) -> Vec<Arc<dyn Worker>> {
-        // Start with the most efficient collection based on filters
-        // Use model index when possible as it's O(1) lookup
-        let workers: Vec<Arc<dyn Worker>> = if let Some(model) = model_id {
-            self.get_by_model(model).to_vec()
-        } else {
-            self.get_all()
-        };
-
-        workers
-            .into_iter()
-            .filter(|w| {
-                if let Some(ref wtype) = worker_type {
-                    if *w.worker_type() != *wtype {
-                        return false;
-                    }
-                }
-                if let Some(ref conn) = connection_mode {
-                    if w.connection_mode() != conn {
-                        return false;
-                    }
-                }
-                if let Some(ref rt) = runtime_type {
-                    if w.metadata().spec.runtime_type != *rt {
-                        return false;
-                    }
-                }
-                if healthy_only && !w.is_healthy() {
+        let matches = |w: &Arc<dyn Worker>| {
+            if let Some(ref wtype) = worker_type {
+                if *w.worker_type() != *wtype {
                     return false;
                 }
-                true
-            })
-            .collect()
+            }
+            if let Some(ref conn) = connection_mode {
+                if w.connection_mode() != conn {
+                    return false;
+                }
+            }
+            if let Some(ref rt) = runtime_type {
+                if w.metadata().spec.runtime_type != *rt {
+                    return false;
+                }
+            }
+            !healthy_only || w.is_healthy()
+        };
+
+        // Clone only the workers that pass: scope to the O(1) model index when a
+        // model is given, otherwise iterate the worker map directly. Avoids the
+        // per-request O(total workers) clone that fetching the full set first
+        // would incur.
+        if let Some(model) = model_id {
+            self.get_by_model(model)
+                .iter()
+                .filter(|w| matches(w))
+                .cloned()
+                .collect()
+        } else {
+            self.workers
+                .iter()
+                .filter(|entry| matches(entry.value()))
+                .map(|entry| entry.value().clone())
+                .collect()
+        }
     }
 
     /// Return an owned snapshot of every registered worker.

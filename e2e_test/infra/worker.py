@@ -45,6 +45,7 @@ class Worker:
     nixl_port: int | None = None
     ib_device: str | None = None
     log_dir: str | None = None
+    extra_engine_args: list[str] | None = None
     process: subprocess.Popen | None = field(default=None, repr=False)
     _log_file: IO[Any] | None = field(default=None, repr=False)
 
@@ -176,25 +177,29 @@ class Worker:
         features = spec.get("features", [])
 
         if self.engine == "sglang":
-            return self._build_sglang_cmd(model_path, tp_size, features, spec)
+            cmd = self._build_sglang_cmd(model_path, tp_size, features, spec)
         elif self.engine == "vllm":
             if self.mode == ConnectionMode.GRPC:
-                return self._build_vllm_grpc_cmd(model_path, tp_size, spec)
+                cmd = self._build_vllm_grpc_cmd(model_path, tp_size, spec)
             else:
-                return self._build_vllm_http_cmd(model_path, tp_size, spec)
+                cmd = self._build_vllm_http_cmd(model_path, tp_size, spec)
         elif self.engine == "trtllm":
-            return self._build_trtllm_cmd(model_path, tp_size, spec)
+            cmd = self._build_trtllm_cmd(model_path, tp_size, spec)
         elif self.engine == "mlx":
-            return self._build_mlx_cmd(model_path, spec)
+            cmd = self._build_mlx_cmd(model_path, spec)
         elif self.engine == "tokenspeed":
             if self.mode != ConnectionMode.GRPC:
                 raise ValueError(
                     "TokenSpeed e2e workers only support gRPC mode; "
                     "HTTP mode would go through the existing OpenAI frontend."
                 )
-            return self._build_tokenspeed_grpc_cmd(model_path, tp_size, spec)
+            cmd = self._build_tokenspeed_grpc_cmd(model_path, tp_size, spec)
         else:
             raise ValueError(f"Unsupported engine: {self.engine}")
+
+        if self.extra_engine_args:
+            cmd.extend(self.extra_engine_args)
+        return cmd
 
     def _build_sglang_cmd(
         self, model_path: str, tp_size: int, features: list[str], spec: dict
@@ -276,12 +281,7 @@ class Worker:
         if self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
             kv_role = "kv_producer" if self.worker_type == WorkerType.PREFILL else "kv_consumer"
             if vllm_kv_backend() == "mooncake":
-                # tcp keeps the transfer off RDMA, which is flaky on shared CI nodes
-                config = {
-                    "kv_connector": "MooncakeConnector",
-                    "kv_role": kv_role,
-                    "kv_connector_extra_config": {"mooncake_protocol": "tcp"},
-                }
+                config = {"kv_connector": "MooncakeConnector", "kv_role": kv_role}
             else:
                 config = {"kv_connector": "NixlConnector", "kv_role": kv_role}
             cmd.extend(["--kv-transfer-config", json.dumps(config)])
@@ -495,6 +495,8 @@ def start_workers(
     log_dir: str | None = None,
     gpu_offset: int = 0,
     wait_ready: bool = True,
+    gpus: int | None = None,
+    extra_engine_args: list[str] | None = None,
 ) -> list[Worker]:
     """Start N workers for a model. GPU IDs assigned sequentially.
 
@@ -510,6 +512,8 @@ def start_workers(
         gpu_offset: Starting GPU index for worker assignment.
         wait_ready: If True (default), block until each worker is healthy.
             If False, spawn processes and return immediately.
+        gpus: GPUs per worker; defaults to the model spec's tp (e.g. DP needs dp*tp).
+        extra_engine_args: Extra CLI args appended to the engine launch command.
 
     Returns:
         List of started Worker instances.
@@ -521,7 +525,7 @@ def start_workers(
         engine = get_runtime()
 
     spec = get_model_spec(model_id)
-    tp = spec.get("tp", 1)
+    gpus_per_worker = gpus or spec.get("tp", 1)
     timeout = spec.get("startup_timeout", timeout)
 
     # Detect IB device for PD workers
@@ -532,8 +536,8 @@ def start_workers(
 
     try:
         for i in range(count):
-            gpu_ids = list(range(gpu_offset, gpu_offset + tp))
-            gpu_offset += tp
+            gpu_ids = list(range(gpu_offset, gpu_offset + gpus_per_worker))
+            gpu_offset += gpus_per_worker
             port = get_open_port()
             bootstrap_port = get_open_port() if worker_type == WorkerType.PREFILL else None
 
@@ -547,6 +551,7 @@ def start_workers(
                 bootstrap_port=bootstrap_port,
                 ib_device=ib_device if has_pd else None,
                 log_dir=log_dir,
+                extra_engine_args=extra_engine_args,
             )
 
             # Stagger launches to avoid resource contention

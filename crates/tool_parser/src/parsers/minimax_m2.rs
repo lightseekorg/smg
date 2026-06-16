@@ -462,11 +462,7 @@ impl ToolParser for MinimaxM2Parser {
             // Parse parameters incrementally
             if self.function_name_sent {
                 // Process parameters and get any calls to emit
-                // Note: We need to be careful here - parse_and_stream_parameters needs
-                // to work with the buffer but we can't pass &self.buffer directly
-                // due to borrow checker. Instead, we'll refactor slightly.
-                // For now, keep the clone but mark it as a TODO for future optimization
-                let buffer_copy = self.buffer.clone(); // TODO: Optimize this
+                let buffer_copy = self.buffer.clone(); // TODO: avoid cloning the buffer
                 let parameter_calls = self.parse_and_stream_parameters(&buffer_copy, tools);
                 calls.extend(parameter_calls);
 

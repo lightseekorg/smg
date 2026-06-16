@@ -6,6 +6,7 @@ use reqwest::Client;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    health,
     middleware::{AuthConfig, TokenBucket},
     policies::PolicyRegistry,
     routers::RouterTrait,
@@ -99,6 +100,7 @@ pub fn create_test_app(
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {
         router,
+        probe_state: start_probe_state(&app_context),
         context: app_context,
         concurrency_queue_tx: None,
         router_manager: None,
@@ -134,6 +136,22 @@ pub fn create_test_app(
     .expect("valid tenant resolution config")
 }
 
+/// Mirror production wiring: cached probe state plus its readiness
+/// maintainer, so `/readiness` reflects worker registry state in tests.
+/// The initial snapshot is computed synchronously, so workers registered
+/// before app creation are visible immediately; later mutations arrive via
+/// the registry event subscription. Must be called from a tokio runtime.
+fn start_probe_state(app_context: &Arc<AppContext>) -> Arc<health::ProbeState> {
+    let probe_state = health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _maintainer = health::spawn_readiness_maintainer(
+        probe_state.clone(),
+        app_context.worker_registry.clone(),
+        app_context.tokenizer_registry.clone(),
+        app_context.router_config.clone(),
+    );
+    probe_state
+}
+
 /// Create a test Axum application with an existing AppContext
 pub fn create_test_app_with_context(
     router: Arc<dyn RouterTrait>,
@@ -142,6 +160,7 @@ pub fn create_test_app_with_context(
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {
         router,
+        probe_state: start_probe_state(&app_context),
         context: app_context.clone(),
         concurrency_queue_tx: None,
         router_manager: None,

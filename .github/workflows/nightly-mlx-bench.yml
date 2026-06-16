@@ -1,9 +1,11 @@
 name: Nightly MLX Benchmark
 
 on:
-  schedule:
-    # 09:17 UTC — off-peak, off the round hour.
-    - cron: "17 9 * * *"
+  # Temporarily disabled — nightly schedule commented out. Re-enable by
+  # uncommenting the cron below. Manual runs via workflow_dispatch still work.
+  # schedule:
+  #   # 09:17 UTC — off-peak, off the round hour.
+  #   - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
       model:

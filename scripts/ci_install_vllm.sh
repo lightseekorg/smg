@@ -22,9 +22,11 @@ echo "Using uv version: $(uv --version)"
 # Floor 0.22.1: older vllm resolved an early transformers v5 that broke
 # e5-mistral last-token pooling (the old <0.19.1 pin); 0.22.1+ only admits
 # transformers >= 5.5.1. e2e-1gpu-embeddings is the quality gate.
+# FastAPI 0.137 makes vLLM's prometheus-fastapi-instrumentator health route
+# crash on _IncludedRouter entries; keep the last known-good FastAPI line.
 # --torch-backend=auto matches the torch CUDA variant to the pod's driver.
 echo "Installing vLLM..."
-uv pip install "vllm>=0.22.1" --torch-backend=auto
+uv pip install "vllm>=0.22.1" "fastapi<0.137" --torch-backend=auto
 
 # NIXL for vLLM PD disaggregation. The bare metapackage pulls both cu12 and
 # cu13 backends, so install the top-level shim alone, then the backend

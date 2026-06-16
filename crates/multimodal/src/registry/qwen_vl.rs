@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::PreprocessedImages,
+    vision::processor::PreprocessedEncoderInputs,
 };
 
 pub(super) struct QwenVLVisionSpec;
@@ -58,14 +58,14 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
         // The chat template already wraps each image with <|vision_start|> ... <|vision_end|>,
         // so we only expand the single <image> placeholder to N pad tokens.
         Ok(preprocessed
-            .num_img_tokens
+            .feature_token_counts
             .iter()
             .map(|&num_tokens| {
                 let tokens = vec![pad_token_id; num_tokens];
@@ -75,7 +75,7 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // pixel_values is patchified: [total_patches, patch_features].
+        // encoder_input is patchified: [total_patches, patch_features].
         // patches_per_image tells how many patches belong to each image.
         // image_grid_thw is [num_images, 3].
         HashMap::from([

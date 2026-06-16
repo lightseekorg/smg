@@ -6,7 +6,8 @@
 use std::cell::RefCell;
 
 use fast_image_resize::{
-    images::Image as FirImage, IntoImageView, ResizeAlg, ResizeOptions, Resizer,
+    images::{Image as FirImage, ImageRef as FirImageRef},
+    IntoImageView, PixelType, ResizeAlg, ResizeOptions, Resizer,
 };
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4};
@@ -232,6 +233,31 @@ pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType)
         return image.resize_exact(width, height, filter);
     }
     fir_image_to_dynamic(dst, width, height, image, filter)
+}
+
+/// Resize borrowed interleaved RGB bytes without first materializing an
+/// `image::RgbImage` over an owned input buffer.
+pub fn resize_rgb_bytes(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    target_width: u32,
+    target_height: u32,
+    filter: FilterType,
+) -> Result<RgbImage> {
+    let src = FirImageRef::new(width, height, data, PixelType::U8x3)
+        .map_err(|e| TransformError::ShapeError(format!("invalid RGB source image: {e}")))?;
+    let mut dst = FirImage::new(target_width, target_height, PixelType::U8x3);
+    let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
+    RESIZER
+        .with(|r| r.borrow_mut().resize(&src, &mut dst, &options))
+        .map_err(|e| TransformError::ShapeError(format!("RGB resize failed: {e}")))?;
+
+    RgbImage::from_raw(target_width, target_height, dst.into_vec()).ok_or_else(|| {
+        TransformError::ShapeError(format!(
+            "failed to build resized RGB image for {target_width}x{target_height}"
+        ))
+    })
 }
 
 /// Convert a `fast_image_resize::Image` back to a `DynamicImage`.
@@ -586,6 +612,28 @@ mod tests {
 
         assert_eq!(resized.width(), 50);
         assert_eq!(resized.height(), 25);
+    }
+
+    #[test]
+    fn test_resize_rgb_bytes_matches_resize() {
+        let mut rgb = RgbImage::new(3, 2);
+        for y in 0..2 {
+            for x in 0..3 {
+                rgb.put_pixel(x, y, Rgb([(x * 40) as u8, (y * 90) as u8, 128]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        let expected = resize(&img, 2, 2, FilterType::Triangle).to_rgb8();
+        let actual = resize_rgb_bytes(rgb.as_raw(), 3, 2, 2, 2, FilterType::Triangle)
+            .expect("resize_rgb_bytes should resize valid RGB input");
+
+        assert_eq!(actual.as_raw(), expected.as_raw());
+    }
+
+    #[test]
+    fn test_resize_rgb_bytes_rejects_invalid_length() {
+        let result = resize_rgb_bytes(&[1, 2, 3, 4, 5], 2, 1, 1, 1, FilterType::Triangle);
+        assert!(matches!(result, Err(TransformError::ShapeError(_))));
     }
 
     #[test]

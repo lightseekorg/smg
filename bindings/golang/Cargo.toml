@@ -1,6 +1,6 @@
 [package]
 name = "smg-golang"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 
 [lib]
@@ -39,6 +39,7 @@ workspace = true
 
 [features]
 default = []
+opencv-video = ["smg/opencv-video"]
 vendored-openssl = ["smg/vendored-openssl"]
 
 [profile.release]

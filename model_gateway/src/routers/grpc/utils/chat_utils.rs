@@ -153,7 +153,7 @@ pub(crate) fn process_content_format(
 /// Transform a single content field based on content format.
 ///
 /// When `image_placeholder` is provided and the content format is `String`,
-/// each `image_url` part is replaced with the placeholder string instead of
+/// each media URL part is replaced with the placeholder string instead of
 /// being stripped.  This mirrors vLLM's behavior of injecting model-specific
 /// placeholder tokens (e.g. `"<|image|>"`) so that the tokenizer produces
 /// token IDs the multimodal expansion step can find and replace.
@@ -177,6 +177,7 @@ fn transform_content_field(
                     match type_str {
                         "text" => obj.get("text")?.as_str().map(String::from),
                         "image_url" => image_placeholder.map(String::from),
+                        "video_url" => image_placeholder.map(String::from),
                         _ => None,
                     }
                 })
@@ -585,7 +586,7 @@ mod tests {
     use llm_tokenizer::chat_template::ChatTemplateContentFormat;
     use openai_protocol::{
         chat::{ChatMessage, MessageContent},
-        common::{ContentPart, ImageUrl},
+        common::{ContentPart, ImageUrl, VideoUrl},
     };
     use serde_json::json;
 
@@ -623,6 +624,35 @@ mod tests {
             "Hello\nWorld"
         );
         assert_eq!(transformed_message["role"].as_str().unwrap(), "user");
+    }
+
+    #[test]
+    fn test_transform_messages_string_format_with_video_placeholder() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Watch this".to_string(),
+                },
+                ContentPart::VideoUrl {
+                    video_url: VideoUrl {
+                        url: "https://example.com/video.mp4".to_string(),
+                    },
+                },
+            ]),
+            name: None,
+        }];
+
+        let result = process_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            Some("<|video|>"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result[0]["content"].as_str().unwrap(),
+            "Watch this\n<|video|>"
+        );
     }
 
     #[test]

@@ -32,11 +32,13 @@ use openai_protocol::{
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
-    worker::{StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest},
+    worker::{
+        ListWorkersQuery, StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest,
+    },
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
@@ -44,7 +46,7 @@ use wfaas::LoggingSubscriber;
 
 use crate::{
     app_context::AppContext,
-    config::{RouterConfig, RoutingMode},
+    config::RouterConfig,
     mesh::MeshAdapters,
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
@@ -52,7 +54,7 @@ use crate::{
         metrics::{self, PrometheusConfig},
         metrics_server,
         metrics_ws::{collectors, registry::WatchRegistry},
-        otel_trace,
+        otel_trace, runtime_metrics,
     },
     routers::{
         conversations, openai::realtime::ws::RealtimeQueryParams, parse,
@@ -60,11 +62,7 @@ use crate::{
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    worker::{
-        manager::{WorkerManager, WorkerManagerConfig},
-        worker::WorkerType,
-        ConnectionMode,
-    },
+    worker::manager::{WorkerManager, WorkerManagerConfig},
     workflow::{
         job_queue::{JobQueue, JobQueueConfig},
         Job, TokenizerConfigRequest, WorkflowEngines,
@@ -78,6 +76,10 @@ pub struct AppState {
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
     pub mesh_adapters: Option<Arc<MeshAdapters>>,
+    /// Cached O(1) readiness state shared with the optional dedicated
+    /// probe listener. Maintained event-driven by
+    /// [`crate::health::spawn_readiness_maintainer`].
+    pub probe_state: Arc<crate::health::ProbeState>,
 }
 
 async fn parse_function_call(
@@ -99,72 +101,16 @@ async fn sink_handler() -> Response {
 }
 
 async fn liveness() -> Response {
-    (StatusCode::OK, "OK").into_response()
+    crate::health::liveness_response()
 }
 
+/// O(1) readiness: reads the event-maintained snapshot (see
+/// [`crate::health::spawn_readiness_maintainer`]) and the drain flag — no registry
+/// scan per probe. The decision logic lives in
+/// [`crate::health::ProbeState::recompute`] and is unchanged from the previous
+/// inline implementation, plus the drain gate (not-ready while draining).
 async fn readiness(State(state): State<Arc<AppState>>) -> Response {
-    let workers = state.context.worker_registry.get_all();
-    let healthy_workers: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
-
-    let workers_ready = if state.context.router_config.enable_igw {
-        !healthy_workers.is_empty()
-    } else {
-        match &state.context.router_config.mode {
-            RoutingMode::PrefillDecode { .. } => {
-                let has_prefill = healthy_workers
-                    .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill));
-                let has_decode = healthy_workers
-                    .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Decode));
-                has_prefill && has_decode
-            }
-            RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
-            RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
-            RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
-            RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
-        }
-    };
-
-    // A worker reports healthy (engine SERVING) as soon as its process is up,
-    // but the gateway autoloads each gRPC worker's tokenizer asynchronously
-    // afterward (`SubmitTokenizerJobStep`, fire-and-forget). Until that lands,
-    // generation requests fail with `tokenizer_not_found`, so `/readiness` must
-    // not report ready yet. Hold readiness until every healthy gRPC worker's
-    // tokenizer is registered. HTTP/proxy workers never autoload a local
-    // tokenizer and are exempt; when autoload is disabled the gateway does not
-    // manage tokenizers at all.
-    let tokenizers_ready = state.context.router_config.disable_tokenizer_autoload
-        || healthy_workers
-            .iter()
-            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Grpc))
-            .all(|w| state.context.tokenizer_registry.get(w.model_id()).is_some());
-
-    if workers_ready && tokenizers_ready {
-        (
-            StatusCode::OK,
-            Json(json!({
-                "status": "ready",
-                "healthy_workers": healthy_workers.len(),
-                "total_workers": workers.len()
-            })),
-        )
-            .into_response()
-    } else {
-        let reason = if workers_ready {
-            "tokenizer not yet registered"
-        } else {
-            "insufficient healthy workers"
-        };
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "not ready",
-                "reason": reason
-            })),
-        )
-            .into_response()
-    }
+    state.probe_state.readiness_response()
 }
 
 async fn health(_state: State<Arc<AppState>>) -> Response {
@@ -620,8 +566,15 @@ async fn create_worker(
     }
 }
 
-async fn list_workers_rest(State(state): State<Arc<AppState>>) -> Response {
-    state.context.worker_service.list_workers().into_response()
+async fn list_workers_rest(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListWorkersQuery>,
+) -> Response {
+    state
+        .context
+        .worker_service
+        .list_workers(query.model.as_deref())
+        .into_response()
 }
 
 async fn get_worker(
@@ -734,6 +687,10 @@ async fn v1_tokenizers_remove(
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Dedicated port for the isolated liveness/readiness/health probe listener. `None`
+    /// leaves the dedicated listener off; probe routes always stay on the
+    /// main `port` regardless.
+    pub health_check_port: Option<u16>,
     pub router_config: RouterConfig,
     pub max_payload_size: usize,
     pub log_dir: Option<String>,
@@ -1058,6 +1015,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 metrics_server::DEFAULT_MAX_WS_CONNECTIONS,
             )
             .await;
+            // Tokio runtime self-observability (event-loop canary + sampler).
+            // `startup` runs on the main runtime, so the observer lands on —
+            // and therefore measures — the runtime that serves requests.
+            runtime_metrics::spawn_observer();
             (Some(handle), Some(registry))
         } else {
             (None, None)
@@ -1320,6 +1281,29 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .as_ref()
         .map(|c| c.advertise_addr.port());
 
+    // O(1) readiness state: maintained from WorkerRegistry events (plus a
+    // short checkpoint for broadcast-bypassing mutations), read by
+    // `/readiness` on the main listener and on the optional dedicated
+    // probe listener below. Dropping the JoinHandle detaches the task.
+    let probe_state = crate::health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _readiness_maintainer = crate::health::spawn_readiness_maintainer(
+        probe_state.clone(),
+        app_context.worker_registry.clone(),
+        app_context.tokenizer_registry.clone(),
+        config.router_config.clone(),
+    );
+
+    // Optional isolated probe listener (additive): when `--health-check-port`
+    // is set, serves /liveness, /readiness, /health on that port from a
+    // dedicated single-worker runtime on its own OS thread, so probes
+    // cannot be starved by the request runtime. The same routes always remain
+    // on the main listener.
+    if let Some(probe_port) = config.health_check_port {
+        let probe_addr =
+            crate::health::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
+        info!("Probe listener started on {probe_addr} (--health-check-port {probe_port})");
+    }
+
     let app_state = Arc::new(AppState {
         router,
         context: app_context.clone(),
@@ -1327,6 +1311,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         router_manager: Some(router_manager),
         mesh_handler,
         mesh_adapters,
+        probe_state,
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {

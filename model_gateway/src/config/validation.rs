@@ -417,6 +417,20 @@ impl ConfigValidator {
             });
         }
 
+        // Reject a configured dedicated probe port of 0: 0 means "OS-assigned
+        // ephemeral port", which breaks the fail-fast contract that probes
+        // live on a stable operator-configured port. (`start_probe_listener`
+        // itself still accepts 0 so the ephemeral-port unit tests can bind;
+        // only the config-sourced value is rejected here.)
+        if config.health_check_port == Some(0) {
+            return Err(ConfigError::InvalidValue {
+                field: "health_check_port".to_string(),
+                value: "0".to_string(),
+                reason: "Port must be > 0 (0 would request an unstable OS-ephemeral port)"
+                    .to_string(),
+            });
+        }
+
         if config.max_payload_size == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "max_payload_size".to_string(),
@@ -1273,5 +1287,28 @@ mod tests {
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_health_check_port_zero() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        // 0 = OS-ephemeral; breaks the stable-probe-port contract.
+        config.health_check_port = Some(0);
+        assert!(matches!(
+            ConfigValidator::validate(&config),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "health_check_port"
+        ));
+
+        // A real port and the unset (None) default both validate.
+        config.health_check_port = Some(8081);
+        assert!(ConfigValidator::validate(&config).is_ok());
+        config.health_check_port = None;
+        assert!(ConfigValidator::validate(&config).is_ok());
     }
 }

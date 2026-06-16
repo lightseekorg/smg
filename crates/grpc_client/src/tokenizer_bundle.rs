@@ -24,7 +24,7 @@ pub const MAX_STREAM_BUNDLE_SIZE: usize = 200 * 1024 * 1024;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StreamBundle {
     pub sha256: String,
     pub compressed_data: Vec<u8>,

@@ -170,6 +170,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn health_check_port(mut self, health_check_port: Option<u16>) -> Self {
+        self.config.health_check_port = health_check_port;
+        self
+    }
+
     // ==================== Request ====================
 
     pub fn max_payload_size(mut self, size: usize) -> Self {

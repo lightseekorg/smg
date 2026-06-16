@@ -12,7 +12,10 @@
 //! - an [`OperationLog`] for replication
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -88,6 +91,9 @@ pub(crate) struct LwwEngine {
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>,
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     log: Arc<RwLock<OperationLog>>,
+    /// Bumped on every log mutation (including relay-only appends);
+    /// invalidation key for shared op-log snapshots.
+    op_generation: Arc<AtomicU64>,
     clock: Arc<LamportClock>,
     replica_id: ReplicaId,
 }
@@ -99,9 +105,17 @@ impl LwwEngine {
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
             log: Arc::new(RwLock::new(OperationLog::new())),
+            op_generation: Arc::new(AtomicU64::new(0)),
             clock,
             replica_id,
         }
+    }
+
+    /// Compact once the log carries more than twice the live key count
+    /// (min 64): a compacted log holds one op per key, so this bounds
+    /// resident log memory at O(keys) while amortizing the fold.
+    fn compact_trigger(&self) -> usize {
+        (self.metadata.len() * 2).max(64)
     }
 
     fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
@@ -233,7 +247,10 @@ impl LwwEngine {
     fn append_op(&self, op: Operation) {
         let mut log = self.log.write();
         log.append(op);
-        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+        self.op_generation.fetch_add(1, Ordering::Release);
+        // The trigger floor is 64, so a short log skips the DashMap len()
+        // (an O(shards) scan) on this per-write path.
+        if log.len() > 64 && log.len() > self.compact_trigger() {
             Self::compact_log(&mut log);
             // Local-write path only: dropping oldest on the remote-merge path
             // would shed remotely-learned keys (see the helper's docs).
@@ -335,6 +352,10 @@ impl NamespaceCrdtEngine for LwwEngine {
         self.store.generation()
     }
 
+    fn op_generation(&self) -> u64 {
+        self.op_generation.load(Ordering::Acquire)
+    }
+
     fn export_ops(&self) -> Vec<Operation> {
         self.log.read().operations().to_vec()
     }
@@ -393,6 +414,7 @@ impl NamespaceCrdtEngine for LwwEngine {
                 log.append(op.clone());
             }
             Self::compact_log(&mut log);
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
 
         // Snapshot the observable value of every key this batch touches before
@@ -447,6 +469,9 @@ impl NamespaceCrdtEngine for LwwEngine {
     fn gc_tombstones(&self, grace: Duration) -> usize {
         let now = Instant::now();
         let mut removed = 0;
+        // Collected keys' winning tombstone versions, for the log purge below.
+        let mut purged: std::collections::HashMap<String, (u64, ReplicaId)> =
+            std::collections::HashMap::new();
         let keys_to_check: Vec<String> = self
             .metadata
             .iter()
@@ -471,9 +496,25 @@ impl NamespaceCrdtEngine for LwwEngine {
                                 && now.saturating_duration_since(winner.created_at) >= grace
                         })
             });
-            if was_removed.is_some() {
+            if let Some((key, versions)) = was_removed {
                 removed += 1;
+                if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()) {
+                    purged.insert(key, winner.version_key());
+                }
             }
+        }
+        if !purged.is_empty() {
+            // Purge the collected keys' dominated ops so log size keeps
+            // tracking metadata (the compaction trigger) and dead tombstones
+            // stop gossiping. Newer concurrent ops for a reused key survive
+            // the version filter.
+            let mut log = self.log.write();
+            log.retain_ops(|op| {
+                purged
+                    .get(op.key())
+                    .is_none_or(|gc_version| (op.timestamp(), op.replica_id()) > *gc_version)
+            });
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
         removed
     }

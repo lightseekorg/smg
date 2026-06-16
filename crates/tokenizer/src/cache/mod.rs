@@ -23,6 +23,7 @@ use std::sync::Arc;
 use anyhow::Result;
 pub use fingerprint::TokenizerFingerprint;
 pub use l0::{CacheStats, L0Cache};
+use l1::PrefixLookup;
 pub use l1::{L1Cache, L1CacheStats};
 use rayon::prelude::*;
 
@@ -171,7 +172,9 @@ impl Encoder for CachedTokenizer {
             }
         }
 
-        // L1 cache lookup (prefix match at special token boundaries)
+        // L1 path (prefix match at special token boundaries): a hit splices the
+        // shared cached prefix with a fresh suffix encode; a miss tokenizes the
+        // input once, seeding every boundary entry along the way.
         if let Some(l1) = &self.l1 {
             let tokens: Vec<&str> = self
                 .special_token_strings
@@ -179,48 +182,59 @@ impl Encoder for CachedTokenizer {
                 .map(|s| s.as_str())
                 .collect();
 
-            if let Some((prefix_tokens, prefix_len)) =
-                l1.longest_prefix_match(input, &tokens, add_special_tokens)
-            {
-                let suffix = &input[prefix_len..];
-                if !suffix.is_empty() {
-                    let suffix_encoding = self.inner.encode(suffix, add_special_tokens)?;
+            let encoding = match l1.lookup_with_seeds(input, &tokens, add_special_tokens) {
+                PrefixLookup::Hit(prefix_tokens, prefix_len) if prefix_len < input.len() => {
+                    let suffix = &input[prefix_len..];
+                    // The cached prefix already carries any leading special tokens,
+                    // so the suffix must never re-add them (it is never segment 0).
+                    let suffix_encoding = self.inner.encode(suffix, false)?;
+                    let suffix_tokens = suffix_encoding.token_ids();
 
-                    let mut merged_tokens = prefix_tokens;
-                    merged_tokens.extend_from_slice(suffix_encoding.token_ids());
-
-                    let merged_encoding = Encoding::Plain(merged_tokens);
-
-                    if let Some(l0) = &self.l0 {
-                        l0.insert(
-                            input.to_string(),
-                            add_special_tokens,
-                            merged_encoding.clone(),
-                        );
-                    }
-
-                    return Ok(merged_encoding);
+                    // Splice with exact capacity: one allocation and a single copy
+                    // of the shared prefix.
+                    let mut merged_tokens =
+                        Vec::with_capacity(prefix_tokens.len() + suffix_tokens.len());
+                    merged_tokens.extend_from_slice(&prefix_tokens);
+                    merged_tokens.extend_from_slice(suffix_tokens);
+                    Encoding::Plain(merged_tokens)
                 }
+                // Defensive: boundaries always exclude input.len(), so a full-input
+                // match cannot occur; if it ever did, the entry is keyed on the whole
+                // input and the cached tokens ARE the full encoding.
+                PrefixLookup::Hit(prefix_tokens, _) => Encoding::Plain(prefix_tokens.to_vec()),
+                // No special token boundaries — nothing cacheable; single plain encode
+                // (preserves the inner tokenizer's native encoding variant).
+                PrefixLookup::Miss(seeds) if seeds.is_empty() => {
+                    self.inner.encode(input, add_special_tokens)?
+                }
+                PrefixLookup::Miss(seeds) => {
+                    match l1.populate_with_seeds(
+                        input,
+                        &seeds,
+                        self.inner.as_ref(),
+                        add_special_tokens,
+                    ) {
+                        Ok(encoding) => encoding,
+                        // Seeding failed mid-segment (nothing was inserted) — fall
+                        // back to the plain uncached encode, matching the previous
+                        // behavior where boundary-insert errors were swallowed.
+                        Err(_) => self.inner.encode(input, add_special_tokens)?,
+                    }
+                }
+            };
+
+            if let Some(l0) = &self.l0 {
+                l0.insert(input.to_string(), add_special_tokens, encoding.clone());
             }
+
+            return Ok(encoding);
         }
 
-        // Full tokenization (both L0 and L1 miss)
+        // Full tokenization (no L1 configured), cached in L0 only
         let encoding = self.inner.encode(input, add_special_tokens)?;
 
-        // Cache in L0
         if let Some(l0) = &self.l0 {
             l0.insert(input.to_string(), add_special_tokens, encoding.clone());
-        }
-
-        // Cache in L1 at special token boundaries
-        if let Some(l1) = &self.l1 {
-            let tokens: Vec<&str> = self
-                .special_token_strings
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            let _ =
-                l1.insert_at_boundaries(input, self.inner.as_ref(), &tokens, add_special_tokens);
         }
 
         Ok(encoding)
@@ -294,7 +308,273 @@ impl Tokenizer for CachedTokenizer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::{mock::MockTokenizer, *};
+
+    /// Tokenizer that prepends a sentinel BOS when `add_special_tokens` is set,
+    /// so duplicated specials across a prefix/suffix merge are observable.
+    struct BosTokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    const BOS_ID: TokenIdType = 99;
+
+    impl BosTokenizer {
+        fn new() -> Self {
+            Self {
+                special_tokens: SpecialTokens {
+                    bos_token: Some("<bos>".to_string()),
+                    additional_special_tokens: vec![
+                        "<|im_start|>".to_string(),
+                        "<|im_end|>".to_string(),
+                    ],
+                    ..Default::default()
+                },
+            }
+        }
+    }
+
+    impl Encoder for BosTokenizer {
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+            let mut ids: Vec<TokenIdType> = Vec::new();
+            if add_special_tokens {
+                ids.push(BOS_ID);
+            }
+            ids.extend(input.bytes().map(TokenIdType::from));
+            Ok(Encoding::Plain(ids))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|i| self.encode(i, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for BosTokenizer {
+        fn decode(&self, _token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    impl traits::Tokenizer for BosTokenizer {
+        fn vocab_size(&self) -> usize {
+            256
+        }
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+        fn token_to_id(&self, _token: &str) -> Option<TokenIdType> {
+            None
+        }
+        fn id_to_token(&self, _id: TokenIdType) -> Option<String> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Wraps [`BosTokenizer`], counting `encode` invocations and the total bytes
+    /// of text tokenized, so tests can assert how much tokenizer work each cache
+    /// path actually performs.
+    struct CountingTokenizer {
+        inner: BosTokenizer,
+        encode_calls: AtomicUsize,
+        bytes_encoded: AtomicUsize,
+    }
+
+    impl CountingTokenizer {
+        fn new() -> Self {
+            Self {
+                inner: BosTokenizer::new(),
+                encode_calls: AtomicUsize::new(0),
+                bytes_encoded: AtomicUsize::new(0),
+            }
+        }
+
+        fn encode_calls(&self) -> usize {
+            self.encode_calls.load(Ordering::Relaxed)
+        }
+
+        fn bytes_encoded(&self) -> usize {
+            self.bytes_encoded.load(Ordering::Relaxed)
+        }
+
+        fn reset(&self) {
+            self.encode_calls.store(0, Ordering::Relaxed);
+            self.bytes_encoded.store(0, Ordering::Relaxed);
+        }
+    }
+
+    impl Encoder for CountingTokenizer {
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+            self.encode_calls.fetch_add(1, Ordering::Relaxed);
+            self.bytes_encoded.fetch_add(input.len(), Ordering::Relaxed);
+            self.inner.encode(input, add_special_tokens)
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|i| self.encode(i, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for CountingTokenizer {
+        fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String> {
+            self.inner.decode(token_ids, skip_special_tokens)
+        }
+    }
+
+    impl traits::Tokenizer for CountingTokenizer {
+        fn vocab_size(&self) -> usize {
+            self.inner.vocab_size()
+        }
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            self.inner.get_special_tokens()
+        }
+        fn token_to_id(&self, _token: &str) -> Option<TokenIdType> {
+            None
+        }
+        fn id_to_token(&self, _id: TokenIdType) -> Option<String> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// L1-only cache config used by the counting/equivalence tests (L0 disabled so
+    /// every call exercises the L1 hit/miss machinery).
+    fn l1_only_config() -> CacheConfig {
+        CacheConfig {
+            enable_l0: false,
+            l0_max_entries: 0,
+            enable_l1: true,
+            l1_max_memory: 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn test_l1_miss_tokenizes_input_exactly_once() {
+        let counting = Arc::new(CountingTokenizer::new());
+        let cached = CachedTokenizer::new(counting.clone(), l1_only_config());
+
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nquery<|im_end|>";
+
+        // Cold miss: the fused path must tokenize each input byte exactly once.
+        // (Previously: one full encode for the result + a re-encode of every
+        // boundary prefix while seeding — roughly 2x the input.)
+        let first = cached.encode(input, true).unwrap();
+        assert_eq!(
+            counting.bytes_encoded(),
+            input.len(),
+            "miss path must tokenize the input exactly once"
+        );
+
+        // Warm hit: only the suffix past the deepest cached boundary is tokenized.
+        // The deepest boundary is the end of the last special token occurrence that
+        // still leaves a suffix (the final <|im_end|> ends at input.len() and is
+        // never a boundary).
+        let deepest_boundary = input.rfind("<|im_start|>").unwrap() + "<|im_start|>".len();
+        counting.reset();
+        let second = cached.encode(input, true).unwrap();
+        assert_eq!(
+            counting.bytes_encoded(),
+            input.len() - deepest_boundary,
+            "hit path must tokenize only the suffix"
+        );
+        assert_eq!(
+            counting.encode_calls(),
+            1,
+            "hit path performs a single suffix encode"
+        );
+
+        // Both paths return the same stream as a fresh uncached encode.
+        let fresh = BosTokenizer::new().encode(input, true).unwrap();
+        assert_eq!(first.token_ids(), fresh.token_ids());
+        assert_eq!(second.token_ids(), fresh.token_ids());
+    }
+
+    #[test]
+    fn test_l1_multi_turn_growth_matches_uncached() {
+        // Append-only conversation: every turn's cached encode (miss on turn 0,
+        // prefix hits afterwards) must equal a fresh uncached encode, under both
+        // add_special_tokens keys.
+        let mut conversation = String::from("<|im_start|>system\nYou are helpful.<|im_end|>");
+        let mut turns = Vec::new();
+        for i in 0..4 {
+            conversation.push_str(&format!(
+                "<|im_start|>user\nquestion {i}<|im_end|><|im_start|>assistant\nanswer {i}<|im_end|>"
+            ));
+            turns.push(conversation.clone());
+        }
+
+        for add_special_tokens in [false, true] {
+            let cached = CachedTokenizer::new(Arc::new(BosTokenizer::new()), l1_only_config());
+            let plain = BosTokenizer::new();
+
+            for (i, turn) in turns.iter().enumerate() {
+                let got = cached.encode(turn, add_special_tokens).unwrap();
+                let want = plain.encode(turn, add_special_tokens).unwrap();
+                assert_eq!(
+                    got.token_ids(),
+                    want.token_ids(),
+                    "turn {i} (add_special_tokens={add_special_tokens}): cached encode must equal uncached"
+                );
+            }
+
+            // Growth actually exercised the hit path (turn 0 misses, later turns hit).
+            let stats = cached.l1_cache_stats().expect("L1 enabled");
+            assert!(stats.hits >= 1, "expected L1 prefix hits across turns");
+        }
+    }
+
+    #[test]
+    fn test_l1_hit_does_not_duplicate_special_tokens() {
+        let tokenizer = Arc::new(BosTokenizer::new());
+        let config = CacheConfig {
+            enable_l0: false,
+            l0_max_entries: 0,
+            enable_l1: true,
+            l1_max_memory: 1024 * 1024,
+        };
+        let cached = CachedTokenizer::new(tokenizer, config);
+
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nquery<|im_end|>";
+
+        // First call warms the L1 cache at special-token boundaries.
+        let first = cached.encode(input, true).unwrap();
+        // Second call hits the warm L1 cache and merges prefix + suffix.
+        let second = cached.encode(input, true).unwrap();
+
+        // The merged result must match a fresh, uncached encode: a single BOS at
+        // the start, none duplicated mid-sequence and none dropped.
+        let fresh = CachedTokenizer::new(
+            Arc::new(BosTokenizer::new()),
+            CacheConfig {
+                enable_l0: false,
+                l0_max_entries: 0,
+                enable_l1: false,
+                l1_max_memory: 0,
+            },
+        )
+        .encode(input, true)
+        .unwrap();
+
+        assert_eq!(first.token_ids(), fresh.token_ids());
+        assert_eq!(second.token_ids(), fresh.token_ids());
+        assert_eq!(
+            second.token_ids().iter().filter(|&&t| t == BOS_ID).count(),
+            1,
+            "exactly one BOS expected, got tokens: {:?}",
+            second.token_ids()
+        );
+    }
 
     #[test]
     fn test_cache_hit() {

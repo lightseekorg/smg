@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use llm_multimodal::Modality;
 use openai_protocol::{
     common::{StringOrArray, ToolChoice, ToolChoiceValue},
     messages::CreateMessageRequest,
@@ -106,6 +107,7 @@ impl MessagePreparationStage {
                     mm_components,
                     &tokenizer_id,
                     &tokenizer_source,
+                    Modality::Image,
                 )
                 .await
                 .map_err(|e| {

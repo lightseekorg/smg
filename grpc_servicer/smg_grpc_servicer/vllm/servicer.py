@@ -5,6 +5,7 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
+import asyncio
 import hashlib
 import itertools
 import json
@@ -14,11 +15,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import grpc
+import msgspec
 import torch
+import zmq
+import zmq.asyncio
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
+from vllm.distributed.kv_events import KVEventBatch
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.engine import MultiModalInput as VllmMultiModalInput
 from vllm.inputs.engine import mm_input, tokens_input
@@ -33,6 +38,11 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
+from smg_grpc_servicer.vllm.kv_events import (
+    endpoint_for_rank,
+    resolve_kv_events_config,
+    stream_kv_events,
+)
 from smg_grpc_servicer.vllm.kv_transfer import params_from_request, params_to_response_fields
 
 logger = init_logger(__name__)
@@ -136,6 +146,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.engine = async_llm
         self.start_time = start_time
+        # Resolve KV-event publishing config from the engine. Non-None only when
+        # vLLM was started with --kv-events-config enabling the ZMQ publisher.
+        self._kv_events_config = resolve_kv_events_config(async_llm)
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -162,11 +175,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             "pixel_values"
         )
         logger.info(
-            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s",
+            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s, dp_rank=%s",
             request_id,
             input_type,
             request.stream,
             has_preprocessed_mm,
+            request.data_parallel_rank if request.HasField("data_parallel_rank") else None,
         )
 
         kv_transfer_params: dict | None = None
@@ -209,6 +223,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 sampling_params=sampling_params,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
+                data_parallel_rank=(
+                    request.data_parallel_rank if request.HasField("data_parallel_rank") else None
+                ),
             ):
                 engine_started = True
                 # For streaming, send chunks for EACH completion output (n outputs)
@@ -456,24 +473,20 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         kv_connector = ""
         kv_role = ""
         kv_engine_id = ""
+        parallel = self.engine.vllm_config.parallel_config
         kv_transfer_config = self.engine.vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             kv_connector = kv_transfer_config.kv_connector or ""
             kv_role = kv_transfer_config.kv_role or ""
-            # With DP active the engine cores suffix their connector engine_id
-            # (base_dp{rank}) and the router cannot attribute requests to a
-            # rank — report no id so it falls back to legacy injection
-            parallel = self.engine.vllm_config.parallel_config
-            dp_active = (
-                parallel.data_parallel_size > 1 or getattr(parallel, "data_parallel_rank", 0) > 0
-            )
-            if not dp_active:
-                kv_engine_id = getattr(kv_transfer_config, "engine_id", "") or ""
+            # Base engine_id; with DP the engine cores serve `{id}_dp{rank}` and
+            # the router derives the suffix from the rank it pins per request
+            kv_engine_id = getattr(kv_transfer_config, "engine_id", "") or ""
 
         return vllm_engine_pb2.GetServerInfoResponse(
             kv_connector=kv_connector,
             kv_role=kv_role,
             kv_engine_id=kv_engine_id,
+            data_parallel_size=parallel.data_parallel_size,
         )
 
     async def GetLoads(
@@ -1004,3 +1017,54 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 **stop_kwargs,
             ),
         )
+
+    async def SubscribeKvEvents(
+        self,
+        request: common_pb2.SubscribeKvEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.KvEventBatch]:
+        """Bridge vLLM's in-process ZMQ KV cache events to a gRPC stream.
+
+        The ZMQ publisher's sequence numbers are used directly as the gRPC
+        batch sequence numbers.
+        """
+        if self._kv_events_config is None:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV cache events not enabled. Start vLLM with "
+                "--kv-events-config "
+                '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
+            )
+
+        config = self._kv_events_config
+
+        # For DP attention each rank publishes on port + rank with independent
+        # sequence counters; subscribing to several on one socket interleaves
+        # them and breaks gap detection. Subscribe to rank 0 only for now.
+        # TODO(phase3): per-rank virtual workers or merged renumbering.
+        pub_endpoint = endpoint_for_rank(config.endpoint, 0)
+
+        zmq_ctx = zmq.asyncio.Context.instance()
+        sub_socket = zmq_ctx.socket(zmq.SUB)
+        sub_socket.subscribe(config.topic.encode("utf-8"))
+        sub_socket.connect(pub_endpoint)
+        logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
+
+        decoder = msgspec.msgpack.Decoder(KVEventBatch)
+
+        try:
+            async for proto_batch in stream_kv_events(
+                sub_socket,
+                decoder.decode,
+                lambda: context.send_initial_metadata(()),
+                context.cancelled,
+            ):
+                yield proto_batch
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("SubscribeKvEvents failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+        finally:
+            sub_socket.close(linger=0)
+            logger.info("SubscribeKvEvents: stream closed")

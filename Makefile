@@ -21,7 +21,7 @@ else
     $(info sccache not found. Install it for faster builds: cargo install sccache)
 endif
 
-.PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
+.PHONY: help build test clean docs check fmt opencv-deps dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
         generate-openapi generate-python-types generate-java-types generate-clients \
         show-version bump-version check-versions
@@ -58,6 +58,9 @@ check: ## Run cargo check and clippy
 fmt: ## Format code with rustfmt
 	@echo "Formatting code..."
 	@rustup run nightly cargo fmt
+
+opencv-deps: ## Install system OpenCV for the opencv-video feature (needed by check/--all-features)
+	@bash scripts/install_opencv.sh
 
 # Development workflow shortcuts
 dev-setup: build test ## Set up development environment

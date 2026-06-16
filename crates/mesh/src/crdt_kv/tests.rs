@@ -1430,6 +1430,58 @@ fn test_gc_tombstones_does_not_remove_live_keys() {
 }
 
 #[test]
+fn test_gc_purges_collected_keys_ops_from_log() {
+    // GC must reclaim the log too: leaving the collected keys' Remove ops
+    // behind would let dead tombstones gossip forever and let the compacted
+    // log sit permanently above the size-tracking compaction trigger.
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    map.insert("key1".to_string(), b"v1".to_vec());
+    map.insert("key2".to_string(), b"v2".to_vec());
+    map.remove("key1");
+
+    let removed = map.gc_tombstones_with_grace(Duration::ZERO);
+    assert_eq!(removed, 1);
+    let log = map.get_operation_log();
+    assert!(
+        log.operations().iter().all(|op| op.key() != "key1"),
+        "GC'd key's ops must leave the log"
+    );
+    assert!(
+        log.operations().iter().any(|op| op.key() == "key2"),
+        "live keys' ops stay"
+    );
+}
+
+#[test]
+fn test_epoch_max_wins_gc_purges_collected_keys_ops_from_log() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    replica.insert("rl:global:node-a".to_string(), encode(1, 1).to_vec());
+    replica.insert("rl:global:node-b".to_string(), encode(1, 2).to_vec());
+    replica.remove("rl:global:node-a");
+
+    let removed = replica.gc_tombstones_with_grace(Duration::ZERO);
+    assert_eq!(removed, 1);
+    let log = replica.get_operation_log();
+    assert!(
+        log.operations()
+            .iter()
+            .all(|op| op.key() != "rl:global:node-a"),
+        "GC'd key's ops must leave the log"
+    );
+    assert!(
+        log.operations()
+            .iter()
+            .any(|op| op.key() == "rl:global:node-b"),
+        "live keys' ops stay"
+    );
+}
+
+#[test]
 fn test_gc_tombstones_multiple_keys() {
     init_test_logging();
     let map = CrdtOrMap::new();

@@ -78,6 +78,33 @@ fn test_partial_json_parser() {
 }
 
 #[test]
+fn test_partial_json_consumed_is_byte_offset() {
+    let parser = PartialJson::default();
+
+    // Complete object with a multibyte value: consumed must be the byte length
+    // and must land on a UTF-8 char boundary so input[..consumed] is sliceable.
+    let input = r#"{"k":"é"}"#;
+    let (value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(value["k"], "é");
+    assert_eq!(consumed, input.len());
+    assert!(input.is_char_boundary(consumed));
+    let _ = &input[..consumed];
+
+    // Partial object whose multibyte char is the last consumed content.
+    let input = "{\"k\":\"é";
+    let (value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(value["k"], "é");
+    assert!(input.is_char_boundary(consumed));
+    let _ = &input[..consumed];
+
+    // Emoji (4-byte) value also yields a byte offset on a char boundary.
+    let input = r#"{"k":"🌍"}"#;
+    let (_value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(consumed, input.len());
+    assert!(input.is_char_boundary(consumed));
+}
+
+#[test]
 fn test_partial_json_depth_limit() {
     // max_depth of 3 allows nesting up to 3 levels
     // Set allow_incomplete to false to get errors instead of partial results
@@ -100,31 +127,6 @@ fn test_partial_json_depth_limit() {
 }
 
 // NOTE: test_stream_result_variants removed - StreamResult enum replaced by StreamingParseResult
-
-#[test]
-fn test_partial_tool_call() {
-    let mut partial = PartialToolCall {
-        name: None,
-        arguments_buffer: String::new(),
-        start_position: 0,
-        name_sent: false,
-        streamed_args: String::new(),
-    };
-
-    // Set name
-    partial.name = Some("test_function".to_string());
-    assert_eq!(partial.name.as_ref().unwrap(), "test_function");
-
-    // Append arguments
-    partial.arguments_buffer.push_str(r#"{"key": "value"}"#);
-    assert_eq!(partial.arguments_buffer, r#"{"key": "value"}"#);
-
-    // Update streaming state
-    partial.name_sent = true;
-    partial.streamed_args = r#"{"key": "#.to_string();
-    assert!(partial.name_sent);
-    assert_eq!(partial.streamed_args, r#"{"key": "#);
-}
 
 #[tokio::test]
 async fn test_json_parser_complete_single() {

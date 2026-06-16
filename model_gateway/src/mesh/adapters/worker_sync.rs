@@ -286,13 +286,19 @@ impl WorkerSyncAdapter {
 
     /// Re-publish every locally-owned worker and tombstone any key this
     /// loop published whose worker no longer exists. Doubles as the
-    /// bootstrap (empty prior set) and the lag-recovery path; re-publishing
-    /// identical state is harmless (peers' URL-dedupe refreshes health).
+    /// bootstrap (empty prior set) and the lag-recovery path. Workers whose
+    /// stored state is already equivalent are skipped: every re-put mints a
+    /// fresh Lamport op, invalidating each peer's send watermark for the
+    /// key, so a blanket resync of W workers would burst W ops to every
+    /// peer even when nothing changed.
     fn resync_local(&self, published: &mut HashSet<WorkerId>) {
         let mut current = HashSet::new();
         for (id, worker) in self.worker_registry.get_all_with_ids() {
             if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
-                self.on_worker_changed(id.as_str(), &worker_state_of(&id, &worker));
+                let state = worker_state_of(&id, &worker);
+                if !self.store_matches(&id, &state) {
+                    self.on_worker_changed(id.as_str(), &state);
+                }
                 current.insert(id);
             }
         }
@@ -301,6 +307,42 @@ impl WorkerSyncAdapter {
             self.on_worker_removed(stale.as_str());
         }
         *published = current;
+    }
+
+    /// True when the store already holds an equivalent state for the
+    /// worker. `load` is not compared (volatile and unread by importers);
+    /// specs compare semantically as JSON values — `WorkerSpec` holds maps,
+    /// so two encodings of identical specs can differ byte-wise. Cheap
+    /// scalar fields and a byte-equality fast path gate the JSON parses.
+    fn store_matches(&self, id: &WorkerId, state: &WorkerState) -> bool {
+        let Some(bytes) = self.workers.get(&format!("{PREFIX}{}", id.as_str())) else {
+            return false;
+        };
+        let Ok(stored) = bincode::deserialize::<WorkerState>(&bytes) else {
+            return false;
+        };
+        if stored.worker_id != state.worker_id
+            || stored.model_id != state.model_id
+            || stored.url != state.url
+            || stored.health != state.health
+            || stored.version != state.version
+        {
+            return false;
+        }
+        // Byte equality is sufficient (not necessary): re-serialising the
+        // same spec instance is byte-stable in-process, so this skips the
+        // JSON parses in the steady state; key-order drift (e.g. across
+        // restarts) falls through to the semantic comparison.
+        if stored.spec == state.spec {
+            return true;
+        }
+        match (
+            serde_json::from_slice::<serde_json::Value>(&stored.spec),
+            serde_json::from_slice::<serde_json::Value>(&state.spec),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
     }
 
     /// Publish a worker update to the cluster. Callers pass the
@@ -348,9 +390,9 @@ fn worker_state_of(worker_id: &WorkerId, worker: &Arc<dyn Worker>) -> WorkerStat
 mod tests {
     use std::time::Duration;
 
-    use openai_protocol::model_card::ModelCard;
+    use openai_protocol::{model_card::ModelCard, worker::WorkerStatus};
     use smg_mesh::{MergeStrategy, MeshKV};
-    use tokio::time::sleep;
+    use tokio::{sync::mpsc::error::TryRecvError, time::sleep};
 
     use super::*;
     use crate::worker::BasicWorkerBuilder;
@@ -775,6 +817,39 @@ mod tests {
             })
             .await,
             "claimed worker must be published with its local spec"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_skips_republish_when_state_unchanged() {
+        // Every put mints a fresh Lamport op (a watermark delta to every
+        // peer), so a lag resync must not re-put unchanged state. A put
+        // always notifies local subscribers, so an empty channel after the
+        // second resync proves the skip.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        let id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+        let mut published = HashSet::new();
+        adapter.resync_local(&mut published);
+
+        let mut sub = ns.subscribe("");
+        adapter.resync_local(&mut published);
+        assert!(
+            matches!(sub.receiver.try_recv(), Err(TryRecvError::Empty)),
+            "unchanged state must not be re-put on resync"
+        );
+
+        // A real change (health flip) is still republished.
+        registry.get(&id).unwrap().set_status(WorkerStatus::Ready);
+        adapter.resync_local(&mut published);
+        assert!(
+            sub.receiver.try_recv().is_ok(),
+            "changed state must be republished on resync"
         );
     }
 

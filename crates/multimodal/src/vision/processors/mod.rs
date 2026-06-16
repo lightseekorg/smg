@@ -1,6 +1,6 @@
-//! Model-specific image processors.
+//! Model-specific vision processors.
 //!
-//! This module contains implementations of `ImagePreProcessor` for various
+//! This module contains implementations of `VisionPreProcessor` for various
 //! vision-language model families.
 //!
 //! # Supported Models

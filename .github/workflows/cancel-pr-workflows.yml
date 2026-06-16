@@ -1,0 +1,46 @@
+name: Cancel PR Workflows
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  cancel:
+    name: ${{ matrix.workflow }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep these in sync with the concurrency groups used by PR workflows.
+          - workflow: PR Test (SMG)
+            group: gateway-tests-pr-{0}
+          - workflow: PR Test (MLX)
+            group: mlx-tests-pr-{0}
+          - workflow: PR Validation
+            group: pr-validation-{0}
+          - workflow: PR Labeler
+            group: labeler-{0}
+          - workflow: Claude PR Review
+            group: claude-review-{0}
+          - workflow: Benchmark - Tokenizer
+            group: benchmark-tokenizer-refs/pull/{0}/merge
+          - workflow: Benchmark - Radix Tree
+            group: benchmark-radix-tree-refs/pull/{0}/merge
+          - workflow: Benchmark - Tool Parser
+            group: benchmark-tool-parser-refs/pull/{0}/merge
+          - workflow: Benchmark - Request Processing
+            group: benchmark-request-processing-refs/pull/{0}/merge
+          - workflow: Benchmark - Manual Policy
+            group: benchmark-manual-policy-refs/pull/{0}/merge
+    concurrency:
+      group: ${{ format(matrix.group, github.event.pull_request.number) }}
+      cancel-in-progress: true
+    steps:
+      - name: Touch cancellation group
+        run: |
+          echo "PR #${{ github.event.pull_request.number }} was closed."
+          echo "Cancellation group: ${{ format(matrix.group, github.event.pull_request.number) }}"

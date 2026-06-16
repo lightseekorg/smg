@@ -96,8 +96,8 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) {
-        if self.chars.next().is_some() {
-            self.position += 1;
+        if let Some(c) = self.chars.next() {
+            self.position += c.len_utf8();
         }
     }
 
