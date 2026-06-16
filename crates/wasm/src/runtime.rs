@@ -101,13 +101,6 @@ impl WasmRuntime {
         (cpu_count, max_recommended)
     }
 
-    /// get current thread pool status
-    pub fn get_thread_pool_info(&self) -> (usize, usize) {
-        let (_cpu_count, max_recommended) = Self::get_cpu_info();
-        let current_workers = self.thread_pool.workers.len();
-        (current_workers, max_recommended)
-    }
-
     /// Execute WASM component using WASM interface based on attach_point
     pub async fn execute_component_async(
         &self,
@@ -374,11 +367,10 @@ impl WasmThreadPool {
         input: WasmComponentInput,
         config: &WasmRuntimeConfig,
     ) -> Result<WasmComponentOutput> {
-        // Compile component from bytes OR retrieve from cache.
-        // Cache is keyed by SHA256 hash (~20ns lookup) instead of raw Vec<u8>
-        // (~24µs for a 500KB module), a 1200× improvement.
+        // Compile component from bytes, or retrieve from cache (keyed by SHA256
+        // hash to avoid hashing the full module bytes per lookup).
         let component = if let Some(comp) = cache.get(&sha256_hash) {
-            comp.clone() // Component is just a handle (cheap clone)
+            comp.clone()
         } else {
             // Compile new component
             let comp = Component::new(engine, wasm_bytes).map_err(|e| {
@@ -406,7 +398,7 @@ impl WasmThreadPool {
             })?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(memory_limit_bytes)
-            .trap_on_grow_failure(true) // Trap instead of returning -1 for easier debugging
+            .trap_on_grow_failure(true)
             .build();
 
         let mut store = Store::new(
