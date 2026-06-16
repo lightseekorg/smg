@@ -1,0 +1,167 @@
+# Nightly BFCL A/B — official Berkeley Function Calling Leaderboard run comparing
+# SMG's parsing frontend (SMG -> vLLM gRPC) against pure vLLM, same model/engine/
+# checkpoint/sampling. Track B of docs/proposals/2026-06-10-bfcl-nightly-parser-
+# verification.md. Informational/non-blocking — never a merge gate.
+#
+# Runs nightly (full non-live set) and, on PRs that touch this pipeline, a quick
+# non-live sanity subset for merge confidence. The A/B mechanics were validated
+# manually on an H100 box (see scripts/bfcl/README.md "Validation status"); the
+# PR trigger doubles as the live-CI-runner shakeout.
+name: Nightly BFCL
+
+on:
+  schedule:
+    - cron: "37 9 * * *" # UTC, off-round, distinct from nightly-benchmark (0 8) / mlx (17 9)
+  # PR sanity: only when the BFCL pipeline itself changes. Runs a quick non-live
+  # subset so the A/B is exercised end-to-end (engine, FC mode, parser, scoring)
+  # before merge — confidence the pipeline works, not a statistical result.
+  pull_request:
+    paths:
+      - "scripts/bfcl/**"
+      - ".github/workflows/nightly-bfcl.yml"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "HF model id (weights) served on both arms"
+        required: false
+        default: "Qwen/Qwen3.6-27B"
+      bfcl_model:
+        description: "BFCL FC handler name (must end in -FC; auto-registered if new)"
+        required: false
+        default: "Qwen/Qwen3.6-27B-FC"
+      categories:
+        description: "Comma-separated BFCL test categories"
+        required: false
+        default: "simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance"
+      vllm_tool_parser:
+        description: "pure-vLLM --tool-call-parser"
+        required: false
+        default: "qwen3_xml"
+      smg_tool_parser:
+        description: "SMG --tool-call-parser"
+        required: false
+        default: "qwen_xml"
+      reasoning_parser:
+        description: "reasoning parser for both arms (empty for non-thinking SKUs)"
+        required: false
+        default: "qwen3"
+
+concurrency:
+  group: nightly-bfcl-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  # Build the smg wheel once (mirrors nightly-benchmark.yml build-wheel + cache).
+  build-wheel:
+    runs-on: k8s-runner-gpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache wheel artifacts
+        id: cache-wheel
+        uses: actions/cache@v5
+        with:
+          path: |
+            bindings/python/dist/*.whl
+          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/**/src/**', 'model_gateway/src/**', 'bindings/python/src/**') }}
+          restore-keys: |
+            nightly-wheel-${{ runner.os }}-
+      - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-rust
+      - name: Setup Python venv
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        run: bash scripts/ci_setup_python_venv.sh
+      - name: Build Python wheel
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        run: bash scripts/ci_build_wheel.sh
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: smg-wheel
+          path: bindings/python/dist/*.whl
+          retention-days: 7
+
+  bfcl-ab:
+    needs: build-wheel
+    if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
+    runs-on: 4-gpu-h100 # TP=2 per arm, both arms concurrent (GPUs 0,1 + 2,3)
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      ROUTER_LOCAL_MODEL_PATH: /models
+      HF_HOME: /models
+      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
+      BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3.6-27B-FC' }}
+      # PR = quick non-live sanity subset; schedule/dispatch = full non-live set.
+      CATEGORIES: ${{ github.event.inputs.categories || (github.event_name == 'pull_request' && 'simple_python,irrelevance' || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: smg-wheel
+          path: wheel
+      - name: Setup vLLM env (provides vllm + grpc servicer + smg)
+        uses: ./.github/actions/setup-vllm
+      - name: Install smg wheel + bfcl-eval (+ ninja for vLLM torch.compile, soundfile for bfcl's qwen handler)
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          pip install "bfcl-eval" soundfile ninja
+      - name: Register model in bfcl (no-op if bfcl already ships a handler)
+        run: python scripts/bfcl/register_bfcl_model.py --model-id "$MODEL" || true
+      - name: Stage model weights
+        run: bash scripts/ci_download_model.sh --gpu-tier 2
+      - name: Launch arms + run official BFCL A/B
+        env:
+          BFCL_MODEL: ${{ env.MODEL }}
+          VLLM_BIN: vllm
+          VLLM_PYTHON: python
+          SMG_LAUNCH: "python -m smg.launch_router"
+          BFCL_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
+          BFCL_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen_xml' }}
+          BFCL_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+          BFCL_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+          BFCL_TP: "2"
+          BFCL_MAX_MODEL_LEN: "16384"
+          BFCL_GPU_MEM_UTIL: "0.85"
+        run: |
+          set -euo pipefail
+          # TP=2 per arm: Arm A (pure vLLM) on GPUs 0,1; Arm B (SMG -> vLLM gRPC) on GPUs 2,3.
+          A_URL=$(BFCL_GPU=0,1 BFCL_ARM_A_PORT=31199 bash scripts/bfcl/launch_arm.sh a)
+          B_URL=$(BFCL_GPU=2,3 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 bash scripts/bfcl/launch_arm.sh b)
+          echo "arm A: $A_URL   arm B: $B_URL"
+          python scripts/bfcl/run_ab.py \
+            --baseline  "vllm=$A_URL" \
+            --candidate "smg=$B_URL" \
+            --bfcl-model "$BFCL_MODEL_FC" \
+            --categories "$CATEGORIES" \
+            --bfcl "$(command -v bfcl)" \
+            --project-root "$RUNNER_TEMP/bfcl_ab" \
+            --out "$RUNNER_TEMP/bfcl_ab.md" \
+            --json-out "$RUNNER_TEMP/bfcl_ab.json" \
+            --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+      - name: Render summary
+        if: always()
+        run: cat "$RUNNER_TEMP/bfcl_ab.md" >> "$GITHUB_STEP_SUMMARY" || echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bfcl-ab-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/bfcl_ab.md
+            ${{ runner.temp }}/bfcl_ab.json
+          retention-days: 30
+      - name: Teardown arms
+        if: always()
+        run: bash scripts/bfcl/launch_arm.sh stop || true
