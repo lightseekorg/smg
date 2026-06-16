@@ -16,9 +16,6 @@ Metrics are exposed on the Prometheus port (default: `29000`):
 curl http://localhost:29000/metrics
 ```
 
-The same listener also serves a WebSocket stream of real-time metric updates
-at `/ws/metrics` (used by dashboards that need live state).
-
 Configure via CLI:
 
 ```bash
