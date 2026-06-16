@@ -524,8 +524,7 @@ impl PDRouter {
                 context.return_logprob,
                 Some(decode_url),
                 Some(response_headers),
-                decode,
-                load_guards
+                load_guards,
             )
         } else {
             // Handle non-streaming error response
@@ -712,8 +711,7 @@ impl PDRouter {
                 context.return_logprob,
                 None,
                 Some(response_headers),
-                decode, 
-                load_guards
+                load_guards,
             )
         } else {
             // Non-streaming response
@@ -900,7 +898,6 @@ impl PDRouter {
         return_logprob: bool,
         decode_url: Option<String>,
         headers: Option<HeaderMap>,
-        decode: Arc<dyn Worker>,
         load_guards: Vec<WorkerLoadGuard>,
     ) -> Response {
         use crate::worker::AttachedBody;
@@ -1646,8 +1643,7 @@ mod tests {
                 false,
                 None,
                 None,
-                decode_ref.clone(),
-                guards
+                guards,
             );
 
             // Guards are now attached to response body, so load should be 1

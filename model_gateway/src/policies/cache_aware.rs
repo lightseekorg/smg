@@ -868,7 +868,7 @@ impl CacheAwarePolicy {
         // No cache overlap — min-load fallback (no token tree involved)
         let min_idx = healthy_indices
             .iter()
-            .min_by_key(|&&idx| workers[idx].load())
+            .min_by_key(|&&idx| (workers[idx].load(), workers[idx].processed_requests(), idx))
             .copied()?;
         debug!(
             worker = workers[min_idx].url(),
@@ -983,12 +983,8 @@ impl CacheAwarePolicy {
                     healthy_indices
                         .iter()
                         .min_by_key(|&&idx| {
-                        (
-                            workers[idx].load(),
-                            workers[idx].processed_requests(),
-                            idx,
-                        )
-                    })
+                            (workers[idx].load(), workers[idx].processed_requests(), idx)
+                        })
                         .copied()
                 };
 
@@ -1071,12 +1067,8 @@ impl CacheAwarePolicy {
                     healthy_indices
                         .iter()
                         .min_by_key(|&&idx| {
-                        (
-                            workers[idx].load(),
-                            workers[idx].processed_requests(),
-                            idx,
-                        )
-                    })
+                            (workers[idx].load(), workers[idx].processed_requests(), idx)
+                        })
                         .copied()
                 };
 
