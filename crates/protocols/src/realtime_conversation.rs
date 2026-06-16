@@ -30,8 +30,8 @@ use crate::common::Redacted;
 /// - `user`      → `input_text`, `input_audio`, `input_image`
 /// - `assistant` → `output_text`, `output_audio`
 ///
-/// Serde does not enforce this. Call [`RealtimeConversationItem::validate()`]
-/// after deserialization to check these invariants.
+/// Serde does not enforce this; these invariants are checked during request
+/// validation, not at deserialization.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

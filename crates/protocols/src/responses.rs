@@ -440,7 +440,7 @@ pub enum ResponseTool {
     /// Built-in host-execute shell tool — `{ type: "local_shell" }`.
     ///
     /// Spec (openai-responses-api-spec.md §tools L462): `LocalShell { type:
-    /// "local_shell" }` — carries no payload. Distinct from `shell` (T6),
+    /// "local_shell" }` — carries no payload. Distinct from `shell`,
     /// which carries a containerized `environment`. The model emits
     /// `local_shell_call` output items carrying a `LocalShellExec` action;
     /// the client executes the command on the host and replies with a
@@ -1351,7 +1351,7 @@ pub struct RequireApprovalFilter {
 }
 
 // ============================================================================
-// Computer Tool (T2)
+// Computer Tool
 // ============================================================================
 
 /// Computer-use preview tool payload.
@@ -1773,7 +1773,7 @@ pub enum ResponseInputOutputItem {
     },
     /// `type: "custom_tool_call_output"` — client's response to a
     /// `custom_tool_call`. Spec: `{ call_id, output, type, id? }` (no
-    /// `status` field per spec — see Drift Log entry for T8). `id` is
+    /// `status` field per spec). `id` is
     /// `Option<String>` for the same reason as `CustomToolCall.id` above.
     /// `output` is either a plain string or an array of input-typed content
     /// parts (`input_text` / `input_image` / `input_file`).
@@ -3469,16 +3469,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // parameterless shell call can round-trip cleanly.
         ResponseInputOutputItem::ShellCall { .. } => {}
         ResponseInputOutputItem::ShellCallOutput { .. } => {
-            // Backend execution is out of scope for T6 (schema-only); the
-            // router returns 501 for shell calls, so SMG never synthesises
+            // The router returns 501 for shell calls, so SMG never synthesises
             // a ShellCallOutput itself. Skip content validation here so
             // round-tripping a previously-recorded response (even with an
             // empty chunk list) stays lossless — the cross-turn replay
             // contract is the motivating use case for keeping this arm
             // content-agnostic.
         }
-        // I2: schema-only; backend resolution (history lookup +
-        // substitution) is deferred to a future R task.
+        // A bare reference to a prior item; no content to validate.
         ResponseInputOutputItem::ItemReference { .. } => {}
         // ApplyPatchCall is model-generated and echoed back on multi-turn
         // replay; matches the FunctionToolCall / CustomToolCall arms with no
@@ -3493,15 +3491,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // output, or a `failed` where the executor had nothing to log) so
         // no emptiness check applies here.
         ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
-        // Schema-only pass-through: T5 adds the protocol variants for the
-        // `local_shell` built-in tool. Validation mirrors `ComputerCall` /
-        // `ImageGenerationCall` above (no payload-level content checks).
+        // Validation mirrors `ComputerCall` / `ImageGenerationCall` above
+        // (no payload-level content checks).
         ResponseInputOutputItem::LocalShellCall { .. } => {}
         ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
-        // T11 schema-only: MCP call/list-tools input items replayed for
-        // stateless multi-turn. Matches `McpApprovalRequest` above with no
-        // content validation so an abridged or in-flight call (output /
-        // error absent) can round-trip cleanly.
+        // MCP call/list-tools input items replayed for stateless multi-turn.
+        // Matches `McpApprovalRequest` above with no content validation so an
+        // abridged or in-flight call (output / error absent) can round-trip
+        // cleanly.
         ResponseInputOutputItem::McpCall { .. } => {}
         ResponseInputOutputItem::McpListTools { .. } => {}
     }
@@ -3551,10 +3548,9 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                 return Err(e);
             }
 
-            // T11 spec contract (openai-responses-api-spec.md L441, L445): one
-            // of `server_url` or `connector_id` is required, and the two are
-            // mutually exclusive. Reject payloads that set both so downstream
-            // target resolution is unambiguous.
+            // One of `server_url` or `connector_id` is required, and the two
+            // are mutually exclusive. Reject payloads that set both so
+            // downstream target resolution is unambiguous.
             if mcp.server_url.is_some() && mcp.connector_id.is_some() {
                 let mut e = ValidationError::new("mcp_tool_conflicting_targets");
                 e.message = Some(
