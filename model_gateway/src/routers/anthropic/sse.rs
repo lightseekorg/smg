@@ -219,9 +219,6 @@ where
     F: Fn(&str) -> String,
 {
     let mut stream = response.bytes_stream();
-    // Shared SSE decoder: cursor-tracked buffering, deferred UTF-8 validation
-    // (handles multi-byte characters split across network chunks), and built-in
-    // DoS protection at `MAX_SSE_BUFFER_SIZE`.
     let mut decoder = SseDecoder::with_max_size(MAX_SSE_BUFFER_SIZE);
     let mut processor =
         EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
@@ -249,9 +246,6 @@ where
     if let Some(frame) = decoder.flush() {
         let frame = frame.map_err(|e| match e {
             SseDecodeError::InvalidUtf8(u) => format!("Invalid UTF-8 in final SSE data: {u}"),
-            // The loop above drains every complete frame, so `flush()` can't
-            // return `IncompleteFlush` here — handled for an accurate message
-            // if that ever changes.
             other => format!("SSE decode error on flush: {other}"),
         })?;
         if let Some((event_type, data)) = resolve_event(frame) {
@@ -655,16 +649,7 @@ where
 // SSE frame resolution
 // ============================================================================
 
-/// Resolve a decoded [`SseFrame`] into Anthropic's `(event_type, data)` pair.
-///
-/// Anthropic always emits an explicit `event:` line, but as a fallback
-/// (preserving prior behavior) the event type is inferred from the payload's
-/// `"type"` field when the `event:` line is absent or empty. Returns `None`
-/// when no event type can be determined.
-///
-/// The event type is returned as a `Cow` so the common case (explicit `event:`
-/// line) borrows straight from the decoded frame with no allocation; only the
-/// rare inference fallback allocates.
+/// Resolve a decoded [`SseFrame`] into `(event_type, data)` pair.
 fn resolve_event(frame: SseFrame<'_>) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
     let event_type = match frame.event_type {
         Some(e) if !e.is_empty() => e,
