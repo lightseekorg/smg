@@ -419,10 +419,8 @@ async fn decode_video_frames(
         None => {
             #[cfg(feature = "opencv-video")]
             {
-                // Auto mode prefers OpenCV for in-process decode performance.
-                // OpenCV samples by frame index, while the FFmpeg fallback uses
-                // an fps filter, so fallback can select a slightly different
-                // frame set for the same input.
+                // OpenCV samples by frame index while the FFmpeg fallback uses an
+                // fps filter, so the fallback can select a different frame set.
                 let opencv_input_path = input_path.clone();
                 let opencv_result = task::spawn_blocking(move || {
                     decode_video_with_opencv_logged(&opencv_input_path, input_bytes, cfg)

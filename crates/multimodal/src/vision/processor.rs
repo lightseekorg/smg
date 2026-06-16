@@ -102,16 +102,6 @@ impl ModelSpecificValue {
         }
     }
 
-    /// Get the first dimension of a tensor variant, if applicable.
-    pub fn first_dim(&self) -> Option<usize> {
-        match self {
-            Self::Tensor { shape, .. }
-            | Self::IntTensor { shape, .. }
-            | Self::UintTensor { shape, .. } => shape.first().copied(),
-            _ => None,
-        }
-    }
-
     /// Interpret this value as per-item flat sizes.
     pub fn as_flat_sizes(&self) -> AnyhowResult<Vec<usize>> {
         match self {

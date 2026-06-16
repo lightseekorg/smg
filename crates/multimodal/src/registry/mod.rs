@@ -24,15 +24,15 @@ impl ModelRegistry {
     pub fn new() -> Self {
         Self {
             specs: vec![
-                LazySpec::new("kimi_k25", || Box::new(KimiK25VisionSpec)),
-                LazySpec::new("llama4", || Box::new(Llama4Spec)),
+                LazySpec::new(|| Box::new(KimiK25VisionSpec)),
+                LazySpec::new(|| Box::new(Llama4Spec)),
                 // LlavaNext must be registered before Llava so "llava_next" model_type matches first.
-                LazySpec::new("llava_next", || Box::new(LlavaNextSpec)),
-                LazySpec::new("llava", || Box::new(LlavaSpec)),
+                LazySpec::new(|| Box::new(LlavaNextSpec)),
+                LazySpec::new(|| Box::new(LlavaSpec)),
                 // Qwen3-VL must be registered before QwenVL so "qwen3" matches first.
-                LazySpec::new("qwen3_vl", || Box::new(Qwen3VLVisionSpec)),
-                LazySpec::new("qwen_vl", || Box::new(QwenVLVisionSpec)),
-                LazySpec::new("phi3_v", || Box::new(Phi3VisionSpec)),
+                LazySpec::new(|| Box::new(Qwen3VLVisionSpec)),
+                LazySpec::new(|| Box::new(QwenVLVisionSpec)),
+                LazySpec::new(|| Box::new(Phi3VisionSpec)),
             ],
         }
     }
@@ -59,7 +59,7 @@ struct LazySpec {
 }
 
 impl LazySpec {
-    fn new(_id: &'static str, factory: fn() -> Box<dyn ModelProcessorSpec>) -> Self {
+    fn new(factory: fn() -> Box<dyn ModelProcessorSpec>) -> Self {
         Self {
             inner: Lazy::new(factory),
         }

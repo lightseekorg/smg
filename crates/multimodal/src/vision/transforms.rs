@@ -286,23 +286,6 @@ fn fir_image_to_dynamic(
     .unwrap_or_else(|| source.resize_exact(width, height, filter))
 }
 
-/// Resize image preserving aspect ratio, fitting within max dimensions.
-pub fn resize_to_fit(
-    image: &DynamicImage,
-    max_width: u32,
-    max_height: u32,
-    filter: FilterType,
-) -> DynamicImage {
-    let (w, h) = image.dimensions();
-    let ratio = (max_width as f64 / w as f64).min(max_height as f64 / h as f64);
-    if ratio >= 1.0 {
-        return image.clone();
-    }
-    let new_w = ((w as f64 * ratio).round() as u32).max(1);
-    let new_h = ((h as f64 * ratio).round() as u32).max(1);
-    resize(image, new_w, new_h, filter)
-}
-
 /// Center crop image to specified dimensions.
 ///
 /// If the crop size is larger than the image, the image is returned unchanged.
@@ -339,26 +322,6 @@ pub fn expand_to_square(image: &DynamicImage, background: Rgb<u8>) -> DynamicIma
             new_image
         }
     }
-}
-
-/// Pad image to specified dimensions with background color.
-///
-/// Image is placed at top-left corner.
-pub fn pad_to_size(
-    image: &DynamicImage,
-    target_w: u32,
-    target_h: u32,
-    background: Rgb<u8>,
-) -> DynamicImage {
-    let (w, h) = image.dimensions();
-    if w >= target_w && h >= target_h {
-        return image.clone();
-    }
-    let new_w = w.max(target_w);
-    let new_h = h.max(target_h);
-    let mut new_image = DynamicImage::from(RgbImage::from_pixel(new_w, new_h, background));
-    image::imageops::overlay(&mut new_image, image, 0, 0);
-    new_image
 }
 
 /// Stack multiple [C, H, W] tensors into [B, C, H, W].

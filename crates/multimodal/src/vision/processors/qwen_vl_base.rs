@@ -41,13 +41,8 @@ use crate::{
 /// Python-compatible rounding (banker's rounding / round half to even).
 ///
 /// This matches Python's `round()` behavior where 0.5 is rounded to the nearest
-/// even number, unlike Rust's `f64::round()` which rounds half away from zero.
-///
-/// Examples:
-/// - round_half_to_even(12.5) = 12 (not 13)
-/// - round_half_to_even(13.5) = 14 (not 14)
-/// - round_half_to_even(12.4) = 12
-/// - round_half_to_even(12.6) = 13
+/// even number (e.g. `12.5 -> 12`, `13.5 -> 14`), unlike Rust's `f64::round()`
+/// which rounds half away from zero.
 #[inline]
 fn round_half_to_even(x: f64) -> f64 {
     let rounded = x.round();
