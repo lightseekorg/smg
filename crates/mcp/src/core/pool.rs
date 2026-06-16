@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use lru::LruCache;
@@ -14,7 +15,7 @@ use parking_lot::Mutex;
 use rmcp::{service::RunningService, RoleClient};
 
 use super::config::{McpProxyConfig, McpServerConfig, McpTransport};
-use crate::error::McpResult;
+use crate::{error::McpResult, tenant::TenantId};
 
 type McpClient = RunningService<RoleClient, ()>;
 type EvictionCallback = Arc<dyn Fn(&PoolKey) + Send + Sync>;
@@ -26,11 +27,11 @@ type EvictionCallback = Arc<dyn Fn(&PoolKey) + Send + Sync>;
 pub struct PoolKey {
     pub url: String,
     pub auth_hash: u64,
-    pub tenant_id: Option<String>,
+    pub tenant_id: Option<TenantId>,
 }
 
 impl PoolKey {
-    pub fn new(url: impl Into<String>, auth_hash: u64, tenant_id: Option<String>) -> Self {
+    pub fn new(url: impl Into<String>, auth_hash: u64, tenant_id: Option<TenantId>) -> Self {
         Self {
             url: url.into(),
             auth_hash,
@@ -38,7 +39,7 @@ impl PoolKey {
         }
     }
 
-    pub fn from_config(config: &McpServerConfig, tenant_id: Option<String>) -> Self {
+    pub fn from_config(config: &McpServerConfig, tenant_id: Option<TenantId>) -> Self {
         let (url, auth_hash) = match &config.transport {
             McpTransport::Streamable {
                 url,
@@ -95,11 +96,23 @@ impl PoolKey {
 #[derive(Clone)]
 pub(crate) struct CachedConnection {
     pub client: Arc<McpClient>,
+    /// Set after a successful `list_all_tools` for this pool entry. The orchestrator
+    /// combines this with a non-empty pool-scoped inventory check before
+    /// short-circuiting.
+    pub tools_discovered: bool,
+    /// Wall-clock-ish timestamp of the last access through `get` / `get_or_create` /
+    /// the fast-path inspection methods. Used by `evict_idle` to reap connections
+    /// that have not been touched for longer than the configured idle timeout.
+    pub last_used: Instant,
 }
 
 impl CachedConnection {
     pub fn new(client: Arc<McpClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            tools_discovered: false,
+            last_used: Instant::now(),
+        }
     }
 }
 
@@ -158,7 +171,8 @@ impl McpConnectionPool {
     {
         {
             let mut connections = self.connections.lock();
-            if let Some(cached) = connections.get(&key) {
+            if let Some(cached) = connections.get_mut(&key) {
+                cached.last_used = Instant::now();
                 return Ok(Arc::clone(&cached.client));
             }
         }
@@ -215,16 +229,86 @@ impl McpConnectionPool {
             .collect()
     }
 
-    /// Get connection, promoting in LRU.
+    /// Get connection, promoting in LRU and refreshing the idle timestamp.
     pub fn get(&self, key: &PoolKey) -> Option<Arc<McpClient>> {
-        self.connections
-            .lock()
-            .get(key)
-            .map(|cached| Arc::clone(&cached.client))
+        self.connections.lock().get_mut(key).map(|cached| {
+            cached.last_used = Instant::now();
+            Arc::clone(&cached.client)
+        })
     }
 
     pub fn contains(&self, key: &PoolKey) -> bool {
         self.connections.lock().contains(key)
+    }
+
+    /// True when the pool holds this key and tool discovery has completed successfully.
+    /// Touches `last_used` because callers gate live usage of the connection on this.
+    pub fn tool_discovery_completed(&self, key: &PoolKey) -> bool {
+        self.connections.lock().get_mut(key).is_some_and(|cached| {
+            cached.last_used = Instant::now();
+            cached.tools_discovered
+        })
+    }
+
+    /// Mark tool discovery as done for a pooled connection.
+    pub fn mark_tool_discovery_completed(&self, key: &PoolKey) -> bool {
+        let mut connections = self.connections.lock();
+        if let Some(cached) = connections.get_mut(key) {
+            let now = Instant::now();
+            cached.tools_discovered = true;
+            cached.last_used = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Evict every pooled entry that has been idle for at least `idle_for`. Fires the
+    /// eviction callback for each removed key so downstream state (tool inventory,
+    /// metrics) stays consistent. Returns the number of entries reaped.
+    pub fn evict_idle(&self, idle_for: Duration) -> usize {
+        let now = Instant::now();
+        let evicted: Vec<PoolKey> = {
+            let mut connections = self.connections.lock();
+            let stale: Vec<PoolKey> = connections
+                .iter()
+                .filter(|(_, cached)| now.saturating_duration_since(cached.last_used) >= idle_for)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &stale {
+                connections.pop(key);
+            }
+            stale
+        };
+
+        let count = evicted.len();
+        if count > 0 {
+            self.connection_count.fetch_sub(count, Ordering::Relaxed);
+            if let Some(callback) = &self.eviction_callback {
+                for key in &evicted {
+                    callback(key);
+                }
+            }
+        }
+        count
+    }
+
+    /// Remove a connection from the pool by key. Returns true if it was present.
+    pub fn remove(&self, key: &PoolKey) -> bool {
+        let (removed, callback) = {
+            let mut connections = self.connections.lock();
+            if connections.pop(key).is_some() {
+                self.connection_count.fetch_sub(1, Ordering::Relaxed);
+                (true, self.eviction_callback.clone())
+            } else {
+                (false, None)
+            }
+        };
+
+        if let Some(callback) = callback {
+            callback(key);
+        }
+        removed
     }
 
     /// Look up a connection by URL only (backward compatibility).
@@ -345,8 +429,31 @@ mod tests {
         assert_ne!(key_with_token.auth_hash, 0); // Token hashed
 
         // With tenant
-        let key_with_tenant = PoolKey::from_config(&config, Some("tenant-123".to_string()));
-        assert_eq!(key_with_tenant.tenant_id, Some("tenant-123".to_string()));
+        let key_with_tenant = PoolKey::from_config(&config, Some(TenantId::from("tenant-123")));
+        assert_eq!(
+            key_with_tenant.tenant_id,
+            Some(TenantId::from("tenant-123"))
+        );
+    }
+
+    #[test]
+    fn test_tool_discovery_completed_absent_key() {
+        let pool = McpConnectionPool::new();
+        let key = PoolKey::from_config(&create_test_config("http://localhost:3000"), None);
+        assert!(!pool.tool_discovery_completed(&key));
+        assert!(!pool.mark_tool_discovery_completed(&key));
+    }
+
+    #[test]
+    fn test_evict_idle_noop_on_empty_pool() {
+        // We cannot safely fabricate `RunningService<RoleClient, ()>` stubs in unit
+        // tests (see the absence of get/insert tests above), so behaviour under load
+        // is covered by the e2e suite. This guards the bookkeeping for empty pools
+        // and exercises the public surface.
+        let pool = McpConnectionPool::new();
+        assert_eq!(pool.evict_idle(Duration::from_secs(0)), 0);
+        assert_eq!(pool.evict_idle(Duration::from_secs(300)), 0);
+        assert_eq!(pool.len(), 0);
     }
 
     #[test]
