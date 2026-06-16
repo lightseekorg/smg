@@ -22,8 +22,7 @@
 //!    mutations that bypass the registry broadcast — `set_status()` called
 //!    directly by `ActivateWorkersStep`, the mesh inbound health refresh in
 //!    `WorkerRegistry::on_remote_worker_state`, FFI bindings — and tokenizer
-//!    registrations, which emit no worker event at all (same recovery
-//!    pattern as the metrics_ws worker collector).
+//!    registrations, which emit no worker event at all.
 //!
 //! 2. **Dedicated probe listener.** When `--health-check-port` (config
 //!    `health_check_port`) is set, `/liveness`, `/readiness`, and `/health`
@@ -275,10 +274,9 @@ pub fn liveness_response() -> Response {
 /// `ProbeState`) alive for the entire process, never observing
 /// `RecvError::Closed` and never exiting. That leak is invisible for a
 /// single long-lived process but matters for tests and embedded callers that
-/// create and drop servers. (The `metrics_ws` worker collector holds a
-/// strong `Arc<AppContext>` with the same loop shape and has the same latent
-/// cycle; this task takes the Weak route since readiness gates traffic and
-/// the fix is self-contained.) `probe_state` stays a strong `Arc` because the
+/// create and drop servers. This task takes the `Weak` route since readiness
+/// gates traffic and the fix is self-contained. `probe_state` stays a strong
+/// `Arc` because the
 /// dedicated listener thread shares it and outlives the maintainer.
 pub fn spawn_readiness_maintainer(
     probe_state: Arc<ProbeState>,

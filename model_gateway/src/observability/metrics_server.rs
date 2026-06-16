@@ -1,9 +1,8 @@
-//! HTTP/WebSocket server for the Prometheus metrics endpoint (port 29000).
-//! Serves `GET /metrics` (Prometheus) and `WS /ws/metrics` (real-time state push).
+//! HTTP server for the Prometheus metrics endpoint (port 29000).
+//! Serves `GET /metrics` (Prometheus text format).
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{atomic::AtomicUsize, Arc},
     time::Duration,
 };
 
@@ -12,13 +11,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use super::{
-    metrics::UPKEEP_INTERVAL_SECS,
-    metrics_ws::{handler, registry::WatchRegistry},
-};
-
-/// Default maximum concurrent WebSocket connections on the metrics endpoint.
-pub const DEFAULT_MAX_WS_CONNECTIONS: usize = 32;
+use super::metrics::UPKEEP_INTERVAL_SECS;
 
 #[derive(Clone)]
 struct MetricsState {
@@ -41,7 +34,7 @@ async fn bind_metrics_listener(addr: SocketAddr) -> Result<tokio::net::TcpListen
         .map_err(|e| format!("failed to bind metrics server on {addr}: {e}"))
 }
 
-/// Start the metrics HTTP/WS server. Binds eagerly so callers fail fast on
+/// Start the metrics HTTP server. Binds eagerly so callers fail fast on
 /// port conflicts or bad addresses.
 #[expect(
     clippy::expect_used,
@@ -51,8 +44,6 @@ pub async fn start_metrics_server(
     handle: PrometheusHandle,
     host: String,
     port: u16,
-    watch_registry: Arc<WatchRegistry>,
-    max_ws_connections: usize,
 ) -> JoinHandle<()> {
     let ip_addr: IpAddr = host.parse().unwrap_or_else(|e| {
         error!("Failed to parse metrics host '{host}': {e}, falling back to 0.0.0.0");
@@ -64,7 +55,7 @@ pub async fn start_metrics_server(
         .await
         .expect("metrics server bind failed");
 
-    info!("Metrics server listening on {addr} (/metrics + /ws/metrics)");
+    info!("Metrics server listening on {addr} (/metrics)");
 
     // Spawn upkeep task — required by install_recorder() for histogram maintenance.
     let upkeep_handle = handle.clone();
@@ -80,18 +71,8 @@ pub async fn start_metrics_server(
     });
 
     let prom_state = MetricsState { handle };
-    let ws_state = handler::MetricsWsState {
-        registry: watch_registry,
-        max_connections: max_ws_connections,
-        active_connections: Arc::new(AtomicUsize::new(0)),
-    };
 
-    let app = Router::new()
-        .route("/metrics", get(prometheus_handler).with_state(prom_state))
-        .route(
-            "/ws/metrics",
-            get(handler::ws_metrics_handler).with_state(ws_state),
-        );
+    let app = Router::new().route("/metrics", get(prometheus_handler).with_state(prom_state));
 
     #[expect(
         clippy::disallowed_methods,
