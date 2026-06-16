@@ -57,6 +57,8 @@ jobs:
           cargo bench --bench radix_tree_benchmark -- benchmark_summary 2>&1 | tee benchmark_output.txt
 
       - name: Run throughput benchmark (synthetic)
+        # Heavy throughput sweep OOM-kills the CPU runner on PRs; run on main/nightly only.
+        if: github.event_name != 'pull_request'
         timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
@@ -68,6 +70,7 @@ jobs:
             --sweep-steps 20 2>&1 | tee throughput_output.txt
 
       - name: Download Mooncake traces
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p "$GITHUB_WORKSPACE/traces"
           for trace in conversation_trace synthetic_trace toolagent_trace; do
@@ -77,6 +80,7 @@ jobs:
           done
 
       - name: Run throughput benchmark (Mooncake traces)
+        if: github.event_name != 'pull_request'
         timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
