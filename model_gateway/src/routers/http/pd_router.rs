@@ -1575,8 +1575,13 @@ mod tests {
             headers: None,
         };
 
+        let load_guards = vec![
+            WorkerLoadGuard::new(prefill.clone(), None),
+            WorkerLoadGuard::new(decode.clone(), None),
+        ];
+
         let response = router
-            .handle_decode_error_response(decode_response, &context, prefill, decode)
+            .handle_decode_error_response(decode_response, &context, decode, load_guards)
             .await;
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
