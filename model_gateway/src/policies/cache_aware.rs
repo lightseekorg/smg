@@ -59,8 +59,8 @@ use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::{
-    get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
-    LoadBalancingPolicy, SelectWorkerInfo,
+    normalize_model_key, utils::PeriodicTask, CacheAwareConfig, LoadBalancingPolicy,
+    SelectWorkerInfo,
 };
 use crate::{
     mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
@@ -275,7 +275,18 @@ impl CacheAwarePolicy {
     /// - **count spread**: request-count dispersion (abs AND rel) over healthy
     ///   workers. Always evaluated, so high-count / low-KV imbalance is still
     ///   caught when KV looks even.
-    fn is_imbalanced(&self, workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> bool {
+    /// Whether to abandon cache affinity for shortest-queue because the pool is
+    /// imbalanced — by backend KV usage (overload ceiling or hot-vs-cool spread)
+    /// or by request-count spread. `min_load`/`max_load` are the request-count
+    /// bounds over the healthy workers, which `select_worker` gathers in its
+    /// single worker pass (tests use the `imbalanced` helper to fold them).
+    fn is_imbalanced(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        healthy_indices: &[usize],
+        min_load: usize,
+        max_load: usize,
+    ) -> bool {
         // KV-based triggers — need a load snapshot; both default 1.0 = disabled.
         if let Some((min_usage, max_usage)) =
             self.backend_token_usage_bounds(workers, healthy_indices)
@@ -291,14 +302,6 @@ impl CacheAwarePolicy {
         }
 
         // Count spread (abs AND rel) over healthy workers.
-        let (min_load, max_load) =
-            healthy_indices
-                .iter()
-                .fold((usize::MAX, 0usize), |(min, max), &idx| {
-                    let load = workers[idx].load();
-                    (min.min(load), max.max(load))
-                });
-        let min_load = if min_load == usize::MAX { 0 } else { min_load };
         max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
             && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold)
     }
@@ -470,7 +473,7 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         info: &SelectWorkerInfo,
-        healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         // Log load balancing trigger (only compute worker loads if debug enabled)
@@ -480,11 +483,10 @@ impl CacheAwarePolicy {
             debug!("Load balancing triggered | workers: {:?}", worker_loads);
         }
 
-        // Use shortest queue when imbalanced
-        let min_load_idx = healthy_indices
-            .iter()
-            .min_by_key(|&&idx| (workers[idx].load(), workers[idx].processed_requests(), idx))
-            .copied()?;
+        // Shortest queue when imbalanced. The min-load index is gathered upstream
+        // in select_worker with the (load, processed_requests, idx) tie-break
+        // from #1714 (spreads load when decode outpaces prefill).
+        let min_load_idx = min_load_idx?;
 
         let worker_url = workers[min_load_idx].url();
 
@@ -767,20 +769,50 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
     fn select_worker(&self, workers: &[Arc<dyn Worker>], info: &SelectWorkerInfo) -> Option<usize> {
         let request_text = info.request_text;
         let request_tokens = info.tokens;
-        let healthy_indices = get_healthy_worker_indices(workers);
+
+        // Single O(workers) gather: read each worker once via routing_state()
+        // (status + load + processed under one ArcSwap guard), replacing the
+        // former separate passes whose per-worker guard traffic dominated routing
+        // CPU at scale. Collects healthy indices, load min/max, and the min-load
+        // index; cache-hit tenant lookup is a hash-free scan over healthy_indices.
+        let mut healthy_indices: Vec<usize> = Vec::with_capacity(workers.len());
+        let mut min_load = usize::MAX;
+        let mut max_load = 0usize;
+        // Min-load worker, (load, processed_requests, idx) tie-break (#1714);
+        // `processed` rides the same guard as `load`, so it is free here.
+        let mut min_key: Option<(usize, usize, usize)> = None;
+        let mut min_load_idx: Option<usize> = None;
+        for (idx, worker) in workers.iter().enumerate() {
+            let state = worker.routing_state();
+            if state.healthy && state.can_execute {
+                healthy_indices.push(idx);
+                min_load = min_load.min(state.load);
+                max_load = max_load.max(state.load);
+                let key = (state.load, state.processed, idx);
+                match min_key {
+                    Some(best) if key >= best => {}
+                    _ => {
+                        min_key = Some(key);
+                        min_load_idx = Some(idx);
+                    }
+                }
+            }
+        }
 
         if healthy_indices.is_empty() {
             return None;
         }
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
 
         // Determine the model for this set of workers (router pre-filters by model)
         // All workers should be from the same model
         let model_id = normalize_model_key(workers[healthy_indices[0]].model_id());
 
         // Abandon cache affinity for shortest-queue when the pool is imbalanced —
-        // by request count, or (for long-context workloads) by backend KV usage.
-        if self.is_imbalanced(workers, &healthy_indices) {
-            return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
+        // by request count (using the loads already gathered above), or (for
+        // long-context workloads) by backend KV usage.
+        if self.is_imbalanced(workers, &healthy_indices, min_load, max_load) {
+            return self.select_worker_min_load(workers, info, min_load_idx, model_id);
         }
 
         // Cache-aware routing when balanced — three types (mutually exclusive):
@@ -789,13 +821,25 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
             if self.has_event_indexer(model_id) {
-                self.select_worker_event_driven(workers, tokens, &healthy_indices, model_id)
+                self.select_worker_event_driven(
+                    workers,
+                    tokens,
+                    &healthy_indices,
+                    min_load_idx,
+                    model_id,
+                )
             } else {
-                self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
+                self.select_worker_with_tokens(
+                    workers,
+                    tokens,
+                    &healthy_indices,
+                    min_load_idx,
+                    model_id,
+                )
             }
         } else {
             let text = request_text.unwrap_or("");
-            self.select_worker_with_text(workers, text, &healthy_indices, model_id)
+            self.select_worker_with_text(workers, text, &healthy_indices, min_load_idx, model_id)
         }
     }
 
@@ -848,6 +892,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let guard = self.kv_monitor.read();
@@ -865,11 +910,8 @@ impl CacheAwarePolicy {
             return Some(idx);
         }
 
-        // No cache overlap — min-load fallback (no token tree involved)
-        let min_idx = healthy_indices
-            .iter()
-            .min_by_key(|&&idx| (workers[idx].load(), workers[idx].processed_requests(), idx))
-            .copied()?;
+        // No cache overlap — min-load fallback (min-load index gathered upstream)
+        let min_idx = min_load_idx?;
         debug!(
             worker = workers[min_idx].url(),
             model_id, "Event-driven routing: no overlap, min-load fallback"
@@ -946,6 +988,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let tree = self
@@ -974,18 +1017,16 @@ impl CacheAwarePolicy {
                 };
 
                 selected_idx = if match_rate > self.config.cache_threshold {
+                    // Cache hit: scan healthy_indices for the tenant (hash-free;
+                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
+                    // a CB-tripped tenant falls through to min-load (intended).
                     let tenant_url: &str = &result.tenant;
-                    workers
-                        .iter()
-                        .position(|w| w.url() == tenant_url)
-                        .filter(|&idx| workers[idx].is_healthy())
-                } else {
                     healthy_indices
                         .iter()
-                        .min_by_key(|&&idx| {
-                            (workers[idx].load(), workers[idx].processed_requests(), idx)
-                        })
                         .copied()
+                        .find(|&idx| workers[idx].url() == tenant_url)
+                } else {
+                    min_load_idx
                 };
 
                 // Insert for the selected worker (None => no insert, exactly
@@ -1037,6 +1078,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         text: &str,
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let tree = self
@@ -1058,18 +1100,16 @@ impl CacheAwarePolicy {
                 };
 
                 selected_idx = if match_rate > self.config.cache_threshold {
+                    // Cache hit: scan healthy_indices for the tenant (hash-free;
+                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
+                    // a CB-tripped tenant falls through to min-load (intended).
                     let tenant_url: &str = &result.tenant;
-                    workers
-                        .iter()
-                        .position(|w| w.url() == tenant_url)
-                        .filter(|&idx| workers[idx].is_healthy())
-                } else {
                     healthy_indices
                         .iter()
-                        .min_by_key(|&&idx| {
-                            (workers[idx].load(), workers[idx].processed_requests(), idx)
-                        })
                         .copied()
+                        .find(|&idx| workers[idx].url() == tenant_url)
+                } else {
+                    min_load_idx
                 };
 
                 // Insert for the selected worker (None => no insert, exactly
@@ -1302,6 +1342,21 @@ mod tests {
         (0..workers.len()).collect()
     }
 
+    /// Run the imbalance check the way `select_worker` does: fold the request-count
+    /// bounds over the healthy workers (production gathers them in one pass), then
+    /// call `is_imbalanced`.
+    fn imbalanced(policy: &CacheAwarePolicy, workers: &[Arc<dyn Worker>]) -> bool {
+        let healthy = all_healthy(workers);
+        let (min_load, max_load) = healthy
+            .iter()
+            .fold((usize::MAX, 0usize), |(min, max), &idx| {
+                let load = workers[idx].load();
+                (min.min(load), max.max(load))
+            });
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
+        policy.is_imbalanced(workers, &healthy, min_load, max_load)
+    }
+
     #[test]
     fn is_imbalanced_uniform_high_kv_does_not_fire() {
         // All engines equally saturated: high utilization, zero spread.
@@ -1310,7 +1365,7 @@ mod tests {
         let _tx = inject_kv(&policy, &workers, &[0.9, 0.9, 0.9]);
         // max 0.9 < 0.95 ceiling, spread 0.0 < 0.3 → keep cache affinity.
         assert!(
-            !policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            !imbalanced(&policy, &workers),
             "uniform-high KV (no cooler home) must not abandon cache affinity"
         );
     }
@@ -1323,7 +1378,7 @@ mod tests {
         let _tx = inject_kv(&policy, &workers, &[0.9, 0.15, 0.15]);
         // spread 0.75 > 0.3 → spill toward a cooler engine.
         assert!(
-            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            imbalanced(&policy, &workers),
             "a hot engine with idle neighbors (large KV spread) must rebalance"
         );
     }
@@ -1336,7 +1391,7 @@ mod tests {
         let _tx = inject_kv(&policy, &workers, &[0.97, 0.80]);
         // spread 0.17 < 0.3 (balance quiet) but 0.97 > 0.95 ceiling → shed.
         assert!(
-            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            imbalanced(&policy, &workers),
             "a critically-saturated engine must shed even below the spread threshold"
         );
     }
@@ -1359,7 +1414,7 @@ mod tests {
         }
         // KV spread 0.0, max 0.3 → KV quiet; count 20 vs 0 → fire.
         assert!(
-            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            imbalanced(&policy, &workers),
             "count spread must still trigger when KV utilization looks even"
         );
     }
@@ -1376,7 +1431,7 @@ mod tests {
         let _tx = inject_kv(&policy, &workers, &[0.95, 0.05]);
         // ...is ignored at the 1.0 default; counts balanced → no rebalance.
         assert!(
-            !policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            !imbalanced(&policy, &workers),
             "default thresholds (1.0) must ignore KV usage entirely"
         );
     }

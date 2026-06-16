@@ -327,6 +327,20 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
         self.is_healthy() && self.circuit_breaker_can_execute()
     }
 
+    /// One-shot routing snapshot for the per-request O(workers) selection loops:
+    /// reads status, load and processed together so the hot path takes one
+    /// `ArcSwap` guard per backing cell per worker instead of one per accessor
+    /// (that guard traffic is a large share of routing CPU at scale). `BasicWorker`
+    /// overrides this to share the runtime guard.
+    fn routing_state(&self) -> RoutingState {
+        RoutingState {
+            healthy: self.is_healthy(),
+            can_execute: self.circuit_breaker_can_execute(),
+            load: self.load(),
+            processed: self.processed_requests(),
+        }
+    }
+
     /// Record the outcome of a request based on the HTTP status code.
     ///
     /// The worker decides whether the status is a CB failure using its
@@ -773,6 +787,19 @@ impl WorkerMetadata {
     }
 }
 
+/// One-shot routing snapshot — see [`Worker::routing_state`].
+#[derive(Clone, Copy, Debug)]
+pub struct RoutingState {
+    /// `status == Ready`.
+    pub healthy: bool,
+    /// Circuit breaker permits execution (closed or half-open).
+    pub can_execute: bool,
+    /// Active in-flight request count.
+    pub load: usize,
+    /// Lifetime processed-request count (min-load tie-break).
+    pub processed: usize,
+}
+
 /// Shared mutable worker state preserved across same-URL replacements.
 #[derive(Debug)]
 pub struct WorkerRuntime {
@@ -1103,6 +1130,19 @@ impl Worker for BasicWorker {
 
     fn circuit_breaker_can_execute(&self) -> bool {
         self.circuit_breaker.load().can_execute()
+    }
+
+    fn routing_state(&self) -> RoutingState {
+        // One runtime guard covers status + load + processed (all live in
+        // `self.runtime`); the circuit breaker is a separate ArcSwap, so it needs
+        // its own guard.
+        let rt = self.runtime.load();
+        RoutingState {
+            healthy: rt.status() == WorkerStatus::Ready,
+            can_execute: self.circuit_breaker.load().can_execute(),
+            load: rt.load(),
+            processed: rt.processed_requests(),
+        }
     }
 
     fn record_circuit_breaker_outcome(&self, success: bool) {
