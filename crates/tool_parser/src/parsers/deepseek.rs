@@ -187,7 +187,12 @@ impl ToolParser for DeepSeekParser {
             // No tool markers detected - return all buffered content as normal text
             // Strip out end tokens if present
             let mut normal_text = std::mem::take(&mut self.buffer);
-            for e_token in ["<｜tool▁calls▁end｜>", "```", "<｜tool▁call▁end｜>"] {
+            for e_token in [
+                "<｜tool▁calls▁end｜>",
+                "```",
+                "<｜tool▁call▁end｜>",
+                "<｜end▁of▁sentence｜>",
+            ] {
                 normal_text = normal_text.replace(e_token, "");
             }
             return Ok(StreamingParseResult {
@@ -243,9 +248,32 @@ impl ToolParser for DeepSeekParser {
                     .map(|s| s.as_str())
                     .unwrap_or("");
 
-                let argument_diff = func_args_raw
+                // Strip the closing markdown fence and end markers that may arrive in
+                // the same chunk as the final JSON bytes. The partial_tool_call_regex
+                // group 3 greedily captures everything after ```json, including the
+                // trailing ``` fence and any stacked end tokens. Use an iterative loop
+                // so markers in any order are all removed before the diff/completion
+                // checks (mirrors deepseek31.rs).
+                const END_MARKERS: [&str; 4] = [
+                    "```",
+                    "<｜end▁of▁sentence｜>",
+                    "<｜tool▁calls▁end｜>",
+                    "<｜tool▁call▁end｜>",
+                ];
+                let mut func_args_clean = func_args_raw.trim_end();
+                loop {
+                    let before = func_args_clean;
+                    for marker in END_MARKERS {
+                        func_args_clean = func_args_clean.trim_end_matches(marker).trim_end();
+                    }
+                    if func_args_clean == before {
+                        break;
+                    }
+                }
+
+                let argument_diff = func_args_clean
                     .strip_prefix(last_sent)
-                    .unwrap_or(func_args_raw);
+                    .unwrap_or(func_args_clean);
 
                 if !argument_diff.is_empty() {
                     calls.push(ToolCallItem {
@@ -259,9 +287,9 @@ impl ToolParser for DeepSeekParser {
                 }
 
                 // Check if JSON is complete
-                if helpers::is_complete_json(func_args_raw) {
+                if helpers::is_complete_json(func_args_clean) {
                     // Update the stored arguments
-                    if let Ok(parsed_args) = serde_json::from_str::<Value>(func_args_raw) {
+                    if let Ok(parsed_args) = serde_json::from_str::<Value>(func_args_clean) {
                         let tool_id = self.current_tool_id as usize;
                         if tool_id < self.prev_tool_call_arr.len() {
                             if let Some(obj) = self.prev_tool_call_arr[tool_id].as_object_mut() {

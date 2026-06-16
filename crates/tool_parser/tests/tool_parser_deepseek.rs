@@ -139,6 +139,95 @@ async fn test_deepseek_malformed_json_handling() {
 }
 
 #[tokio::test]
+async fn test_deepseek_streaming_final_chunk_strips_fence_and_markers() {
+    // Regression: when the closing ```` ``` ```` fence and end tokens arrive in the
+    // same chunk as the final JSON bytes, the greedy partial regex captures them into
+    // the arguments group. They must be stripped before the diff/completion checks,
+    // otherwise the fence/markers get streamed as argument content and
+    // is_complete_json never returns true (the tool call never completes).
+    let tools = create_test_tools();
+    let mut parser = DeepSeekParser::new();
+
+    // First chunk: emit through the function name so the args stream begins.
+    parser
+        .parse_incremental(
+            "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n",
+            &tools,
+        )
+        .await
+        .unwrap();
+
+    // Final chunk: complete JSON immediately followed by the closing fence and end markers.
+    let final_chunk =
+        "{\"location\": \"Tokyo\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>";
+    let result = parser.parse_incremental(final_chunk, &tools).await.unwrap();
+
+    // Accumulate every argument delta streamed on the final chunk.
+    let streamed_args: String = result
+        .calls
+        .iter()
+        .filter(|c| c.name.is_none())
+        .map(|c| c.parameters.as_str())
+        .collect();
+
+    // No fence or end-marker bytes may leak into streamed argument content.
+    assert!(
+        !streamed_args.contains("```"),
+        "streamed args leaked the closing fence: {streamed_args:?}"
+    );
+    assert!(
+        !streamed_args.contains('｜'),
+        "streamed args leaked an end marker: {streamed_args:?}"
+    );
+
+    // The streamed arguments must be exactly the clean JSON object and parse cleanly.
+    assert_eq!(streamed_args, r#"{"location": "Tokyo"}"#);
+    let parsed: serde_json::Value = serde_json::from_str(&streamed_args).unwrap();
+    assert_eq!(parsed["location"], "Tokyo");
+
+    // The tool call must complete on this final chunk: the parser advances to the next
+    // tool and consumes the finished call from its buffer. A following second tool call
+    // is therefore parsed as a new tool (index 1) with its own clean name and args -
+    // which only happens if the first call completed instead of staying open.
+    let second = parser
+        .parse_incremental(
+            "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"location\": \"Paris\"}\n```<｜tool▁call▁end｜>",
+            &tools,
+        )
+        .await
+        .unwrap();
+    assert!(
+        second
+            .calls
+            .iter()
+            .any(|c| c.name.as_deref() == Some("get_weather") && c.tool_index == 1),
+        "second tool call not started as a new tool: {:?}",
+        second.calls
+    );
+}
+
+#[tokio::test]
+async fn test_deepseek_streaming_normal_text_strips_end_of_sentence() {
+    // Regression: streamed normal text (no tool call) must strip the end-of-sentence
+    // marker, matching deepseek31 — otherwise it leaks into client-visible content.
+    let tools = create_test_tools();
+    let mut parser = DeepSeekParser::new();
+
+    let result = parser
+        .parse_incremental("All done.<｜end▁of▁sentence｜>", &tools)
+        .await
+        .unwrap();
+
+    assert!(
+        !result.normal_text.contains('｜'),
+        "end-of-sentence marker leaked into normal text: {:?}",
+        result.normal_text
+    );
+    assert_eq!(result.normal_text, "All done.");
+    assert!(result.calls.is_empty());
+}
+
+#[tokio::test]
 async fn test_multiple_tool_calls() {
     let parser = DeepSeekParser::new();
 
