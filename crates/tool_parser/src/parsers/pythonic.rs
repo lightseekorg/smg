@@ -220,20 +220,38 @@ impl ToolParser for PythonicParser {
     }
 }
 
-/// Find the matching closing bracket for the opening bracket at start position.
-/// Properly handles nested brackets.
+/// Find the matching closing bracket for the opening bracket at byte offset
+/// `start`. Returns the byte offset of the matching `]`.
+///
+/// Brackets inside string literals (single or double quoted, with `\` escapes)
+/// are ignored so that values like `"a]b"` do not close the call list early.
 fn find_matching_bracket(buffer: &str, start: usize) -> Option<usize> {
     let mut bracket_count = 0;
-    let chars: Vec<char> = buffer.chars().collect();
+    let mut string_delim: Option<char> = None;
+    let mut escaped = false;
 
-    for (i, &ch) in chars.iter().enumerate().skip(start) {
-        if ch == '[' {
-            bracket_count += 1;
-        } else if ch == ']' {
-            bracket_count -= 1;
-            if bracket_count == 0 {
-                return Some(i);
+    for (i, ch) in buffer.char_indices().filter(|&(i, _)| i >= start) {
+        if let Some(delim) = string_delim {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delim {
+                string_delim = None;
             }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => string_delim = Some(ch),
+            '[' => bracket_count += 1,
+            ']' => {
+                bracket_count -= 1;
+                if bracket_count == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
     None // No matching bracket found
