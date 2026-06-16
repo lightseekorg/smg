@@ -325,6 +325,10 @@ impl TrtllmServiceClient {
     /// - temperature: 1.0 (neutral sampling)
     /// - top_p: 1.0 (no nucleus filtering)
     /// - repetition_penalty: 1.0 (no penalty)
+    #[expect(
+        deprecated,
+        reason = "ChatCompletionRequest.seed is marked Legacy by openai-protocol, but TRT-LLM still honors it"
+    )]
     fn build_sampling_config_from_chat(request: &ChatCompletionRequest) -> proto::SamplingConfig {
         proto::SamplingConfig {
             beam_width: 1,
@@ -334,9 +338,9 @@ impl TrtllmServiceClient {
             top_p_min: None,
             top_p_reset_ids: None,
             top_p_decay: None,
-            seed: None,
+            seed: request.seed.map(|s| s as u64),
             temperature: Some(request.temperature.unwrap_or(1.0)),
-            min_tokens: None,
+            min_tokens: request.min_tokens,
             beam_search_diversity_rate: None,
             repetition_penalty: Some(request.repetition_penalty.unwrap_or(1.0)),
             presence_penalty: request.presence_penalty,
@@ -939,5 +943,31 @@ mod tests {
             proto::guided_decoding_params::GuideType::JsonSchema as i32
         );
         assert_eq!(guided.guide, r#"{"type": "object"}"#);
+    }
+
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "ChatCompletionRequest.seed is marked Legacy by openai-protocol, but TRT-LLM still honors it"
+    )]
+    fn test_chat_sampling_config_min_tokens_and_seed_are_passed_through() {
+        // Regression guard: build_sampling_config_from_chat() previously
+        // hardcoded min_tokens and seed to None, silently dropping min-token
+        // enforcement on every chat completion and breaking reproducibility
+        // (seed) at temperature>0.
+        let request = ChatCompletionRequest {
+            min_tokens: Some(5),
+            seed: Some(42),
+            ..Default::default()
+        };
+        let config = TrtllmServiceClient::build_sampling_config_from_chat(&request);
+        assert_eq!(config.min_tokens, Some(5));
+        assert_eq!(config.seed, Some(42));
+
+        // Neither set → both stay None.
+        let unset = ChatCompletionRequest::default();
+        let unset_config = TrtllmServiceClient::build_sampling_config_from_chat(&unset);
+        assert_eq!(unset_config.min_tokens, None);
+        assert_eq!(unset_config.seed, None);
     }
 }

@@ -297,6 +297,7 @@ impl SglangSchedulerClient {
             presence_penalty: request.presence_penalty.unwrap_or(0.0),
             repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
             max_new_tokens,
+            min_new_tokens: request.min_tokens.unwrap_or(0),
             stop: stop_sequences,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
             skip_special_tokens,
@@ -927,4 +928,25 @@ mod tests {
     }
 
     // TODO: ModelInfo not in current proto - skip test
+
+    #[test]
+    fn test_chat_sampling_params_min_tokens_is_passed_through() {
+        // Regression guard: build_grpc_sampling_params_from_chat() previously
+        // omitted min_new_tokens, so `..Default::default()` left it at 0 and
+        // min-token enforcement was silently dropped on every chat completion.
+        let request = ChatCompletionRequest {
+            min_tokens: Some(5),
+            ..Default::default()
+        };
+        let params = SglangSchedulerClient::build_grpc_sampling_params_from_chat(&request, None)
+            .expect("build sampling params");
+        assert_eq!(params.min_new_tokens, 5);
+
+        // No min_tokens → proto field stays at 0 (no floor).
+        let unset = ChatCompletionRequest::default();
+        let unset_params =
+            SglangSchedulerClient::build_grpc_sampling_params_from_chat(&unset, None)
+                .expect("build sampling params");
+        assert_eq!(unset_params.min_new_tokens, 0);
+    }
 }

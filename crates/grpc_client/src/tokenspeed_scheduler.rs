@@ -339,6 +339,7 @@ impl TokenSpeedSchedulerClient {
             presence_penalty: Some(request.presence_penalty.unwrap_or(0.0)),
             repetition_penalty: Some(request.repetition_penalty.unwrap_or(1.0)),
             max_new_tokens: request.max_completion_tokens,
+            min_new_tokens: request.min_tokens.unwrap_or(0),
             stop: stop_sequences,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
             skip_special_tokens: true,
@@ -694,5 +695,30 @@ impl From<tokenspeed_proto::GetLoadsResponse> for openai_protocol::worker::Worke
             dp_rank_count: resp.dp_rank_count,
             loads: resp.loads.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_sampling_params_min_tokens_is_passed_through() {
+        // Regression guard: build_sampling_params_from_chat() previously
+        // omitted min_new_tokens, so `..Default::default()` left it at 0 and
+        // min-token enforcement was silently dropped on every chat completion.
+        let request = ChatCompletionRequest {
+            min_tokens: Some(5),
+            ..Default::default()
+        };
+        let params = TokenSpeedSchedulerClient::build_sampling_params_from_chat(&request, None)
+            .expect("build sampling params");
+        assert_eq!(params.min_new_tokens, 5);
+
+        // No min_tokens → proto field stays at 0 (no floor).
+        let unset = ChatCompletionRequest::default();
+        let unset_params = TokenSpeedSchedulerClient::build_sampling_params_from_chat(&unset, None)
+            .expect("build sampling params");
+        assert_eq!(unset_params.min_new_tokens, 0);
     }
 }

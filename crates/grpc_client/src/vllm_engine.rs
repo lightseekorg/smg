@@ -257,6 +257,7 @@ impl VllmEngineClient {
             presence_penalty: request.presence_penalty.unwrap_or(0.0),
             repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
             max_tokens,
+            min_tokens: request.min_tokens.unwrap_or(0),
             stop: stop_sequences,
             stop_token_ids: request.stop_token_ids.clone().unwrap_or_default(),
             skip_special_tokens,
@@ -951,6 +952,26 @@ mod tests {
             VllmEngineClient::build_grpc_sampling_params_from_responses(&disabled, None)
                 .expect("build sampling params");
         assert_eq!(disabled_params.top_k, 0);
+    }
+
+    #[test]
+    fn test_chat_sampling_params_min_tokens_is_passed_through() {
+        // Regression guard: build_grpc_sampling_params_from_chat() previously
+        // omitted min_tokens, so `..Default::default()` left it at 0 and
+        // min-token enforcement was silently dropped on every chat completion.
+        let request = ChatCompletionRequest {
+            min_tokens: Some(5),
+            ..Default::default()
+        };
+        let params = VllmEngineClient::build_grpc_sampling_params_from_chat(&request, None)
+            .expect("build sampling params");
+        assert_eq!(params.min_tokens, 5);
+
+        // No min_tokens → proto field stays at 0 (no floor).
+        let unset = ChatCompletionRequest::default();
+        let unset_params = VllmEngineClient::build_grpc_sampling_params_from_chat(&unset, None)
+            .expect("build sampling params");
+        assert_eq!(unset_params.min_tokens, 0);
     }
 
     #[test]
