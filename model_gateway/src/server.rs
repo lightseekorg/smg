@@ -1366,7 +1366,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
     let inflight_tracker = app_context.inflight_tracker.clone();
-    let drain_timeout = Duration::from_secs(config.shutdown_grace_period_secs);
+    let grace = Duration::from_secs(config.shutdown_grace_period_secs);
+    // Keep accepting for a short settle window before gating, so requests still
+    // routed here during load-balancer / EndpointSlice propagation lag are
+    // served instead of connection-refused — readiness already reports 503 by
+    // then (#1694), so the orchestrator is removing this endpoint meanwhile.
+    // Carved out of the grace budget (never more than half, capped at 5s — the
+    // per-worker `drain_settle_secs` default) so total shutdown stays within
+    // `shutdown_grace_period_secs` and never overruns terminationGracePeriod.
+    let settle = (grace / 2).min(Duration::from_secs(5));
+    let drain_timeout = grace.saturating_sub(settle);
     #[expect(
         clippy::disallowed_methods,
         reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
@@ -1374,12 +1383,21 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     spawn(async move {
         shutdown_signal().await;
 
-        // Phase 1: Gate — stop accepting new connections, mark as draining
+        // Phase 1: Flip readiness to 503, hold the listener open through the
+        // settle window so propagation-lagged requests still land, then gate
+        // new connections.
         info!(
             in_flight = inflight_tracker.len(),
-            "Beginning graceful shutdown: gating new connections"
+            "Beginning graceful shutdown: readiness draining"
         );
         inflight_tracker.begin_drain();
+        if !settle.is_zero() {
+            info!(
+                settle_secs = settle.as_secs(),
+                "Keeping listener open during load-balancer propagation window"
+            );
+            tokio::time::sleep(settle).await;
+        }
         handle_clone.graceful_shutdown(Some(drain_timeout));
 
         // Phase 2: Drain — wait for in-flight requests to complete
