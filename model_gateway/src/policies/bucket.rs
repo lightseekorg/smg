@@ -258,7 +258,19 @@ impl LoadBalancingPolicy for BucketPolicy {
             prefill_url
         };
 
-        workers.iter().position(|w| w.url() == prefill_url)
+        // The chosen URL comes from the bucket's stored set, which can drift
+        // from the live healthy slice under worker churn. If it is gone, fall
+        // back to a healthy worker rather than failing the request.
+        workers
+            .iter()
+            .position(|w| w.url() == prefill_url)
+            .or_else(|| {
+                warn!(
+                    "Selected prefill worker {} not in healthy set, falling back",
+                    prefill_url
+                );
+                healthy_indices.first().copied()
+            })
     }
 
     fn name(&self) -> &'static str {
@@ -357,14 +369,16 @@ impl Bucket {
         let boundary = match self.l_max.checked_div(worker_cnt) {
             None => Vec::new(),
             Some(gap) => {
-                self.l_max = usize::MAX;
+                // Last bucket is an open-ended catch-all. Use a local bound so
+                // `self.l_max` stays the gap source and re-init is idempotent.
+                let last_max = usize::MAX;
                 prefill_worker_urls
                     .iter()
                     .enumerate()
                     .map(|(i, url)| {
                         let min = i * gap;
                         let max = if i == worker_cnt - 1 {
-                            self.l_max
+                            last_max
                         } else {
                             (i + 1) * gap - 1
                         };
@@ -1322,5 +1336,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Re-init must be idempotent: `update_policies` calls
+    /// `init_prefill_worker_urls` on every worker-registration event, so a
+    /// second init with the same workers must reproduce the same boundaries.
+    /// Regression for `self.l_max` being overwritten to `usize::MAX` on the
+    /// first init, which corrupted the gap (`usize::MAX / N`) on every re-init.
+    #[test]
+    fn test_init_prefill_worker_urls_is_idempotent() {
+        let policy = BucketPolicy::with_config(BucketConfig::default());
+        let prefill_workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("test_api_key")
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("test_api_key")
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w3:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("test_api_key")
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+        ];
+
+        // 4096 / 3 = 1365 gap => [0, 1364] [1365, 2729] [2730, MAX].
+        let expected = vec![[0, 1364], [1365, 2729], [2730, usize::MAX]];
+
+        // Wildcard workers (no model set) normalize to UNKNOWN_MODEL_ID.
+        let model_key = normalize_model_key(prefill_workers[0].model_id());
+        let read_state = || {
+            let bucket = policy
+                .buckets
+                .get(model_key)
+                .map(|entry| entry.value().clone())
+                .expect("bucket should exist after init");
+            let guard = bucket.read();
+            let ranges: Vec<[usize; 2]> = guard.boundary.iter().map(|b| b.range).collect();
+            (guard.l_max, ranges)
+        };
+
+        policy.init_prefill_worker_urls(&prefill_workers);
+        let (l_max_first, ranges_first) = read_state();
+        assert_eq!(l_max_first, 4096, "l_max must not be mutated by init");
+        assert_eq!(ranges_first, expected);
+
+        // Re-init with the same workers (mirrors a re-registration event).
+        policy.init_prefill_worker_urls(&prefill_workers);
+        let (l_max_second, ranges_second) = read_state();
+        assert_eq!(l_max_second, 4096, "l_max must stay 4096 across re-init");
+        assert_eq!(
+            ranges_second, expected,
+            "boundaries must be unchanged after re-init"
+        );
+    }
+
+    /// `select_worker` must not fail a request when the bucket-chosen URL maps
+    /// to a worker that is absent from the live healthy slice while OTHER
+    /// healthy workers remain. Regression for `position(...)` returning `None`
+    /// (request failure) instead of falling back to a healthy worker.
+    #[tokio::test]
+    async fn test_select_worker_falls_back_when_mapped_url_absent() {
+        let policy = BucketPolicy::with_config(BucketConfig::default());
+
+        let make = |url: &str| -> Arc<dyn Worker> {
+            Arc::new(
+                BasicWorkerBuilder::new(url)
+                    .worker_type(WorkerType::Regular)
+                    .api_key("test_api_key")
+                    .health_config(no_health_check())
+                    .build(),
+            )
+        };
+
+        // Bucket boundaries are built for all three workers, so a small request
+        // maps to w1 (boundary[0]).
+        let all_workers: Vec<Arc<dyn Worker>> = vec![
+            make("http://w1:8000"),
+            make("http://w2:8000"),
+            make("http://w3:8000"),
+        ];
+        policy.init_prefill_worker_urls(&all_workers);
+
+        // Live slice excludes w1: the mapped URL is absent but w2/w3 are healthy.
+        let live_workers: Vec<Arc<dyn Worker>> =
+            vec![Arc::clone(&all_workers[1]), Arc::clone(&all_workers[2])];
+
+        let idx = policy.select_worker(
+            &live_workers,
+            &SelectWorkerInfo {
+                request_text: Some("short"),
+                ..Default::default()
+            },
+        );
+
+        let idx = idx.expect("must fall back to a healthy worker, not fail the request");
+        assert!(
+            idx < live_workers.len(),
+            "fallback index must be within the live worker slice"
+        );
+        assert!(
+            live_workers[idx].is_healthy(),
+            "fallback must select a healthy worker"
+        );
     }
 }
