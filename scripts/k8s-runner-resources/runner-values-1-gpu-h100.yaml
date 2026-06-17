@@ -144,12 +144,18 @@ template:
         securityContext:
           privileged: true
         resources:
+          # genai-bench (and any `docker run` workload) executes inside this dind
+          # cgroup, whose memory limit also caps the page cache for reading the
+          # multi-GB CUDA/torch image. At 4Gi a cold image read thrashes (constant
+          # reclaim + re-read), ballooning container startup to minutes and
+          # tripping the benchmark suite's 480s watchdog. Size for driver RSS +
+          # image page cache; the H100 nodes have ample RAM.
           limits:
-            cpu: '2'
-            memory: 4Gi
+            cpu: '8'
+            memory: 32Gi
           requests:
-            cpu: '1'
-            memory: 2Gi
+            cpu: '4'
+            memory: 8Gi
         startupProbe:
           exec:
             command:
