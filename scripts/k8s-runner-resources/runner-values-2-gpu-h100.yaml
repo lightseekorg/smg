@@ -6,7 +6,7 @@ githubConfigUrl: "https://github.com/lightseekorg/smg"
 githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
-minRunners: 2
+minRunners: 4
 maxRunners: 8
 
 ## name of the runner scale set to create.  Defaults to the helm release name
@@ -19,6 +19,12 @@ keyVault: {}
 template:
   spec:
     terminationGracePeriodSeconds: 600
+
+    # Schedule runner pods with Volcano so the binpack plugin consolidates GPU
+    # runners onto fewer H100 nodes. The bin-packing weights live in the cluster
+    # scheduler config: volcano-system/volcano-scheduler-configmap
+    # (see volcano-scheduler-configmap.yaml in this directory).
+    schedulerName: volcano
 
     # hostNetwork puts the runner in the host netns so PD disaggregation KV
     # transfer (NIXL/Mooncake) sees the host's populated RoCE GID tables. An
@@ -38,28 +44,21 @@ template:
         value: "true"
         effect: "NoSchedule"
 
-    # With hostNetwork the pod shares the host port space, so spread 2-gpu PD
-    # runners one-per-node to avoid host-port collisions between concurrent PD
-    # jobs (replaces the previous GPU bin-packing podAffinity).
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                  - key: actions.github.com/scale-set-name
-                    operator: In
-                    values:
-                      - 2-gpu-h100
-              topologyKey: kubernetes.io/hostname
+    # Pod affinity/anti-affinity intentionally omitted: GPU placement is now
+    # driven by the Volcano binpack plugin. NOTE: 2-gpu PD runners use
+    # hostNetwork and may bind fixed host ports; previously a podAntiAffinity
+    # spread them one-per-node to avoid host-port collisions between concurrent
+    # PD jobs. Under binpack they can be packed onto the same node — watch for
+    # host-port collisions, or re-add a podAntiAffinity for this scale set if
+    # they recur.
 
     volumes:
       - name: work
         emptyDir: {}
       - name: model-cache
-        persistentVolumeClaim:
-          claimName: model-cache
+        hostPath:
+          path: /raid/models
+          type: Directory
       - name: dshm
         emptyDir:
           medium: Memory
@@ -70,6 +69,10 @@ template:
         emptyDir: {}
       - name: docker-storage
         emptyDir: {}
+      - name: infiniband
+        hostPath:
+          path: /dev/infiniband
+          type: Directory
 
     containers:
       - name: runner
@@ -77,12 +80,12 @@ template:
         command:
           - /home/runner/run.sh
         securityContext:
-          # The runner runs as non-root (uid 1001), so capabilities.add:
-          # [IPC_LOCK] only reaches the bounding set (not effective) and the
-          # default 64KiB RLIMIT_MEMLOCK blocks RDMA completion-queue
-          # allocation (ibv_create_cq -> ENOMEM, e.g. sglang/Mooncake).
-          # privileged makes IPC_LOCK effective and lifts the memlock cap.
-          privileged: true
+          # Non-root runner (uid 1001) + IPC_LOCK lets RDMA pin completion-queue
+          # memory (ibv_create_cq) without granting full privileged.
+          privileged: false
+          capabilities:
+            add:
+              - IPC_LOCK
         env:
           - name: DOCKER_HOST
             value: unix:///var/run/docker.sock
@@ -118,8 +121,10 @@ template:
           requests:
             cpu: '32'
             memory: 128Gi
+            rdma/hca_shared_devices_a: '1'
           limits:
             nvidia.com/gpu: 2
+            rdma/hca_shared_devices_a: '1'
         volumeMounts:
           - name: model-cache
             mountPath: /models
@@ -131,6 +136,8 @@ template:
             mountPath: /var/run
           - name: docker-storage
             mountPath: /var/lib/docker
+          - name: infiniband
+            mountPath: /dev/infiniband
 
     initContainers:
       - name: init-dind-externals
