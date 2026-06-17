@@ -541,7 +541,11 @@ impl VisionPreProcessor for QwenVLProcessorBase {
 
         let mean = config.get_image_mean();
         let std = config.get_image_std();
-        let filter = pil_to_filter(config.resampling);
+        // Qwen2VL/Qwen3VL image processors default to BICUBIC (PIL resample=3)
+        // when the preprocessor config omits `resample`. The global pil_to_filter
+        // fallback is bilinear, which yields smoother features and measurably
+        // degrades VLM accuracy, so pin the HF-correct default here.
+        let filter = pil_to_filter(config.resampling.or(Some(3)));
 
         let patch_size = self.config.patch_size;
         let temporal_patch_size = self.config.temporal_patch_size;
@@ -637,7 +641,11 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         let item_sizes = vec![(w, h)];
         let mean = config.get_image_mean();
         let std = config.get_image_std();
-        let filter = pil_to_filter(config.resampling);
+        // Qwen2VL/Qwen3VL image processors default to BICUBIC (PIL resample=3)
+        // when the preprocessor config omits `resample`. The global pil_to_filter
+        // fallback is bilinear, which yields smoother features and measurably
+        // degrades VLM accuracy, so pin the HF-correct default here.
+        let filter = pil_to_filter(config.resampling.or(Some(3)));
 
         let temporal_patch_size = self.config.temporal_patch_size;
         let padded_frames = frames.len().div_ceil(temporal_patch_size) * temporal_patch_size;
@@ -745,7 +753,11 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         let item_sizes = vec![(w, h)];
         let mean = config.get_image_mean();
         let std = config.get_image_std();
-        let filter = pil_to_filter(config.resampling);
+        // Qwen2VL/Qwen3VL image processors default to BICUBIC (PIL resample=3)
+        // when the preprocessor config omits `resample`. The global pil_to_filter
+        // fallback is bilinear, which yields smoother features and measurably
+        // degrades VLM accuracy, so pin the HF-correct default here.
+        let filter = pil_to_filter(config.resampling.or(Some(3)));
 
         let temporal_patch_size = self.config.temporal_patch_size;
         let padded_frames = frames.len().div_ceil(temporal_patch_size) * temporal_patch_size;
