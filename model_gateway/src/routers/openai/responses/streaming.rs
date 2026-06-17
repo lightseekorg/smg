@@ -211,7 +211,7 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
 }
 
 /// Send an SSE event to the client channel
-/// Returns false if client disconnected
+/// Returns false if the client disconnected
 #[inline]
 fn send_sse_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -221,7 +221,14 @@ fn send_sse_event(
 ) -> bool {
     match enc.encode_event(event_name, data) {
         Ok(bytes) => tx.send(Ok(bytes)).is_ok(),
-        Err(_) => false,
+        Err(e) => {
+            // Unreachable in practice (static event name + Value); fall back to
+            // manual framing like send_final_response_event rather than treating
+            // an encode error as a client disconnect.
+            warn!("failed to encode SSE event '{event_name}', falling back: {e}");
+            let block = format!("event: {event_name}\ndata: {data}\n\n");
+            tx.send(Ok(Bytes::from(block))).is_ok()
+        }
     }
 }
 
