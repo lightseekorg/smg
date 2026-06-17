@@ -3,10 +3,11 @@
 # checkpoint/sampling. Track B of docs/proposals/2026-06-10-bfcl-nightly-parser-
 # verification.md. Informational/non-blocking — never a merge gate.
 #
-# Runs nightly (full non-live set) and, on PRs that touch this pipeline, a quick
-# non-live sanity subset for merge confidence. The A/B mechanics were validated
-# manually on an H100 box (see scripts/bfcl/README.md "Validation status"); the
-# PR trigger doubles as the live-CI-runner shakeout.
+# Runs nightly over non_live + live + multi_turn (static, reproducible; excludes
+# the agentic/executable categories that need web-search/memory/sandbox infra).
+# On PRs that touch this pipeline it runs a quick non-live sanity subset for
+# merge confidence. The A/B mechanics were validated manually on an H100 box
+# (see scripts/bfcl/README.md "Validation status").
 name: Nightly BFCL
 
 on:
@@ -32,7 +33,7 @@ on:
       categories:
         description: "Comma-separated BFCL test categories"
         required: false
-        default: "simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance"
+        default: "simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance,live_simple,live_multiple,live_parallel,live_parallel_multiple,live_irrelevance,live_relevance,multi_turn_base,multi_turn_miss_func,multi_turn_miss_param,multi_turn_long_context"
       vllm_tool_parser:
         description: "pure-vLLM --tool-call-parser"
         required: false
@@ -94,7 +95,9 @@ jobs:
     needs: build-wheel
     if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
     runs-on: 4-gpu-h100 # TP=2 per arm, both arms concurrent (GPUs 0,1 + 2,3)
-    timeout-minutes: 120
+    # Generous: the nightly set adds multi_turn (multi-turn state simulation),
+    # which is much slower than the single-turn AST/live categories.
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
@@ -102,8 +105,8 @@ jobs:
       HF_HOME: /models
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
       BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3.6-27B-FC' }}
-      # PR = quick non-live sanity subset; schedule/dispatch = full non-live set.
-      CATEGORIES: ${{ github.event.inputs.categories || (github.event_name == 'pull_request' && 'simple_python,irrelevance' || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance') }}
+      # PR = quick non-live sanity subset; schedule/dispatch = non_live + live + multi_turn.
+      CATEGORIES: ${{ github.event.inputs.categories || (github.event_name == 'pull_request' && 'simple_python,irrelevance' || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance,live_simple,live_multiple,live_parallel,live_parallel_multiple,live_irrelevance,live_relevance,multi_turn_base,multi_turn_miss_func,multi_turn_miss_param,multi_turn_long_context') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
