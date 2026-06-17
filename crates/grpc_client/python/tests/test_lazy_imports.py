@@ -48,3 +48,10 @@ def test_unknown_attribute_raises_attribute_error(monkeypatch, tmp_path):
         assert "not_a_generated_module" in str(exc)
     else:
         raise AssertionError("expected AttributeError")
+
+
+def test_dir_contains_generated_modules(monkeypatch, tmp_path):
+    smg_grpc_proto = _import_proto_package(monkeypatch, tmp_path)
+    attrs = dir(smg_grpc_proto)
+    for module_name in smg_grpc_proto._GENERATED_MODULES:
+        assert module_name in attrs
