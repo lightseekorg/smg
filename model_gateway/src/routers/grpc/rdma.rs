@@ -10,7 +10,8 @@
 //!
 //! v2 (pre-registered pool): one host-DRAM arena is registered with NIXL ONCE at
 //! init and sub-divided into fixed slots. Per image the hot path only LEASES a free
-//! slot, memcpy's the pixels in, and ships `[slot_addr u64 LE][port u16 LE][ip utf8]`
+//! slot, frames the pixels as `[gen u64][pixels][gen u64]`, and ships
+//! `[slot_addr u64 LE][gen u64 LE][port u16 LE][ip utf8]`
 //! -- NO per-image register_memory and NO growing agent metadata. The worker fetches
 //! the gateway's (now fixed) metadata ONCE, then READs slot offsets into its own
 //! pre-registered landing pool. The transfer notif is tagged with the bootstrap_room;
@@ -18,6 +19,7 @@
 //! lost-notif net). This removes the v1 per-image control+registration overhead that
 //! made the RDMA path slower than inline.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -46,6 +48,19 @@ const REAPER_TICK: Duration = Duration::from_millis(20);
 /// image's bf16 pixel buffer (~10 MiB at 1080p, ~40 MiB at 4k -> raise SLOT_BYTES).
 const DEFAULT_POOL_SLOTS: usize = 64;
 const DEFAULT_SLOT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Per-lease generation framing. Each leased slot is written as
+/// `[gen u64 LE][payload][gen u64 LE]` and the descriptor carries the same `gen`, so
+/// the worker can detect a slot it READ after the gateway recycled and reused it (the
+/// residual the TTL widening still leaves if the TTL is ever misconfigured / the two
+/// sides' env drift): a recycled slot carries a strictly newer gen than the worker's
+/// descriptor, and a READ torn by a concurrent reuse sees header != trailer. Both are
+/// caught by requiring `header == trailer == descriptor.gen`, which makes correctness
+/// independent of the TTL value (TTL stays purely a capacity knob). Worker-side parse
+/// mirrors this in grpc_servicer encoder_servicer.py (`GEN`/`FRAME`).
+const GEN_BYTES: usize = 8;
+/// Header + trailer generation stamps bracketing the payload.
+const FRAME_OVERHEAD: usize = 2 * GEN_BYTES;
 
 /// Read a seconds-valued env knob, falling back to `default`.
 fn env_secs(key: &str, default: u64) -> u64 {
@@ -139,6 +154,10 @@ struct SlotPool {
     free: Mutex<Vec<u32>>,
     /// Leased slots keyed by bootstrap_room (free-on-notif + TTL reclaim).
     occupied: DashMap<i64, OccSlot>,
+    /// Monotonic per-lease generation stamp (see GEN_BYTES). Starts at 1 so the
+    /// zero-initialized arena (a never-written slot reads gen 0) can never match a
+    /// real descriptor's gen.
+    gen: AtomicU64,
 }
 
 impl SlotPool {
@@ -149,31 +168,45 @@ impl SlotPool {
             n_slots,
             free: Mutex::new((0..n_slots as u32).collect()),
             occupied: DashMap::new(),
+            gen: AtomicU64::new(1),
         }
     }
 
-    /// Lease a free slot for `room`, copy `bytes` into it, and record the lease at
-    /// `now`. Returns `(slot, slot_addr)`, or `None` if the image exceeds `slot_bytes`
-    /// or no slot is free (caller -> inline). Recording the lease here (rather than in
-    /// the caller) keeps the slot and its TTL timestamp atomic w.r.t. the write.
-    fn lease_and_write(&self, room: i64, bytes: &[u8], now: Instant) -> Option<(u32, u64)> {
-        if bytes.len() > self.slot_bytes {
+    /// Lease a free slot for `room`, frame `bytes` as `[gen][payload][gen]` into it, and
+    /// record the lease at `now`. Returns `(slot, slot_addr, gen)`, or `None` if the
+    /// framed image exceeds `slot_bytes` or no slot is free (caller -> inline). Recording
+    /// the lease here (rather than in the caller) keeps the slot and its TTL timestamp
+    /// atomic w.r.t. the write. `gen` is shipped in the descriptor and re-checked by the
+    /// worker against the slot's stamps to reject a recycled/torn READ.
+    fn lease_and_write(&self, room: i64, bytes: &[u8], now: Instant) -> Option<(u32, u64, u64)> {
+        // Reserve room for the generation stamps bracketing the payload.
+        if bytes.len() + FRAME_OVERHEAD > self.slot_bytes {
             return None;
         }
         let slot = self.free.lock().pop()?;
         let addr = self.base + slot as usize * self.slot_bytes;
+        // A fresh, monotonically increasing stamp for THIS lease; a later lease of the
+        // same slot gets a strictly larger gen. Relaxed is fine: we only need
+        // uniqueness, and the cross-process happens-before is the descriptor ship.
+        let gen = self.gen.fetch_add(1, Ordering::Relaxed);
+        let gen_le = gen.to_le_bytes();
         // SAFETY: `slot` is exclusively leased (popped from `free`, returned only via
-        // free_room); [addr, addr+len) is within the arena (len <= slot_bytes) and
-        // disjoint from every other leased slot; the worker reads it only after we
-        // ship the descriptor below, and the TTL keeps it leased past the worker's
-        // max READ window. The arena is raw, leaked memory (no aliasing typed
-        // reference). So there is no data race and no overlap.
+        // free_room); [addr, addr + FRAME_OVERHEAD + len) is within the arena
+        // (len + FRAME_OVERHEAD <= slot_bytes) and disjoint from every other leased
+        // slot; the worker reads it only after we ship the descriptor below, and the
+        // TTL keeps it leased past the worker's max READ window. The arena is raw,
+        // leaked memory (no aliasing typed reference). So there is no data race and no
+        // overlap. Write the header gen FIRST and the trailer gen LAST so a racing
+        // reuse is visible at one stamp or the other (seqlock framing).
         #[allow(unsafe_code)]
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len());
+            let p = addr as *mut u8;
+            std::ptr::copy_nonoverlapping(gen_le.as_ptr(), p, GEN_BYTES);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(GEN_BYTES), bytes.len());
+            std::ptr::copy_nonoverlapping(gen_le.as_ptr(), p.add(GEN_BYTES + bytes.len()), GEN_BYTES);
         }
         self.occupied.insert(room, OccSlot { slot, at: now });
-        Some((slot, addr as u64))
+        Some((slot, addr as u64, gen))
     }
 
     /// Return the slot leased for `room` to the free list (idempotent).
@@ -399,9 +432,10 @@ fn spawn_reaper() {
 
 /// Stage `bytes` (the serialized pixel buffer for one image) into a pre-registered
 /// arena slot keyed by `room` (its bootstrap_room), and return the wire descriptor
-/// for the puller: `[slot_addr u64 LE][port u16 LE][listener_ip utf8]`. The worker
-/// fetches the gateway's (fixed) metadata once, connects to the listener (ip:port),
-/// then READs `nbytes` (the proto field) from `slot_addr`. The slot is returned to
+/// for the puller: `[slot_addr u64 LE][gen u64 LE][port u16 LE][listener_ip utf8]`. The
+/// worker fetches the gateway's (fixed) metadata once, connects to the listener
+/// (ip:port), then READs `nbytes + FRAME_OVERHEAD` (the gen-framed payload) from
+/// `slot_addr` and re-checks the stamps against `gen`. The slot is returned to
 /// the free list on the worker's free-notif or the TTL. On any failure (no listener
 /// IP, NIXL init, oversized image, or no free slot) returns `Err(bytes)` so the
 /// caller re-attaches them as the inline payload (no behaviour change).
@@ -413,15 +447,16 @@ pub(crate) fn export_pixel_buffer(room: i64, bytes: Vec<u8>) -> Result<Vec<u8>, 
     let Some(arena) = arena() else {
         return Err(bytes);
     };
-    let Some((slot, addr)) = arena.pool.lease_and_write(room, &bytes, Instant::now()) else {
+    let Some((slot, addr, gen)) = arena.pool.lease_and_write(room, &bytes, Instant::now()) else {
         // Image too big for a slot, or the pool is momentarily exhausted.
         return Err(bytes);
     };
 
     let ip = gw_listen_ip().as_bytes();
     let port = gw_listen_port();
-    let mut descriptor = Vec::with_capacity(10 + ip.len());
+    let mut descriptor = Vec::with_capacity(8 + GEN_BYTES + 2 + ip.len());
     descriptor.extend_from_slice(&addr.to_le_bytes());
+    descriptor.extend_from_slice(&gen.to_le_bytes());
     descriptor.extend_from_slice(&port.to_le_bytes());
     descriptor.extend_from_slice(ip);
     debug!(
@@ -465,7 +500,7 @@ mod tests {
         let pool = test_pool(1, 64);
         let t0 = Instant::now();
         let img_a = b"AAAAAAAAAAAAAAAA";
-        let (_slot_a, addr_a) = pool.lease_and_write(1, img_a, t0).expect("lease A");
+        let (_slot_a, addr_a, _gen_a) = pool.lease_and_write(1, img_a, t0).expect("lease A");
 
         // Worker has NOT issued its READ yet (e.g. parked on landing-ring backpressure).
         // The reaper runs with a 30s TTL after 31s -> reclaims the still-referenced slot.
@@ -474,16 +509,69 @@ mod tests {
 
         // The next image re-leases the freed slot -> same physical address.
         let img_b = b"BBBBBBBBBBBBBBBB";
-        let (_slot_b, addr_b) = pool
+        let (_slot_b, addr_b, _gen_b) = pool
             .lease_and_write(2, img_b, t0 + Duration::from_secs(31))
             .expect("lease B");
         assert_eq!(addr_a, addr_b, "freed slot's address is reused");
 
-        // The late READ for room 1 reads addr_a, which now holds room 2's pixels.
+        // The late READ for room 1 reads addr_a, whose payload (at +GEN_BYTES) now holds
+        // room 2's pixels. The TTL no longer protects this; the gen stamps do (next test).
         assert_eq!(
-            bytes_at(addr_a, img_b.len()),
+            bytes_at(addr_a + GEN_BYTES as u64, img_b.len()),
             img_b,
-            "stale READ returns the WRONG image (silent cross-wire)"
+            "stale READ returns the WRONG image's payload (physical cross-wire remains)"
+        );
+    }
+
+    /// The gen guard: a recycled slot carries a fresh gen, so a worker validating the
+    /// slot's header/trailer stamps against its (older) descriptor gen detects the
+    /// cross-wire and fails the room -- independent of the TTL value.
+    #[test]
+    fn gen_guard_detects_recycled_slot() {
+        let pool = test_pool(1, 64);
+        let t0 = Instant::now();
+        let img_a = b"AAAAAAAA";
+        let (_a, addr_a, gen_a) = pool.lease_and_write(1, img_a, t0).expect("lease A");
+
+        // Recycle under a too-short TTL (the residual the gen guard backstops).
+        pool.reap_stale(t0 + Duration::from_secs(31), Duration::from_secs(30));
+        let img_b = b"BBBBBBBB";
+        let (_b, addr_b, gen_b) = pool
+            .lease_and_write(2, img_b, t0 + Duration::from_secs(31))
+            .expect("lease B");
+        assert_eq!(addr_a, addr_b, "slot address is physically reused");
+        assert_ne!(gen_a, gen_b, "each lease gets a fresh, larger generation");
+
+        // The slot's header+trailer stamps now read gen_b. A worker holding room 1's
+        // descriptor (gen_a) compares against these and sees a mismatch -> reject.
+        let hdr = u64::from_le_bytes(bytes_at(addr_a, GEN_BYTES).try_into().unwrap());
+        let trl = u64::from_le_bytes(
+            bytes_at(addr_a + (GEN_BYTES + img_b.len()) as u64, GEN_BYTES)
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(hdr, gen_b);
+        assert_eq!(trl, gen_b);
+        assert_ne!(hdr, gen_a, "stamp != descriptor gen -> worker fails the room");
+    }
+
+    /// A normal lease frames the payload as `[gen][payload][gen]` with both stamps equal
+    /// to the returned (and shipped-in-descriptor) gen.
+    #[test]
+    fn gen_framing_brackets_the_payload() {
+        let pool = test_pool(1, 64);
+        let t0 = Instant::now();
+        let (_s, addr, gen) = pool.lease_and_write(7, b"PIXELS!!", t0).expect("lease");
+        assert_eq!(
+            u64::from_le_bytes(bytes_at(addr, GEN_BYTES).try_into().unwrap()),
+            gen,
+            "header stamp == gen"
+        );
+        assert_eq!(bytes_at(addr + GEN_BYTES as u64, 8), b"PIXELS!!", "payload");
+        assert_eq!(
+            u64::from_le_bytes(bytes_at(addr + (GEN_BYTES + 8) as u64, GEN_BYTES).try_into().unwrap()),
+            gen,
+            "trailer stamp == gen"
         );
     }
 
@@ -507,7 +595,8 @@ mod tests {
     fn derived_ttl_keeps_slot_through_worker_hold() {
         let pool = test_pool(1, 64);
         let t0 = Instant::now();
-        let (_slot_a, addr_a) = pool.lease_and_write(1, b"AAAAAAAAAAAAAAAA", t0).expect("lease A");
+        let (_slot_a, addr_a, _gen_a) =
+            pool.lease_and_write(1, b"AAAAAAAAAAAAAAAA", t0).expect("lease A");
 
         let freed = pool.reap_stale(t0 + worker_max_hold(), slot_ttl());
         assert_eq!(freed, 0, "derived TTL must not reclaim within the worker hold");
@@ -519,9 +608,9 @@ mod tests {
             "leased slot is not handed to a second image"
         );
         assert_eq!(
-            bytes_at(addr_a, 16),
+            bytes_at(addr_a + GEN_BYTES as u64, 16),
             b"AAAAAAAAAAAAAAAA",
-            "the slot still holds room 1's pixels for its READ"
+            "the slot still holds room 1's pixels (payload at +GEN_BYTES) for its READ"
         );
     }
 
@@ -531,14 +620,14 @@ mod tests {
     fn multi_slot_addresses_recycle_after_reclaim() {
         let pool = test_pool(2, 64);
         let t0 = Instant::now();
-        let (_a, addr_a) = pool.lease_and_write(1, b"A", t0).unwrap();
-        let (_b, addr_b) = pool.lease_and_write(2, b"B", t0).unwrap();
+        let (_a, addr_a, _ga) = pool.lease_and_write(1, b"A", t0).unwrap();
+        let (_b, addr_b, _gb) = pool.lease_and_write(2, b"B", t0).unwrap();
         assert_ne!(addr_a, addr_b, "distinct leases get distinct addresses");
 
         let freed = pool.reap_stale(t0 + Duration::from_secs(31), Duration::from_secs(30));
         assert_eq!(freed, 2);
 
-        let (_c, addr_c) = pool
+        let (_c, addr_c, _gc) = pool
             .lease_and_write(3, b"C", t0 + Duration::from_secs(31))
             .unwrap();
         assert!(
@@ -551,13 +640,15 @@ mod tests {
     /// the slot for reuse.
     #[test]
     fn oversize_rejected_and_free_returns_slot() {
-        let pool = test_pool(1, 8);
+        // Slot holds FRAME_OVERHEAD (16) of gen stamps + payload, so 24 bytes => 8 of
+        // usable payload.
+        let pool = test_pool(1, FRAME_OVERHEAD + 8);
         let t0 = Instant::now();
         assert!(
             pool.lease_and_write(1, &[0u8; 9], t0).is_none(),
-            "image larger than a slot is rejected"
+            "payload + gen frame larger than a slot is rejected"
         );
-        let (_s, _addr) = pool.lease_and_write(1, &[1u8; 8], t0).expect("fits exactly");
+        let (_s, _addr, _g) = pool.lease_and_write(1, &[1u8; 8], t0).expect("fits exactly");
         assert!(
             pool.lease_and_write(2, &[2u8; 8], t0).is_none(),
             "pool now full"

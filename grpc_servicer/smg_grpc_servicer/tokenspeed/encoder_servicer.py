@@ -194,20 +194,29 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         agent = self._nixl_agent
         if self._landing_free is None:
             raise RuntimeError("EPD RDMA: remote payload but landing pool unavailable")
+        # Descriptor wire format (gateway rdma.rs export_pixel_buffer):
+        #   [slot_addr u64 LE][gen u64 LE][port u16 LE][ip utf8]
+        # The slot itself is framed [gen u64][payload nbytes][gen u64]; nbytes is the
+        # PAYLOAD size (proto field), so we READ nbytes + _FRAME and re-check both gen
+        # stamps against the descriptor's gen to reject a recycled/torn slot.
+        _GEN = 8  # must match rdma.rs GEN_BYTES
+        _FRAME = 2 * _GEN  # must match rdma.rs FRAME_OVERHEAD
         desc = bytes(td.remote.descriptor)
         nbytes = int(td.remote.nbytes)
-        if len(desc) < 10:
+        if len(desc) < 8 + _GEN + 2:
             raise ValueError("remote descriptor too short")
         remote_addr = int.from_bytes(desc[:8], "little")
-        port = int.from_bytes(desc[8:10], "little")
-        ip = desc[10:].decode()
+        expected_gen = int.from_bytes(desc[8 : 8 + _GEN], "little")
+        port = int.from_bytes(desc[8 + _GEN : 10 + _GEN], "little")
+        ip = desc[10 + _GEN :].decode()
         gw_name = "smg-gateway-encode"
-        if nbytes > self._landing_slot_bytes:
+        if nbytes + _FRAME > self._landing_slot_bytes:
             raise ValueError(
-                f"remote pixel {nbytes}B exceeds landing slot {self._landing_slot_bytes}B"
+                f"remote pixel {nbytes}B (+{_FRAME}B gen frame) exceeds landing slot "
+                f"{self._landing_slot_bytes}B"
             )
 
-        remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
+        remote = agent.get_xfer_descs([(remote_addr, nbytes + _FRAME, 0)], "DRAM")
         self._ensure_remote_ready(gw_name, ip, port, remote, room)
 
         # Lease a slot with patient, VISIBLE backpressure. Failing here aborts a
@@ -239,7 +248,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         try:
             off = slot * self._landing_slot_bytes
             laddr = self._landing_base + off
-            local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
+            local = agent.get_xfer_descs([(laddr, nbytes + _FRAME, 0)], "DRAM")
             h = agent.initialize_xfer("READ", local, remote, gw_name, str(room).encode())
             read_deadline = time.monotonic() + float(
                 os.environ.get("SMG_RDMA_READ_TIMEOUT_S", 60)
@@ -273,9 +282,27 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                     f"remote pixel size mismatch: nbytes={nbytes} expected={expected} "
                     f"(shape={shape} dtype={td.dtype})"
                 )
+            # Validate the generation stamps bracketing the payload. A slot the gateway
+            # recycled (TTL misconfig / env drift between the two sides) or a READ torn
+            # by a concurrent reuse leaves header/trailer != the descriptor's gen; fail
+            # the room (the request aborts and the gateway re-attaches inline on retry)
+            # rather than feed another image's pixels to the ViT. Correctness here does
+            # not depend on the TTL value -- the stamps catch any aliased READ.
+            hdr = int.from_bytes(self._landing_np[off : off + _GEN].tobytes(), "little")
+            trl = int.from_bytes(
+                self._landing_np[off + _GEN + nbytes : off + _FRAME + nbytes].tobytes(),
+                "little",
+            )
+            if hdr != expected_gen or trl != expected_gen:
+                raise ValueError(
+                    f"EPD RDMA: slot generation mismatch room={room} "
+                    f"expected={expected_gen} header={hdr} trailer={trl} "
+                    f"(slot recycled/torn under a live READ -> wrong-image guard)"
+                )
             # Reinterpret the slot bytes as the tensor; copy OUT (clone/.to) before
-            # the finally returns the slot, since the slot is then reused.
-            slot_np = self._landing_np[off : off + nbytes]
+            # the finally returns the slot, since the slot is then reused. Payload sits
+            # between the gen stamps (offset +_GEN).
+            slot_np = self._landing_np[off + _GEN : off + _GEN + nbytes]
             if td.dtype == "bfloat16":
                 t = torch.from_numpy(
                     slot_np.view(np.uint16).reshape(shape)
