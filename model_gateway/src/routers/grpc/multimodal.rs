@@ -39,7 +39,7 @@ use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
     proto_wrapper::{
-        tokenspeed_shm_transport_enabled_for_bytes, write_tokenspeed_shm_with,
+        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode, write_tokenspeed_shm_with,
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
         TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
     },
@@ -1060,6 +1060,9 @@ fn assemble_tokenspeed(
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
+    // Resolve the multimodal tensor transport once per request: `shm` always on,
+    // `auto` only when the worker is local (shares /dev/shm), otherwise inline.
+    let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
     let patch_offsets = intermediate
@@ -1084,8 +1087,11 @@ fn assemble_tokenspeed(
                 item_index,
             )?;
             let encoder_input_started = Instant::now();
-            let encoder_input =
-                serialize_array_as_tokenspeed_tensor(&item_encoder_input, &encoder_input_dtype);
+            let encoder_input = serialize_array_as_tokenspeed_tensor(
+                &item_encoder_input,
+                &encoder_input_dtype,
+                shm_enabled,
+            );
             let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
             let model_specific_started = Instant::now();
             let model_specific_tensors = serialize_model_specific_for_item(
@@ -1134,7 +1140,7 @@ fn assemble_tokenspeed(
         );
     }
 
-    Ok(TokenSpeedMultimodalData { items })
+    Ok(TokenSpeedMultimodalData { items, shm_enabled })
 }
 
 fn precomputed_multimodal_item_count(
@@ -1348,6 +1354,7 @@ fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
 fn serialize_array_as_tokenspeed_tensor(
     encoder_input: &ArrayD<f32>,
     dtype: &str,
+    shm_enabled: bool,
 ) -> TokenSpeedTensor {
     let dtype = match canonical_float_dtype(dtype).as_deref() {
         Some("float32") => "float32".to_string(),
@@ -1369,7 +1376,7 @@ fn serialize_array_as_tokenspeed_tensor(
     };
     let nbytes = encoder_input.len() * element_size;
 
-    if tokenspeed_shm_transport_enabled_for_bytes(nbytes) {
+    if shm_enabled && nbytes >= tokenspeed_mm_shm_min_bytes() {
         let started = Instant::now();
         match write_tokenspeed_shm_with(nbytes, |file| {
             write_array_as_dtype(file, encoder_input, &dtype)
@@ -1607,6 +1614,57 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
         .get("multimodal_encoder_dtype")
         .filter(|dtype| !dtype.is_empty())
         .cloned()
+}
+
+/// Resolve whether large multimodal tensors should use the SHM transport for
+/// this request. `shm` = always (legacy explicit opt-in); `auto` = only when the
+/// worker is local and therefore shares SMG's `/dev/shm`; anything else
+/// (including unset or `inline`) keeps the inline gRPC path.
+fn resolve_tokenspeed_shm_enabled(workers: Option<&WorkerSelection>) -> bool {
+    match tokenspeed_mm_tensor_transport_mode().as_str() {
+        "shm" => true,
+        "auto" => worker_is_local(workers),
+        _ => false,
+    }
+}
+
+/// A worker is treated as "local" (assumed to share SMG's `/dev/shm`) when its
+/// gRPC URL targets a loopback host or a unix-domain socket. Conservative: an
+/// unknown worker is non-local so `auto` falls back to the safe inline path.
+fn worker_is_local(workers: Option<&WorkerSelection>) -> bool {
+    let worker = match workers {
+        Some(WorkerSelection::Single { worker }) => worker,
+        Some(WorkerSelection::Dual { prefill, .. }) => prefill,
+        None => return false,
+    };
+    url_is_loopback(worker.url())
+}
+
+fn url_is_loopback(url: &str) -> bool {
+    if url.starts_with("unix:") {
+        return true;
+    }
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        // IPv6 literal, e.g. [::1]:47165
+        stripped.split(']').next().unwrap_or(stripped)
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
+    }
+    .trim();
+    host == "localhost"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+        || host
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 fn canonical_float_dtype(dtype: &str) -> Option<String> {

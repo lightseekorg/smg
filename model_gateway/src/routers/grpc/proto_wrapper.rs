@@ -87,6 +87,10 @@ pub struct TrtllmMultimodalData {
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalData {
     pub items: Vec<TokenSpeedMultimodalItem>,
+    /// Resolved per-request decision: may large multimodal tensors use the SHM
+    /// transport? Computed upstream from the transport mode and (for `auto`)
+    /// worker locality, so `into_proto` does not re-read the environment.
+    pub shm_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -252,17 +256,18 @@ impl TrtllmMultimodalData {
 impl TokenSpeedMultimodalData {
     /// Convert to TokenSpeed proto MultimodalInputs.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
+        let shm_enabled = self.shm_enabled;
         let items = self
             .items
             .into_iter()
-            .map(TokenSpeedMultimodalItem::into_proto)
+            .map(|item| item.into_proto(shm_enabled))
             .collect();
         tokenspeed::MultimodalInputs { items }
     }
 }
 
 impl TokenSpeedMultimodalItem {
-    fn into_proto(self) -> tokenspeed::MultimodalItem {
+    fn into_proto(self, shm_enabled: bool) -> tokenspeed::MultimodalItem {
         let placeholders = self
             .mm_placeholders
             .into_iter()
@@ -272,7 +277,7 @@ impl TokenSpeedMultimodalItem {
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
-            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v)))
+            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled)))
             .collect::<HashMap<_, _>>();
 
         tokenspeed::MultimodalItem {
@@ -282,7 +287,7 @@ impl TokenSpeedMultimodalItem {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input)),
+            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled)),
             model_specific_tensors,
             placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -290,14 +295,14 @@ impl TokenSpeedMultimodalItem {
     }
 }
 
-fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor) -> tokenspeed::TensorData {
+fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tokenspeed::TensorData {
     let TokenSpeedTensor {
         storage,
         shape,
         dtype,
     } = value;
     let payload = match storage {
-        TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data),
+        TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data, shm_enabled),
         TokenSpeedTensorStorage::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
     };
 
@@ -308,23 +313,19 @@ fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor) -> tokenspeed::TensorData
     }
 }
 
-fn tensor_bytes_to_tokenspeed(value: TensorBytes) -> tokenspeed::TensorData {
+fn tensor_bytes_to_tokenspeed(value: TensorBytes, shm_enabled: bool) -> tokenspeed::TensorData {
     let TensorBytes { data, shape, dtype } = value;
 
     tokenspeed::TensorData {
         shape,
         dtype,
-        payload: Some(tokenspeed_tensor_payload(data)),
+        payload: Some(tokenspeed_tensor_payload(data, shm_enabled)),
     }
 }
 
-fn tokenspeed_tensor_payload(data: Vec<u8>) -> tokenspeed::tensor_data::Payload {
+fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::tensor_data::Payload {
     let log_timing = log_tokenspeed_mm_timing_enabled();
-    let mode = std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if mode != "shm" {
+    if !shm_enabled {
         if log_timing {
             tracing::info!(
                 nbytes = data.len(),
@@ -334,10 +335,7 @@ fn tokenspeed_tensor_payload(data: Vec<u8>) -> tokenspeed::tensor_data::Payload 
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
-    let min_bytes = std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(64 * 1024);
+    let min_bytes = tokenspeed_mm_shm_min_bytes();
     if data.len() < min_bytes {
         if log_timing {
             tracing::info!(
@@ -378,20 +376,30 @@ fn log_tokenspeed_mm_timing_enabled() -> bool {
         .unwrap_or(false)
 }
 
-pub fn tokenspeed_shm_transport_enabled_for_bytes(nbytes: usize) -> bool {
-    let mode = std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT")
+/// Multimodal tensor transport mode for the TokenSpeed backend.
+///
+/// This only governs multimodal tensor payloads (encoder inputs and
+/// model-specific tensors); prompt `input_ids` are always sent inline. The
+/// canonical env var is `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`; the legacy
+/// `SMG_TOKENSPEED_TENSOR_TRANSPORT` is still honored for backward
+/// compatibility.
+pub fn tokenspeed_mm_tensor_transport_mode() -> String {
+    std::env::var("SMG_TOKENSPEED_MM_TENSOR_TRANSPORT")
+        .or_else(|_| std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT"))
         .unwrap_or_default()
         .trim()
-        .to_ascii_lowercase();
-    if mode != "shm" {
-        return false;
-    }
+        .to_ascii_lowercase()
+}
 
-    let min_bytes = std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES")
+/// Minimum multimodal tensor size (bytes) before the SHM transport is used.
+/// Canonical env var `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`, with legacy fallback to
+/// `SMG_TOKENSPEED_SHM_MIN_BYTES`. Defaults to 64 KiB.
+pub fn tokenspeed_mm_shm_min_bytes() -> usize {
+    std::env::var("SMG_TOKENSPEED_MM_SHM_MIN_BYTES")
+        .or_else(|_| std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES"))
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(64 * 1024);
-    nbytes >= min_bytes
+        .unwrap_or(64 * 1024)
 }
 
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -400,6 +408,12 @@ fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
     write_tokenspeed_shm_with(data.len(), |file| file.write_all(data))
 }
 
+// TODO: pack all of a request's tensors (encoder_input + model_specific) into
+// ONE /dev/shm segment at running offsets instead of one file per tensor
+// (ShmHandle.offset already exists, always 0 here). Needs consumer
+// ShmTensorHandle offset support + a per-segment refcount so the segment is
+// unlinked exactly once after all its tensors are consumed. Cleanliness / fewer
+// files, not a measured speed win (tmpfs makes per-file syscalls negligible).
 pub fn write_tokenspeed_shm_with(
     nbytes: usize,
     write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> std::io::Result<()>,
@@ -1586,6 +1600,7 @@ mod tests {
                 mm_placeholders: vec![(4, 2)],
                 content_hash: vec![7; 32],
             }],
+            shm_enabled: false,
         }
         .into_proto();
 
@@ -1627,6 +1642,7 @@ mod tests {
                 mm_placeholders: vec![(4, 2)],
                 content_hash: vec![7; 32],
             }],
+            shm_enabled: false,
         }
         .into_proto();
 
@@ -1645,11 +1661,14 @@ mod tests {
 
     #[test]
     fn tokenspeed_tensor_data_uses_clean_payload_tags() {
-        let tensor = tensor_bytes_to_tokenspeed(TensorBytes {
-            data: vec![0xaa, 0xbb],
-            shape: vec![2, 3],
-            dtype: "uint32".to_string(),
-        });
+        let tensor = tensor_bytes_to_tokenspeed(
+            TensorBytes {
+                data: vec![0xaa, 0xbb],
+                shape: vec![2, 3],
+                dtype: "uint32".to_string(),
+            },
+            false,
+        );
 
         assert_eq!(
             tensor.encode_to_vec(),
@@ -1681,6 +1700,7 @@ mod tests {
                 mm_placeholders: vec![(4, 2)],
                 content_hash: vec![7; 32],
             }],
+            shm_enabled: true,
         }
         .into_proto();
 
