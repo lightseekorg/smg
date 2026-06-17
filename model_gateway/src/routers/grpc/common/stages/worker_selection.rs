@@ -295,8 +295,13 @@ impl WorkerSelectionStage {
             return None;
         }
 
-        // Select using policies
-        let policy = self.policy_registry.get_policy_or_default(model_id);
+        // Select prefill and decode independently via their per-role policies
+        // (`--prefill-policy` / `--decode-policy`), mirroring the HTTP PD router
+        // (routers/http/pd_router.rs). Each getter falls back to the main
+        // default policy when its role policy is unset, so the default (no
+        // per-role flag) keeps the prior single-default-policy behavior.
+        let prefill_policy = self.policy_registry.get_prefill_policy();
+        let decode_policy = self.policy_registry.get_decode_policy();
 
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
@@ -307,24 +312,24 @@ impl WorkerSelectionStage {
             headers,
             hash_ring,
         };
-        let prefill_idx = policy.select_worker(&available_prefill, &info)?;
-        let decode_idx = policy.select_worker(&available_decode, &info)?;
+        let prefill_idx = prefill_policy.select_worker(&available_prefill, &info)?;
+        let decode_idx = decode_policy.select_worker(&available_decode, &info)?;
 
         let model = model_id;
-        let policy_name = policy.name();
 
-        // Record worker selection metrics for both prefill and decode
+        // Record worker selection metrics for both prefill and decode, each
+        // tagged with the policy that actually picked it.
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,
             model,
-            policy_name,
+            prefill_policy.name(),
         );
         Metrics::record_worker_selection(
             metrics_labels::WORKER_DECODE,
             metrics_labels::CONNECTION_GRPC,
             model,
-            policy_name,
+            decode_policy.name(),
         );
 
         Some((
@@ -430,8 +435,12 @@ impl WorkerSelectionStage {
             return None;
         }
 
-        // Select using policies
-        let policy = self.policy_registry.get_policy_or_default(model_id);
+        // Select prefill and decode independently via their per-role policies
+        // (`--prefill-policy` / `--decode-policy`), mirroring select_pd_pair and
+        // the HTTP PD router. Each getter falls back to the main default policy
+        // when its role policy is unset, so the default keeps prior behavior.
+        let prefill_policy = self.policy_registry.get_prefill_policy();
+        let decode_policy = self.policy_registry.get_decode_policy();
 
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
@@ -444,24 +453,23 @@ impl WorkerSelectionStage {
         };
         // The encode pool is returned whole; the encode stage assigns items
         // across it per request. Only the prefill/decode pair is picked here.
-        let prefill_idx = policy.select_worker(&available_prefill, &info)?;
-        let decode_idx = policy.select_worker(&available_decode, &info)?;
-
-        let policy_name = policy.name();
+        let prefill_idx = prefill_policy.select_worker(&available_prefill, &info)?;
+        let decode_idx = decode_policy.select_worker(&available_decode, &info)?;
 
         // Record worker selection metrics for prefill and decode (the encode
-        // worker is picked per image round-robin later, in the encode stage).
+        // worker is picked per image round-robin later, in the encode stage),
+        // each tagged with the policy that picked it.
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,
             model_id,
-            policy_name,
+            prefill_policy.name(),
         );
         Metrics::record_worker_selection(
             metrics_labels::WORKER_DECODE,
             metrics_labels::CONNECTION_GRPC,
             model_id,
-            policy_name,
+            decode_policy.name(),
         );
 
         Some((
