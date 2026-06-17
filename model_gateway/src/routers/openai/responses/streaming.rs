@@ -221,9 +221,6 @@ fn send_sse_event(
 ) -> bool {
     match enc.encode_event(event_name, data) {
         Ok(bytes) => tx.send(Ok(bytes)).is_ok(),
-        // `event_name` is always a static constant and `data` is a JSON value,
-        // so encoding only fails in practice on an impossible serialization
-        // error; treat that as a fatal stream condition.
         Err(_) => false,
     }
 }
@@ -510,7 +507,8 @@ pub(super) fn send_final_response_event(
 
     match enc.encode_event(ResponseEvent::COMPLETED, &completed_payload) {
         Ok(bytes) => tx.send(Ok(bytes)).is_ok(),
-        Err(_) => {
+        Err(e) => {
+            warn!("failed to encode response.completed via SseEncoder, falling back: {e}");
             let completed_event = format!(
                 "event: {}\ndata: {}\n\n",
                 ResponseEvent::COMPLETED,
@@ -728,7 +726,6 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut mcp_list_tools_sent = false;
         let mut is_first_iteration = true;
         let mut sequence_number: u64 = 0;
-        // Reusable SSE encoder shared across every event emitted for this stream.
         let mut sse_encoder = SseEncoder::new();
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
