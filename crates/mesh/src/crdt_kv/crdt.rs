@@ -206,6 +206,19 @@ impl CrdtOrMap {
             .sum()
     }
 
+    /// Causally-stable tombstone GC: collect tombstones past `grace` whose
+    /// winning version `stable` confirms every live peer acked.
+    pub fn gc_stable_tombstones(
+        &self,
+        grace: Duration,
+        stable: &dyn Fn(&str, (u64, ReplicaId)) -> bool,
+    ) -> usize {
+        self.all_engines()
+            .iter()
+            .map(|e| e.gc_tombstones_where(grace, stable))
+            .sum()
+    }
+
     // ---- Replication ----
 
     /// Snapshot the operation log seen by gossip. Concatenates each engine's
