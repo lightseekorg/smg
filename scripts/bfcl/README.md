@@ -160,9 +160,3 @@ touch the pipeline run only a quick non-live sanity subset
 (`simple_python,irrelevance`); per-PR correctness is the cheap CPU Track-A
 parser-conformance gate (`crates/parser_conformance`). Scale to multiple runs ×
 the five target models for tight confidence intervals.
-
-**On the two "fixes" from the first cut:** neither `--enforce-eager` nor
-`HF_HUB_OFFLINE` is actually needed. The crash was a missing `ninja` (install it
-in the vLLM env + PATH → CUDA graphs work); the slowness was a transient
-unauthenticated-HF hiccup (cached + online runs at ~7 req/s). Both band-aids
-have been removed from the defaults.
