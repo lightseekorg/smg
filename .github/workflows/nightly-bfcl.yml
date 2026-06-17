@@ -137,8 +137,10 @@ jobs:
         run: |
           set -euo pipefail
           # TP=2 per arm: Arm A (pure vLLM) on GPUs 0,1; Arm B (SMG -> vLLM gRPC) on GPUs 2,3.
-          A_URL=$(BFCL_GPU=0,1 BFCL_ARM_A_PORT=31199 bash scripts/bfcl/launch_arm.sh a)
-          B_URL=$(BFCL_GPU=2,3 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 bash scripts/bfcl/launch_arm.sh b)
+          # Ports are left unset so launch_arm.sh picks free ones — lets two bfcl
+          # runners share a node (bin-packed, hostNetwork) without port collisions.
+          A_URL=$(BFCL_GPU=0,1 bash scripts/bfcl/launch_arm.sh a)
+          B_URL=$(BFCL_GPU=2,3 bash scripts/bfcl/launch_arm.sh b)
           echo "arm A: $A_URL   arm B: $B_URL"
           python scripts/bfcl/run_ab.py \
             --baseline  "vllm=$A_URL" \

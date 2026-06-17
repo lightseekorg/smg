@@ -41,10 +41,13 @@ SMG_REASONING_PARSER="${BFCL_SMG_REASONING_PARSER:-}"
 # more stable under sustained bfcl load on shared/contended GPUs.
 VLLM_EXTRA="${BFCL_VLLM_EXTRA:-}"
 
-# Ports (override to avoid collisions on a shared box).
-ARM_A_PORT="${BFCL_ARM_A_PORT:-31199}"          # pure-vLLM OpenAI port
-ARM_B_GRPC_PORT="${BFCL_ARM_B_GRPC_PORT:-50081}" # vLLM gRPC worker port
-ARM_B_GW_PORT="${BFCL_ARM_B_GW_PORT:-31200}"     # SMG OpenAI gateway port
+# Ports. Default to an OS-assigned free port (resolved per-arm in the case
+# below) so concurrent arms/jobs sharing a host — e.g. bin-packed CI runners
+# under hostNetwork — don't collide on a fixed port. Pin via env for a stable
+# port on a dev box.
+ARM_A_PORT="${BFCL_ARM_A_PORT:-}"          # pure-vLLM OpenAI port
+ARM_B_GRPC_PORT="${BFCL_ARM_B_GRPC_PORT:-}" # vLLM gRPC worker port
+ARM_B_GW_PORT="${BFCL_ARM_B_GW_PORT:-}"     # SMG OpenAI gateway port
 
 # Executables (override for venv / box paths).
 VLLM_BIN="${VLLM_BIN:-vllm}"                      # `vllm serve` console script
@@ -78,8 +81,13 @@ wait_grpc() {  # crude TCP-listen check for the gRPC port
   exec 3>&- 2>/dev/null || true
 }
 
+free_port() {  # OS-assigned free TCP port (same idiom as the e2e infra's get_open_port)
+  python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 case "$ARM" in
   a)
+    ARM_A_PORT="${ARM_A_PORT:-$(free_port)}"
     declare -a cmd=(
       CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_BIN" serve "$MODEL"
       --served-model-name "$MODEL"
@@ -97,6 +105,8 @@ case "$ARM" in
     ;;
 
   b)
+    ARM_B_GRPC_PORT="${ARM_B_GRPC_PORT:-$(free_port)}"
+    ARM_B_GW_PORT="${ARM_B_GW_PORT:-$(free_port)}"
     # 1) vLLM gRPC worker (raw-token; SMG will own template+parsing).
     declare -a wcmd=(
       CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server
