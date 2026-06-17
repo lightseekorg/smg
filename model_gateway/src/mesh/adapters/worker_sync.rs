@@ -38,7 +38,10 @@ use smg_mesh::{CrdtNamespace, WorkerState};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::worker::{event::WorkerEvent, registry::WorkerId, Worker, WorkerOrigin, WorkerRegistry};
+use crate::{
+    observability::metrics::Metrics,
+    worker::{event::WorkerEvent, registry::WorkerId, Worker, WorkerOrigin, WorkerRegistry},
+};
 
 const PREFIX: &str = "worker:";
 
@@ -153,14 +156,21 @@ impl WorkerSyncAdapter {
         self.backfill_keys(self.workers.keys(""));
     }
 
-    fn backfill_keys(&self, keys: impl IntoIterator<Item = String>) {
+    /// Returns how many keys this backfill actually changed in the registry
+    /// (recovered dropped puts / dropped updates to imports); converged keys
+    /// and ignored locally-owned echoes count as 0.
+    fn backfill_keys(&self, keys: impl IntoIterator<Item = String>) -> usize {
+        let mut changed = 0usize;
         for key in keys {
             let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
                 warn!(key, "worker: backfill yielded unexpected key shape");
                 continue;
             };
-            self.sync_key_from_store(&key, worker_id);
+            if self.sync_key_from_store(&key, worker_id) {
+                changed += 1;
+            }
         }
+        changed
     }
 
     /// One reconcile pass aligning the registry with the store. Subscription
@@ -170,18 +180,31 @@ impl WorkerSyncAdapter {
     /// cold-start merge burst larger than the channel — and missed
     /// tombstones. Missing-key handling runs before backfill so a same-URL
     /// key from another publisher can re-import in the same pass.
-    fn reconcile_once(&self) {
+    /// Returns the number of corrections applied, which is also published as
+    /// the `smg_mesh_worker_sync_drift` gauge.
+    fn reconcile_once(&self) -> usize {
         // Key-presence set: `keys()` avoids cloning every live value just
         // to test membership, and feeds the backfill below so the
         // namespace is scanned once per pass.
         let live: HashSet<String> = self.workers.keys("").into_iter().collect();
+        // Drift = the registry mutations this pass actually performs. Counting
+        // real mutations (rather than enumerating divergence cases) captures
+        // every dropped-notification recovery uniformly — a dropped put, a
+        // dropped health update to an existing import, an applied tombstone,
+        // a local re-assert — and never miscounts a no-op (e.g. a URL-deduped
+        // import or a converged key, which mutate nothing). Steady state is 0.
+        let mut corrections = 0usize;
         for (id, worker) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
             if !live.contains(&key) {
-                // Missing backing key: same handling as a live tombstone
-                // event — imports are removed, locally-owned state is
-                // re-asserted.
-                self.sync_key_from_store(&key, id.as_str());
+                // Registry has the worker, the store doesn't: re-publish a
+                // locally-owned one (foreign tombstone / lost publish) or
+                // remove a mesh import (a dropped tombstone now applied).
+                // Its key is absent from `live`, so backfill won't also see
+                // it — no double count.
+                if self.sync_key_from_store(&key, id.as_str()) {
+                    corrections += 1;
+                }
             } else if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
                 // Present but stale: with restart-stable ids, a prior
                 // incarnation's higher-timestamp ops can dominate the
@@ -192,10 +215,17 @@ impl WorkerSyncAdapter {
                 if !self.store_matches(&id, &state) {
                     warn!(worker_id = %id.as_str(), "re-asserting locally-owned state over stale store value");
                     self.on_worker_changed(id.as_str(), &state);
+                    corrections += 1;
                 }
             }
         }
-        self.backfill_keys(live);
+        // Live store keys: recovers dropped puts and dropped updates to
+        // existing imports (e.g. a missed health demotion). Each call reports
+        // whether it actually changed the registry; converged keys and
+        // ignored locally-owned echoes contribute 0.
+        corrections += self.backfill_keys(live);
+        Metrics::set_mesh_worker_drift(corrections);
+        corrections
     }
 
     /// Bring the registry in line with the store's current state for one
@@ -203,7 +233,10 @@ impl WorkerSyncAdapter {
     /// (tombstoned) one removes a mesh import, re-asserts a locally-owned
     /// worker's state, and ignores unknown ids. Tombstones resolve via the
     /// publisher's id, which the import adopted.
-    fn sync_key_from_store(&self, key: &str, worker_id: &str) {
+    /// Returns whether this call changed the registry (applied an update,
+    /// re-asserted a local worker, or removed an import) — `false` for a
+    /// no-op (already converged, ignored echo, or unknown tombstone).
+    fn sync_key_from_store(&self, key: &str, worker_id: &str) -> bool {
         match self.workers.get(key) {
             Some(bytes) => self.apply_incoming(worker_id, &bytes),
             None => {
@@ -215,26 +248,44 @@ impl WorkerSyncAdapter {
                 // stays delisted everywhere until its next status change.
                 if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
                     if let Some(worker) = self.worker_registry.get(&id) {
+                        // We still own this worker, so the missing key is a
+                        // foreign tombstone (or a lost publish) we overrule by
+                        // re-asserting — a refused tombstone.
+                        Metrics::record_mesh_worker_refused_tombstone();
                         warn!(
                             worker_id,
                             "re-publishing locally-owned worker after foreign tombstone"
                         );
                         self.on_worker_changed(worker_id, &worker_state_of(&id, &worker));
-                        return;
+                        return true;
                     }
                 }
                 match self.worker_registry.remove_remote(&id) {
-                    Some(_) => info!(worker_id, "removed worker on remote tombstone"),
-                    None => debug!(worker_id, "ignored tombstone (unknown id)"),
+                    Some(_) => {
+                        info!(worker_id, "removed worker on remote tombstone");
+                        true
+                    }
+                    // No-op tombstone: the id is already absent — most often
+                    // the echo of this node's own delete (origin cleared by
+                    // then), or a tombstone for a worker never imported here.
+                    // Not a refusal, so not counted.
+                    None => {
+                        debug!(worker_id, "ignored tombstone (unknown id)");
+                        false
+                    }
                 }
             }
         }
     }
 
-    fn apply_incoming(&self, worker_id: &str, bytes: &[u8]) {
+    /// Returns whether applying the state actually changed the registry.
+    fn apply_incoming(&self, worker_id: &str, bytes: &[u8]) -> bool {
         match bincode::deserialize::<WorkerState>(bytes) {
             Ok(state) => self.worker_registry.on_remote_worker_state(&state),
-            Err(err) => warn!(worker_id, %err, "failed to decode WorkerState"),
+            Err(err) => {
+                warn!(worker_id, %err, "failed to decode WorkerState");
+                false
+            }
         }
     }
 
@@ -387,6 +438,7 @@ impl WorkerSyncAdapter {
 fn worker_state_of(worker_id: &WorkerId, worker: &Arc<dyn Worker>) -> WorkerState {
     let spec = serde_json::to_vec(&worker.metadata().spec).unwrap_or_else(|err| {
         warn!(url = %worker.url(), %err, "failed to encode WorkerSpec; publishing without spec");
+        Metrics::record_mesh_worker_spec_fallback();
         Vec::new()
     });
     WorkerState {
@@ -716,17 +768,82 @@ mod tests {
             "worker:peer-w1",
             bincode::serialize(&sample_state("peer-w1", "http://remote:8080")).unwrap(),
         );
-        adapter.reconcile_once();
+        let drift = adapter.reconcile_once();
         assert!(
             registry.get_by_url("http://remote:8080").is_some(),
             "reconcile recovers a missed put"
         );
+        assert_eq!(drift, 1, "a recovered dropped put counts as drift");
 
         ns.delete("worker:peer-w1");
-        adapter.reconcile_once();
+        let drift = adapter.reconcile_once();
         assert!(
             registry.get_by_url("http://remote:8080").is_none(),
             "reconcile recovers a missed tombstone"
+        );
+        assert_eq!(drift, 1, "a recovered dropped tombstone counts as drift");
+
+        assert_eq!(adapter.reconcile_once(), 0, "converged: no drift");
+    }
+
+    #[tokio::test]
+    async fn reconcile_counts_dropped_update_to_existing_import() {
+        // A dropped health update to an already-imported mesh worker leaves
+        // the registry stale while the store holds the new value; reconcile
+        // re-applies it (a real mutation) and must count it as drift.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        ns.put(
+            "worker:peer-h",
+            bincode::serialize(&sample_state("peer-h", "http://remote:8080")).unwrap(),
+        );
+        assert_eq!(adapter.reconcile_once(), 1, "importing the worker is drift");
+
+        // Dropped demotion: store now carries health=false, registry is stale.
+        let demoted = WorkerState {
+            health: false,
+            ..sample_state("peer-h", "http://remote:8080")
+        };
+        ns.put("worker:peer-h", bincode::serialize(&demoted).unwrap());
+        assert_eq!(
+            adapter.reconcile_once(),
+            1,
+            "a recovered dropped update to an existing import counts as drift"
+        );
+        assert_eq!(adapter.reconcile_once(), 0, "converged: no drift");
+    }
+
+    #[tokio::test]
+    async fn reconcile_does_not_count_url_deduped_import_as_drift() {
+        // A remote shard whose URL the registry already holds (under a
+        // different, pre-reserved/local id) is the supported URL-dedup path,
+        // not a dropped put — its publisher key looks absent by id yet the
+        // worker is represented, so it must not inflate drift.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        // A local worker for the URL, with its matching state published so it
+        // is converged (contributes no drift of its own).
+        let id = registry.register(local_worker("http://dup:8080")).unwrap();
+        adapter.on_worker_changed(
+            id.as_str(),
+            &worker_state_of(&id, &registry.get(&id).unwrap()),
+        );
+        // A remote shard for the SAME url under a different publisher key.
+        ns.put(
+            "worker:peer-dup",
+            bincode::serialize(&sample_state("peer-dup", "http://dup:8080")).unwrap(),
+        );
+
+        assert_eq!(
+            adapter.reconcile_once(),
+            0,
+            "a URL-deduped import is represented, not a dropped put"
         );
     }
 
@@ -751,11 +868,19 @@ mod tests {
             bincode::serialize(&sample_state(id.as_str(), "http://local:8080")).unwrap(),
         );
 
-        adapter.reconcile_once();
+        let corrections = adapter.reconcile_once();
         let stored: WorkerState = bincode::deserialize(&ns.get(&key).unwrap()).unwrap();
         assert!(
             !stored.spec.is_empty(),
             "reconcile re-asserts the live local state over the stale value"
+        );
+        assert_eq!(corrections, 1, "the stale-shadow re-assert counts as drift");
+
+        // A converged store yields zero drift: the gauge is 0 in steady state.
+        assert_eq!(
+            adapter.reconcile_once(),
+            0,
+            "no divergence on the second pass"
         );
     }
 

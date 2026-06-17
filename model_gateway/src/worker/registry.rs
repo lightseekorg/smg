@@ -1389,7 +1389,11 @@ impl WorkerRegistry {
     /// against an existing local worker (refresh health only), or
     /// register a new worker from the embedded `WorkerSpec` (falling
     /// back to a minimal builder if the spec is absent or invalid).
-    pub fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
+    /// Returns `true` iff this call actually mutated the registry (status
+    /// change on an existing import, or a new import registered). Callers
+    /// use it to count genuine reconcile recovery work without re-deriving
+    /// what changed; an ignored/no-op apply returns `false`.
+    pub fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) -> bool {
         use openai_protocol::model_card::ModelCard;
 
         // If worker already exists at this URL, update its health
@@ -1410,23 +1414,29 @@ impl WorkerRegistry {
                     url = %state.url,
                     "Ignoring mesh state for locally-owned worker"
                 );
-                return;
+                return false;
             }
             if let Some(existing) = self.get(&existing_id) {
                 let status = existing.status();
-                if state.health {
+                let changed = if state.health {
                     if matches!(status, WorkerStatus::Pending | WorkerStatus::NotReady) {
                         existing.set_status(WorkerStatus::Ready);
+                        true
+                    } else {
+                        false
                     }
                 } else if status == WorkerStatus::Ready {
                     existing.set_status(WorkerStatus::NotReady);
-                }
+                    true
+                } else {
+                    false
+                };
                 tracing::debug!(
                     url = %state.url,
                     healthy = state.health,
                     "Updated health for existing mesh-synced worker"
                 );
-                return;
+                return changed;
             }
         }
 
@@ -1486,15 +1496,19 @@ impl WorkerRegistry {
         // (WorkerManager's health scheduler, etc.) pick up mesh-imported
         // workers via the same event path as any other registration.
         let worker: Arc<dyn Worker> = Arc::new(worker);
-        if let Some(id) = self.register_inner(worker, WorkerOrigin::Mesh) {
-            tracing::info!(
-                worker_id = %id.as_str(),
-                url = %state.url,
-                model = %state.model_id,
-                healthy = state.health,
-                spec_applied,
-                "Registered mesh-synced worker into local registry"
-            );
+        match self.register_inner(worker, WorkerOrigin::Mesh) {
+            Some(id) => {
+                tracing::info!(
+                    worker_id = %id.as_str(),
+                    url = %state.url,
+                    model = %state.model_id,
+                    healthy = state.health,
+                    spec_applied,
+                    "Registered mesh-synced worker into local registry"
+                );
+                true
+            }
+            None => false,
         }
     }
 }
