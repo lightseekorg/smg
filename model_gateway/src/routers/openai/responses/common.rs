@@ -86,7 +86,10 @@ pub(super) fn parse_sse_block(block: &str) -> (Option<&str>, Cow<'_, str>) {
         Some(frame) => {
             let event_name = frame.event_type.and_then(|e| match e {
                 Cow::Borrowed(s) => Some(s.trim()),
-                Cow::Owned(_) => None,
+                Cow::Owned(_) => {
+                    debug_assert!(false, "parse_block returned Cow::Owned for event_type");
+                    None
+                }
             });
             (event_name, frame.data)
         }
