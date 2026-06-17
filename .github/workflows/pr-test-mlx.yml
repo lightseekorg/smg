@@ -35,8 +35,10 @@ on:
 permissions:
   contents: read
 
+# Per-PR groups cancel superseded runs; pushes to main key on the commit SHA so
+# every commit on main gets its own run and is never cancelled by a later push.
 concurrency:
-  group: mlx-tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  group: mlx-tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
