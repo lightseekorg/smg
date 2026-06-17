@@ -1399,6 +1399,7 @@ fn serialize_array_as_tokenspeed_tensor(
                     dtype = %dtype,
                     "Failed to write TokenSpeed encoder input directly to SHM; falling back to bytes path"
                 );
+                crate::observability::metrics::Metrics::record_tokenspeed_mm_shm_write_failure();
             }
         }
     }

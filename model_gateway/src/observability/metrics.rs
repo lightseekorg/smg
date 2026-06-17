@@ -389,6 +389,20 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!("smg_db_items_stored", "Total items stored by storage_type");
 
+    // TokenSpeed multimodal tensor transport (shm vs inline)
+    describe_counter!(
+        "smg_tokenspeed_mm_tensors_total",
+        "TokenSpeed multimodal tensors sent, by transport path (shm/inline)"
+    );
+    describe_counter!(
+        "smg_tokenspeed_mm_tensor_bytes_total",
+        "TokenSpeed multimodal tensor bytes sent, by transport path (shm/inline)"
+    );
+    describe_counter!(
+        "smg_tokenspeed_mm_shm_write_failures_total",
+        "TokenSpeed SHM tensor write attempts that failed and fell back to inline"
+    );
+
     // Layer 0: Tokio runtime self-observability (event-loop canary + sampler).
     super::runtime_metrics::describe();
 
@@ -630,6 +644,18 @@ impl Metrics {
             "result" => result
         )
         .increment(1);
+    }
+
+    /// Record one TokenSpeed multimodal tensor sent over `path` ("shm"|"inline").
+    pub fn record_tokenspeed_mm_tensor(path: &'static str, nbytes: usize) {
+        counter!("smg_tokenspeed_mm_tensors_total", "path" => path).increment(1);
+        counter!("smg_tokenspeed_mm_tensor_bytes_total", "path" => path)
+            .increment(nbytes as u64);
+    }
+
+    /// Record a TokenSpeed SHM write that failed and fell back to inline.
+    pub fn record_tokenspeed_mm_shm_write_failure() {
+        counter!("smg_tokenspeed_mm_shm_write_failures_total").increment(1);
     }
 
     // ========================================================================

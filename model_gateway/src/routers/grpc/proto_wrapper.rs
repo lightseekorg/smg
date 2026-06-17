@@ -305,8 +305,16 @@ fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tok
         dtype,
     } = value;
     let payload = match storage {
+        // Inline storage is metered inside tokenspeed_tensor_payload.
         TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data, shm_enabled),
-        TokenSpeedTensorStorage::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
+        // Encoder input already written directly to SHM upstream — meter it here.
+        TokenSpeedTensorStorage::Shm(handle) => {
+            crate::observability::metrics::Metrics::record_tokenspeed_mm_tensor(
+                "shm",
+                handle.nbytes as usize,
+            );
+            tokenspeed::tensor_data::Payload::Shm(handle)
+        }
     };
 
     tokenspeed::TensorData {
@@ -327,26 +335,27 @@ fn tensor_bytes_to_tokenspeed(value: TensorBytes, shm_enabled: bool) -> tokenspe
 }
 
 fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::tensor_data::Payload {
+    use crate::observability::metrics::Metrics;
     let log_timing = log_tokenspeed_mm_timing_enabled();
+    let nbytes = data.len();
     if !shm_enabled {
         if log_timing {
-            tracing::info!(
-                nbytes = data.len(),
-                "smg_mm_timing tokenspeed_tensor_payload_inline"
-            );
+            tracing::info!(nbytes, "smg_mm_timing tokenspeed_tensor_payload_inline");
         }
+        Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
     let min_bytes = tokenspeed_mm_shm_min_bytes();
-    if data.len() < min_bytes {
+    if nbytes < min_bytes {
         if log_timing {
             tracing::info!(
-                nbytes = data.len(),
+                nbytes,
                 min_bytes,
                 "smg_mm_timing tokenspeed_tensor_payload_inline_below_threshold"
             );
         }
+        Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
@@ -355,19 +364,22 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
         Ok(handle) => {
             if log_timing {
                 tracing::info!(
-                    nbytes = data.len(),
+                    nbytes,
                     elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
                     "smg_mm_timing tokenspeed_shm_write"
                 );
             }
+            Metrics::record_tokenspeed_mm_tensor("shm", nbytes);
             tokenspeed::tensor_data::Payload::Shm(handle)
         }
         Err(error) => {
             tracing::warn!(
                 ?error,
-                nbytes = data.len(),
+                nbytes,
                 "Failed to create TokenSpeed SHM tensor payload; falling back to inline"
             );
+            Metrics::record_tokenspeed_mm_shm_write_failure();
+            Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
             tokenspeed::tensor_data::Payload::Inline(data)
         }
     }
