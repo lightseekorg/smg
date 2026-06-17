@@ -20,17 +20,12 @@ template:
   spec:
     terminationGracePeriodSeconds: 600
 
-    # Schedule runner pods with Volcano so the binpack plugin consolidates GPU
-    # runners onto fewer H100 nodes. The bin-packing weights live in the cluster
-    # scheduler config: volcano-system/volcano-scheduler-configmap
-    # (see volcano-scheduler-configmap.yaml in this directory).
+    # Volcano binpack packs GPU runners onto fewer nodes
+    # (weights: volcano-scheduler-configmap.yaml).
     schedulerName: volcano
 
-    # hostNetwork puts the runner in the host netns so PD disaggregation KV
-    # transfer (NIXL/Mooncake) sees the host's populated RoCE GID tables. An
-    # overlay-CNI pod sees the mlx5 NICs as PORT_ACTIVE but with an empty GID
-    # table, so RDMA init dies at worker startup. ClusterFirstWithHostNet keeps
-    # cluster DNS working while on the host network.
+    # hostNetwork: RDMA KV transfer (NIXL/Mooncake) needs the host's RoCE GID
+    # tables; an overlay netns has empty GIDs and RDMA init fails.
     hostNetwork: true
     dnsPolicy: ClusterFirstWithHostNet
 
@@ -44,10 +39,8 @@ template:
         value: "true"
         effect: "NoSchedule"
 
-    # Pod affinity/anti-affinity intentionally omitted: GPU placement is now
-    # driven by the Volcano binpack plugin. NOTE: with hostNetwork, runners
-    # co-located by binpack share the host port space — jobs binding fixed host
-    # ports can collide when packed onto the same node.
+    # No affinity: placement left to binpack. e2e servers bind OS-assigned
+    # ports on 127.0.0.1, so co-located hostNetwork runners don't collide.
 
     volumes:
       - name: work
