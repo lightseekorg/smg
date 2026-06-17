@@ -2,9 +2,9 @@
 
 Implements ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` on top of
 :class:`tokenspeed.runtime.engine.async_llm.AsyncLLM`. The proto field set
-is intentionally minimal — generative LLM serving plus precomputed multimodal;
-no Embed / GetTokenizer / SubscribeKvEvents / PD-disaggregated / LoRA /
-hidden states / classifier outputs.
+is intentionally minimal — generative LLM serving, precomputed multimodal, and
+KV-cache-event streaming for cache-aware routing; no Embed / GetTokenizer /
+PD-disaggregated / LoRA / hidden states / classifier outputs.
 """
 
 from __future__ import annotations
@@ -21,8 +21,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import grpc
+import msgspec
 import numpy as np
 import torch
+import zmq
+import zmq.asyncio
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
 from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
@@ -32,8 +35,11 @@ from tokenspeed.runtime.multimodal.inputs import (
     MultimodalDataItem,
     MultimodalInputs,
 )
+from tokenspeed.runtime.pd.kv_events import KVEventBatch
 
+from smg_grpc_servicer.kv_events import endpoint_for_rank, stream_kv_events
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
+from smg_grpc_servicer.tokenspeed.kv_events import resolve_kv_events_config
 
 if TYPE_CHECKING:
     # Type-only — keeps these out of the cold-path graph when the servicer is
@@ -110,6 +116,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         self.scheduler_info = scheduler_info
         self.health_servicer = health_servicer
         self.start_time = time.time()
+
+        # Resolved ZMQ KV-events endpoint, or None when the worker was not
+        # launched with --kv-events-config (SubscribeKvEvents → UNIMPLEMENTED).
+        self._kv_events_config = resolve_kv_events_config(server_args)
 
         # Drive AsyncLLM's output-dispatch loop. This is idempotent — the
         # first caller creates the handle loop; subsequent callers (including
@@ -534,6 +544,67 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             loads=scheduler_loads,
             aggregate=aggregate,
         )
+
+    # ------------------------------------------------------------------
+    # SubscribeKvEvents (server-streaming) — feeds the gateway's
+    # cache-aware router the scheduler's actual KV-cache state.
+    # ------------------------------------------------------------------
+
+    async def SubscribeKvEvents(
+        self,
+        _request: common_pb2.SubscribeKvEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.KvEventBatch]:
+        """Bridge TokenSpeed's in-process ZMQ KV cache events to a gRPC stream.
+
+        The scheduler subprocess publishes msgpack ``BlockStored`` /
+        ``BlockRemoved`` / ``AllBlocksCleared`` batches on a ZMQ PUB socket
+        (enabled via ``--kv-events-config``); we re-publish them as the
+        engine-neutral ``common.KvEventBatch`` stream SMG already consumes,
+        using the publisher's sequence numbers directly.
+
+        ``start_sequence_number`` (replay) is not honored — the stream starts
+        from the current ZMQ position, matching the other engine bridges.
+        """
+        if self._kv_events_config is None:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV cache events not enabled. Start TokenSpeed with "
+                "--kv-events-config "
+                '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
+            )
+
+        config = self._kv_events_config
+
+        # DP attention publishes one PUB socket per rank (port + rank) with
+        # independent sequence counters; subscribing to several on one socket
+        # interleaves them and breaks gap detection. Subscribe to rank 0 only.
+        pub_endpoint = endpoint_for_rank(config.endpoint, 0)
+
+        zmq_ctx = zmq.asyncio.Context.instance()
+        sub_socket = zmq_ctx.socket(zmq.SUB)
+        sub_socket.subscribe(config.topic.encode("utf-8"))
+        sub_socket.connect(pub_endpoint)
+        logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
+
+        decoder = msgspec.msgpack.Decoder(KVEventBatch)
+
+        try:
+            async for proto_batch in stream_kv_events(
+                sub_socket,
+                decoder.decode,
+                lambda: context.send_initial_metadata(()),
+                context.cancelled,
+            ):
+                yield proto_batch
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.exception("SubscribeKvEvents failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+        finally:
+            sub_socket.close(linger=0)
+            logger.info("SubscribeKvEvents: stream closed")
 
     async def FlushCache(
         self,

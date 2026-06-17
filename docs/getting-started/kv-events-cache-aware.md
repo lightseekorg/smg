@@ -117,6 +117,31 @@ SMG learns the block size from the `BlockStored` events themselves, so you needn
 
 Everything downstream — SMG flags, block-size learning, and the verification logs — is unchanged; `KvEventMonitor` consumes the events the same way for any gRPC worker.
 
+### Alternative: launch a TokenSpeed worker
+
+TokenSpeed's scheduler publishes KV cache events on a ZMQ socket; enable them with `--kv-events-config`. The TokenSpeed gRPC server *is* the SMG gRPC entrypoint, so there is no separate `--grpc` flag:
+
+```bash
+# TokenSpeed is installed from source (engine + kernel + scheduler); see
+# scripts/ci_install_tokenspeed.sh. Install the bridge's extra deps:
+pip install "smg-grpc-servicer[tokenspeed]"
+
+# --kv-events-config turns on KV-event publishing in the scheduler:
+python -m smg_grpc_servicer.tokenspeed \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --host 0.0.0.0 \
+  --port 50051 \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv-events"}'
+```
+
+| Field | Why |
+|---|---|
+| `enable_kv_cache_events: true` | TokenSpeed master switch. Without it the scheduler records no events even if a publisher is set. |
+| `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. Unset defaults to `"zmq"` when events are enabled; `"null"` (or any other value) disables bridging. |
+| `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. The publisher binds in the scheduler subprocess; for data-parallel the port is `endpoint_port + dp_rank`, and SMG currently consumes rank 0. |
+
+`--kv-events-config` is parsed by TokenSpeed's `KVEventsConfig.from_cli`. SMG learns the block size from the `BlockStored` events themselves, so you needn't set it; pass TokenSpeed's `--page-size N` only to pin a non-default value. Everything downstream is identical to the SGLang and vLLM paths.
+
 ---
 
 ## Step 2 — Launch SMG
@@ -240,4 +265,7 @@ If events never arrive, the policy keeps working — it falls back to the approx
 - Event subscription manager: `model_gateway/src/worker/kv_event_monitor.rs`
 - KV event proto: `crates/grpc_client/proto/common.proto` (messages `KvEventBatch`, `KvCacheEvent`, `KvBlocksStored`, `KvBlocksRemoved`)
 - Servicer bridge: `grpc_servicer/smg_grpc_servicer/sglang/servicer.py` (`SubscribeKvEvents`)
+- Shared ZMQ→proto conversion: `grpc_servicer/smg_grpc_servicer/kv_events.py` (engine-neutral; used by the vLLM and TokenSpeed bridges)
+- TokenSpeed servicer bridge: `grpc_servicer/smg_grpc_servicer/tokenspeed/servicer.py` (`SubscribeKvEvents`) + config resolver `grpc_servicer/smg_grpc_servicer/tokenspeed/kv_events.py`
 - SGLang upstream config: `python/sglang/srt/disaggregation/kv_events.py` (class `KVEventsConfig`)
+- TokenSpeed upstream config: `tokenspeed/runtime/pd/kv_events.py` (class `KVEventsConfig`)
