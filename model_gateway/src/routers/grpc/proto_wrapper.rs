@@ -6,11 +6,14 @@
 
 use std::{
     collections::HashMap,
-    fs::{remove_file, OpenOptions},
+    fs::{read_dir, remove_file, OpenOptions},
     io::{BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -408,6 +411,74 @@ fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
     write_tokenspeed_shm_with(data.len(), |file| file.write_all(data))
 }
 
+/// Whether SMG can actually create+write files under `/dev/shm`. Probed once;
+/// when false the SHM transport cannot work, so `auto`/`shm` must stay inline.
+pub fn tokenspeed_shm_dev_writable() -> bool {
+    static WRITABLE: OnceLock<bool> = OnceLock::new();
+    *WRITABLE.get_or_init(|| {
+        let name = format!("smg-tokenspeed-probe-{}", process::id());
+        let path = tokenspeed_shm_path(&name);
+        let ok = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(b"x"))
+            .is_ok();
+        let _ = remove_file(&path);
+        if !ok {
+            tracing::warn!(
+                path = %path.display(),
+                "/dev/shm is not writable; TokenSpeed SHM tensor transport will fall back to inline"
+            );
+        }
+        ok
+    })
+}
+
+/// Best-effort, run-once sweep of `/dev/shm` for TokenSpeed payload files left
+/// behind by a *previous* SMG process that crashed between writing a segment and
+/// the consumer unlinking it. Files are named `smg-tokenspeed-<pid>-...`; we only
+/// remove those whose producer pid is no longer alive (and never our own).
+fn sweep_orphan_tokenspeed_shm_once() {
+    static SWEEP: OnceLock<()> = OnceLock::new();
+    SWEEP.get_or_init(|| {
+        let dir = Path::new("/dev/shm");
+        let Ok(entries) = read_dir(dir) else {
+            return;
+        };
+        let my_pid = process::id();
+        let mut removed = 0u32;
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix("smg-tokenspeed-") else {
+                continue;
+            };
+            // pid is the first '-'-separated field after the prefix.
+            let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+                continue;
+            };
+            // Skip our own files and any still-live producer (pid recycling is a
+            // safe miss: we just keep the file rather than risk deleting a live one).
+            if pid == my_pid || Path::new(&format!("/proc/{pid}")).exists() {
+                continue;
+            }
+            if remove_file(dir.join(name)).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::warn!(
+                count = removed,
+                "Swept orphaned TokenSpeed SHM files from dead producer processes"
+            );
+        }
+    });
+}
+
 // TODO: pack all of a request's tensors (encoder_input + model_specific) into
 // ONE /dev/shm segment at running offsets instead of one file per tensor
 // (ShmHandle.offset already exists, always 0 here). Needs consumer
@@ -418,6 +489,7 @@ pub fn write_tokenspeed_shm_with(
     nbytes: usize,
     write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<tokenspeed::ShmHandle> {
+    sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();
     let path = tokenspeed_shm_path(&name);
     let file = OpenOptions::new()

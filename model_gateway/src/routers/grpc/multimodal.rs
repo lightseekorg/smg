@@ -39,7 +39,8 @@ use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
     proto_wrapper::{
-        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode, write_tokenspeed_shm_with,
+        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode,
+        tokenspeed_shm_dev_writable, write_tokenspeed_shm_with,
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
         TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
     },
@@ -1621,11 +1622,40 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
 /// worker is local and therefore shares SMG's `/dev/shm`; anything else
 /// (including unset or `inline`) keeps the inline gRPC path.
 fn resolve_tokenspeed_shm_enabled(workers: Option<&WorkerSelection>) -> bool {
-    match tokenspeed_mm_tensor_transport_mode().as_str() {
-        "shm" => true,
-        "auto" => worker_is_local(workers),
-        _ => false,
+    let mode = tokenspeed_mm_tensor_transport_mode();
+    log_tokenspeed_transport_config_once(&mode);
+    match mode.as_str() {
+        // SHM only ever happens when SMG can actually write /dev/shm.
+        "shm" => tokenspeed_shm_dev_writable(),
+        "auto" => worker_is_local(workers) && tokenspeed_shm_dev_writable(),
+        "" | "inline" => false,
+        other => {
+            log_unknown_tokenspeed_transport_once(other);
+            false
+        }
     }
+}
+
+fn log_tokenspeed_transport_config_once(mode: &str) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        info!(
+            mode,
+            shm_min_bytes = tokenspeed_mm_shm_min_bytes(),
+            dev_writable = tokenspeed_shm_dev_writable(),
+            "TokenSpeed multimodal tensor transport configured"
+        );
+    });
+}
+
+fn log_unknown_tokenspeed_transport_once(value: &str) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        warn!(
+            value,
+            "Unknown SMG_TOKENSPEED_MM_TENSOR_TRANSPORT value; expected inline|shm|auto, using inline"
+        );
+    });
 }
 
 /// A worker is treated as "local" (assumed to share SMG's `/dev/shm`) when its
