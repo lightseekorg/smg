@@ -63,6 +63,18 @@ def _grpc_max_message_bytes() -> int:
     return value
 
 
+def _grpc_server_options(max_message_bytes: int) -> list[tuple[str, int]]:
+    """Build gRPC server options for long-idle TokenSpeed generation streams."""
+    return [
+        ("grpc.max_send_message_length", max_message_bytes),
+        ("grpc.max_receive_message_length", max_message_bytes),
+        # Allow gateway keepalive pings during long prefill / non-streaming
+        # requests while keeping ping-strike enforcement enabled.
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+        ("grpc.keepalive_permit_without_calls", 1),
+    ]
+
+
 async def serve_grpc(server_args: ServerArgs) -> None:
     """Run the TokenSpeed gRPC server until a shutdown signal is received."""
 
@@ -72,13 +84,7 @@ async def serve_grpc(server_args: ServerArgs) -> None:
     max_message_bytes = _grpc_max_message_bytes()
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
-        options=[
-            ("grpc.max_send_message_length", max_message_bytes),
-            ("grpc.max_receive_message_length", max_message_bytes),
-            # Permissive keepalive so long prefill stalls don't trip GOAWAY.
-            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
-            ("grpc.keepalive_permit_without_calls", True),
-        ],
+        options=_grpc_server_options(max_message_bytes),
     )
 
     health_servicer = TokenSpeedHealthServicer(
