@@ -9,6 +9,57 @@ use crate::{
     types::{StreamingParseResult, ToolCallItem},
 };
 
+/// `param_name -> declared JSON-schema type` for the named function (empty if the
+/// function or its `properties` are absent). Lets XML-style parsers coerce by the
+/// declared type instead of guessing from text (e.g. keep a numeric-looking
+/// `string` as a string).
+pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<String, String> {
+    let mut types = HashMap::new();
+    let Some(tool) = tools.iter().find(|t| t.function.name == func_name) else {
+        return types;
+    };
+    if let Some(props) = tool
+        .function
+        .parameters
+        .get("properties")
+        .and_then(Value::as_object)
+    {
+        for (key, schema) in props {
+            if let Some(ty) = schema.get("type").and_then(Value::as_str) {
+                types.insert(key.clone(), ty.to_string());
+            }
+        }
+    }
+    types
+}
+
+/// Coerce a raw value by its declared JSON-schema type. `string` is kept verbatim;
+/// numeric/boolean/structured types are parsed. `None` (unknown type or parse
+/// failure) means the caller should fall back to its own inference.
+pub fn coerce_by_schema_type(text: &str, declared_type: Option<&str>) -> Option<Value> {
+    match declared_type? {
+        "string" => Some(Value::String(text.to_string())),
+        "integer" => text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|n| Value::Number(n.into())),
+        "number" => text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        "boolean" => match text.trim() {
+            "true" | "True" => Some(Value::Bool(true)),
+            "false" | "False" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        "object" | "array" => serde_json::from_str::<Value>(text).ok(),
+        _ => None,
+    }
+}
+
 /// Get a mapping of tool names to their indices
 pub fn get_tool_indices(tools: &[Tool]) -> HashMap<String, usize> {
     tools

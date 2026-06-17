@@ -44,7 +44,10 @@ pub async fn parse_function_call(
     };
 
     let parser = pooled_parser.lock().await;
-    match parser.parse_complete(&req.text).await {
+    match parser
+        .parse_complete_with_tools(&req.text, &req.tools)
+        .await
+    {
         Ok((remaining_text, tool_calls)) => (
             StatusCode::OK,
             Json(serde_json::json!({

@@ -11,7 +11,7 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{FunctionCallResponse, Tool, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -166,6 +166,7 @@ impl ResponseProcessor {
                     .parse_tool_calls(
                         &processed_text,
                         &original_request.model,
+                        original_request.tools.as_deref().unwrap_or(&[]),
                         history_tool_calls_count,
                     )
                     .await;
@@ -309,6 +310,7 @@ impl ResponseProcessor {
         &self,
         processed_text: &str,
         model: &str,
+        tools: &[Tool],
         history_tool_calls_count: usize,
     ) -> (Option<Vec<ToolCall>>, String) {
         // Get pooled parser for this model
@@ -318,10 +320,14 @@ impl ResponseProcessor {
             model,
         );
 
-        // Try parsing directly (parser will handle detection internally)
+        // Try parsing directly (parser will handle detection internally). Pass the
+        // tool schemas so schema-aware parsers coerce argument types by their
+        // declared type instead of guessing from the raw text.
         let result = {
             let parser = pooled_parser.lock().await;
-            parser.parse_complete(processed_text).await
+            parser
+                .parse_complete_with_tools(processed_text, tools)
+                .await
             // Lock is dropped here
         };
 
@@ -651,10 +657,16 @@ impl ResponseProcessor {
                     utils::message_utils::get_history_tool_calls_count_messages(&messages_request),
                 );
             } else if tool_parser_available {
+                let chat_tools = messages_request
+                    .tools
+                    .as_deref()
+                    .map(utils::message_utils::extract_chat_tools)
+                    .unwrap_or_default();
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
                         &messages_request.model,
+                        &chat_tools,
                         utils::message_utils::get_history_tool_calls_count_messages(
                             &messages_request,
                         ),

@@ -2,7 +2,128 @@
 mod common;
 
 use common::create_test_tools;
+use openai_protocol::common::{Function, Tool};
+use serde_json::json;
 use tool_parser::{MinimaxM2Parser, ToolParser};
+
+/// Tools matching issue #1743: `update_task(taskId: string, subject: string)`.
+fn update_task_tools() -> Vec<Tool> {
+    vec![Tool {
+        tool_type: "function".to_string(),
+        function: Function {
+            name: "update_task".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "taskId":  {"type": "string"},
+                    "subject": {"type": "string"}
+                },
+                "required": ["taskId", "subject"]
+            }),
+            strict: None,
+        },
+    }]
+}
+
+const UPDATE_TASK_CALL: &str = r#"<minimax:tool_call>
+<invoke name="update_task">
+<parameter name="taskId">3</parameter>
+<parameter name="subject">X</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+/// Issue #1743: a `string`-typed parameter whose value looks numeric must be
+/// emitted as a JSON string when the schema is available, not coerced to a number.
+#[tokio::test]
+async fn test_minimax_string_arg_kept_as_string_with_schema() {
+    let parser = MinimaxM2Parser::new();
+    let tools = update_task_tools();
+
+    let (_normal, calls) = parser
+        .parse_complete_with_tools(UPDATE_TASK_CALL, &tools)
+        .await
+        .unwrap();
+
+    assert_eq!(calls.len(), 1);
+    let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+    assert_eq!(
+        args["taskId"],
+        json!("3"),
+        "string schema -> must stay string"
+    );
+    assert_eq!(args["subject"], json!("X"));
+}
+
+/// Numeric schema types are still coerced: an `integer` field stays a number.
+#[tokio::test]
+async fn test_minimax_integer_arg_coerced_with_schema() {
+    let parser = MinimaxM2Parser::new();
+    let tools = vec![Tool {
+        tool_type: "function".to_string(),
+        function: Function {
+            name: "update_task".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": { "taskId": {"type": "integer"} }
+            }),
+            strict: None,
+        },
+    }];
+
+    let (_normal, calls) = parser
+        .parse_complete_with_tools(UPDATE_TASK_CALL, &tools)
+        .await
+        .unwrap();
+    let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+    assert_eq!(args["taskId"], json!(3), "integer schema -> number");
+}
+
+/// Backward compatible: with no schema, text-based inference is unchanged
+/// (a numeric-looking value becomes a number).
+#[tokio::test]
+async fn test_minimax_no_schema_infers_number() {
+    let parser = MinimaxM2Parser::new();
+    let (_normal, calls) = parser.parse_complete(UPDATE_TASK_CALL).await.unwrap();
+    let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+    assert_eq!(
+        args["taskId"],
+        json!(3),
+        "no schema -> inferred number (unchanged)"
+    );
+}
+
+/// Streaming honors the schema too (tools were previously received but ignored).
+#[tokio::test]
+async fn test_minimax_streaming_string_arg_kept_as_string_with_schema() {
+    let mut parser = MinimaxM2Parser::new();
+    let tools = update_task_tools();
+
+    let mut args_json = String::new();
+    for chunk in [
+        "<minimax:tool_call>",
+        r#"<invoke name="update_task">"#,
+        r#"<parameter name="taskId">3</parameter>"#,
+        r#"<parameter name="subject">X</parameter>"#,
+        "</invoke>",
+        "</minimax:tool_call>",
+    ] {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if call.name.is_none() {
+                args_json.push_str(&call.parameters);
+            }
+        }
+    }
+
+    let args: serde_json::Value = serde_json::from_str(&args_json).unwrap();
+    assert_eq!(
+        args["taskId"],
+        json!("3"),
+        "streaming string schema -> stay string"
+    );
+}
 
 #[tokio::test]
 async fn test_minimax_complete_parsing() {
