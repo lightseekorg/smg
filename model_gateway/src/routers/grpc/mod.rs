@@ -9,6 +9,7 @@ pub(crate) mod harmony;
 pub(crate) mod multimodal;
 pub(crate) mod pd_router; // Used by routers/factory
 pub(crate) mod pipeline;
+pub(crate) mod pixel_cache;
 pub(crate) mod proto_wrapper;
 pub(crate) mod rdma;
 pub(crate) mod regular;

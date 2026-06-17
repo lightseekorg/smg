@@ -27,7 +27,7 @@ use llm_multimodal::{
     PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
-use ndarray::{ArrayD, Axis, Slice};
+use ndarray::{ArrayD, Axis, IxDyn, Slice};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
@@ -38,6 +38,7 @@ use tracing::{debug, info, warn};
 use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
+    pixel_cache::{config_fingerprint, CachedEncodeItem, PixelCache, PixelCacheKey},
     proto_wrapper::{
         cleanup_tokenspeed_items_encoder_shm, tokenspeed_mm_shm_min_bytes,
         tokenspeed_mm_tensor_transport_mode, tokenspeed_shm_dev_writable,
@@ -245,6 +246,9 @@ pub(crate) struct MultimodalComponents {
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
+    /// Optional host-DRAM cache of preprocessed per-image encoder inputs
+    /// (`SMG_MM_PIXEL_CACHE_MB`; TokenSpeed-only, disabled by default).
+    pub pixel_cache: Option<Arc<PixelCache>>,
 }
 
 impl MultimodalComponents {
@@ -263,6 +267,7 @@ impl MultimodalComponents {
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
+            pixel_cache: super::pixel_cache::pixel_cache_from_env(),
         })
     }
 }
@@ -306,6 +311,13 @@ pub(crate) struct PrecomputedMultimodalIntermediate {
     pub field_layouts: HashMap<String, FieldLayout>,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
     pub keep_on_cpu_keys: Vec<String>,
+    /// Pixel-cache fast path: per-image pre-serialized encoder payloads (one per
+    /// image, in order). `Some` only when the cache is enabled and hit/populated for
+    /// this request; an assembler that consumes the pre-serialized form (today
+    /// `assemble_tokenspeed`) builds items directly from these and skips the f32
+    /// slice + serialize. `None` => the regular f32 path. An assembler that needs the
+    /// unserialized tensor rejects a `Some` intermediate (`ensure_unserialized_encoder`).
+    pub encoded_items: Option<Vec<Arc<CachedEncodeItem>>>,
 }
 
 /// Resolve the placeholder token string for a multimodal model.
@@ -673,18 +685,41 @@ async fn process_multimodal_parts(
             .unwrap_or_else(|| model_config.preprocessor_config.clone()),
         _ => model_config.preprocessor_config.clone(),
     };
-    let registry = components.vision_processor_registry.clone();
-    let model_id_owned = model_id.to_string();
-    let model_type_owned = model_type.map(String::from);
-    let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
-    let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
-
     let preprocess_started = Instant::now();
     let _epd_tl = std::env::var("EPD_TL").is_ok();
     if _epd_tl {
         tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_start num_images={} epoch_ms={}", images.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
     }
-    let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
+
+    // Pixel-cache fast path (post-decode, per-image): when the cache is enabled and
+    // this is an image request, preprocess + serialize only the cache misses and
+    // reuse cached payloads; the assembler that consumes the pre-serialized form
+    // then builds items directly from `encoded_items` and skips the f32 slice +
+    // serialize. Otherwise run the regular batched preprocess (encoded_items = None).
+    // An assembler needing the unserialized tensor rejects a `Some` intermediate.
+    let (preprocessed, encoded_items): (
+        PreprocessedEncoderInputs,
+        Option<Vec<Arc<CachedEncodeItem>>>,
+    ) = if let (Some(cache), Modality::Image) = (components.pixel_cache.clone(), modality) {
+        preprocess_images_cached(
+            cache,
+            &images,
+            components.vision_processor_registry.clone(),
+            model_id.to_string(),
+            model_type.map(String::from),
+            pp_config,
+            spec.field_layouts(),
+            config_fingerprint(tokenizer_id, &model_config.config),
+            tokenspeed_encoder_input_dtype(modality, None),
+        )
+        .await?
+    } else {
+        let registry = components.vision_processor_registry.clone();
+        let model_id_owned = model_id.to_string();
+        let model_type_owned = model_type.map(String::from);
+        let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
+        let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
+        let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
             .ok_or_else(|| {
@@ -747,9 +782,11 @@ async fn process_multimodal_parts(
                 "Unsupported modality for preprocessing: {modality}"
             )),
         }
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
+        (preprocessed, None)
+    };
     let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
 
     if _epd_tl {
@@ -830,6 +867,7 @@ async fn process_multimodal_parts(
         placeholder_token_id,
         field_layouts: spec.field_layouts(),
         keep_on_cpu_keys: spec.keep_on_cpu_keys(),
+        encoded_items,
     });
 
     if log_timing {
@@ -853,6 +891,123 @@ async fn process_multimodal_parts(
         expanded_token_ids: expanded.token_ids,
         intermediate,
     })
+}
+
+/// TokenSpeed pixel-cache image preprocessing (post-decode, per-image).
+///
+/// Looks up each image by `(raw-bytes hash, config fingerprint, wire dtype)`,
+/// preprocesses + serializes only the misses (one image at a time, off the async
+/// runtime), inserts them into the cache, and returns the per-image payloads in
+/// order plus a minimal [`PreprocessedEncoderInputs`] carrying just the
+/// `feature_token_counts` the phase-1 prompt-replacement / item-count consumers
+/// need. The heavy encoder bytes live behind `Arc` and are copied only once, when
+/// the proto item is materialized on the leg that ships pixels.
+#[allow(clippy::too_many_arguments)]
+async fn preprocess_images_cached(
+    cache: Arc<PixelCache>,
+    images: &[Arc<ImageFrame>],
+    registry: Arc<VisionProcessorRegistry>,
+    model_id: String,
+    model_type: Option<String>,
+    pp_config: PreProcessorConfig,
+    field_layouts: HashMap<String, FieldLayout>,
+    fingerprint: u64,
+    dtype: String,
+) -> Result<(
+    PreprocessedEncoderInputs,
+    Option<Vec<Arc<CachedEncodeItem>>>,
+)> {
+    // Look up every image first (bumping recency on hits) before inserting any
+    // miss, so a multi-image request cannot evict its own earlier image mid-build.
+    let keys: Vec<PixelCacheKey> = images
+        .iter()
+        .map(|frame| PixelCacheKey {
+            image_hash: frame.hash.clone(),
+            config_fingerprint: fingerprint,
+            dtype: dtype.clone(),
+        })
+        .collect();
+    let mut slots: Vec<Option<Arc<CachedEncodeItem>>> =
+        keys.iter().map(|key| cache.get(key)).collect();
+
+    let miss_indices: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(index, _)| index)
+        .collect();
+
+    if !miss_indices.is_empty() {
+        let miss_images: Vec<image::DynamicImage> = miss_indices
+            .iter()
+            .map(|&index| images[index].image.clone())
+            .collect();
+        let dtype_for_blocking = dtype.clone();
+        let computed: Vec<CachedEncodeItem> = tokio::task::spawn_blocking(move || -> Result<_> {
+            let processor = registry
+                .find(&model_id, model_type.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No vision processor found for model: {model_id}")
+                })?;
+            miss_images
+                .iter()
+                .map(|image| {
+                    // Per-image preprocess is behavior-equivalent to a slice of the
+                    // batched call (the vision processors are per-image-independent;
+                    // see the golden test in the cache tests).
+                    let preprocessed = processor
+                        .preprocess(std::slice::from_ref(image), &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
+                    let (encoder_input, encoder_input_shape, encoder_input_dtype) =
+                        serialize_array_as_dtype(&preprocessed.encoder_input, &dtype_for_blocking);
+                    let model_specific_tensors = serialize_model_specific_for_item(
+                        &preprocessed.model_specific,
+                        &field_layouts,
+                        0,
+                    )?;
+                    let feature_token_count = preprocessed
+                        .feature_token_counts
+                        .first()
+                        .copied()
+                        .unwrap_or(0);
+                    Ok(CachedEncodeItem {
+                        encoder_input,
+                        encoder_input_shape,
+                        encoder_input_dtype,
+                        model_specific_tensors,
+                        feature_token_count,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
+
+        for (&index, item) in miss_indices.iter().zip(computed.into_iter()) {
+            let shared = Arc::new(item);
+            cache.insert(keys[index].clone(), shared.clone());
+            slots[index] = Some(shared);
+        }
+    }
+
+    let encoded: Vec<Arc<CachedEncodeItem>> = slots
+        .into_iter()
+        .map(|slot| slot.expect("every miss was preprocessed and filled"))
+        .collect();
+    let feature_token_counts: Vec<usize> = encoded
+        .iter()
+        .map(|item| item.feature_token_count)
+        .collect();
+    // Minimal metadata: the image prompt-replacement path reads only
+    // feature_token_counts; encoder_input/model_specific are carried per-item in
+    // `encoded_items` and the f32 tensor is never rebuilt.
+    let preprocessed = PreprocessedEncoderInputs {
+        encoder_input: ArrayD::<f32>::zeros(IxDyn(&[0])),
+        feature_token_counts,
+        item_sizes: Vec::new(),
+        model_specific: HashMap::new(),
+    };
+    Ok((preprocessed, Some(encoded)))
 }
 
 /// Output of token expansion, containing both full structural and patch-only ranges.
@@ -973,14 +1128,17 @@ pub(crate) fn assemble_multimodal_data(
         MultimodalIntermediate::Precomputed(precomputed) => match client {
             GrpcClient::Sglang(_) => {
                 ensure_image_only(&precomputed, "SGLang")?;
+                ensure_unserialized_encoder(&precomputed, "SGLang")?;
                 Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
             }
             GrpcClient::Vllm(_) => {
                 ensure_image_only(&precomputed, "vLLM")?;
+                ensure_unserialized_encoder(&precomputed, "vLLM")?;
                 Ok(MultimodalData::Vllm(assemble_vllm(precomputed)))
             }
             GrpcClient::Trtllm(_) => {
                 ensure_image_only(&precomputed, "TRT-LLM")?;
+                ensure_unserialized_encoder(&precomputed, "TRT-LLM")?;
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
             GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
@@ -1003,6 +1161,28 @@ fn ensure_image_only(
         return Err(anyhow::anyhow!(
             "{backend} multimodal path currently supports image inputs only; got {}",
             intermediate.modality
+        ));
+    }
+    Ok(())
+}
+
+/// Backend precondition: the assembler reads the unserialized f32 encoder tensor in
+/// `preprocessed.encoder_input`. When the gateway eagerly serialized the per-image
+/// encoder payloads (the host-DRAM cache fast path produces `encoded_items`), that
+/// tensor is elided, so an assembler that needs it cannot proceed. This mirrors
+/// `ensure_image_only`: a backend declares the input form it requires. Today only
+/// the TokenSpeed assembler consumes the pre-serialized form, and operators only
+/// enable the cache where that holds, so this never fires in practice; it is a
+/// guard against enabling the cache on a gateway that also serves other backends.
+fn ensure_unserialized_encoder(
+    intermediate: &PrecomputedMultimodalIntermediate,
+    backend: &str,
+) -> Result<()> {
+    if intermediate.encoded_items.is_some() {
+        return Err(anyhow::anyhow!(
+            "{backend} multimodal assembly requires the unserialized encoder tensor, but the \
+             gateway produced a pre-serialized encoder payload (SMG_MM_PIXEL_CACHE_MB); disable \
+             the cache when this backend can be selected"
         ));
     }
     Ok(())
@@ -1097,6 +1277,44 @@ pub(crate) fn assemble_tokenspeed(
         Modality::Audio => TokenSpeedModality::Audio,
         Modality::ImageEmbeds => TokenSpeedModality::Image,
     };
+
+    // Pixel-cache fast path: items were pre-serialized per image in phase 1. Build
+    // each item directly from its cached payload (the bf16 encoder bytes are cloned
+    // only here, only on the leg that ships pixels) plus the request-positional
+    // placeholders + content_hash; skips the f32 slice + serialize entirely.
+    if let Some(encoded) = intermediate.encoded_items.as_ref() {
+        let items = encoded
+            .iter()
+            .enumerate()
+            .map(|(item_index, cached)| {
+                let (encoder_input, encoder_input_shape, encoder_input_dtype) = if skip_pixel_values
+                {
+                    (Vec::new(), Vec::new(), cached.encoder_input_dtype.clone())
+                } else {
+                    (
+                        cached.encoder_input.clone(),
+                        cached.encoder_input_shape.clone(),
+                        cached.encoder_input_dtype.clone(),
+                    )
+                };
+                let mm_placeholders =
+                    placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
+                let content_hash =
+                    content_hash_for_item(intermediate.modality, intermediate, item_index);
+                TokenSpeedMultimodalItem {
+                    modality,
+                    encoder_input,
+                    encoder_input_shape,
+                    encoder_input_dtype,
+                    model_specific_tensors: cached.model_specific_tensors.clone(),
+                    placeholder_token_id: intermediate.placeholder_token_id,
+                    mm_placeholders,
+                    content_hash,
+                }
+            })
+            .collect();
+        return Ok(TokenSpeedMultimodalData { items });
+    }
 
     let item_count = precomputed_multimodal_item_count(intermediate)?;
     // Build items imperatively so that if any step fails partway we can unlink
@@ -2215,6 +2433,7 @@ mod tests {
                 ("image_grid_thw".to_string(), FieldLayout::Batched),
             ]),
             keep_on_cpu_keys: vec![],
+            encoded_items: None,
         };
 
         let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
@@ -2322,6 +2541,7 @@ mod tests {
                 ("video_grid_thw".to_string(), FieldLayout::Batched),
             ]),
             keep_on_cpu_keys: vec![],
+            encoded_items: None,
         };
 
         let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
