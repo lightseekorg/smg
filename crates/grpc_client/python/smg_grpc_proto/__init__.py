@@ -30,3 +30,7 @@ def __getattr__(name: str):
     module = import_module(f".generated.{name}", __name__)
     globals()[name] = module
     return module
+
+
+def __dir__():
+    return sorted(set(globals()) | _GENERATED_MODULES)
