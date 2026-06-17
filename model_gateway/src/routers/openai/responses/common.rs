@@ -24,14 +24,6 @@ pub(crate) fn get_event_type<'a>(event_name: Option<&'a str>, parsed: &'a Value)
 
 /// Processes incoming byte chunks into complete SSE blocks.
 /// Handles buffering of partial chunks and CRLF normalization.
-///
-/// This yields the *raw* block text (not a parsed frame) because the
-/// streaming pass-through path forwards upstream events verbatim and only
-/// rewrites the `data:` payload in place — see `rewrite_streaming_block`.
-/// The shared [`crate::routers::common::sse::SseDecoder`] yields parsed
-/// frames and would lose that verbatim text, so block buffering is kept
-/// local; the actual field parsing is delegated to the shared codec via
-/// [`parse_sse_block`].
 pub(super) struct ChunkProcessor {
     pending: String,
 }
@@ -92,8 +84,6 @@ impl ChunkProcessor {
 pub(super) fn parse_sse_block(block: &str) -> (Option<&str>, Cow<'_, str>) {
     match parse_block(block) {
         Some(frame) => {
-            // `parse_block` always borrows the event type from `block`; trim it
-            // to match the previous parser's `.trim()` of the `event:` value.
             let event_name = frame.event_type.and_then(|e| match e {
                 Cow::Borrowed(s) => Some(s.trim()),
                 Cow::Owned(_) => None,
