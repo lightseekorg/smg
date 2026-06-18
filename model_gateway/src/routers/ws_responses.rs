@@ -543,31 +543,46 @@ async fn acquire_request_slot(session: &Arc<Mutex<WsSessionState>>) -> bool {
     // after the response is materialized/cached/persisted). Bridge that handoff
     // with a bounded wait on `request_done`.
     //
-    // `Notify::notify_waiters()` stores NO permit: a completion firing between
-    // dropping the lock and registering `.notified()` is missed. So we LOOP,
-    // re-checking `active_request` under the lock after each bounded wait,
-    // rather than waiting once. This turns a missed wakeup into a short extra
-    // wait instead of a spurious `concurrent_response_create` (observed under
-    // slower history backends, e.g. redis). A genuinely concurrent second
+    // `Notify::notify_waiters()` stores NO permit, so a completion that fires
+    // before this task is registered as a waiter is lost. We therefore arm the
+    // waiter via `Notified::enable()` — which registers without awaiting —
+    // *before* re-reading `active_request` each iteration. Any `notify_waiters()`
+    // from that point is guaranteed to wake us, so the handoff resolves on the
+    // real completion (sub-millisecond) instead of stalling for the timeout in
+    // the missed-notify window. The bounded `timeout` is retained only as a
+    // safety re-check (e.g. a fully lost wakeup); a genuinely concurrent second
     // create still rejects once the deadline passes.
     let deadline = tokio::time::Instant::now() + ACTIVE_REQUEST_HANDOFF_TIMEOUT;
+
+    // The completion `Notify` is connection-stable; clone the handle once.
+    let notify = {
+        let guard = session.lock().await;
+        guard.request_done.clone()
+    };
+    let notified = notify.notified();
+    tokio::pin!(notified);
     loop {
-        let notify = {
+        // Arm the waiter BEFORE checking the slot — closes the missed-notify
+        // window: a completion firing after we drop the lock cannot be lost.
+        notified.as_mut().enable();
+
+        {
             let mut guard = session.lock().await;
             if !guard.active_request {
                 guard.active_request = true;
                 return true;
             }
-            guard.request_done.clone()
-        };
+        }
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return false;
         }
-        // Wake on completion OR after `remaining` (catches a missed notify);
-        // either way the loop re-checks `active_request` under the lock.
-        let _ = tokio::time::timeout(remaining, notify.notified()).await;
+        // Wake on the completion notification (fast path) or after `remaining`
+        // (safety net); either way re-check `active_request` under the lock.
+        // Re-arm the future for the next iteration.
+        let _ = tokio::time::timeout(remaining, notified.as_mut()).await;
+        notified.set(notify.notified());
     }
 }
 
