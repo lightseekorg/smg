@@ -276,6 +276,44 @@ pub(crate) fn init_metrics() {
         "Retry backoff duration by attempt number"
     );
 
+    // Layer 3: Engine load re-export (from the GetLoads poll loop)
+    describe_gauge!(
+        "smg_engine_running_requests",
+        "Engine-reported running requests by worker, model, dp_rank"
+    );
+    describe_gauge!(
+        "smg_engine_waiting_requests",
+        "Engine-reported waiting requests by worker, model, dp_rank"
+    );
+    describe_gauge!(
+        "smg_engine_token_usage",
+        "Engine-reported KV token usage ratio (0.0-1.0) by worker, model, dp_rank"
+    );
+    describe_gauge!(
+        "smg_engine_gen_throughput",
+        "Engine-reported generation throughput (tokens/s) by worker, model, dp_rank"
+    );
+    describe_gauge!(
+        "smg_engine_cache_hit_rate",
+        "Engine-reported prefix cache hit rate (0.0-1.0) by worker, model, dp_rank"
+    );
+    describe_gauge!(
+        "smg_engine_pd_kv_transfer_latency_ms",
+        "Engine-reported PD KV transfer latency (ms) by worker, role"
+    );
+    describe_gauge!(
+        "smg_engine_pd_kv_transfer_speed_gb_s",
+        "Engine-reported PD KV transfer speed (GB/s) by worker, role"
+    );
+    describe_gauge!(
+        "smg_engine_pd_prefill_queue_reqs",
+        "Engine-reported PD prefill queue depth by worker, role"
+    );
+    describe_gauge!(
+        "smg_engine_pd_decode_queue_reqs",
+        "Engine-reported PD decode queue depth by worker, role"
+    );
+
     // Layer 4: Discovery metrics
     describe_counter!(
         "smg_discovery_registrations_total",
@@ -1223,6 +1261,102 @@ impl Metrics {
     }
 
     // ========================================================================
+    // Layer 3: Engine load re-export
+    // ========================================================================
+
+    /// Re-export a worker's `GetLoads` snapshot as `smg_engine_*` gauges.
+    ///
+    /// Core gauges are per DP rank (`dp_rank` bounded by dp_size). PD gauges
+    /// are emitted only for ranks that carry a `disagg` section, labeled by the
+    /// engine-reported role (`prefill`/`decode`/`null`).
+    pub fn record_engine_load(
+        worker_url: &str,
+        model_id: &str,
+        response: &openai_protocol::worker::WorkerLoadResponse,
+    ) {
+        let worker = intern_string(worker_url);
+        let model = intern_string(model_id);
+
+        for load in &response.loads {
+            let dp_rank = intern_string(&load.dp_rank.to_string());
+
+            gauge!(
+                "smg_engine_running_requests",
+                "worker" => Arc::clone(&worker),
+                "model" => Arc::clone(&model),
+                "dp_rank" => Arc::clone(&dp_rank),
+            )
+            .set(load.num_running_reqs as f64);
+            gauge!(
+                "smg_engine_waiting_requests",
+                "worker" => Arc::clone(&worker),
+                "model" => Arc::clone(&model),
+                "dp_rank" => Arc::clone(&dp_rank),
+            )
+            .set(load.num_waiting_reqs as f64);
+            gauge!(
+                "smg_engine_token_usage",
+                "worker" => Arc::clone(&worker),
+                "model" => Arc::clone(&model),
+                "dp_rank" => Arc::clone(&dp_rank),
+            )
+            .set(load.token_usage);
+            gauge!(
+                "smg_engine_gen_throughput",
+                "worker" => Arc::clone(&worker),
+                "model" => Arc::clone(&model),
+                "dp_rank" => Arc::clone(&dp_rank),
+            )
+            .set(load.gen_throughput);
+            gauge!(
+                "smg_engine_cache_hit_rate",
+                "worker" => Arc::clone(&worker),
+                "model" => Arc::clone(&model),
+                "dp_rank" => dp_rank,
+            )
+            .set(load.cache_hit_rate);
+
+            // PD gauges only when the engine reported a disagg section.
+            let Some(role) = load.disagg_mode.as_deref() else {
+                continue;
+            };
+            let role = intern_string(role);
+            if let Some(latency) = load.kv_transfer_latency_ms {
+                gauge!(
+                    "smg_engine_pd_kv_transfer_latency_ms",
+                    "worker" => Arc::clone(&worker),
+                    "role" => Arc::clone(&role),
+                )
+                .set(latency);
+            }
+            if let Some(speed) = load.kv_transfer_speed_gb_s {
+                gauge!(
+                    "smg_engine_pd_kv_transfer_speed_gb_s",
+                    "worker" => Arc::clone(&worker),
+                    "role" => Arc::clone(&role),
+                )
+                .set(speed);
+            }
+            if let Some(reqs) = load.prefill_queue_reqs {
+                gauge!(
+                    "smg_engine_pd_prefill_queue_reqs",
+                    "worker" => Arc::clone(&worker),
+                    "role" => Arc::clone(&role),
+                )
+                .set(reqs as f64);
+            }
+            if let Some(reqs) = load.decode_queue_reqs {
+                gauge!(
+                    "smg_engine_pd_decode_queue_reqs",
+                    "worker" => Arc::clone(&worker),
+                    "role" => role,
+                )
+                .set(reqs as f64);
+            }
+        }
+    }
+
+    // ========================================================================
     // Worker cleanup
     // ========================================================================
 
@@ -1239,13 +1373,163 @@ impl Metrics {
         gauge!("smg_worker_cb_state", "worker" => Arc::clone(&worker)).set(-1.0);
         gauge!("smg_worker_health", "worker" => worker).set(-1.0);
     }
+
+    /// Sentinel-out `smg_engine_*` series for a removed worker.
+    ///
+    /// metrics-rs cannot delete series, so per the `remove_worker_metrics`
+    /// convention we set each to -1 (an impossible value for these gauges, whose
+    /// 0 is meaningful) until <https://github.com/metrics-rs/metrics/issues/653>.
+    /// `dp_size` bounds the rank labels; the role label is unknown at teardown,
+    /// so both PD roles are cleared. The label set must exactly match
+    /// `record_engine_load` (including `model`) or a fresh series is created
+    /// instead of overwriting the live one.
+    pub fn remove_engine_load_metrics(worker_url: &str, model_id: &str, dp_size: usize) {
+        let worker = intern_string(worker_url);
+        let model = intern_string(model_id);
+
+        for rank in 0..dp_size.max(1) {
+            let dp_rank = intern_string(&rank.to_string());
+            for name in [
+                "smg_engine_running_requests",
+                "smg_engine_waiting_requests",
+                "smg_engine_token_usage",
+                "smg_engine_gen_throughput",
+                "smg_engine_cache_hit_rate",
+            ] {
+                gauge!(
+                    name,
+                    "worker" => Arc::clone(&worker),
+                    "model" => Arc::clone(&model),
+                    "dp_rank" => Arc::clone(&dp_rank),
+                )
+                .set(-1.0);
+            }
+        }
+
+        for role in ["prefill", "decode"] {
+            for name in [
+                "smg_engine_pd_kv_transfer_latency_ms",
+                "smg_engine_pd_kv_transfer_speed_gb_s",
+                "smg_engine_pd_prefill_queue_reqs",
+                "smg_engine_pd_decode_queue_reqs",
+            ] {
+                gauge!(name, "worker" => Arc::clone(&worker), "role" => role).set(-1.0);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
 
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use openai_protocol::worker::{SchedulerLoadSnapshot, WorkerLoadResponse};
+
     use super::*;
+
+    /// Run `f` under a thread-local Prometheus recorder and return the
+    /// rendered `/metrics` text — the same scrape output the :29000 endpoint
+    /// serves in production.
+    fn render_with_recorder(f: impl FnOnce()) -> String {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, f);
+        handle.render()
+    }
+
+    /// Core engine gauges share these labels for the snapshot fixtures.
+    const CORE_LABELS: [&str; 3] = ["dp_rank=\"2\"", "model=\"m\"", "worker=\"http://w:1\""];
+
+    /// Assert the rendered scrape has a line for `name` carrying every label in
+    /// `labels` and ending in `value`. Label order is exporter-defined, so this
+    /// matches on substrings rather than a fixed label set.
+    fn assert_metric(rendered: &str, name: &str, labels: &[&str], value: &str) {
+        let line = rendered
+            .lines()
+            .find(|l| l.starts_with(&format!("{name}{{")))
+            .unwrap_or_else(|| panic!("metric {name} missing; rendered:\n{rendered}"));
+        for label in labels {
+            assert!(line.contains(label), "{name} missing label {label}: {line}");
+        }
+        assert!(
+            line.ends_with(&format!(" {value}")),
+            "{name} expected value {value}: {line}"
+        );
+    }
+
+    #[test]
+    fn record_engine_load_sets_core_gauges_per_dp_rank() {
+        let response = WorkerLoadResponse {
+            timestamp: "t".to_string(),
+            dp_rank_count: 1,
+            loads: vec![SchedulerLoadSnapshot {
+                dp_rank: 2,
+                num_running_reqs: 7,
+                num_waiting_reqs: 3,
+                token_usage: 0.5,
+                gen_throughput: 42.0,
+                cache_hit_rate: 0.25,
+                ..Default::default()
+            }],
+        };
+
+        let rendered = render_with_recorder(|| {
+            Metrics::record_engine_load("http://w:1", "m", &response);
+        });
+
+        // The exporter renders labels in insertion order, so assert on the
+        // metric line's components rather than a fixed label ordering.
+        assert_metric(&rendered, "smg_engine_running_requests", &CORE_LABELS, "7");
+        assert_metric(&rendered, "smg_engine_waiting_requests", &CORE_LABELS, "3");
+        assert_metric(&rendered, "smg_engine_gen_throughput", &CORE_LABELS, "42");
+        // PD gauges absent when no disagg section was reported.
+        assert!(
+            !rendered.contains("smg_engine_pd_"),
+            "PD gauges must not appear without a disagg section; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn record_engine_load_sets_pd_gauges_when_disagg_present() {
+        let response = WorkerLoadResponse {
+            timestamp: "t".to_string(),
+            dp_rank_count: 1,
+            loads: vec![SchedulerLoadSnapshot {
+                dp_rank: 0,
+                disagg_mode: Some("prefill".to_string()),
+                kv_transfer_latency_ms: Some(3.5),
+                kv_transfer_speed_gb_s: Some(12.0),
+                prefill_queue_reqs: Some(9),
+                decode_queue_reqs: Some(4),
+                ..Default::default()
+            }],
+        };
+
+        let rendered = render_with_recorder(|| {
+            Metrics::record_engine_load("http://w:1", "m", &response);
+        });
+
+        let pd_labels = ["role=\"prefill\"", "worker=\"http://w:1\""];
+        assert_metric(
+            &rendered,
+            "smg_engine_pd_kv_transfer_latency_ms",
+            &pd_labels,
+            "3.5",
+        );
+        assert_metric(
+            &rendered,
+            "smg_engine_pd_prefill_queue_reqs",
+            &pd_labels,
+            "9",
+        );
+        assert_metric(
+            &rendered,
+            "smg_engine_pd_decode_queue_reqs",
+            &pd_labels,
+            "4",
+        );
+    }
 
     #[test]
     fn test_prometheus_config_default() {

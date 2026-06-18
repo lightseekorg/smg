@@ -700,6 +700,10 @@ impl SglangSchedulerClient {
 
 impl From<proto::SchedulerLoad> for openai_protocol::worker::SchedulerLoadSnapshot {
     fn from(load: proto::SchedulerLoad) -> Self {
+        // Disaggregation queue depths roll the per-stage SGLang counters into
+        // the two canonical totals: prefill = prealloc + inflight, decode =
+        // prealloc + transfer + retracted.
+        let disagg = load.disaggregation;
         Self {
             dp_rank: load.dp_rank,
             num_running_reqs: load.num_running_reqs,
@@ -713,6 +717,17 @@ impl From<proto::SchedulerLoad> for openai_protocol::worker::SchedulerLoadSnapsh
             cache_hit_rate: load.cache_hit_rate,
             utilization: load.utilization,
             max_running_requests: load.max_running_requests,
+            kv_transfer_latency_ms: disagg.as_ref().map(|d| d.kv_transfer_latency_ms),
+            kv_transfer_speed_gb_s: disagg.as_ref().map(|d| d.kv_transfer_speed_gb_s),
+            prefill_queue_reqs: disagg
+                .as_ref()
+                .map(|d| d.prefill_prealloc_queue_reqs + d.prefill_inflight_queue_reqs),
+            decode_queue_reqs: disagg.as_ref().map(|d| {
+                d.decode_prealloc_queue_reqs
+                    + d.decode_transfer_queue_reqs
+                    + d.decode_retracted_queue_reqs
+            }),
+            disagg_mode: disagg.map(|d| d.mode),
         }
     }
 }
@@ -735,6 +750,46 @@ mod tests {
     fn test_proto_types_compilation() {
         let _health_req = proto::HealthCheckRequest {};
         // HealthCheckRequest is now empty - no fields to test
+    }
+
+    #[test]
+    fn test_scheduler_load_maps_disagg_section() {
+        let load = proto::SchedulerLoad {
+            dp_rank: 0,
+            num_running_reqs: 3,
+            disaggregation: Some(proto::DisaggregationMetrics {
+                mode: "prefill".to_string(),
+                prefill_prealloc_queue_reqs: 2,
+                prefill_inflight_queue_reqs: 5,
+                decode_prealloc_queue_reqs: 1,
+                decode_transfer_queue_reqs: 4,
+                decode_retracted_queue_reqs: 7,
+                kv_transfer_speed_gb_s: 12.5,
+                kv_transfer_latency_ms: 3.25,
+            }),
+            ..Default::default()
+        };
+
+        let snap = openai_protocol::worker::SchedulerLoadSnapshot::from(load);
+
+        assert_eq!(snap.disagg_mode.as_deref(), Some("prefill"));
+        assert_eq!(snap.kv_transfer_latency_ms, Some(3.25));
+        assert_eq!(snap.kv_transfer_speed_gb_s, Some(12.5));
+        assert_eq!(snap.prefill_queue_reqs, Some(7)); // 2 + 5
+        assert_eq!(snap.decode_queue_reqs, Some(12)); // 1 + 4 + 7
+    }
+
+    #[test]
+    fn test_scheduler_load_disagg_absent_is_none() {
+        let snap = openai_protocol::worker::SchedulerLoadSnapshot::from(proto::SchedulerLoad {
+            num_running_reqs: 1,
+            ..Default::default()
+        });
+
+        assert!(snap.disagg_mode.is_none());
+        assert!(snap.kv_transfer_latency_ms.is_none());
+        assert!(snap.prefill_queue_reqs.is_none());
+        assert!(snap.decode_queue_reqs.is_none());
     }
 
     #[test]

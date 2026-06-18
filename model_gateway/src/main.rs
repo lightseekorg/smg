@@ -274,6 +274,11 @@ struct CliArgs {
     #[arg(long, default_value_t = 10, help_heading = "Load Monitoring")]
     load_monitor_interval: u64,
 
+    /// Re-export engine GetLoads signals (incl. PD) as smg_engine_* Prometheus
+    /// gauges, polling even without a load-aware routing policy.
+    #[arg(long, default_value_t = false, help_heading = "Load Monitoring")]
+    engine_metrics: bool,
+
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
     #[arg(
@@ -1258,6 +1263,7 @@ impl CliArgs {
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
+            .engine_metrics(self.engine_metrics)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -1570,6 +1576,39 @@ mod tests {
 
         let server_config = cli.to_server_config(router_config).unwrap();
         assert_eq!(server_config.health_check_port, None);
+    }
+
+    /// `--engine-metrics` must flow into `RouterConfig` and survive nesting
+    /// into `ServerConfig.router_config` — the consumer (load monitor) reads it
+    /// off `RouterConfig`. Two-path config-plumbing guard.
+    #[test]
+    fn engine_metrics_flows_into_both_configs() {
+        let cli = cli_args_from(&["--engine-metrics"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert!(
+            router_config.engine_metrics,
+            "engine_metrics must reach RouterConfig via to_router_config"
+        );
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert!(
+            server_config.router_config.engine_metrics,
+            "engine_metrics must survive into ServerConfig via to_server_config"
+        );
+    }
+
+    /// Default is off: the flag stays false through both conversions so
+    /// existing deployments keep the routing-gated polling behavior.
+    #[test]
+    fn engine_metrics_defaults_to_false_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert!(!router_config.engine_metrics);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert!(!server_config.router_config.engine_metrics);
     }
 
     /// clap rejects out-of-range probe ports at parse time (the `u16`

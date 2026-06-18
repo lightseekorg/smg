@@ -168,6 +168,7 @@ mod tests {
                 cache_hit_rate: 0.0,
                 utilization: 0.0,
                 max_running_requests: 0,
+                ..Default::default()
             }],
         }
     }

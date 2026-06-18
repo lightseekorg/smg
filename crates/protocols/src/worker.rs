@@ -1099,6 +1099,21 @@ pub struct SchedulerLoadSnapshot {
     pub cache_hit_rate: f64,
     pub utilization: f64,
     pub max_running_requests: i32,
+    /// PD disaggregation signals, populated only when the backend reports a
+    /// `disagg` section. `None` for HTTP or older engines. Canonical schema
+    /// other engines map into; SGLang derives the queue depths from its
+    /// per-stage DisaggregationMetrics counters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_speed_gb_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_queue_reqs: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_queue_reqs: Option<i32>,
+    /// "prefill", "decode", or "null" as reported by the backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disagg_mode: Option<String>,
 }
 
 /// Full load response for a single worker across all DP ranks.

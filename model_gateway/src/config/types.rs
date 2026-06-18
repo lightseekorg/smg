@@ -30,6 +30,11 @@ pub struct RouterConfig {
     pub worker_startup_check_interval_secs: u64,
     #[serde(default = "default_load_monitor_interval_secs")]
     pub load_monitor_interval_secs: u64,
+    /// Re-export engine `GetLoads` signals as `smg_engine_*` gauges, polling
+    /// even when no load-aware routing policy is active. Decouples engine
+    /// observability from routing.
+    #[serde(default)]
+    pub engine_metrics: bool,
     pub dp_aware: bool,
     #[serde(default)]
     pub dp_minimum_tokens_scheduler: bool,
@@ -650,6 +655,7 @@ impl Default for RouterConfig {
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
+            engine_metrics: false,
             dp_aware: false,
             dp_minimum_tokens_scheduler: false,
             api_key: None,

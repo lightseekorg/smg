@@ -584,6 +584,7 @@ impl AppContextBuilder {
                 .clone(),
             client.clone(),
             config.load_monitor_interval_secs,
+            config.engine_metrics,
         )));
         Ok(self)
     }

@@ -202,6 +202,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn engine_metrics(mut self, enabled: bool) -> Self {
+        self.config.engine_metrics = enabled;
+        self
+    }
+
     // ==================== Rate Limiting ====================
 
     pub fn max_concurrent_requests(mut self, max: i32) -> Self {

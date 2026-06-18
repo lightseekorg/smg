@@ -683,6 +683,8 @@ impl From<tokenspeed_proto::SchedulerLoad> for openai_protocol::worker::Schedule
             cache_hit_rate: load.cache_hit_rate,
             utilization: load.utilization,
             max_running_requests: load.max_running_requests,
+            // TokenSpeed has no disagg section; canonical PD fields stay None.
+            ..Default::default()
         }
     }
 }

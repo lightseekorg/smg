@@ -730,6 +730,9 @@ impl From<proto::SchedulerLoad> for openai_protocol::worker::SchedulerLoadSnapsh
             cache_hit_rate: load.cache_hit_rate,
             utilization: load.utilization,
             max_running_requests: load.max_running_requests,
+            // vLLM disagg mapping is out of scope here; canonical PD fields
+            // stay None until the vLLM proto exposes them.
+            ..Default::default()
         }
     }
 }
