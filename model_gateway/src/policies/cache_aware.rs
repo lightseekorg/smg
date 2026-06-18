@@ -64,8 +64,46 @@ use super::{
 };
 use crate::{
     mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
-    worker::{KvEventMonitor, Worker},
+    // `RoutingState` is not re-exported from `worker`; reach it via the
+    // submodule path to keep this change contained to `cache_aware.rs`.
+    worker::{worker::RoutingState, KvEventMonitor, Worker},
 };
+
+/// Number of distinct workers sampled per request to drive the min-load
+/// fallback and the imbalance min/max estimate, bounding the load work at
+/// O(SAMPLE) instead of O(fleet).
+///
+/// This is a generalized power-of-two-choices (`power_of_two.rs` uses D=2):
+/// the min-load fallback routes to the least-loaded of the sample, and the
+/// imbalance trigger compares the sample's load/KV spread. We sample more than
+/// 2 so the imbalance estimate stays reasonable — D=2 reliably finds a lightly
+/// loaded target but is a poor estimator of fleet-wide spread, which is the
+/// signal that decides whether to abandon cache affinity. With D=8 the sampled
+/// spread tracks the true spread closely for the skewed pools imbalance is
+/// meant to catch, while the work stays independent of fleet size.
+///
+/// APPROXIMATION (documented for routing-quality review):
+/// - Min-load fallback: picks the min of 8 random workers rather than the
+///   global min. This is the canonical sub-linear load-balancer; it cannot
+///   pick a pathologically loaded worker when a lighter one is in the sample.
+/// - Imbalance detection: the sampled min/max under-estimates the true
+///   `max - min` spread (a sample of 8 may miss the single hottest or single
+///   coldest engine). Net effect is a slight bias toward *keeping* cache
+///   affinity (fewer false imbalance trips), never toward routing to an
+///   overloaded worker — the min-load fallback itself is still load-aware.
+/// Not configurable here because `CacheAwareConfig` lives in `mod.rs`; a
+/// module constant keeps the change contained to this file.
+const LOAD_SAMPLE_SIZE: usize = 8;
+
+/// A sampled worker: its fleet index plus the one-shot routing snapshot read
+/// for it. Carrying the snapshot avoids re-reading `routing_state()` (one
+/// `ArcSwap` guard) when the same worker is reused across the imbalance check
+/// and the min-load fallback.
+#[derive(Clone, Copy)]
+struct SampledWorker {
+    idx: usize,
+    state: RoutingState,
+}
 
 /// Latest per-worker backend load snapshot stream, keyed by worker URL.
 pub(crate) type LoadReceiver = watch::Receiver<HashMap<String, WorkerLoadResponse>>;
@@ -277,20 +315,23 @@ impl CacheAwarePolicy {
     ///   caught when KV looks even.
     /// Whether to abandon cache affinity for shortest-queue because the pool is
     /// imbalanced — by backend KV usage (overload ceiling or hot-vs-cool spread)
-    /// or by request-count spread. `min_load`/`max_load` are the request-count
-    /// bounds over the healthy workers, which `select_worker` gathers in its
-    /// single worker pass (tests use the `imbalanced` helper to fold them).
+    /// or by request-count spread.
+    ///
+    /// Operates on a bounded random `sample` of healthy workers (see
+    /// [`LOAD_SAMPLE_SIZE`]), so the spread is an estimate of the fleet-wide
+    /// spread rather than the exact min/max. The sampled spread can only be
+    /// `<=` the true spread, biasing slightly toward keeping cache affinity.
+    /// `min_load`/`max_load` are the request-count bounds over the sample;
+    /// tests fold them with the `imbalanced` helper.
     fn is_imbalanced(
         &self,
         workers: &[Arc<dyn Worker>],
-        healthy_indices: &[usize],
+        sample: &[SampledWorker],
         min_load: usize,
         max_load: usize,
     ) -> bool {
         // KV-based triggers — need a load snapshot; both default 1.0 = disabled.
-        if let Some((min_usage, max_usage)) =
-            self.backend_token_usage_bounds(workers, healthy_indices)
-        {
+        if let Some((min_usage, max_usage)) = self.backend_token_usage_bounds(workers, sample) {
             // Overload: a single engine is critically saturated.
             if max_usage > f64::from(self.config.overload_token_usage_threshold) {
                 return true;
@@ -301,26 +342,27 @@ impl CacheAwarePolicy {
             }
         }
 
-        // Count spread (abs AND rel) over healthy workers.
+        // Count spread (abs AND rel) over the sampled workers.
         max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
             && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold)
     }
 
-    /// Min and max backend KV-cache utilization (0.0–1.0) across healthy workers
-    /// that have a `WorkerMonitor` snapshot entry, as `(min, max)`. `None` when
-    /// no receiver is wired or no healthy worker has a load entry (→ caller
-    /// relies on the request-count spread).
+    /// Min and max backend KV-cache utilization (0.0–1.0) across the sampled
+    /// workers that have a `WorkerMonitor` snapshot entry, as `(min, max)`.
+    /// `None` when no receiver is wired or no sampled worker has a load entry
+    /// (→ caller relies on the request-count spread). Like the count spread,
+    /// this is a sampled estimate of the fleet-wide KV spread.
     fn backend_token_usage_bounds(
         &self,
         workers: &[Arc<dyn Worker>],
-        healthy_indices: &[usize],
+        sample: &[SampledWorker],
     ) -> Option<(f64, f64)> {
         let guard = self.load_rx.read();
         let rx = guard.as_ref()?;
         let loads = rx.borrow();
         let mut bounds: Option<(f64, f64)> = None;
-        for &idx in healthy_indices {
-            if let Some(load) = loads.get(workers[idx].url()) {
+        for s in sample {
+            if let Some(load) = loads.get(workers[s.idx].url()) {
                 let usage = load.effective_token_usage();
                 bounds = Some(match bounds {
                     Some((min, max)) => (min.min(usage), max.max(usage)),
@@ -329,6 +371,130 @@ impl CacheAwarePolicy {
             }
         }
         bounds
+    }
+
+    /// Draw up to [`LOAD_SAMPLE_SIZE`] *distinct* healthy+executable workers at
+    /// random and return them with their routing snapshots.
+    ///
+    /// This is the bounded replacement for the former O(fleet) gather: instead
+    /// of reading every worker to find the global min-load and the exact
+    /// load/KV spread, we read a constant-size random sample. The sample drives
+    /// both the imbalance estimate ([`is_imbalanced`]) and the min-load
+    /// fallback ([`min_load_idx_from`]), so each request takes at most
+    /// `LOAD_SAMPLE_SIZE` routing-state guards regardless of fleet size.
+    ///
+    /// Sampling strategy: for small fleets (`len <= LOAD_SAMPLE_SIZE`) we walk
+    /// every index (still O(fleet) but bounded by the constant), preserving the
+    /// exact-min behavior the old code had at the sizes used in tests. For
+    /// larger fleets we probe random indices, skipping unhealthy ones, with a
+    /// bounded number of attempts so a transiently unhealthy fleet can't spin.
+    /// Returns an empty vec only when no probed worker was healthy.
+    fn sample_healthy(workers: &[Arc<dyn Worker>]) -> Vec<SampledWorker> {
+        let len = workers.len();
+        let mut sample: Vec<SampledWorker> = Vec::with_capacity(LOAD_SAMPLE_SIZE.min(len));
+
+        if len <= LOAD_SAMPLE_SIZE {
+            // Small fleet: examine all (bounded by the constant). Exact min/max.
+            for (idx, worker) in workers.iter().enumerate() {
+                let state = worker.routing_state();
+                if state.healthy && state.can_execute {
+                    sample.push(SampledWorker { idx, state });
+                }
+            }
+            return sample;
+        }
+
+        // Large fleet: probe random distinct indices until we have
+        // LOAD_SAMPLE_SIZE healthy workers or exhaust the attempt budget.
+        // Attempts are bounded so a mostly-unhealthy fleet can't spin; the
+        // budget is a small multiple of the target so a few unhealthy hits
+        // don't starve the sample.
+        let mut rng = rand::rng();
+        let max_attempts = LOAD_SAMPLE_SIZE.saturating_mul(4);
+        let mut seen: Vec<usize> = Vec::with_capacity(max_attempts);
+        for _ in 0..max_attempts {
+            if sample.len() >= LOAD_SAMPLE_SIZE {
+                break;
+            }
+            let idx = rng.random_range(0..len);
+            if seen.contains(&idx) {
+                continue;
+            }
+            seen.push(idx);
+            let state = workers[idx].routing_state();
+            if state.healthy && state.can_execute {
+                sample.push(SampledWorker { idx, state });
+            }
+        }
+        sample
+    }
+
+    /// Least-loaded worker index within a sample, using the same
+    /// `(load, processed, idx)` tie-break as the former full gather (#1714:
+    /// spreads load when decode outpaces prefill). `None` when the sample is
+    /// empty.
+    fn min_load_idx_from(sample: &[SampledWorker]) -> Option<usize> {
+        sample
+            .iter()
+            .min_by_key(|s| (s.state.load, s.state.processed, s.idx))
+            .map(|s| s.idx)
+    }
+
+    /// First worker in fleet order that is healthy + executable, re-checked
+    /// directly (O(1) per worker, short-circuits on the first match). Replaces
+    /// the former `healthy_indices.first()` fallback without materializing the
+    /// whole healthy set. In the common case the upstream `is_available()`
+    /// pre-filter means index 0 already qualifies, so this returns on the first
+    /// probe.
+    fn first_available(workers: &[Arc<dyn Worker>]) -> Option<usize> {
+        workers.iter().position(|w| {
+            let state = w.routing_state();
+            state.healthy && state.can_execute
+        })
+    }
+
+    /// Resolve a cache-affinity tenant URL to a fleet index, returning it only
+    /// when that worker is currently healthy + executable.
+    ///
+    /// This is the cache-HIT resolution. It is byte-for-byte equivalent to the
+    /// former `healthy_indices.iter().find(|idx| url == tenant)`: that set held
+    /// only healthy workers, so a match meant "tenant present AND healthy"; an
+    /// unhealthy tenant returned `None` and fell through to the min-load /
+    /// first-available fallback. Here we scan the (upstream-`is_available`)
+    /// `workers` slice, short-circuit on the URL match, then re-check that one
+    /// worker's health directly (O(1)).
+    ///
+    /// PRESERVED O(fleet-until-match): the tree returns the tenant by URL and
+    /// there is no URL→index map available, so resolving it is a scan. On a hit
+    /// the tenant is present and the scan is the same one the old code ran over
+    /// the healthy set; building a map would itself be O(fleet) and changing
+    /// the tree to store indices would alter the preserved cache-affinity
+    /// matching. This is the cache-affinity path, so it is kept exact.
+    fn healthy_worker_by_url(workers: &[Arc<dyn Worker>], tenant_url: &str) -> Option<usize> {
+        let idx = workers.iter().position(|w| w.url() == tenant_url)?;
+        let state = workers[idx].routing_state();
+        (state.healthy && state.can_execute).then_some(idx)
+    }
+
+    /// Random healthy + executable worker, used by the no-tree fallback (a
+    /// brand-new model whose tree has not been created yet). Mirrors the old
+    /// `rng.random_range(0..healthy_indices.len())` pick but without building
+    /// the healthy set: probe random indices a bounded number of times, then
+    /// fall back to the first available. Bounded, so it stays sub-linear.
+    fn random_available(workers: &[Arc<dyn Worker>]) -> Option<usize> {
+        let len = workers.len();
+        if len == 0 {
+            return None;
+        }
+        let mut rng = rand::rng();
+        for _ in 0..LOAD_SAMPLE_SIZE {
+            let idx = rng.random_range(0..len);
+            let state = workers[idx].routing_state();
+            if state.healthy && state.can_execute {
+                return Some(idx);
+            }
+        }
+        Self::first_available(workers)
     }
 
     /// Initialize the trees with worker URLs (used only during initial setup)
@@ -770,48 +936,48 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         let request_text = info.request_text;
         let request_tokens = info.tokens;
 
-        // Single O(workers) gather: read each worker once via routing_state()
-        // (status + load + processed under one ArcSwap guard), replacing the
-        // former separate passes whose per-worker guard traffic dominated routing
-        // CPU at scale. Collects healthy indices, load min/max, and the min-load
-        // index; cache-hit tenant lookup is a hash-free scan over healthy_indices.
-        let mut healthy_indices: Vec<usize> = Vec::with_capacity(workers.len());
-        let mut min_load = usize::MAX;
-        let mut max_load = 0usize;
-        // Min-load worker, (load, processed_requests, idx) tie-break (#1714);
-        // `processed` rides the same guard as `load`, so it is free here.
-        let mut min_key: Option<(usize, usize, usize)> = None;
-        let mut min_load_idx: Option<usize> = None;
-        for (idx, worker) in workers.iter().enumerate() {
-            let state = worker.routing_state();
-            if state.healthy && state.can_execute {
-                healthy_indices.push(idx);
-                min_load = min_load.min(state.load);
-                max_load = max_load.max(state.load);
-                let key = (state.load, state.processed, idx);
-                match min_key {
-                    Some(best) if key >= best => {}
-                    _ => {
-                        min_key = Some(key);
-                        min_load_idx = Some(idx);
-                    }
-                }
-            }
-        }
-
-        if healthy_indices.is_empty() {
+        if workers.is_empty() {
             return None;
         }
-        let min_load = if min_load == usize::MAX { 0 } else { min_load };
 
-        // Determine the model for this set of workers (router pre-filters by model)
-        // All workers should be from the same model
-        let model_id = normalize_model_key(workers[healthy_indices[0]].model_id());
+        // Bounded sample (O(LOAD_SAMPLE_SIZE), independent of fleet size) that
+        // replaces the former O(fleet) gather. It drives the imbalance estimate
+        // and the min-load fallback; the cache-affinity tree/indexer match is
+        // unchanged and stays sub-linear (prefix match), validating the matched
+        // worker's health directly (O(1)) rather than against a full healthy
+        // set. See `sample_healthy` / `LOAD_SAMPLE_SIZE` for the approximation.
+        let sample = Self::sample_healthy(workers);
+        if sample.is_empty() {
+            // No probed worker was healthy. On a small fleet the sample is
+            // exhaustive, so this means none are healthy → no selection. On a
+            // large fleet the probe may have missed the healthy minority; fall
+            // back to a direct first-available scan so we don't drop a request
+            // that a deterministic scan would have served. Route it through the
+            // min-load path so the tree + processed counter are still updated.
+            let idx = Self::first_available(workers)?;
+            let model_id = normalize_model_key(workers[idx].model_id());
+            return self.select_worker_min_load(workers, info, Some(idx), model_id);
+        }
+
+        // Sampled request-count bounds + min-load index (same `(load,
+        // processed, idx)` tie-break as the old gather, now over the sample).
+        let mut min_load = usize::MAX;
+        let mut max_load = 0usize;
+        for s in &sample {
+            min_load = min_load.min(s.state.load);
+            max_load = max_load.max(s.state.load);
+        }
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
+        let min_load_idx = Self::min_load_idx_from(&sample);
+
+        // Determine the model for this set of workers (router pre-filters by
+        // model, so all workers share it; the first sampled worker is healthy).
+        let model_id = normalize_model_key(workers[sample[0].idx].model_id());
 
         // Abandon cache affinity for shortest-queue when the pool is imbalanced —
-        // by request count (using the loads already gathered above), or (for
-        // long-context workloads) by backend KV usage.
-        if self.is_imbalanced(workers, &healthy_indices, min_load, max_load) {
+        // by request count or (for long-context workloads) by backend KV usage,
+        // both estimated from the sample.
+        if self.is_imbalanced(workers, &sample, min_load, max_load) {
             return self.select_worker_min_load(workers, info, min_load_idx, model_id);
         }
 
@@ -821,25 +987,13 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
             if self.has_event_indexer(model_id) {
-                self.select_worker_event_driven(
-                    workers,
-                    tokens,
-                    &healthy_indices,
-                    min_load_idx,
-                    model_id,
-                )
+                self.select_worker_event_driven(workers, tokens, min_load_idx, model_id)
             } else {
-                self.select_worker_with_tokens(
-                    workers,
-                    tokens,
-                    &healthy_indices,
-                    min_load_idx,
-                    model_id,
-                )
+                self.select_worker_with_tokens(workers, tokens, min_load_idx, model_id)
             }
         } else {
             let text = request_text.unwrap_or("");
-            self.select_worker_with_text(workers, text, &healthy_indices, min_load_idx, model_id)
+            self.select_worker_with_text(workers, text, min_load_idx, model_id)
         }
     }
 
@@ -891,7 +1045,6 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
-        healthy_indices: &[usize],
         min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
@@ -904,9 +1057,7 @@ impl CacheAwarePolicy {
             .block_size(model_id)
             .unwrap_or(self.config.block_size);
 
-        if let Some(idx) =
-            Self::score_overlap(workers, tokens, healthy_indices, &indexer, block_size)
-        {
+        if let Some(idx) = Self::score_overlap(workers, tokens, &indexer, block_size) {
             return Some(idx);
         }
 
@@ -925,10 +1076,18 @@ impl CacheAwarePolicy {
     /// Returns `Some(idx)` if at least one worker has cached blocks matching the
     /// request. Returns `None` if the request is too short for a full block or
     /// no workers have matching data.
+    ///
+    /// PRESERVED O(fleet): this is the event-driven cache-affinity path, whose
+    /// value is selecting the worker with the best backend KV overlap. The
+    /// overlap scores are keyed by interned worker id with no reverse id→index
+    /// map exposed here, so finding the best-overlap worker requires visiting
+    /// the fleet. Sampling it would risk skipping the true best-overlap worker
+    /// and regress cache affinity, so it is intentionally left exhaustive (it
+    /// re-checks each worker's health directly, O(1), in place of the former
+    /// pre-built healthy-index set).
     fn score_overlap(
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
-        healthy_indices: &[usize],
         indexer: &PositionalIndexer,
         block_size: usize,
     ) -> Option<usize> {
@@ -942,18 +1101,20 @@ impl CacheAwarePolicy {
             return None;
         }
 
-        // Select worker with best overlap among those that actually match.
-        // Tie-break: lower load, then smaller tree size.
-        let best_idx = healthy_indices
-            .iter()
-            .copied()
+        // Select worker with best overlap among healthy workers that actually
+        // match. Health is re-checked directly per worker (O(1)) instead of
+        // against a pre-built healthy-index set. Tie-break: lower load, then
+        // smaller tree size.
+        let best_idx = (0..workers.len())
             .filter(|&idx| {
-                indexer
-                    .worker_id(workers[idx].url())
-                    .and_then(|id| overlap.scores.get(&id))
-                    .copied()
-                    .unwrap_or(0)
-                    > 0
+                workers[idx].is_healthy()
+                    && workers[idx].circuit_breaker_can_execute()
+                    && indexer
+                        .worker_id(workers[idx].url())
+                        .and_then(|id| overlap.scores.get(&id))
+                        .copied()
+                        .unwrap_or(0)
+                        > 0
             })
             .max_by_key(|&idx| {
                 let wid = indexer.worker_id(workers[idx].url());
@@ -987,7 +1148,6 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
-        healthy_indices: &[usize],
         min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
@@ -1004,10 +1164,10 @@ impl CacheAwarePolicy {
             // match, mirroring the previous branch exactly:
             //   * cache hit  (match_rate > threshold): route to the matched
             //     worker if it is still healthy — insert for it;
-            //   * cache miss (match_rate <= threshold): route to the least-loaded
-            //     worker — insert for it;
+            //   * cache miss (match_rate <= threshold): route to the sampled
+            //     least-loaded worker — insert for it;
             //   * matched worker gone/unhealthy: select nothing and DON'T insert
-            //     (closure returns None), falling back to first-healthy below.
+            //     (closure returns None), falling back to first-available below.
             let mut selected_idx: Option<usize> = None;
             let result = tree.match_and_insert_with(tokens, |result| {
                 let match_rate = if result.input_token_count == 0 {
@@ -1017,14 +1177,11 @@ impl CacheAwarePolicy {
                 };
 
                 selected_idx = if match_rate > self.config.cache_threshold {
-                    // Cache hit: scan healthy_indices for the tenant (hash-free;
-                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
-                    // a CB-tripped tenant falls through to min-load (intended).
-                    let tenant_url: &str = &result.tenant;
-                    healthy_indices
-                        .iter()
-                        .copied()
-                        .find(|&idx| workers[idx].url() == tenant_url)
+                    // Cache hit: resolve the tenant URL to a healthy worker
+                    // directly (see `healthy_worker_by_url`). A CB-tripped or
+                    // unhealthy tenant resolves to None and falls through to
+                    // min-load, exactly as the old healthy-set scan did.
+                    Self::healthy_worker_by_url(workers, &result.tenant)
                 } else {
                     min_load_idx
                 };
@@ -1058,17 +1215,15 @@ impl CacheAwarePolicy {
                 return Some(idx);
             }
 
-            // Selected worker no longer exists or unhealthy - fall back to first healthy
-            // Stale entries will be cleaned up by LRU eviction
-            healthy_indices.first().copied()
+            // Selected worker no longer exists or unhealthy - fall back to first
+            // available. Stale entries will be cleaned up by LRU eviction.
+            Self::first_available(workers)
         } else {
             debug!(
                 "Warning: No token tree found for model '{}', using random worker selection",
                 model_id
             );
-            let mut rng = rand::rng();
-            let random_idx = rng.random_range(0..healthy_indices.len());
-            Some(healthy_indices[random_idx])
+            Self::random_available(workers)
         }
     }
 
@@ -1077,7 +1232,6 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         text: &str,
-        healthy_indices: &[usize],
         min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
@@ -1100,14 +1254,11 @@ impl CacheAwarePolicy {
                 };
 
                 selected_idx = if match_rate > self.config.cache_threshold {
-                    // Cache hit: scan healthy_indices for the tenant (hash-free;
-                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
-                    // a CB-tripped tenant falls through to min-load (intended).
-                    let tenant_url: &str = &result.tenant;
-                    healthy_indices
-                        .iter()
-                        .copied()
-                        .find(|&idx| workers[idx].url() == tenant_url)
+                    // Cache hit: resolve the tenant URL to a healthy worker
+                    // directly (see `healthy_worker_by_url`). A CB-tripped or
+                    // unhealthy tenant resolves to None and falls through to
+                    // min-load, exactly as the old healthy-set scan did.
+                    Self::healthy_worker_by_url(workers, &result.tenant)
                 } else {
                     min_load_idx
                 };
@@ -1140,17 +1291,15 @@ impl CacheAwarePolicy {
                 return Some(idx);
             }
 
-            // Selected worker no longer exists or unhealthy - fall back to first healthy
-            // Stale entries will be cleaned up by LRU eviction
-            healthy_indices.first().copied()
+            // Selected worker no longer exists or unhealthy - fall back to first
+            // available. Stale entries will be cleaned up by LRU eviction.
+            Self::first_available(workers)
         } else {
             debug!(
                 "Warning: No string tree found for model '{}', using random worker selection",
                 model_id
             );
-            let mut rng = rand::rng();
-            let random_idx = rng.random_range(0..healthy_indices.len());
-            Some(healthy_indices[random_idx])
+            Self::random_available(workers)
         }
     }
 }
@@ -1338,23 +1487,31 @@ mod tests {
         }
     }
 
-    fn all_healthy(workers: &[Arc<dyn Worker>]) -> Vec<usize> {
-        (0..workers.len()).collect()
+    /// Build a full `SampledWorker` set (every worker), so the imbalance helper
+    /// sees exact min/max bounds. Production samples a bounded random subset;
+    /// these unit tests assert the *decision logic* in `is_imbalanced`, so they
+    /// feed the exhaustive set to keep the bounds deterministic.
+    fn full_sample(workers: &[Arc<dyn Worker>]) -> Vec<SampledWorker> {
+        workers
+            .iter()
+            .enumerate()
+            .map(|(idx, w)| SampledWorker {
+                idx,
+                state: w.routing_state(),
+            })
+            .collect()
     }
 
     /// Run the imbalance check the way `select_worker` does: fold the request-count
-    /// bounds over the healthy workers (production gathers them in one pass), then
-    /// call `is_imbalanced`.
+    /// bounds over the sampled workers, then call `is_imbalanced`. Uses the
+    /// exhaustive sample so the bounds are exact (see `full_sample`).
     fn imbalanced(policy: &CacheAwarePolicy, workers: &[Arc<dyn Worker>]) -> bool {
-        let healthy = all_healthy(workers);
-        let (min_load, max_load) = healthy
-            .iter()
-            .fold((usize::MAX, 0usize), |(min, max), &idx| {
-                let load = workers[idx].load();
-                (min.min(load), max.max(load))
-            });
+        let sample = full_sample(workers);
+        let (min_load, max_load) = sample.iter().fold((usize::MAX, 0usize), |(min, max), s| {
+            (min.min(s.state.load), max.max(s.state.load))
+        });
         let min_load = if min_load == usize::MAX { 0 } else { min_load };
-        policy.is_imbalanced(workers, &healthy, min_load, max_load)
+        policy.is_imbalanced(workers, &sample, min_load, max_load)
     }
 
     #[test]
@@ -1808,7 +1965,6 @@ mod tests {
         let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            &[0, 1],
             &indexer,
             4,
         );
@@ -1833,7 +1989,6 @@ mod tests {
         let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[100, 200, 300, 400, 500, 600, 700, 800],
-            &[0],
             &indexer,
             4,
         );
@@ -1883,7 +2038,7 @@ mod tests {
             .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &indexer, 4);
         assert_eq!(result, Some(1)); // w2 (lower load)
     }
 
@@ -1936,7 +2091,7 @@ mod tests {
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &indexer, 4);
         assert_eq!(result, Some(0)); // w1 (smaller tree)
     }
 
@@ -1952,7 +2107,7 @@ mod tests {
         let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
 
         // Request shorter than block_size → no full blocks → None
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &indexer, 4);
         assert_eq!(result, None);
     }
 
@@ -2017,7 +2172,6 @@ mod tests {
         let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            &[0, 1],
             &indexer,
             4,
         );
@@ -2362,5 +2516,356 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, idx2); // token tree cache affinity preserved
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounded-sampling tests (#1692): load work is O(LOAD_SAMPLE_SIZE), cache
+    // affinity is preserved exactly at any fleet size.
+    // -----------------------------------------------------------------------
+
+    /// `n` healthy workers `http://wN:8000`, indices 0..n.
+    fn make_fleet(n: usize) -> Vec<Arc<dyn Worker>> {
+        (0..n)
+            .map(|i| {
+                Arc::new(
+                    BasicWorkerBuilder::new(format!("http://w{i}:8000"))
+                        .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
+                        .build(),
+                ) as Arc<dyn Worker>
+            })
+            .collect()
+    }
+
+    fn balanced_config() -> CacheAwareConfig {
+        // High count thresholds so a balanced fleet never trips imbalance and we
+        // exercise the cache-affinity path.
+        CacheAwareConfig {
+            cache_threshold: 0.5,
+            balance_abs_threshold: usize::MAX,
+            balance_rel_threshold: f32::MAX,
+            eviction_interval_secs: 0,
+            ..Default::default()
+        }
+    }
+
+    // ---- helper unit tests ----
+
+    #[test]
+    fn min_load_idx_from_uses_load_then_processed_tiebreak() {
+        // Build a sample by hand with crafted states; assert the min picks the
+        // lowest load, then lowest processed, then lowest idx.
+        let s = |idx: usize, load: usize, processed: usize| SampledWorker {
+            idx,
+            state: RoutingState {
+                healthy: true,
+                can_execute: true,
+                load,
+                processed,
+            },
+        };
+        // idx2 has the lowest load → wins outright.
+        let sample = [s(0, 5, 0), s(1, 3, 9), s(2, 1, 100)];
+        assert_eq!(CacheAwarePolicy::min_load_idx_from(&sample), Some(2));
+
+        // Equal load → lower processed wins (idx1).
+        let sample = [s(0, 2, 7), s(1, 2, 3), s(2, 2, 9)];
+        assert_eq!(CacheAwarePolicy::min_load_idx_from(&sample), Some(1));
+
+        // Equal load + processed → lower idx wins.
+        let sample = [s(2, 2, 3), s(0, 2, 3), s(1, 2, 3)];
+        assert_eq!(CacheAwarePolicy::min_load_idx_from(&sample), Some(0));
+
+        assert_eq!(CacheAwarePolicy::min_load_idx_from(&[]), None);
+    }
+
+    #[test]
+    fn sample_healthy_small_fleet_is_exhaustive() {
+        // len <= LOAD_SAMPLE_SIZE → every healthy worker is sampled (exact).
+        let workers = make_fleet(LOAD_SAMPLE_SIZE);
+        let sample = CacheAwarePolicy::sample_healthy(&workers);
+        assert_eq!(sample.len(), LOAD_SAMPLE_SIZE);
+        let mut idxs: Vec<usize> = sample.iter().map(|s| s.idx).collect();
+        idxs.sort_unstable();
+        assert_eq!(idxs, (0..LOAD_SAMPLE_SIZE).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sample_healthy_small_fleet_skips_unhealthy() {
+        let workers = make_fleet(4);
+        workers[1].set_status(WorkerStatus::NotReady);
+        let sample = CacheAwarePolicy::sample_healthy(&workers);
+        let mut idxs: Vec<usize> = sample.iter().map(|s| s.idx).collect();
+        idxs.sort_unstable();
+        assert_eq!(idxs, vec![0, 2, 3]); // unhealthy idx 1 excluded
+    }
+
+    #[test]
+    fn sample_healthy_large_fleet_is_bounded() {
+        // len > LOAD_SAMPLE_SIZE → sample is capped at the constant, all healthy.
+        let workers = make_fleet(200);
+        let sample = CacheAwarePolicy::sample_healthy(&workers);
+        assert_eq!(sample.len(), LOAD_SAMPLE_SIZE);
+        for s in &sample {
+            assert!(s.state.healthy && s.state.can_execute);
+            assert!(s.idx < 200);
+        }
+        // Distinct indices.
+        let mut idxs: Vec<usize> = sample.iter().map(|s| s.idx).collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        assert_eq!(idxs.len(), LOAD_SAMPLE_SIZE);
+    }
+
+    #[test]
+    fn first_available_skips_leading_unhealthy() {
+        let workers = make_fleet(5);
+        workers[0].set_status(WorkerStatus::NotReady);
+        workers[1].set_status(WorkerStatus::NotReady);
+        assert_eq!(CacheAwarePolicy::first_available(&workers), Some(2));
+    }
+
+    #[test]
+    fn first_available_none_when_all_unhealthy() {
+        let workers = make_fleet(3);
+        for w in &workers {
+            w.set_status(WorkerStatus::NotReady);
+        }
+        assert_eq!(CacheAwarePolicy::first_available(&workers), None);
+    }
+
+    #[test]
+    fn healthy_worker_by_url_resolves_only_when_healthy() {
+        let workers = make_fleet(4);
+        // Resolves a healthy tenant to its index.
+        assert_eq!(
+            CacheAwarePolicy::healthy_worker_by_url(&workers, "http://w2:8000"),
+            Some(2)
+        );
+        // Unknown URL → None.
+        assert_eq!(
+            CacheAwarePolicy::healthy_worker_by_url(&workers, "http://nope:8000"),
+            None
+        );
+        // Known but unhealthy tenant → None (mirrors the old healthy-set scan).
+        workers[2].set_status(WorkerStatus::NotReady);
+        assert_eq!(
+            CacheAwarePolicy::healthy_worker_by_url(&workers, "http://w2:8000"),
+            None
+        );
+    }
+
+    // ---- degenerate fleet sizes ----
+
+    #[test]
+    fn select_worker_empty_fleet_returns_none() {
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![];
+        assert_eq!(
+            policy.select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some("hi"),
+                    ..Default::default()
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn select_worker_all_unhealthy_returns_none() {
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers = make_fleet(5);
+        policy.init_workers(&workers);
+        for w in &workers {
+            w.set_status(WorkerStatus::NotReady);
+        }
+        assert_eq!(
+            policy.select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some("hi"),
+                    ..Default::default()
+                }
+            ),
+            None
+        );
+    }
+
+    // ---- cache affinity preserved at large (sampled) fleet size ----
+
+    #[test]
+    fn cache_affinity_preserved_in_large_fleet_text() {
+        // The critical invariant: same-prefix requests route to the SAME worker
+        // even when the fleet is far larger than LOAD_SAMPLE_SIZE. This proves
+        // the tenant URL→index resolution is independent of sampling.
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers = make_fleet(500);
+        policy.init_workers(&workers);
+
+        let info = SelectWorkerInfo {
+            request_text: Some("the quick brown fox jumps over the lazy dog"),
+            ..Default::default()
+        };
+        let first = policy.select_worker(&workers, &info).unwrap();
+        for _ in 0..25 {
+            let again = policy.select_worker(&workers, &info).unwrap();
+            assert_eq!(again, first, "cache affinity must hold at large fleet size");
+        }
+    }
+
+    #[test]
+    fn cache_affinity_preserved_in_large_fleet_tokens() {
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers = make_fleet(500);
+        policy.init_workers(&workers);
+
+        let tokens: Vec<u32> = (1..=64).collect();
+        let info = SelectWorkerInfo {
+            tokens: Some(&tokens),
+            ..Default::default()
+        };
+        let first = policy.select_worker(&workers, &info).unwrap();
+        for _ in 0..25 {
+            let again = policy.select_worker(&workers, &info).unwrap();
+            assert_eq!(
+                again, first,
+                "token cache affinity must hold at large fleet"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_affinity_falls_back_when_owner_unhealthy_large_fleet() {
+        // Establish affinity to a worker, then mark that worker unhealthy. The
+        // next same-prefix request must NOT route to it (falls back), proving
+        // the O(1) health re-check on the resolved tenant works at scale.
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers = make_fleet(300);
+        policy.init_workers(&workers);
+
+        let info = SelectWorkerInfo {
+            request_text: Some("affinity owner prompt that is reasonably long"),
+            ..Default::default()
+        };
+        let owner = policy.select_worker(&workers, &info).unwrap();
+
+        workers[owner].set_status(WorkerStatus::NotReady);
+        for _ in 0..10 {
+            let picked = policy.select_worker(&workers, &info).unwrap();
+            assert_ne!(picked, owner, "must not route to unhealthy cache owner");
+            // And the pick must itself be healthy.
+            assert!(workers[picked].is_healthy() && workers[picked].circuit_breaker_can_execute());
+        }
+    }
+
+    // ---- min-load fallback (cache miss) uses the sample ----
+
+    #[test]
+    fn cache_miss_routes_within_sampled_min_load() {
+        // No tree match yet (first request) → cache-miss branch routes to the
+        // sampled min-load worker. With a large fleet the sample is random, but
+        // the chosen worker must always be healthy + executable (the P2C
+        // invariant: never route to an unavailable worker).
+        let policy = CacheAwarePolicy::with_config(balanced_config());
+        let workers = make_fleet(100);
+        policy.init_workers(&workers);
+
+        for n in 0..30 {
+            let text = format!("unique prompt number {n} with no shared prefix xyzzy");
+            let idx = policy
+                .select_worker(
+                    &workers,
+                    &SelectWorkerInfo {
+                        request_text: Some(&text),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(workers[idx].is_healthy() && workers[idx].circuit_breaker_can_execute());
+        }
+    }
+
+    #[test]
+    fn imbalance_triggers_shortest_queue_large_fleet() {
+        // One worker drowning, the rest idle. The count-spread trigger should
+        // fire (the hot worker is very likely sampled at D=8 over a skewed pool)
+        // and route to a low-load worker, abandoning cache affinity. We assert
+        // the statistical property over many trials rather than a single pick,
+        // since sampling is randomized.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        let workers = make_fleet(50);
+        policy.init_workers(&workers);
+
+        // Make worker 0 extremely hot; everyone else idle.
+        for _ in 0..1000 {
+            workers[0].increment_load();
+        }
+
+        // Drive the SAME prefix repeatedly. If imbalance were ignored, cache
+        // affinity would pin every request to one worker (the tenant). Under
+        // imbalance the min-load fallback spreads across idle workers, so we
+        // should see the hot worker chosen at most rarely and several distinct
+        // low-load workers selected.
+        let info = SelectWorkerInfo {
+            request_text: Some("shared affinity prefix for the imbalance test"),
+            ..Default::default()
+        };
+        let mut distinct = std::collections::HashSet::new();
+        let mut hot_picks = 0;
+        for _ in 0..60 {
+            let idx = policy.select_worker(&workers, &info).unwrap();
+            if idx == 0 {
+                hot_picks += 1;
+            }
+            distinct.insert(idx);
+            assert_eq!(workers[idx].load(), if idx == 0 { 1000 } else { 0 });
+        }
+        // The hot worker should almost never be picked (it has 1000 load), and
+        // the fallback should have spread across multiple idle workers.
+        assert!(
+            hot_picks <= 5,
+            "hot worker picked {hot_picks} times; imbalance fallback should avoid it"
+        );
+        assert!(
+            distinct.len() > 1,
+            "shortest-queue fallback should spread across idle workers"
+        );
+    }
+
+    #[test]
+    fn small_fleet_min_load_is_exact() {
+        // At len <= LOAD_SAMPLE_SIZE the sample is exhaustive, so the imbalanced
+        // path picks the true global min — preserving the old exact behavior.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        let workers = make_fleet(4); // <= LOAD_SAMPLE_SIZE
+        policy.init_workers(&workers);
+        // Heavy load on all but worker 3.
+        for w in workers.iter().take(3) {
+            for _ in 0..20 {
+                w.increment_load();
+            }
+        }
+        let info = SelectWorkerInfo {
+            request_text: Some("x"),
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            // Exhaustive sample → always the exact global min (worker 3).
+            assert_eq!(policy.select_worker(&workers, &info), Some(3));
+        }
     }
 }
