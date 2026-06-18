@@ -689,6 +689,9 @@ pub struct ServerConfig {
     /// leaves the dedicated listener off; probe routes always stay on the
     /// main `port` regardless.
     pub health_check_port: Option<u16>,
+    /// Explicit async runtime worker-thread count. `None` uses tokio's
+    /// container-aware default (`available_parallelism()`).
+    pub runtime_worker_threads: Option<usize>,
     pub router_config: RouterConfig,
     pub max_payload_size: usize,
     pub log_dir: Option<String>,

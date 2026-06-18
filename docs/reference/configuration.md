@@ -517,6 +517,35 @@ headers can otherwise spoof storage hook request context values.
 
 ---
 
+## Runtime Configuration
+
+Controls the tokio async runtime that backs request handling.
+
+By default the runtime is **container-aware**. tokio sizes its worker pool to
+`std::thread::available_parallelism()`, which on Rust 1.95+ already reads the
+cgroup CPU quota — so under a Kubernetes `limits.cpu` the worker count matches
+the pod's quota, not the host's core count. No extra configuration is needed for
+the default to be right under a CPU limit.
+
+Do **not** set an inflated `TOKIO_WORKER_THREADS` (for example a fixed `32`).
+That overrides the container-aware default and oversubscribes worker threads
+against the cores the scheduler actually grants, causing scheduler thrash,
+tail-latency spikes, and `/health` starvation. Leaving it unset is the correct
+production configuration.
+
+### Worker Threads
+
+Explicit async runtime worker-thread count. Leave unset to use tokio's
+container-aware default above; set it only to pin an explicit count (overriding
+the cgroup-quota-derived default).
+
+| Option | `--runtime-worker-threads` |
+|--------|----------------------------|
+| Environment | - |
+| Default | tokio default (`available_parallelism()`, cgroup-quota-aware) |
+
+---
+
 ## Rate Limiting Configuration
 
 ### Concurrent Request Limit

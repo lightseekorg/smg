@@ -175,6 +175,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn runtime_worker_threads(mut self, threads: Option<usize>) -> Self {
+        self.config.runtime_worker_threads = threads;
+        self
+    }
+
     // ==================== Request ====================
 
     pub fn max_payload_size(mut self, size: usize) -> Self {

@@ -24,6 +24,11 @@ pub struct RouterConfig {
     /// routes always remain available on the main `port` regardless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check_port: Option<u16>,
+    /// Explicit async runtime worker-thread count. `None` uses tokio's default
+    /// (`available_parallelism()`), which already honors the cgroup CPU quota on
+    /// Rust 1.95+ and is therefore container-aware. `Some` pins a count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_worker_threads: Option<usize>,
     pub max_payload_size: usize,
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
@@ -645,6 +650,7 @@ impl Default for RouterConfig {
             host: "0.0.0.0".to_string(),
             port: 3001,
             health_check_port: None,
+            runtime_worker_threads: None,
             max_payload_size: 536_870_912,     // 512MB
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading

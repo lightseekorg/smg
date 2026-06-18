@@ -1198,6 +1198,7 @@ impl Router {
                 host: self.host.clone(),
                 port: self.port,
                 health_check_port: self.health_check_port,
+                runtime_worker_threads: None,
                 router_config,
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),

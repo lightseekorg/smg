@@ -20,6 +20,8 @@ use smg::{
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
+use tracing::info;
+
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -743,6 +745,13 @@ struct CliArgs {
     /// Defaults to `stun.l.google.com:19302`. Set to "none" to disable.
     #[arg(long, help_heading = "WebRTC")]
     webrtc_stun_server: Option<String>,
+
+    // ==================== Runtime ====================
+    /// Explicit async runtime worker-thread count. Leave unset to use tokio's
+    /// default (`available_parallelism()`), which already honors the cgroup CPU
+    /// quota on Rust 1.95+ and is therefore container-aware.
+    #[arg(long, help_heading = "Runtime")]
+    runtime_worker_threads: Option<usize>,
 }
 
 enum OracleConnectSource {
@@ -1253,6 +1262,7 @@ impl CliArgs {
             .host(&self.host)
             .port(self.port)
             .health_check_port(self.health_check_port)
+            .runtime_worker_threads(self.runtime_worker_threads)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
@@ -1411,6 +1421,7 @@ impl CliArgs {
             host: self.host.clone(),
             port: self.port,
             health_check_port: self.health_check_port,
+            runtime_worker_threads: self.runtime_worker_threads,
             router_config,
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
@@ -1515,7 +1526,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;
-    let runtime = tokio::runtime::Runtime::new()?;
+    // tokio's default worker-thread count is `available_parallelism()`, which on
+    // Rust 1.95+ already honors the cgroup CPU quota, so the default is
+    // container-aware. Only build the runtime explicitly when an operator pins a
+    // worker-thread count.
+    let runtime = match server_config.runtime_worker_threads {
+        Some(n) => {
+            info!(
+                worker_threads = n,
+                "Sizing tokio runtime (explicit override)"
+            );
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(n)
+                .enable_all()
+                .build()?
+        }
+        None => {
+            info!("Sizing tokio runtime (default, container-aware)");
+            tokio::runtime::Runtime::new()?
+        }
+    };
     runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();
@@ -1581,5 +1611,36 @@ mod tests {
             Cli::try_parse_from(argv).is_err(),
             "a port above u16::MAX must fail clap parsing"
         );
+    }
+
+    /// The `--runtime-worker-threads` override must flow into BOTH conversion
+    /// paths (`to_router_config` and `to_server_config`); wiring only one path
+    /// would let the flag be silently ignored on the other (the two-path footgun).
+    #[test]
+    fn runtime_worker_threads_flows_into_both_configs() {
+        let cli = cli_args_from(&["--runtime-worker-threads", "3"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.runtime_worker_threads, Some(3));
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.runtime_worker_threads,
+            Some(3),
+            "runtime_worker_threads must reach ServerConfig via to_server_config"
+        );
+    }
+
+    /// Unset, the flag propagates as `None` through both conversions, so the
+    /// runtime uses tokio's container-aware default.
+    #[test]
+    fn runtime_worker_threads_default_to_none_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.runtime_worker_threads, None);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(server_config.runtime_worker_threads, None);
     }
 }
