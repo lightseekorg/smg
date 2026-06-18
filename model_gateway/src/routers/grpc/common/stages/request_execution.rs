@@ -206,8 +206,7 @@ impl PipelineStage for RequestExecutionStage {
                                     .await
                             }
                             Some(RuntimeType::Sglang) => {
-                                self.execute_dual_dispatch(req, clients, workers, model)
-                                    .await
+                                self.execute_dual_dispatch(req, clients, workers).await
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::Mlx)
@@ -325,12 +324,8 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
-        model: &str,
     ) -> Result<ExecutionResult, Response> {
-        let runtime = workers
-            .pd_runtime_type()
-            .map(RuntimeType::as_str)
-            .unwrap_or("");
+        let runtime = workers.pd_runtime_type().map(|r| r.as_str()).unwrap_or("");
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_dual_dispatch",
@@ -417,10 +412,7 @@ impl RequestExecutionStage {
         workers: &WorkerSelection,
         model: &str,
     ) -> Result<ExecutionResult, Response> {
-        let runtime = workers
-            .pd_runtime_type()
-            .map(RuntimeType::as_str)
-            .unwrap_or("");
+        let runtime = workers.pd_runtime_type().map(|r| r.as_str()).unwrap_or("");
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",

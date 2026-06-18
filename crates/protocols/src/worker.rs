@@ -218,7 +218,7 @@ impl RuntimeType {
 
     /// Static string form, identical to `Display`. For hot-path metric labels
     /// that must avoid per-call allocation/interning.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             RuntimeType::Unspecified => "unspecified",
             RuntimeType::Sglang => "sglang",
