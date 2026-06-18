@@ -54,6 +54,10 @@ pub struct GrpcRouter {
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
     retry_config: RetryConfig,
+    /// Header→key mapping for storage request-context. The WS Responses upgrade
+    /// runs outside the middleware's task-local scope, so it rebuilds the scope
+    /// from these headers (empty = feature off, a no-op like the middleware).
+    storage_context_headers: std::collections::HashMap<String, String>,
 }
 
 impl GrpcRouter {
@@ -176,6 +180,7 @@ impl GrpcRouter {
             responses_context,
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
+            storage_context_headers: ctx.router_config.storage_context_headers.clone(),
         })
     }
 
@@ -401,8 +406,16 @@ impl GrpcRouter {
         };
         let headers = parts.headers.clone();
 
-        // Build a fresh context with the current storage request context (set by
-        // middleware on this task before the upgrade future runs).
+        // Build a fresh context. The realtime-style WS route does NOT carry
+        // `storage_context_middleware`, and the upgrade future runs detached from
+        // this request's task, so `current_request_context()` is `None` here.
+        // Rebuild the storage scope directly from the request headers so
+        // store=true WS reads/writes are tenant/user-scoped like the HTTP path
+        // (no-op when `storage_context_headers` is unconfigured).
+        let request_context = crate::middleware::storage_context::build_storage_request_context(
+            &self.storage_context_headers,
+            &headers,
+        );
         let responses_context = ResponsesContext::new(
             Arc::new(self.pipeline.clone()),
             self.shared_components.clone(),
@@ -411,7 +424,7 @@ impl GrpcRouter {
             self.responses_context.conversation_item_storage.clone(),
             self.responses_context.mcp_orchestrator.clone(),
             self.responses_context.mcp_format_registry.clone(),
-            smg_data_connector::current_request_context(),
+            request_context,
         );
         let executor: Arc<dyn WsResponsesExecutor> = Arc::new(GrpcWsResponsesExecutor::new(
             self.worker_registry.clone(),

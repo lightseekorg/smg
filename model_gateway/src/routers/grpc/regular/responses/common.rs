@@ -230,11 +230,16 @@ pub(crate) async fn load_conversation_history_with_cache(
             modified_request.previous_response_id = None;
         } else {
             let prev_id = ResponseId::from(prev_id_str.as_str());
-            match ctx
-                .response_storage
-                .get_response_chain(&prev_id, None)
-                .await
-            {
+            // Re-establish the storage request-context scope for the read so
+            // tenant/user-scoped storage hooks see it. The WS executor runs
+            // outside the middleware's task-local scope, so wrap explicitly when
+            // a context was rebuilt from the upgrade request's headers.
+            let chain_fut = ctx.response_storage.get_response_chain(&prev_id, None);
+            let chain_result = match &ctx.request_context {
+                Some(rc) => data_connector::with_request_context(rc.clone(), chain_fut).await,
+                None => chain_fut.await,
+            };
+            match chain_result {
                 Ok(chain) if !chain.responses.is_empty() => {
                     let mut items = Vec::new();
                     for stored in &chain.responses {
