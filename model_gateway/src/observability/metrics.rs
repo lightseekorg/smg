@@ -299,19 +299,19 @@ pub(crate) fn init_metrics() {
     );
     describe_gauge!(
         "smg_engine_pd_kv_transfer_latency_ms",
-        "Engine-reported PD KV transfer latency (ms) by worker, role"
+        "Engine-reported PD KV transfer latency (ms) by worker, role, dp_rank"
     );
     describe_gauge!(
         "smg_engine_pd_kv_transfer_speed_gb_s",
-        "Engine-reported PD KV transfer speed (GB/s) by worker, role"
+        "Engine-reported PD KV transfer speed (GB/s) by worker, role, dp_rank"
     );
     describe_gauge!(
         "smg_engine_pd_prefill_queue_reqs",
-        "Engine-reported PD prefill queue depth by worker, role"
+        "Engine-reported PD prefill queue depth by worker, role, dp_rank"
     );
     describe_gauge!(
         "smg_engine_pd_decode_queue_reqs",
-        "Engine-reported PD decode queue depth by worker, role"
+        "Engine-reported PD decode queue depth by worker, role, dp_rank"
     );
 
     // Layer 4: Discovery metrics
@@ -1312,11 +1312,12 @@ impl Metrics {
                 "smg_engine_cache_hit_rate",
                 "worker" => Arc::clone(&worker),
                 "model" => Arc::clone(&model),
-                "dp_rank" => dp_rank,
+                "dp_rank" => Arc::clone(&dp_rank),
             )
             .set(load.cache_hit_rate);
 
-            // PD gauges only when the engine reported a disagg section.
+            // PD gauges only when the engine reported a disagg section. Labeled
+            // by dp_rank too, so DP ranks sharing a role don't overwrite.
             let Some(role) = load.disagg_mode.as_deref() else {
                 continue;
             };
@@ -1326,6 +1327,7 @@ impl Metrics {
                     "smg_engine_pd_kv_transfer_latency_ms",
                     "worker" => Arc::clone(&worker),
                     "role" => Arc::clone(&role),
+                    "dp_rank" => Arc::clone(&dp_rank),
                 )
                 .set(latency);
             }
@@ -1334,6 +1336,7 @@ impl Metrics {
                     "smg_engine_pd_kv_transfer_speed_gb_s",
                     "worker" => Arc::clone(&worker),
                     "role" => Arc::clone(&role),
+                    "dp_rank" => Arc::clone(&dp_rank),
                 )
                 .set(speed);
             }
@@ -1342,6 +1345,7 @@ impl Metrics {
                     "smg_engine_pd_prefill_queue_reqs",
                     "worker" => Arc::clone(&worker),
                     "role" => Arc::clone(&role),
+                    "dp_rank" => Arc::clone(&dp_rank),
                 )
                 .set(reqs as f64);
             }
@@ -1350,6 +1354,7 @@ impl Metrics {
                     "smg_engine_pd_decode_queue_reqs",
                     "worker" => Arc::clone(&worker),
                     "role" => role,
+                    "dp_rank" => dp_rank,
                 )
                 .set(reqs as f64);
             }
@@ -1380,9 +1385,9 @@ impl Metrics {
     /// convention we set each to -1 (an impossible value for these gauges, whose
     /// 0 is meaningful) until <https://github.com/metrics-rs/metrics/issues/653>.
     /// `dp_size` bounds the rank labels; the role label is unknown at teardown,
-    /// so all PD roles (prefill/decode/null) are cleared. The label set must exactly match
-    /// `record_engine_load` (including `model`) or a fresh series is created
-    /// instead of overwriting the live one.
+    /// so the full `dp_rank` × role (prefill/decode/null) space is cleared. The
+    /// label set must exactly match `record_engine_load` (including `model` and
+    /// `dp_rank`) or a fresh series is created instead of overwriting the live one.
     pub fn remove_engine_load_metrics(worker_url: &str, model_id: &str, dp_size: usize) {
         let worker = intern_string(worker_url);
         let model = intern_string(model_id);
@@ -1404,16 +1409,24 @@ impl Metrics {
                 )
                 .set(-1.0);
             }
-        }
 
-        for role in ["prefill", "decode", "null"] {
-            for name in [
-                "smg_engine_pd_kv_transfer_latency_ms",
-                "smg_engine_pd_kv_transfer_speed_gb_s",
-                "smg_engine_pd_prefill_queue_reqs",
-                "smg_engine_pd_decode_queue_reqs",
-            ] {
-                gauge!(name, "worker" => Arc::clone(&worker), "role" => role).set(-1.0);
+            // PD gauges are labeled {worker, role, dp_rank}; the role is unknown
+            // at teardown, so clear every role for this rank.
+            for role in ["prefill", "decode", "null"] {
+                for name in [
+                    "smg_engine_pd_kv_transfer_latency_ms",
+                    "smg_engine_pd_kv_transfer_speed_gb_s",
+                    "smg_engine_pd_prefill_queue_reqs",
+                    "smg_engine_pd_decode_queue_reqs",
+                ] {
+                    gauge!(
+                        name,
+                        "worker" => Arc::clone(&worker),
+                        "role" => role,
+                        "dp_rank" => Arc::clone(&dp_rank),
+                    )
+                    .set(-1.0);
+                }
             }
         }
     }
@@ -1510,7 +1523,7 @@ mod tests {
             Metrics::record_engine_load("http://w:1", "m", &response);
         });
 
-        let pd_labels = ["role=\"prefill\"", "worker=\"http://w:1\""];
+        let pd_labels = ["role=\"prefill\"", "worker=\"http://w:1\"", "dp_rank=\"0\""];
         assert_metric(
             &rendered,
             "smg_engine_pd_kv_transfer_latency_ms",

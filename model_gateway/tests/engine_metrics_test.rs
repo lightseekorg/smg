@@ -53,16 +53,19 @@ async fn engine_pd_gauge_appears_on_metrics_endpoint() {
         .await
         .expect("metrics body");
 
+    // Match the metric name AND its labels on the SAME rendered line, so the
+    // name and the role/dp_rank labels can't be satisfied by different samples.
+    let pd_latency_line = body
+        .lines()
+        .find(|l| l.starts_with("smg_engine_pd_kv_transfer_latency_ms{"))
+        .unwrap_or_else(|| panic!("PD KV transfer latency sample missing from /metrics:\n{body}"));
     assert!(
-        body.contains("smg_engine_pd_kv_transfer_latency_ms"),
-        "PD KV transfer latency gauge missing from /metrics:\n{body}"
+        pd_latency_line.contains("role=\"prefill\"") && pd_latency_line.contains("dp_rank=\"0\""),
+        "PD latency sample missing role/dp_rank labels: {pd_latency_line}"
     );
     assert!(
-        body.contains("role=\"prefill\""),
-        "PD role label missing from /metrics:\n{body}"
-    );
-    assert!(
-        body.contains("smg_engine_running_requests"),
-        "core engine gauge missing from /metrics:\n{body}"
+        body.lines()
+            .any(|l| l.starts_with("smg_engine_running_requests{")),
+        "core engine sample missing from /metrics:\n{body}"
     );
 }
