@@ -138,7 +138,7 @@ python -m smg_grpc_servicer.tokenspeed \
 |---|---|
 | `enable_kv_cache_events: true` | TokenSpeed master switch. Without it the scheduler records no events even if a publisher is set. |
 | `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. Unset defaults to `"zmq"` when events are enabled; `"null"` (or any other value) disables bridging. |
-| `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. The publisher binds in the scheduler subprocess; for data-parallel the port is `endpoint_port + dp_rank`, and SMG currently consumes rank 0. |
+| `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. Use a **bind-style** endpoint (`tcp://*:PORT`) — TokenSpeed only *binds* when the endpoint contains `*`/`::`/`ipc://`/`inproc://`, so a concrete address like `tcp://127.0.0.1:PORT` makes it *connect* instead, leaving nothing bound and the stream idle. For data-parallel the port is `endpoint_port + dp_rank`, and SMG currently consumes rank 0. |
 
 `--kv-events-config` is parsed by TokenSpeed's `KVEventsConfig.from_cli`. SMG learns the block size from the `BlockStored` events themselves, so you needn't set it; pass TokenSpeed's `--page-size N` only to pin a non-default value. Everything downstream is identical to the SGLang and vLLM paths.
 
