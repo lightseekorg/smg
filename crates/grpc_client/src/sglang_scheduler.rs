@@ -719,13 +719,14 @@ impl From<proto::SchedulerLoad> for openai_protocol::worker::SchedulerLoadSnapsh
             max_running_requests: load.max_running_requests,
             kv_transfer_latency_ms: disagg.as_ref().map(|d| d.kv_transfer_latency_ms),
             kv_transfer_speed_gb_s: disagg.as_ref().map(|d| d.kv_transfer_speed_gb_s),
-            prefill_queue_reqs: disagg
-                .as_ref()
-                .map(|d| d.prefill_prealloc_queue_reqs + d.prefill_inflight_queue_reqs),
+            prefill_queue_reqs: disagg.as_ref().map(|d| {
+                d.prefill_prealloc_queue_reqs
+                    .saturating_add(d.prefill_inflight_queue_reqs)
+            }),
             decode_queue_reqs: disagg.as_ref().map(|d| {
                 d.decode_prealloc_queue_reqs
-                    + d.decode_transfer_queue_reqs
-                    + d.decode_retracted_queue_reqs
+                    .saturating_add(d.decode_transfer_queue_reqs)
+                    .saturating_add(d.decode_retracted_queue_reqs)
             }),
             disagg_mode: disagg.map(|d| d.mode),
         }

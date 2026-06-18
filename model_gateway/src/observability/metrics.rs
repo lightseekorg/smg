@@ -1380,7 +1380,7 @@ impl Metrics {
     /// convention we set each to -1 (an impossible value for these gauges, whose
     /// 0 is meaningful) until <https://github.com/metrics-rs/metrics/issues/653>.
     /// `dp_size` bounds the rank labels; the role label is unknown at teardown,
-    /// so both PD roles are cleared. The label set must exactly match
+    /// so all PD roles (prefill/decode/null) are cleared. The label set must exactly match
     /// `record_engine_load` (including `model`) or a fresh series is created
     /// instead of overwriting the live one.
     pub fn remove_engine_load_metrics(worker_url: &str, model_id: &str, dp_size: usize) {
@@ -1406,7 +1406,7 @@ impl Metrics {
             }
         }
 
-        for role in ["prefill", "decode"] {
+        for role in ["prefill", "decode", "null"] {
             for name in [
                 "smg_engine_pd_kv_transfer_latency_ms",
                 "smg_engine_pd_kv_transfer_speed_gb_s",

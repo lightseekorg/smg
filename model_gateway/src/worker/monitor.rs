@@ -366,11 +366,12 @@ impl WorkerMonitor {
         });
         self.worker_load_manager.remove_worker(url);
         if self.engine_metrics {
-            Metrics::remove_engine_load_metrics(
-                url,
-                worker.model_id(),
-                worker.dp_size().unwrap_or(1),
-            );
+            // A worker can serve multiple models (one load group per model),
+            // so sentinel every model's series — not just the primary.
+            let dp_size = worker.dp_size().unwrap_or(1);
+            for model_id in WorkerRegistry::worker_model_ids(worker) {
+                Metrics::remove_engine_load_metrics(url, &model_id, dp_size);
+            }
         }
     }
 
