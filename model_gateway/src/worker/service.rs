@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::{
     config::RouterConfig,
-    worker::{registry::WorkerId, worker::worker_to_info, WorkerRegistry, WorkerType},
+    worker::{registry::WorkerId, worker::worker_to_info, Worker, WorkerRegistry, WorkerType},
     workflow::{Job, JobQueue},
 };
 
@@ -343,27 +343,53 @@ impl WorkerService {
     ///
     /// The counts reflect the returned (filtered) list, not the whole
     /// registry.
+    ///
+    /// The `?model` path uses the registry's bounded, wildcard-safe per-model
+    /// candidate lookup (per-model index unioned with wildcard workers)
+    /// instead of scanning every worker, so it stays O(per-model + wildcards).
+    /// The unfiltered path must serialize all workers, so it remains O(workers)
+    /// — acceptable for this admin endpoint.
     pub fn list_workers(&self, model: Option<&str>) -> ListWorkersResult {
-        let mut worker_infos = Vec::new();
         let mut prefill_count = 0;
         let mut decode_count = 0;
         let mut regular_count = 0;
 
-        for (worker_id, worker) in self.worker_registry.get_all_with_ids() {
-            if let Some(model) = model {
-                if !worker.supports_model(model) {
-                    continue;
-                }
-            }
+        let mut count_and_build = |worker_id: String, worker: &Arc<dyn Worker>| {
             match worker.worker_type() {
                 WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
                 WorkerType::Regular => regular_count += 1,
             }
-            let mut info = worker_to_info(&worker);
-            info.id = worker_id.as_str().to_string();
-            worker_infos.push(info);
-        }
+            let mut info = worker_to_info(worker);
+            info.id = worker_id;
+            info
+        };
+
+        let worker_infos: Vec<WorkerInfo> = match model {
+            Some(model) => self
+                .worker_registry
+                .get_candidates_for_model(model)
+                .into_iter()
+                // The bounded set may include wildcard workers that have since
+                // discovered specific models; re-filter via `supports_model`
+                // so the listing matches the unfiltered semantics exactly.
+                .filter(|worker| worker.supports_model(model))
+                .map(|worker| {
+                    let id = self
+                        .worker_registry
+                        .get_id_by_url(worker.url())
+                        .map(|id| id.as_str().to_string())
+                        .unwrap_or_default();
+                    count_and_build(id, &worker)
+                })
+                .collect(),
+            None => self
+                .worker_registry
+                .get_all_with_ids()
+                .into_iter()
+                .map(|(worker_id, worker)| count_and_build(worker_id.as_str().to_string(), &worker))
+                .collect(),
+        };
 
         ListWorkersResult {
             total: worker_infos.len(),

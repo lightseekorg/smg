@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use openai_protocol::worker::WorkerStatus;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -94,6 +94,19 @@ pub struct WorkerRegistry {
     /// Uses Arc<[T]> instead of Arc<RwLock<Vec<T>>> for lock-free reads.
     model_index: ModelIndex,
 
+    /// IDs of wildcard workers (those advertising no specific models, which
+    /// `supports_model` accepts for *any* model_id). Wildcards are not
+    /// reliably indexed under a single key in `model_index` — `model_id()`
+    /// falls back to a `model_id` label or [`crate::worker::UNKNOWN_MODEL_ID`],
+    /// so a per-model lookup cannot find them. This set lets the bounded
+    /// candidate lookup ([`Self::get_candidates_for_model`]) union them in
+    /// without an O(total fleet) scan. Maintained under the per-worker
+    /// mutation lock in register / replace / remove. Membership is captured
+    /// from `has_models_discovered()` at mutation time; a worker that later
+    /// discovers models via lazy refresh stays in the set until its next
+    /// mutation, which is harmless — `supports_model` re-filters the union.
+    wildcard_workers: Arc<DashSet<WorkerId>>,
+
     /// Consistent hash rings per model for O(log n) routing.
     /// Rebuilt on worker add/remove (copy-on-write).
     hash_rings: Arc<DashMap<String, Arc<HashRing>>>,
@@ -139,6 +152,7 @@ impl WorkerRegistry {
         Self {
             workers: Arc::new(DashMap::new()),
             model_index: Arc::new(DashMap::new()),
+            wildcard_workers: Arc::new(DashSet::new()),
             hash_rings: Arc::new(DashMap::new()),
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
@@ -290,6 +304,48 @@ impl WorkerRegistry {
             .get(model_id)
             .map(|workers| Arc::clone(&workers))
             .unwrap_or_else(|| Arc::from(Self::EMPTY_WORKERS))
+    }
+
+    /// Return every worker that could serve `model_id`: the per-model index
+    /// slice unioned with all wildcard workers, deduplicated by URL.
+    ///
+    /// This is the bounded, wildcard-safe candidate lookup. `get_by_model`
+    /// alone misses wildcard workers (those advertising no specific models),
+    /// because they are indexed under a `model_id` label or
+    /// [`crate::worker::UNKNOWN_MODEL_ID`] rather than under `model_id`.
+    /// `WorkerSelector` previously scanned the entire fleet to catch them;
+    /// this restores that correctness at O(per-model + wildcards) cost
+    /// instead of O(total fleet). Wildcards are few, so the union is cheap.
+    ///
+    /// Callers still apply `supports_model` (and any other filters) to the
+    /// result — a wildcard worker that has since discovered specific models
+    /// is correctly rejected there.
+    pub fn get_candidates_for_model(&self, model_id: &str) -> Vec<Arc<dyn Worker>> {
+        let indexed = self.get_by_model(model_id);
+
+        // Fast path: no wildcard workers, so the per-model slice is the full
+        // candidate set. Avoids the dedup HashSet allocation entirely.
+        if self.wildcard_workers.is_empty() {
+            return indexed.to_vec();
+        }
+
+        let mut seen: HashSet<String> = HashSet::with_capacity(indexed.len());
+        let mut candidates: Vec<Arc<dyn Worker>> = Vec::with_capacity(indexed.len());
+        for worker in indexed.iter() {
+            if seen.insert(worker.url().to_string()) {
+                candidates.push(Arc::clone(worker));
+            }
+        }
+        for entry in self.wildcard_workers.iter() {
+            if let Some(worker) = self.get(entry.key()) {
+                // A wildcard worker may also be model-indexed (e.g. under a
+                // `model_id` label that equals `model_id`); dedup by URL.
+                if seen.insert(worker.url().to_string()) {
+                    candidates.push(worker);
+                }
+            }
+        }
+        candidates
     }
 
     /// Return all workers of a given type as an immutable shared slice.
@@ -751,6 +807,11 @@ impl WorkerRegistry {
             self.rebuild_hash_ring(kept_model);
         }
 
+        // Re-evaluate wildcard membership for the replacement: the new
+        // worker may declare specific models where the old was wildcard,
+        // or vice versa.
+        self.update_wildcard_membership(worker_id, &new_worker);
+
         self.warn_on_sampling_defaults_divergence_for_worker(&new_worker);
 
         if old_worker.worker_type() != new_worker.worker_type() {
@@ -971,6 +1032,7 @@ impl WorkerRegistry {
             // We hold _guard; drop the DashMap entry but the Mutex stays alive via Arc.
             self.worker_mutation_locks.remove(worker_id);
             self.worker_origins.remove(worker_id);
+            self.wildcard_workers.remove(worker_id);
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
@@ -1083,6 +1145,21 @@ impl WorkerRegistry {
         }
 
         model_ids
+    }
+
+    /// Add or remove `worker_id` from the wildcard set based on whether
+    /// `worker` currently advertises no specific models. Called under the
+    /// per-worker mutation lock from register / replace so the set stays in
+    /// sync with the worker object installed in `workers`.
+    fn update_wildcard_membership(&self, worker_id: &WorkerId, worker: &Arc<dyn Worker>) {
+        // A worker is a routing wildcard when it has not (yet) had specific
+        // models discovered/declared — exactly when `supports_model` accepts
+        // any model_id. `has_models_discovered()` is the trait-level predicate.
+        if worker.has_models_discovered() {
+            self.wildcard_workers.remove(worker_id);
+        } else {
+            self.wildcard_workers.insert(worker_id.clone());
+        }
     }
 
     fn sampling_defaults_label(worker: &Arc<dyn Worker>) -> Option<&str> {
@@ -1201,6 +1278,9 @@ impl WorkerRegistry {
             self.add_worker_to_model_index(&model_id, worker.clone());
             self.rebuild_hash_ring(&model_id);
         }
+        // Track wildcard workers separately: they are not reliably indexed
+        // under a per-model key, so the bounded candidate lookup unions them.
+        self.update_wildcard_membership(&worker_id, &worker);
         self.warn_on_sampling_defaults_divergence_for_worker(&worker);
 
         // Update type index (clone needed for DashMap key ownership)
@@ -1871,6 +1951,135 @@ mod tests {
         let llama_workers_after = registry.get_by_model("llama-3");
         assert_eq!(llama_workers_after.len(), 1);
         assert_eq!(llama_workers_after[0].url(), "http://worker2:8080");
+    }
+
+    #[test]
+    fn test_get_candidates_for_model_unions_wildcard_workers() {
+        let registry = WorkerRegistry::new();
+
+        // Specific worker for "llama-3".
+        let specific: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://specific:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        );
+        // Wildcard worker (no models declared) — indexed under UNKNOWN_MODEL_ID,
+        // NOT under "llama-3", so get_by_model("llama-3") would miss it.
+        let wildcard: Arc<dyn Worker> =
+            Arc::new(BasicWorkerBuilder::new("http://wildcard:8080").build());
+
+        registry.register(specific).unwrap();
+        let wildcard_id = registry.register(wildcard).unwrap();
+
+        // get_by_model alone misses the wildcard.
+        assert_eq!(registry.get_by_model("llama-3").len(), 1);
+
+        // The bounded candidate lookup unions the wildcard in.
+        let candidates = registry.get_candidates_for_model("llama-3");
+        let urls: HashSet<String> = candidates.iter().map(|w| w.url().to_string()).collect();
+        assert_eq!(candidates.len(), 2, "specific + wildcard");
+        assert!(urls.contains("http://specific:8080"));
+        assert!(urls.contains("http://wildcard:8080"));
+
+        // An arbitrary, never-registered model still surfaces the wildcard
+        // (the regression this guards against).
+        let arbitrary = registry.get_candidates_for_model("some-random-model");
+        let arb_urls: HashSet<String> = arbitrary.iter().map(|w| w.url().to_string()).collect();
+        assert_eq!(arbitrary.len(), 1);
+        assert!(arb_urls.contains("http://wildcard:8080"));
+
+        // Every surfaced wildcard actually supports the arbitrary model.
+        assert!(arbitrary
+            .iter()
+            .all(|w| w.supports_model("some-random-model")));
+
+        // Removing the wildcard drops it from the bounded set.
+        registry.remove(&wildcard_id);
+        assert!(registry
+            .get_candidates_for_model("some-random-model")
+            .is_empty());
+        assert_eq!(registry.get_candidates_for_model("llama-3").len(), 1);
+    }
+
+    #[test]
+    fn test_get_candidates_for_model_excludes_other_models() {
+        let registry = WorkerRegistry::new();
+
+        let a: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://a:8080")
+                .model(ModelCard::new("model-a"))
+                .build(),
+        );
+        let b: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://b:8080")
+                .model(ModelCard::new("model-b"))
+                .build(),
+        );
+        registry.register(a).unwrap();
+        registry.register(b).unwrap();
+
+        // No wildcards registered: the bounded set is exactly the per-model
+        // slice and excludes other models' workers.
+        let candidates = registry.get_candidates_for_model("model-a");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].url(), "http://a:8080");
+
+        assert!(registry.get_candidates_for_model("model-c").is_empty());
+    }
+
+    #[test]
+    fn test_get_candidates_for_model_dedups_wildcard_indexed_under_model_key() {
+        // A wildcard worker carrying a `model_id` label is indexed under that
+        // label in the model index AND tracked in the wildcard set. The
+        // union must not return it twice.
+        let registry = WorkerRegistry::new();
+        let mut labels = HashMap::new();
+        labels.insert("model_id".to_string(), "labelled".to_string());
+        let wildcard: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://wildcard:8080")
+                .labels(labels)
+                .build(),
+        );
+        registry.register(wildcard).unwrap();
+
+        // Indexed under its label key...
+        assert_eq!(registry.get_by_model("labelled").len(), 1);
+        // ...and the union dedups by URL rather than returning it twice.
+        let candidates = registry.get_candidates_for_model("labelled");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "no duplicate from index + wildcard set"
+        );
+    }
+
+    #[test]
+    fn test_wildcard_membership_updates_on_replace() {
+        let registry = WorkerRegistry::new();
+
+        // Register a wildcard worker.
+        let wildcard: Arc<dyn Worker> = Arc::new(BasicWorkerBuilder::new("http://w:8080").build());
+        let id = registry.register(wildcard).unwrap();
+        assert_eq!(registry.get_candidates_for_model("anything").len(), 1);
+
+        // Replace it with a worker declaring specific models — it must drop
+        // out of the wildcard set.
+        let specific: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("specific-model"))
+                .build(),
+        );
+        assert!(registry.replace(&id, specific));
+        assert!(
+            registry.get_candidates_for_model("anything").is_empty(),
+            "replacement declares specific models, no longer wildcard"
+        );
+        assert_eq!(registry.get_candidates_for_model("specific-model").len(), 1);
+
+        // Replace back to wildcard — it must re-enter the wildcard set.
+        let wildcard2: Arc<dyn Worker> = Arc::new(BasicWorkerBuilder::new("http://w:8080").build());
+        assert!(registry.replace(&id, wildcard2));
+        assert_eq!(registry.get_candidates_for_model("anything").len(), 1);
     }
 
     // Health-checker integration tests moved to worker/manager.rs along with
