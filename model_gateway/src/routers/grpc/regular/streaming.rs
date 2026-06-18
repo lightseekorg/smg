@@ -1560,7 +1560,10 @@ impl StreamingProcessor {
                 });
             }
             context::ExecutionResult::Dual {
-                prefill, decode, ..
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
             } => {
                 let processor = self.clone();
                 let tokenizer_clone = tokenizer.clone();
@@ -2320,7 +2323,10 @@ impl StreamingProcessor {
                 });
             }
             context::ExecutionResult::Dual {
-                prefill, decode, ..
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
             } => {
                 let processor = self.clone();
                 #[expect(

@@ -452,7 +452,9 @@ impl RequestExecutionStage {
             })
             .unwrap_or(KvConnectorMode::Passthrough);
 
-        Metrics::record_pd_kv_connector_mode(mode.metrics_label());
+        // Recorded on the success path (after decode established) so failed
+        // requests don't pollute success metrics; captured here before use of mode.
+        let kv_connector_label = mode.metrics_label();
 
         match &mode {
             KvConnectorMode::Mooncake {
@@ -566,12 +568,8 @@ impl RequestExecutionStage {
         }
         prefill_stream.mark_completed();
         workers.record_outcome_prefill(200);
-        Metrics::record_pd_prefill_duration(
-            metrics_labels::BACKEND_PD,
-            model,
-            runtime,
-            prefill_start.elapsed(),
-        );
+        // Captured at drain; recorded below only once decode is established.
+        let prefill_duration = prefill_start.elapsed();
 
         // KV-transfer window: prefill drain complete to decode send complete.
         let kv_window_start = Instant::now();
@@ -654,6 +652,14 @@ impl RequestExecutionStage {
         })?;
 
         workers.record_outcome_decode(200);
+        // Decode established: record the success-only PD metrics here.
+        Metrics::record_pd_kv_connector_mode(kv_connector_label);
+        Metrics::record_pd_prefill_duration(
+            metrics_labels::BACKEND_PD,
+            model,
+            runtime,
+            prefill_duration,
+        );
         Metrics::record_pd_kv_transfer_duration(
             metrics_labels::BACKEND_PD,
             model,

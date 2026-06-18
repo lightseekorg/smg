@@ -651,33 +651,38 @@ impl PDRouter {
         // hits a transport error, the other is cancelled immediately — otherwise
         // the surviving request hangs waiting for a PD bootstrap that will never
         // come (see #831).
-        // Time each leg from its own dispatch on a monotonic clock. The decode
-        // future captures its own head-arrival elapsed so TTFT is not conflated
-        // with the prefill-head wait; prefill duration is measured below, after
-        // its body is drained. All recorders sit on the success path only, so
-        // failed/retried attempts never pollute or double-count the signal.
+        // Each leg captures its own head-arrival elapsed when its `send()`
+        // resolves, so the two are independent even though `try_join!` returns
+        // only once both heads arrive: decode TTFT isn't conflated with the
+        // prefill-head wait, and prefill duration isn't conflated with a slower
+        // decode head. Recorded on the success path only.
         let runtime = prefill.metadata().spec.runtime_type.as_str();
         let dispatch_start = Instant::now();
+        let prefill_fut = async {
+            let resp = prefill_request.send().await?;
+            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+        };
         let decode_fut = async {
             let resp = decode_request.send().await?;
             Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
         };
-        let pd_result = tokio::try_join!(prefill_request.send(), decode_fut);
+        let pd_result = tokio::try_join!(prefill_fut, decode_fut);
 
         events::RequestReceivedEvent {}.emit();
 
-        let (prefill_response, (decode_head_elapsed, decode_response)) = match pd_result {
-            Ok(pair) => pair,
-            Err(e) => {
-                error!("PD request transport error, both sides aborted: {e}");
-                // Don't record_outcome here — the caller (execute_dual_dispatch)
-                // records outcomes from the response status after we return.
-                return error::bad_gateway(
-                    "PD disaggregation request failed",
-                    format!("Transport error: {e}"),
-                );
-            }
-        };
+        let ((prefill_head_elapsed, prefill_response), (decode_head_elapsed, decode_response)) =
+            match pd_result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    error!("PD request transport error, both sides aborted: {e}");
+                    // Don't record_outcome here — the caller (execute_dual_dispatch)
+                    // records outcomes from the response status after we return.
+                    return error::bad_gateway(
+                        "PD disaggregation request failed",
+                        format!("Transport error: {e}"),
+                    );
+                }
+            };
 
         // Process decode response
         let status = StatusCode::from_u16(decode_response.status().as_u16())
@@ -708,6 +713,7 @@ impl PDRouter {
         );
 
         // Process prefill response
+        let prefill_drain_start = Instant::now();
         let prefill_body = match self
             .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
             .await
@@ -716,12 +722,13 @@ impl PDRouter {
             Err(error_response) => return error_response,
         };
 
-        // Prefill RPC duration: dispatch to fully-drained prefill body.
+        // Prefill RPC duration: prefill-head elapsed + body drain, independent
+        // of decode so a slower decode head never inflates it.
         Metrics::record_pd_prefill_duration(
             metrics_labels::BACKEND_PD,
             context.model_id,
             runtime,
-            dispatch_start.elapsed(),
+            prefill_head_elapsed + prefill_drain_start.elapsed(),
         );
 
         if context.is_stream {

@@ -120,7 +120,10 @@ impl HarmonyStreamingProcessor {
                 });
             }
             context::ExecutionResult::Dual {
-                prefill, decode, ..
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
             } => {
                 tokio::spawn(async move {
                     let result =
@@ -510,7 +513,10 @@ impl HarmonyStreamingProcessor {
                 Self::process_decode_stream(stream, emitter, tx, session, format_registry, 0).await
             }
             context::ExecutionResult::Dual {
-                prefill, decode, ..
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
             } => {
                 debug!("Processing Responses API dual stream mode");
                 Self::process_responses_dual_stream(
