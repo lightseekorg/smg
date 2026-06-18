@@ -4,6 +4,7 @@ use std::{
 };
 
 use openai_protocol::worker::WorkerLoadResponse;
+use rand::Rng;
 use tracing::debug;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
@@ -92,6 +93,11 @@ pub struct LeastLoadPolicy {
     /// Fallback throughput (tokens/s) for the `/throughput` term when a backend
     /// reports no live `gen_throughput`.
     default_throughput: f64,
+    /// Fleet-nominal throughput (mean of positive per-worker reports), cached
+    /// off the hot path. Recomputed in `update_loads` from the whole cache and
+    /// read O(1) in `select_worker`; falls back to `default_throughput` when no
+    /// worker reports a positive rate.
+    nominal_throughput: RwLock<f64>,
 }
 
 impl LeastLoadPolicy {
@@ -116,6 +122,11 @@ impl LeastLoadPolicy {
         mean_prefill_tokens: u32,
         default_throughput: f64,
     ) -> Self {
+        let default_throughput = if default_throughput.is_finite() && default_throughput > 0.0 {
+            default_throughput
+        } else {
+            DEFAULT_THROUGHPUT
+        };
         Self {
             cached_loads: RwLock::new(HashMap::new()),
             inflight_tokens: RwLock::new(HashMap::new()),
@@ -125,11 +136,9 @@ impl LeastLoadPolicy {
                 DEFAULT_KV_PRESSURE_WEIGHT
             },
             mean_prefill_tokens: mean_prefill_tokens.max(1),
-            default_throughput: if default_throughput.is_finite() && default_throughput > 0.0 {
-                default_throughput
-            } else {
-                DEFAULT_THROUGHPUT
-            },
+            default_throughput,
+            // No loads yet -> start at the fallback; recomputed on first poll.
+            nominal_throughput: RwLock::new(default_throughput),
         }
     }
 
@@ -183,6 +192,30 @@ impl LeastLoadPolicy {
             .map(|t| t.len() as u64)
             .unwrap_or(self.mean_prefill_tokens as u64)
     }
+
+    /// Cached fleet-nominal throughput, read O(1) on the hot path.
+    fn nominal_throughput(&self) -> f64 {
+        self.nominal_throughput
+            .read()
+            .map(|t| *t)
+            .unwrap_or(self.default_throughput)
+    }
+
+    /// Mean of positive per-worker generation rates across all cached loads,
+    /// or `default_throughput` when none report a positive rate. Computed off
+    /// the hot path (in `update_loads`) over the whole cache.
+    fn compute_nominal_throughput(&self, loads: &HashMap<String, WorkerLoadResponse>) -> f64 {
+        let (tp_sum, tp_count) = loads
+            .values()
+            .map(|l| l.total_gen_throughput())
+            .filter(|t| *t > 0.0)
+            .fold((0.0, 0u32), |(s, n), t| (s + t, n + 1));
+        if tp_count > 0 {
+            tp_sum / tp_count as f64
+        } else {
+            self.default_throughput
+        }
+    }
 }
 
 impl LoadBalancingPolicy for LeastLoadPolicy {
@@ -198,21 +231,12 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
         let loads_guard = self.cached_loads.read().ok();
         let loads = loads_guard.as_deref();
 
-        // Fleet-nominal throughput (mean of positive reports) stands in for a
-        // worker missing a fresh snapshot; `fleet_has_loads` distinguishes a
-        // partial gap (estimate that worker's drain time at the nominal rate)
-        // from a fully dark fleet (fall back to join-shortest-queue).
-        let (tp_sum, tp_count) = healthy
-            .iter()
-            .filter_map(|&i| loads.and_then(|m| m.get(workers[i].url())))
-            .map(|l| l.total_gen_throughput())
-            .filter(|t| *t > 0.0)
-            .fold((0.0, 0u32), |(s, n), t| (s + t, n + 1));
-        let nominal_throughput = if tp_count > 0 {
-            tp_sum / tp_count as f64
-        } else {
-            self.default_throughput
-        };
+        // Fleet-nominal throughput stands in for a worker missing a fresh
+        // snapshot; it is cached off the hot path (recomputed in `update_loads`)
+        // and read O(1) here. `fleet_has_loads` distinguishes a partial gap
+        // (estimate that worker's drain time at the nominal rate) from a fully
+        // dark fleet (fall back to join-shortest-queue).
+        let nominal_throughput = self.nominal_throughput();
         let fleet_has_loads = loads
             .map(|m| healthy.iter().any(|&i| m.contains_key(workers[i].url())))
             .unwrap_or(false);
@@ -224,27 +248,40 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut best = healthy[0];
-        let mut best_score = self.score(
-            &workers[best],
+        // Power-of-two-choices: scoring is O(1) per request rather than
+        // O(healthy). For tiny pools (<= 2) score all — sampling two of two is
+        // the same set, so we keep the exact argmin. Otherwise sample two
+        // distinct healthy workers and take the lower-scored of the pair.
+        let candidates: [usize; 2] = if healthy.len() <= 2 {
+            [healthy[0], healthy[1]]
+        } else {
+            let mut rng = rand::rng();
+            let i1 = rng.random_range(0..healthy.len());
+            // Offset into the remaining indices guarantees a distinct second
+            // pick in O(1) (mirrors `power_of_two.rs`).
+            let i2 = (i1 + 1 + rng.random_range(0..healthy.len() - 1)) % healthy.len();
+            [healthy[i1], healthy[i2]]
+        };
+
+        let score_a = self.score(
+            &workers[candidates[0]],
             loads,
             &inflight,
             nominal_throughput,
             fleet_has_loads,
         );
-        for &idx in &healthy[1..] {
-            let s = self.score(
-                &workers[idx],
-                loads,
-                &inflight,
-                nominal_throughput,
-                fleet_has_loads,
-            );
-            if s < best_score {
-                best = idx;
-                best_score = s;
-            }
-        }
+        let score_b = self.score(
+            &workers[candidates[1]],
+            loads,
+            &inflight,
+            nominal_throughput,
+            fleet_has_loads,
+        );
+        let (best, best_score) = if score_a <= score_b {
+            (candidates[0], score_a)
+        } else {
+            (candidates[1], score_b)
+        };
 
         // In-flight correction: credit the chosen worker with this request's
         // token-work until its next poll refreshes the snapshot.
@@ -267,8 +304,16 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
     }
 
     fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
+        // Recompute the fleet-nominal throughput off the hot path. `update_loads`
+        // is called per model group with that group's loads, which `extend` the
+        // shared cache, so the mean is taken over the *whole* cache after the
+        // merge to keep fleet-wide semantics across groups.
         if let Ok(mut cached) = self.cached_loads.write() {
             cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let nominal = self.compute_nominal_throughput(&cached);
+            if let Ok(mut tp) = self.nominal_throughput.write() {
+                *tp = nominal;
+            }
         }
         // A fresh snapshot already reflects work up to the poll, so reset the
         // since-poll in-flight estimate for the workers it covers.
@@ -282,6 +327,11 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
     fn remove_worker(&self, url: &str) {
         if let Ok(mut cached) = self.cached_loads.write() {
             cached.remove(url);
+            // Keep the cached mean consistent with the surviving loads.
+            let nominal = self.compute_nominal_throughput(&cached);
+            if let Ok(mut tp) = self.nominal_throughput.write() {
+                *tp = nominal;
+            }
         }
         if let Ok(mut inflight) = self.inflight_tokens.write() {
             inflight.remove(url);
@@ -301,7 +351,7 @@ impl Default for LeastLoadPolicy {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot};
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -507,6 +557,192 @@ mod tests {
             policy.select_worker(&workers, &SelectWorkerInfo::default()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn empty_fleet_selects_none() {
+        let policy = LeastLoadPolicy::new();
+        let workers: Vec<Arc<dyn Worker>> = vec![];
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn power_of_two_picks_lower_of_sampled_pair() {
+        // Larger-than-2 pool exercises the sampling branch. One worker is far
+        // lighter than every other; with two distinct samples, at least one of
+        // the pair is always a heavy worker, and the lighter of any pair that
+        // includes the light worker must win. Over many draws the light worker
+        // is selected far more than uniform — and is never beaten when sampled.
+        let policy = LeastLoadPolicy::new();
+        let urls = [
+            "http://a:8000",
+            "http://b:8000",
+            "http://c:8000",
+            "http://d:8000",
+        ];
+        let workers: Vec<Arc<dyn Worker>> = urls.iter().map(|u| mk(u)).collect();
+        let mut loads = HashMap::new();
+        // a is light (1000 queued); the rest are heavy (50000 queued).
+        loads.insert(urls[0].to_string(), make_load(1000, 0.1, 100.0));
+        for u in &urls[1..] {
+            loads.insert(u.to_string(), make_load(50000, 0.1, 100.0));
+        }
+        policy.update_loads(&loads);
+
+        let info = SelectWorkerInfo::default();
+        let mut light_selected = 0;
+        for _ in 0..1000 {
+            // Re-poll each iteration so the in-flight credit doesn't accumulate
+            // and perturb the relative ordering across draws.
+            policy.update_loads(&loads);
+            if policy.select_worker(&workers, &info) == Some(0) {
+                light_selected += 1;
+            }
+        }
+        // Power-of-two samples include the light worker with probability
+        // 1 - C(3,2)/C(4,2) = 0.5, and when sampled it always wins. So the light
+        // worker is selected ~50% of the time, well above the uniform 25%.
+        assert!(
+            light_selected > 400,
+            "expected light worker selected often via power-of-two, got {light_selected}/1000"
+        );
+    }
+
+    #[test]
+    fn power_of_two_lower_score_wins_for_sampled_pair() {
+        // Deterministic check of the pairwise rule: with exactly two healthy
+        // workers the pool is scored exhaustively (the <=2 branch), so the
+        // lower-scored worker is always chosen — the same min-over-pair rule
+        // the sampling branch applies.
+        let policy = LeastLoadPolicy::new();
+        let workers = vec![mk("http://a:8000"), mk("http://b:8000")];
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(9000, 0.2, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(500, 0.2, 100.0));
+        policy.update_loads(&loads);
+        // a: 9000/100 = 90s ; b: 500/100 = 5s -> the lower-scored b wins.
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn select_skips_unhealthy_workers() {
+        // An unhealthy worker is never returned even if it would score lowest.
+        let policy = LeastLoadPolicy::new();
+        let healthy = mk("http://a:8000");
+        let unhealthy = mk("http://b:8000");
+        unhealthy.set_status(WorkerStatus::NotReady);
+        // b is far lighter but unhealthy; it must never be returned.
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(9000, 0.2, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(1, 0.0, 100.0));
+        policy.update_loads(&loads);
+        let workers: Vec<Arc<dyn Worker>> = vec![healthy, unhealthy];
+        // Only one healthy worker -> single-worker fast path returns it.
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn inflight_credit_applied_to_chosen_worker() {
+        // The chosen worker (and only it) is credited this request's token-work.
+        let policy = LeastLoadPolicy::new();
+        let workers = vec![mk("http://a:8000"), mk("http://b:8000")];
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(8000, 0.2, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(1000, 0.2, 100.0));
+        policy.update_loads(&loads);
+
+        // tokens known -> credit is exactly the request's token count.
+        let tokens = vec![0u32; 256];
+        let info = SelectWorkerInfo {
+            tokens: Some(&tokens),
+            ..Default::default()
+        };
+        let chosen = policy.select_worker(&workers, &info).unwrap();
+        assert_eq!(chosen, 1); // b is lighter
+        let inflight = policy.inflight_tokens.read().unwrap();
+        assert_eq!(inflight.get("http://b:8000").copied(), Some(256));
+        // a was not chosen this dispatch (reset to 0 by update_loads, untouched).
+        assert_eq!(inflight.get("http://a:8000").copied(), Some(0));
+    }
+
+    #[test]
+    fn cached_mean_updates_on_update_loads() {
+        // The fleet-nominal throughput is recomputed off the hot path and stored.
+        let policy = LeastLoadPolicy::new();
+        // Before any poll it is the default fallback.
+        assert_eq!(policy.nominal_throughput(), DEFAULT_THROUGHPUT);
+
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(0, 0.1, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(0, 0.1, 300.0));
+        policy.update_loads(&loads);
+        // Mean of positive rates: (100 + 300) / 2 = 200.
+        assert_eq!(policy.nominal_throughput(), 200.0);
+
+        // A later poll with different rates updates the cached mean.
+        let mut loads2 = HashMap::new();
+        loads2.insert("http://a:8000".to_string(), make_load(0, 0.1, 500.0));
+        loads2.insert("http://b:8000".to_string(), make_load(0, 0.1, 500.0));
+        policy.update_loads(&loads2);
+        assert_eq!(policy.nominal_throughput(), 500.0);
+    }
+
+    #[test]
+    fn cached_mean_falls_back_when_no_positive_rates() {
+        // All reports have zero gen_throughput -> mean falls back to default.
+        let policy = LeastLoadPolicy::new();
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(0, 0.1, 0.0));
+        loads.insert("http://b:8000".to_string(), make_load(0, 0.1, 0.0));
+        policy.update_loads(&loads);
+        assert_eq!(policy.nominal_throughput(), DEFAULT_THROUGHPUT);
+    }
+
+    #[test]
+    fn cached_mean_used_to_score_missing_snapshot() {
+        // Worker b has no snapshot; its drain-time estimate uses the cached
+        // nominal throughput. With a cached mean of 100 tok/s and 5 in-flight,
+        // b ≈ 5 * 1024 / 100 = 51.2s vs a's 40s -> the cached mean must be in
+        // play for a to be chosen (a raw count of 5 would wrongly beat 40s).
+        let policy = LeastLoadPolicy::new(); // p̄ = 1024
+        let a = mk("http://a:8000");
+        let b = mk("http://b:8000");
+        for _ in 0..5 {
+            b.increment_load();
+        }
+        let workers = vec![a, b];
+        // Only a reports, at 100 tok/s, so the cached mean is 100.
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(4000, 0.0, 100.0));
+        policy.update_loads(&loads);
+        assert_eq!(policy.nominal_throughput(), 100.0);
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn remove_worker_recomputes_cached_mean() {
+        let policy = LeastLoadPolicy::new();
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(0, 0.1, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(0, 0.1, 300.0));
+        policy.update_loads(&loads);
+        assert_eq!(policy.nominal_throughput(), 200.0);
+
+        // Dropping the 100 tok/s worker leaves the 300 tok/s worker only.
+        policy.remove_worker("http://a:8000");
+        assert_eq!(policy.nominal_throughput(), 300.0);
     }
 
     #[test]
