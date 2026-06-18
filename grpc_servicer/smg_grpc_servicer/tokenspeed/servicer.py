@@ -573,6 +573,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 "--kv-events-config "
                 '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
             )
+            return  # defensive: context.abort() raises, but keep config non-None below
 
         config = self._kv_events_config
 
@@ -583,13 +584,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         zmq_ctx = zmq.asyncio.Context.instance()
         sub_socket = zmq_ctx.socket(zmq.SUB)
-        sub_socket.subscribe(config.topic.encode("utf-8"))
-        sub_socket.connect(pub_endpoint)
-        logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
-
-        decoder = msgspec.msgpack.Decoder(KVEventBatch)
-
         try:
+            # subscribe/connect can raise on a malformed endpoint; keep them in
+            # the try so the finally below always closes the socket.
+            sub_socket.subscribe(config.topic.encode("utf-8"))
+            sub_socket.connect(pub_endpoint)
+            logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
+
+            decoder = msgspec.msgpack.Decoder(KVEventBatch)
             async for proto_batch in stream_kv_events(
                 sub_socket,
                 decoder.decode,
@@ -599,6 +601,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 yield proto_batch
         except asyncio.CancelledError:
             pass
+        except grpc.aio.AbortError:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.exception("SubscribeKvEvents failed")
             await context.abort(grpc.StatusCode.INTERNAL, str(e))

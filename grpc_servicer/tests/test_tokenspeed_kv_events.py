@@ -54,7 +54,8 @@ class TestResolveKvEventsConfig:
         cfg = _cfg(enable_kv_cache_events=False, publisher="zmq")
         assert ts_kv_events.resolve_kv_events_config(_Args(cfg)) is None
 
-    def test_none_when_publisher_null(self):
+    def test_none_when_publisher_non_zmq_string(self):
+        # Explicit non-zmq publisher (string "null") disables bridging.
         cfg = _cfg(enable_kv_cache_events=True, publisher="null")
         assert ts_kv_events.resolve_kv_events_config(_Args(cfg)) is None
 
@@ -76,6 +77,28 @@ class TestResolveKvEventsConfig:
         assert out is not None
         assert out.endpoint == "tcp://*:5557"  # KVEventsConfig default
         assert out.topic == ""  # KVEventsConfig default
+
+    def test_publisher_explicit_json_null_defaults_to_zmq(self):
+        # Explicit JSON ``null`` (not the string "null") → defaults to zmq when enabled.
+        cfg = _cfg(enable_kv_cache_events=True, publisher=None)
+        assert '"publisher": null' in cfg
+        out = ts_kv_events.resolve_kv_events_config(_Args(cfg))
+        assert out is not None
+
+    def test_none_when_endpoint_or_topic_not_string(self):
+        # Non-string endpoint/topic from arbitrary JSON → cleanly disabled (not a runtime crash).
+        assert (
+            ts_kv_events.resolve_kv_events_config(
+                _Args(_cfg(enable_kv_cache_events=True, endpoint=1234))
+            )
+            is None
+        )
+        assert (
+            ts_kv_events.resolve_kv_events_config(
+                _Args(_cfg(enable_kv_cache_events=True, topic=["x"]))
+            )
+            is None
+        )
 
     def test_malformed_json_returns_none(self):
         assert ts_kv_events.resolve_kv_events_config(_Args("{not json")) is None

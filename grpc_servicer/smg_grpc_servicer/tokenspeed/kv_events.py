@@ -69,5 +69,15 @@ def resolve_kv_events_config(server_args: object) -> ResolvedKvEventsConfig | No
     topic = cfg.get("topic")
     if topic is None:
         topic = _DEFAULT_TOPIC
+    # Guard against non-string values from arbitrary JSON; otherwise they fail
+    # later (e.g. topic.encode()) as opaque INTERNAL errors at subscribe time.
+    if not isinstance(endpoint, str) or not isinstance(topic, str):
+        logger.warning(
+            "TokenSpeed kv-events endpoint/topic must be strings (got endpoint=%r topic=%r); "
+            "SubscribeKvEvents disabled",
+            endpoint,
+            topic,
+        )
+        return None
     logger.info("TokenSpeed KV events enabled: endpoint=%s", endpoint)
     return ResolvedKvEventsConfig(endpoint=endpoint, topic=topic)
