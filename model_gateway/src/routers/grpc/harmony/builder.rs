@@ -30,34 +30,44 @@ use crate::routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils};
 /// Global Harmony encoding (lazy-initialized)
 static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();
 
-/// Get or initialize the Harmony encoding
+/// Get or initialize the Harmony encoding.
 ///
 /// Uses HarmonyGptOss encoding which supports the gpt-oss model family.
-#[expect(
-    clippy::expect_used,
-    reason = "Harmony encoding is a required static resource; failure is unrecoverable"
-)]
-pub(crate) fn get_harmony_encoding() -> &'static HarmonyEncoding {
-    HARMONY_ENCODING.get_or_init(|| {
-        tokio::task::block_in_place(|| {
-            openai_harmony::load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
-                .expect("Failed to load Harmony encoding")
-        })
-    })
+/// Returns an error if the encoding cannot be loaded (e.g., network failure
+/// downloading `o200k_base.tiktoken`). Failed attempts are retryable on
+/// subsequent calls since `OnceLock` is only set on success.
+pub(crate) fn get_harmony_encoding() -> Result<&'static HarmonyEncoding, String> {
+    if let Some(enc) = HARMONY_ENCODING.get() {
+        return Ok(enc);
+    }
+
+    let encoding = tokio::task::block_in_place(|| {
+        openai_harmony::load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
+            .map_err(|e| format!("Failed to load Harmony encoding: {e}"))
+    })?;
+
+    // OnceLock::set returns Err if another thread won the race — use get() which
+    // is guaranteed to succeed after any successful set.
+    let _ = HARMONY_ENCODING.set(encoding);
+    Ok(HARMONY_ENCODING
+        .get()
+        .expect("OnceLock must be initialized after successful set"))
 }
 
 /// Convert ProtoOutputLogProbs to OpenAI ChatLogProbs format using Harmony's tokenizer
 ///
 /// Delegates to the shared `convert_proto_logprobs` with Harmony's built-in tokenizer
-/// for token ID decoding.
-pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> ChatLogProbs {
-    let encoding = get_harmony_encoding();
+/// for token ID decoding. Returns an error if the Harmony encoding is not available.
+pub(crate) fn convert_harmony_logprobs(
+    proto_logprobs: &ProtoOutputLogProbs,
+) -> Result<ChatLogProbs, String> {
+    let encoding = get_harmony_encoding()?;
     let tokenizer = encoding.tokenizer();
-    utils::convert_proto_logprobs(proto_logprobs, |token_id| {
+    Ok(utils::convert_proto_logprobs(proto_logprobs, |token_id| {
         tokenizer
             .decode_utf8([token_id])
             .unwrap_or_else(|_| format!("<token_{token_id}>"))
-    })
+    }))
 }
 
 /// Built-in tools that are advertised in the gpt-oss system message.
@@ -237,16 +247,16 @@ fn has_custom_tools(tool_types: &[&str]) -> bool {
 ///
 /// Converts OpenAI-format requests into Harmony-encoded format with input_ids,
 /// stop tokens, and selection text for worker routing.
-pub(crate) struct HarmonyBuilder {
-    encoding: &'static HarmonyEncoding,
-}
+///
+/// Construction is zero-cost — the Harmony encoding is loaded lazily on first
+/// call to `build_from_chat()` or `build_from_responses()`, so creating a
+/// `HarmonyBuilder` never triggers a network download or panics.
+pub(crate) struct HarmonyBuilder;
 
 impl HarmonyBuilder {
     /// Create a new Harmony builder
     pub fn new() -> Self {
-        Self {
-            encoding: get_harmony_encoding(),
-        }
+        Self
     }
 
     /// Build Harmony request from Chat Completion request
@@ -262,6 +272,7 @@ impl HarmonyBuilder {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<HarmonyBuildOutput, String> {
+        let encoding = get_harmony_encoding()?;
         let mut all_messages = Vec::new();
 
         let sys_msg = self.build_system_message_from_chat(request);
@@ -274,16 +285,14 @@ impl HarmonyBuilder {
         all_messages.append(&mut user_messages);
 
         let conversation = Conversation::from_messages(all_messages.clone());
-        let token_ids = self
-            .encoding
+        let token_ids = encoding
             .render_conversation_for_completion(&conversation, Role::Assistant, None)
             .map_err(|e| format!("Failed to encode Harmony conversation: {e}"))?;
 
         let selection_text = self.extract_selection_text(&all_messages);
 
         // Get stop tokens for Harmony assistant actions (<|return|> and <|call|>)
-        let stop_token_ids: Vec<u32> = self
-            .encoding
+        let stop_token_ids: Vec<u32> = encoding
             .stop_tokens_for_assistant_actions()
             .into_iter()
             .flat_map(|set| set.into_iter())
@@ -313,27 +322,25 @@ impl HarmonyBuilder {
         &self,
         request: &ResponsesRequest,
     ) -> Result<HarmonyBuildOutput, String> {
+        let encoding = get_harmony_encoding()?;
         let all_messages = self.construct_input_messages_with_harmony(request)?;
 
         let conversation = Conversation::from_messages(all_messages.clone());
-        let token_ids = self
-            .encoding
+        let token_ids = encoding
             .render_conversation_for_completion(&conversation, Role::Assistant, None)
             .map_err(|e| format!("Failed to encode Harmony conversation: {e}"))?;
 
         let selection_text = self.extract_selection_text(&all_messages);
 
         // Get stop tokens for Harmony assistant actions (<|return|> and <|call|>)
-        let stop_token_ids: Vec<u32> = self
-            .encoding
+        let stop_token_ids: Vec<u32> = encoding
             .stop_tokens_for_assistant_actions()
             .into_iter()
             .flat_map(|set| set.into_iter())
             .collect();
 
         // Decode tokens to see what the model actually receives
-        let decoded_text = self
-            .encoding
+        let decoded_text = encoding
             .tokenizer()
             .decode_utf8(&token_ids)
             .unwrap_or_else(|_| "<decode error>".to_string());
@@ -1169,6 +1176,12 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn harmony_builder_construction_does_not_load_encoding() {
+        // HarmonyBuilder::new() must be zero-cost — no network call, no panic.
+        let _builder = HarmonyBuilder::new();
+    }
+
     /// Invariant: `image_generation` must never be advertised as a
     /// gpt-oss native builtin tool. If a future change re-adds it,
     /// gpt-oss's behavior becomes undefined (hallucinated tool call
@@ -1266,9 +1279,9 @@ mod tests {
     /// where the tool is silently dropped from the developer message.
     ///
     /// Uses `#[tokio::test(flavor = "multi_thread")]` because
-    /// [`HarmonyBuilder::new`] → [`get_harmony_encoding`] wraps its
-    /// one-shot initialization in [`tokio::task::block_in_place`], which
-    /// requires a multi-threaded runtime context.
+    /// [`get_harmony_encoding`] wraps its one-shot initialization in
+    /// [`tokio::task::block_in_place`], which requires a multi-threaded
+    /// runtime context.
     #[tokio::test(flavor = "multi_thread")]
     async fn build_from_responses_renders_image_generation_as_function_tool() {
         let builder = HarmonyBuilder::new();
@@ -1285,8 +1298,8 @@ mod tests {
             .build_from_responses(&request)
             .expect("harmony build must succeed");
 
-        let decoded = builder
-            .encoding
+        let decoded = get_harmony_encoding()
+            .expect("test requires harmony encoding")
             .tokenizer()
             .decode_utf8(&output.input_ids)
             .expect("decode harmony tokens back to UTF-8");
@@ -1366,8 +1379,8 @@ mod tests {
             .build_from_responses(&request)
             .expect("harmony build must succeed");
 
-        let decoded = builder
-            .encoding
+        let decoded = get_harmony_encoding()
+            .expect("test requires harmony encoding")
             .tokenizer()
             .decode_utf8(&output.input_ids)
             .expect("decode harmony tokens back to UTF-8");

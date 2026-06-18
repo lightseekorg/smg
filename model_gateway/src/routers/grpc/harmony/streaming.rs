@@ -261,6 +261,7 @@ impl HarmonyStreamingProcessor {
                         chunk_wrapper
                             .output_logprobs()
                             .map(|lp| convert_harmony_logprobs(&lp))
+                            .transpose()?
                     } else {
                         None
                     };

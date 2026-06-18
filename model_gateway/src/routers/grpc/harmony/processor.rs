@@ -94,6 +94,15 @@ impl HarmonyResponseProcessor {
                 complete
                     .output_logprobs()
                     .map(|lp| convert_harmony_logprobs(&lp))
+                    .transpose()
+                    .map_err(|e| {
+                        error!(
+                            function = "process_harmony_response",
+                            error = %e,
+                            "Harmony logprobs conversion failed"
+                        );
+                        error::internal_error("harmony_logprobs_failed", e)
+                    })?
             } else {
                 None
             };
