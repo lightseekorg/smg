@@ -133,6 +133,10 @@ toml = "1.0"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
+# Used by PD metrics integration tests to capture metric emission via a
+# thread-local Prometheus recorder (same versions as the runtime deps above).
+metrics = "0.24.2"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
 http-body-util = "0.1"
 portpicker = "0.1"
 lazy_static = "1.4"

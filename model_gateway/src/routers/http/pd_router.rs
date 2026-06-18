@@ -352,7 +352,10 @@ impl PDRouter {
                             context.batch_size,
                         ) {
                             Ok(v) => v,
-                            Err(e) => return Self::handle_serialization_error(e),
+                            Err(e) => {
+                                Metrics::record_pd_bootstrap_failure();
+                                return Self::handle_serialization_error(e);
+                            }
                         };
 
                         let mut prefill_json_request = json_request.clone();
@@ -648,6 +651,10 @@ impl PDRouter {
         // hits a transport error, the other is cancelled immediately — otherwise
         // the surviving request hangs waiting for a PD bootstrap that will never
         // come (see #831).
+        // PD timing uses a monotonic clock from dispatch; the recorders below sit
+        // on the success path only, so retried attempts never double-count.
+        let runtime = prefill.metadata().spec.runtime_type.to_string();
+        let prefill_start = Instant::now();
         let pd_result = tokio::try_join!(prefill_request.send(), decode_request.send());
 
         events::RequestReceivedEvent {}.emit();
@@ -682,6 +689,18 @@ impl PDRouter {
                 .await;
         }
 
+        // Honest PD TTFT (prefill start to first decode output): the decode
+        // response head is the first user-visible decode output, since the
+        // gateway forwards the decode body unbuffered. Complements the
+        // decode-only `smg_router_ttft_seconds`, which PD never narrows to a
+        // single leg.
+        Metrics::record_pd_ttft(
+            metrics_labels::BACKEND_PD,
+            context.model_id,
+            &runtime,
+            prefill_start.elapsed(),
+        );
+
         // Process prefill response
         let prefill_body = match self
             .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
@@ -690,6 +709,14 @@ impl PDRouter {
             Ok((_, body)) => body,
             Err(error_response) => return error_response,
         };
+
+        // Prefill RPC duration: dispatch to fully-drained prefill body.
+        Metrics::record_pd_prefill_duration(
+            metrics_labels::BACKEND_PD,
+            context.model_id,
+            &runtime,
+            prefill_start.elapsed(),
+        );
 
         if context.is_stream {
             // Streaming response

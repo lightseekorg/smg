@@ -39,6 +39,7 @@ pub(crate) async fn collect_responses(
         ExecutionResult::Dual {
             mut prefill,
             decode,
+            ..
         } => {
             // Collect prefill for input_logprobs (don't mark completed yet)
             let prefill_responses = collect_stream_responses(&mut prefill, "Prefill").await?;

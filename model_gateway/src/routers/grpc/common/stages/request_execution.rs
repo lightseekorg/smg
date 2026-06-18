@@ -1,16 +1,20 @@
 //! Request execution stage: Execute gRPC requests (single or dual dispatch)
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
 use crate::{
+    observability::metrics::{intern_string, metrics_labels, Metrics},
     routers::{
         error,
         grpc::{
             context::{
-                ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection,
+                ClientSelection, ExecutionResult, LoadGuards, PdTiming, RequestContext,
+                WorkerSelection,
             },
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
@@ -43,6 +47,16 @@ enum KvConnectorMode {
     Nixl,
     /// Unknown/absent connector: relay returned params opportunistically.
     Passthrough,
+}
+
+impl KvConnectorMode {
+    fn metrics_label(&self) -> &'static str {
+        match self {
+            Self::Mooncake { .. } => metrics_labels::KV_CONNECTOR_MOONCAKE,
+            Self::Nixl => metrics_labels::KV_CONNECTOR_NIXL,
+            Self::Passthrough => metrics_labels::KV_CONNECTOR_PASSTHROUGH,
+        }
+    }
 }
 
 fn kv_connector_mode(
@@ -188,10 +202,12 @@ impl PipelineStage for RequestExecutionStage {
                         let runtime_type = workers.pd_runtime_type();
                         match runtime_type {
                             Some(RuntimeType::Vllm) => {
-                                self.execute_sequential_pd(req, clients, workers).await
+                                self.execute_sequential_pd(req, clients, workers, model)
+                                    .await
                             }
                             Some(RuntimeType::Sglang) => {
-                                self.execute_dual_dispatch(req, clients, workers).await
+                                self.execute_dual_dispatch(req, clients, workers, model)
+                                    .await
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::Mlx)
@@ -309,7 +325,12 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
+        model: &str,
     ) -> Result<ExecutionResult, Response> {
+        let runtime = workers
+            .pd_runtime_type()
+            .map(RuntimeType::to_string)
+            .unwrap_or_default();
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_dual_dispatch",
@@ -333,9 +354,21 @@ impl RequestExecutionStage {
             decode_request.set_data_parallel_rank(rank as i32);
         }
 
-        let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
-            prefill_client.generate(prefill_request),
-            decode_client.generate(decode_request)
+        // Time the prefill RPC on its own even though both legs are dispatched
+        // concurrently: wrap the prefill future so it records its own elapsed.
+        let prefill_start = Instant::now();
+        let prefill_fut = async {
+            let result: StreamResult = prefill_client.generate(prefill_request).await;
+            (prefill_start.elapsed(), result)
+        };
+        let ((prefill_elapsed, prefill_result), decode_result): ((_, StreamResult), StreamResult) =
+            tokio::join!(prefill_fut, decode_client.generate(decode_request));
+
+        Metrics::record_pd_prefill_duration(
+            metrics_labels::BACKEND_PD,
+            model,
+            &runtime,
+            prefill_elapsed,
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
@@ -346,12 +379,22 @@ impl RequestExecutionStage {
 
         // Handle prefill result
         let prefill_stream = prefill_result.map_err(|e| {
+            Metrics::record_worker_error(
+                metrics_labels::WORKER_PREFILL,
+                metrics_labels::CONNECTION_GRPC,
+                metrics_labels::ERROR_BACKEND,
+            );
             error!(function = "execute_dual_dispatch", error = %e, "Prefill worker failed to start");
             e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
         })?;
 
         // Handle decode result
         let decode_stream = decode_result.map_err(|e| {
+            Metrics::record_worker_error(
+                metrics_labels::WORKER_DECODE,
+                metrics_labels::CONNECTION_GRPC,
+                metrics_labels::ERROR_BACKEND,
+            );
             error!(function = "execute_dual_dispatch", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
@@ -362,6 +405,10 @@ impl RequestExecutionStage {
         Ok(ExecutionResult::Dual {
             prefill: prefill_stream,
             decode: Box::new(decode_stream),
+            pd_timing: PdTiming {
+                prefill_start,
+                runtime: intern_string(&runtime),
+            },
         })
     }
 
@@ -376,7 +423,12 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
+        model: &str,
     ) -> Result<ExecutionResult, Response> {
+        let runtime = workers
+            .pd_runtime_type()
+            .map(RuntimeType::to_string)
+            .unwrap_or_default();
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",
@@ -407,6 +459,8 @@ impl RequestExecutionStage {
                 )
             })
             .unwrap_or(KvConnectorMode::Passthrough);
+
+        Metrics::record_pd_kv_connector_mode(mode.metrics_label());
 
         match &mode {
             KvConnectorMode::Mooncake {
@@ -477,11 +531,17 @@ impl RequestExecutionStage {
         );
 
         // Send to prefill, wait for completion
+        let prefill_start = Instant::now();
         let mut prefill_stream = prefill_client
             .generate(prefill_request)
             .await
             .map_err(|e| {
                 workers.record_outcome_prefill(e.http_status().as_u16());
+                Metrics::record_worker_error(
+                    metrics_labels::WORKER_PREFILL,
+                    metrics_labels::CONNECTION_GRPC,
+                    metrics_labels::ERROR_BACKEND,
+                );
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
                 e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
             })?;
@@ -499,6 +559,11 @@ impl RequestExecutionStage {
                 }
                 Err(e) => {
                     workers.record_outcome_prefill(e.http_status().as_u16());
+                    Metrics::record_worker_error(
+                        metrics_labels::WORKER_PREFILL,
+                        metrics_labels::CONNECTION_GRPC,
+                        metrics_labels::ERROR_BACKEND,
+                    );
                     error!(function = "execute_sequential_pd", error = %e, "Prefill stream error");
                     return Err(e.to_http_error(
                         "prefill_stream_error",
@@ -509,6 +574,15 @@ impl RequestExecutionStage {
         }
         prefill_stream.mark_completed();
         workers.record_outcome_prefill(200);
+        Metrics::record_pd_prefill_duration(
+            metrics_labels::BACKEND_PD,
+            model,
+            &runtime,
+            prefill_start.elapsed(),
+        );
+
+        // KV-transfer window: prefill drain complete to decode send complete.
+        let kv_window_start = Instant::now();
 
         debug!("vLLM PD: prefill completed, sending decode request");
 
@@ -561,6 +635,7 @@ impl RequestExecutionStage {
                 decode_request.set_kv_transfer_params_json(json);
             }
             (KvConnectorMode::Nixl, None) if relay_kv_params => {
+                Metrics::record_pd_kv_transfer_failure();
                 tracing::warn!(
                     request_id = %decode_request.request_id(),
                     "vLLM PD (NIXL): prefill returned no kv_transfer_params; decode will \
@@ -574,6 +649,11 @@ impl RequestExecutionStage {
         // Send request to decode
         let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
             workers.record_outcome_decode(e.http_status().as_u16());
+            Metrics::record_worker_error(
+                metrics_labels::WORKER_DECODE,
+                metrics_labels::CONNECTION_GRPC,
+                metrics_labels::ERROR_BACKEND,
+            );
             error!(function = "execute_sequential_pd", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
@@ -582,6 +662,12 @@ impl RequestExecutionStage {
         })?;
 
         workers.record_outcome_decode(200);
+        Metrics::record_pd_kv_transfer_duration(
+            metrics_labels::BACKEND_PD,
+            model,
+            &runtime,
+            kv_window_start.elapsed(),
+        );
 
         Ok(ExecutionResult::Single {
             stream: decode_stream,

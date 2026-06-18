@@ -201,6 +201,33 @@ pub(crate) fn init_metrics() {
         "Total generation time by router_type, backend_type, model, endpoint (gRPC only)"
     );
 
+    // Layer 2: PD disaggregation metrics (signals only SMG can measure — it is the
+    // only component that observes both the prefill and decode legs of a request).
+    describe_histogram!(
+        "smg_pd_prefill_duration_seconds",
+        "Prefill-leg RPC duration by backend_type, model, runtime"
+    );
+    describe_histogram!(
+        "smg_pd_kv_transfer_duration_seconds",
+        "KV-transfer window (prefill drain to decode send) by backend_type, model, runtime (vLLM sequential PD)"
+    );
+    describe_histogram!(
+        "smg_pd_ttft_seconds",
+        "Honest end-to-end TTFT (prefill start to first decode token) by backend_type, model, runtime"
+    );
+    describe_counter!(
+        "smg_pd_kv_connector_mode_total",
+        "KV connector mode decisions by mode (mooncake/nixl/passthrough)"
+    );
+    describe_counter!(
+        "smg_pd_bootstrap_failures_total",
+        "PD bootstrap injection failures"
+    );
+    describe_counter!(
+        "smg_pd_kv_transfer_failures_total",
+        "PD KV-transfer failures (missing connector params at decode handoff)"
+    );
+
     // Layer 3: Worker metrics
     describe_gauge!(
         "smg_worker_pool_size",
@@ -429,6 +456,11 @@ pub mod metrics_labels {
     // Token types
     pub const TOKEN_INPUT: &str = "input";
     pub const TOKEN_OUTPUT: &str = "output";
+
+    // PD KV connector modes (smg_pd_kv_connector_mode_total)
+    pub const KV_CONNECTOR_MOONCAKE: &str = "mooncake";
+    pub const KV_CONNECTOR_NIXL: &str = "nixl";
+    pub const KV_CONNECTOR_PASSTHROUGH: &str = "passthrough";
 
     // Storage types
     pub const STORAGE_RESPONSE: &str = "response";
@@ -833,6 +865,96 @@ impl Metrics {
             "token_type" => metrics_labels::TOKEN_OUTPUT
         )
         .increment(output_tokens);
+    }
+
+    // ========================================================================
+    // Layer 2: PD disaggregation metrics
+    //
+    // Per-request, engine-agnostic signals that no backend can self-report: SMG
+    // is the only component that sees both the prefill and decode legs. All
+    // durations come from a monotonic clock and are recorded once per request
+    // (never per retry attempt).
+    // ========================================================================
+
+    /// Record prefill-leg RPC duration.
+    /// Uses string interning for model_id and runtime.
+    pub fn record_pd_prefill_duration(
+        backend_type: &'static str,
+        model_id: &str,
+        runtime: &str,
+        duration: Duration,
+    ) {
+        let model = intern_string(model_id);
+        let runtime = intern_string(runtime);
+        histogram!(
+            "smg_pd_prefill_duration_seconds",
+            "backend_type" => backend_type,
+            "model" => model,
+            "runtime" => runtime
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    /// Record the KV-transfer window (prefill drain to decode send) for vLLM
+    /// sequential PD. Uses string interning for model_id and runtime.
+    pub fn record_pd_kv_transfer_duration(
+        backend_type: &'static str,
+        model_id: &str,
+        runtime: &str,
+        duration: Duration,
+    ) {
+        let model = intern_string(model_id);
+        let runtime = intern_string(runtime);
+        histogram!(
+            "smg_pd_kv_transfer_duration_seconds",
+            "backend_type" => backend_type,
+            "model" => model,
+            "runtime" => runtime
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    /// Record honest end-to-end TTFT: prefill start to first decode token.
+    ///
+    /// INVARIANT: this is the user-facing complement to
+    /// `smg_router_ttft_seconds{backend_type="pd"}`, which measures only the
+    /// decode leg (first decode token minus decode-send). For sequential PD the
+    /// two differ by the prefill + KV-transfer time; both are kept on purpose.
+    /// Uses string interning for model_id and runtime.
+    pub fn record_pd_ttft(
+        backend_type: &'static str,
+        model_id: &str,
+        runtime: &str,
+        duration: Duration,
+    ) {
+        let model = intern_string(model_id);
+        let runtime = intern_string(runtime);
+        histogram!(
+            "smg_pd_ttft_seconds",
+            "backend_type" => backend_type,
+            "model" => model,
+            "runtime" => runtime
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    /// Record a KV connector mode decision (mooncake/nixl/passthrough).
+    pub fn record_pd_kv_connector_mode(mode: &'static str) {
+        counter!(
+            "smg_pd_kv_connector_mode_total",
+            "mode" => mode
+        )
+        .increment(1);
+    }
+
+    /// Record a PD bootstrap injection failure.
+    pub fn record_pd_bootstrap_failure() {
+        counter!("smg_pd_bootstrap_failures_total").increment(1);
+    }
+
+    /// Record a PD KV-transfer failure (missing connector params at handoff).
+    pub fn record_pd_kv_transfer_failure() {
+        counter!("smg_pd_kv_transfer_failures_total").increment(1);
     }
 
     // ========================================================================
@@ -1560,5 +1682,104 @@ mod tests {
         assert_eq!(method_to_static_str("GET"), "GET");
         assert_eq!(method_to_static_str("POST"), "POST");
         assert_eq!(method_to_static_str("UNKNOWN"), "OTHER");
+    }
+
+    // ========================================================================
+    // PD disaggregation metric tests
+    // ========================================================================
+
+    /// Run `f` with a Prometheus recorder installed thread-locally and return
+    /// the rendered /metrics text. Mirrors the helper in `runtime_metrics`.
+    fn with_test_recorder<T>(f: impl FnOnce() -> T) -> (String, T) {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let result = metrics::with_local_recorder(&recorder, f);
+        (handle.render(), result)
+    }
+
+    #[test]
+    fn test_record_pd_prefill_duration_emits_histogram() {
+        let (rendered, ()) = with_test_recorder(|| {
+            Metrics::record_pd_prefill_duration(
+                metrics_labels::BACKEND_PD,
+                "test-model",
+                "vllm",
+                Duration::from_millis(42),
+            );
+        });
+        assert!(
+            rendered.contains("smg_pd_prefill_duration_seconds_count{")
+                && rendered.contains(r#"backend_type="pd""#)
+                && rendered.contains(r#"model="test-model""#)
+                && rendered.contains(r#"runtime="vllm""#),
+            "prefill duration histogram not emitted; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_record_pd_kv_transfer_duration_emits_histogram() {
+        let (rendered, ()) = with_test_recorder(|| {
+            Metrics::record_pd_kv_transfer_duration(
+                metrics_labels::BACKEND_PD,
+                "m",
+                "vllm",
+                Duration::from_millis(7),
+            );
+        });
+        assert!(
+            rendered.contains("smg_pd_kv_transfer_duration_seconds_count"),
+            "kv transfer histogram not emitted; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_record_pd_ttft_emits_histogram() {
+        let (rendered, ()) = with_test_recorder(|| {
+            Metrics::record_pd_ttft(
+                metrics_labels::BACKEND_PD,
+                "m",
+                "sglang",
+                Duration::from_millis(123),
+            );
+        });
+        assert!(
+            rendered.contains("smg_pd_ttft_seconds_count")
+                && rendered.contains(r#"runtime="sglang""#),
+            "pd ttft histogram not emitted; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_record_pd_kv_connector_mode_counts_by_mode() {
+        let (rendered, ()) = with_test_recorder(|| {
+            Metrics::record_pd_kv_connector_mode(metrics_labels::KV_CONNECTOR_MOONCAKE);
+            Metrics::record_pd_kv_connector_mode(metrics_labels::KV_CONNECTOR_MOONCAKE);
+            Metrics::record_pd_kv_connector_mode(metrics_labels::KV_CONNECTOR_NIXL);
+        });
+        assert!(
+            rendered.contains(r#"smg_pd_kv_connector_mode_total{mode="mooncake"} 2"#),
+            "mooncake connector counter wrong; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"smg_pd_kv_connector_mode_total{mode="nixl"} 1"#),
+            "nixl connector counter wrong; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_record_pd_failure_counters() {
+        let (rendered, ()) = with_test_recorder(|| {
+            Metrics::record_pd_bootstrap_failure();
+            Metrics::record_pd_kv_transfer_failure();
+            Metrics::record_pd_kv_transfer_failure();
+        });
+        assert!(
+            rendered.contains("smg_pd_bootstrap_failures_total 1"),
+            "bootstrap failure counter wrong; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("smg_pd_kv_transfer_failures_total 2"),
+            "kv transfer failure counter wrong; rendered:\n{rendered}"
+        );
     }
 }

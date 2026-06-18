@@ -140,7 +140,11 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                prefill,
+                decode,
+                pd_timing,
+            } => {
                 let processor = self.clone();
                 let tokenizer_clone = tokenizer.clone();
                 #[expect(
@@ -157,6 +161,7 @@ impl StreamingProcessor {
                             stop_params,
                             chat_request,
                             &tx,
+                            pd_timing,
                         )
                         .await;
 
@@ -184,12 +189,38 @@ impl StreamingProcessor {
     /// Process streaming chunks from a single stream (Regular mode)
     pub async fn process_streaming_chunks(
         &self,
+        grpc_stream: ProtoStream,
+        dispatch: context::DispatchMetadata,
+        tokenizer: Arc<dyn Tokenizer>,
+        stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
+        original_request: Arc<ChatCompletionRequest>,
+        tx: &UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        self.process_streaming_chunks_inner(
+            grpc_stream,
+            dispatch,
+            tokenizer,
+            stop_params,
+            original_request,
+            tx,
+            None,
+        )
+        .await
+    }
+
+    /// Inner implementation shared by single-mode and PD-dual streaming.
+    /// `pd_timing` is `Some` only in PD mode and yields honest PD TTFT
+    /// (prefill start to first decode token).
+    #[expect(clippy::too_many_arguments)]
+    async fn process_streaming_chunks_inner(
+        &self,
         mut grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
+        pd_timing: Option<context::PdTiming>,
     ) -> Result<(), String> {
         // Metrics timing
         let start_time = Instant::now();
@@ -303,6 +334,14 @@ impl StreamingProcessor {
                     // Track TTFT immediately on first chunk received from backend
                     if first_token_time.is_none() {
                         first_token_time = Some(Instant::now());
+                        if let Some(timing) = &pd_timing {
+                            Metrics::record_pd_ttft(
+                                self.backend_type,
+                                model,
+                                &timing.runtime,
+                                timing.prefill_start.elapsed(),
+                            );
+                        }
                     }
 
                     let index = chunk.index();
@@ -610,6 +649,7 @@ impl StreamingProcessor {
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<ChatCompletionRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
+        pd_timing: context::PdTiming,
     ) -> Result<(), String> {
         // Phase 1.5: Collect input_logprobs from prefill stream if requested
         if original_request.logprobs {
@@ -627,16 +667,18 @@ impl StreamingProcessor {
             }
         }
 
-        // Phase 2-5: Process decode stream (same as single mode)
+        // Phase 2-5: Process decode stream (same as single mode). Pass pd_timing
+        // so the first decode token yields honest PD TTFT.
         // Note: decode_stream will be marked completed inside process_streaming_chunks
         let result = self
-            .process_streaming_chunks(
+            .process_streaming_chunks_inner(
                 decode_stream,
                 dispatch,
                 tokenizer,
                 stop_params,
                 original_request,
                 tx,
+                Some(pd_timing),
             )
             .await;
 
@@ -696,7 +738,11 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                prefill,
+                decode,
+                pd_timing,
+            } => {
                 // For PD mode, need to handle prefill stream for input_logprobs
                 let tokenizer = tokenizer.clone();
                 #[expect(
@@ -705,7 +751,7 @@ impl StreamingProcessor {
                 )]
                 tokio::spawn(async move {
                     let result = Self::process_generate_streaming_dual(
-                        tokenizer, prefill, *decode, ctx, &tx,
+                        tokenizer, prefill, *decode, ctx, &tx, pd_timing,
                     )
                     .await;
 
@@ -846,6 +892,7 @@ impl StreamingProcessor {
         decode_stream: ProtoStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
+        pd_timing: context::PdTiming,
     ) -> Result<(), String> {
         // Collect input_logprobs from prefill stream if requested
         let input_token_logprobs = if ctx.return_logprob {
@@ -870,7 +917,8 @@ impl StreamingProcessor {
             None
         };
 
-        // Process decode stream with input_logprobs prepended
+        // Process decode stream with input_logprobs prepended. Pass pd_timing so
+        // the first decode token yields honest PD TTFT.
         // Note: decode_stream will be marked completed inside the function
         let result = Self::process_generate_streaming_with_input_logprobs(
             tokenizer,
@@ -878,6 +926,7 @@ impl StreamingProcessor {
             ctx,
             input_token_logprobs,
             tx,
+            Some(pd_timing),
         )
         .await;
 
@@ -897,6 +946,7 @@ impl StreamingProcessor {
         ctx: GenerateStreamContext,
         input_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
+        pd_timing: Option<context::PdTiming>,
     ) -> Result<(), String> {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
@@ -915,6 +965,14 @@ impl StreamingProcessor {
                     // Track TTFT immediately on first chunk received from backend
                     if first_token_time.is_none() {
                         first_token_time = Some(Instant::now());
+                        if let Some(timing) = &pd_timing {
+                            Metrics::record_pd_ttft(
+                                ctx.backend_type,
+                                &ctx.model,
+                                &timing.runtime,
+                                timing.prefill_start.elapsed(),
+                            );
+                        }
                     }
 
                     let index = chunk.index();
@@ -1501,7 +1559,9 @@ impl StreamingProcessor {
                     // No data: [DONE] — Anthropic uses message_stop instead
                 });
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                prefill, decode, ..
+            } => {
                 let processor = self.clone();
                 let tokenizer_clone = tokenizer.clone();
                 #[expect(
@@ -2259,7 +2319,9 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                prefill, decode, ..
+            } => {
                 let processor = self.clone();
                 #[expect(
                     clippy::disallowed_methods,
