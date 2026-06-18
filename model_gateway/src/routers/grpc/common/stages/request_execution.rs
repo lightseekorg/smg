@@ -8,7 +8,7 @@ use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
 use crate::{
-    observability::metrics::{intern_string, metrics_labels, Metrics},
+    observability::metrics::{metrics_labels, Metrics},
     routers::{
         error,
         grpc::{
@@ -329,8 +329,8 @@ impl RequestExecutionStage {
     ) -> Result<ExecutionResult, Response> {
         let runtime = workers
             .pd_runtime_type()
-            .map(RuntimeType::to_string)
-            .unwrap_or_default();
+            .map(RuntimeType::as_str)
+            .unwrap_or("");
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_dual_dispatch",
@@ -354,21 +354,13 @@ impl RequestExecutionStage {
             decode_request.set_data_parallel_rank(rank as i32);
         }
 
-        // Time the prefill RPC on its own even though both legs are dispatched
-        // concurrently: wrap the prefill future so it records its own elapsed.
+        // `generate` only establishes the prefill stream here (SMG does not drain
+        // it on this path), so prefill duration cannot be measured — only TTFT,
+        // recorded at the first decode token in streaming. prefill_start anchors it.
         let prefill_start = Instant::now();
-        let prefill_fut = async {
-            let result: StreamResult = prefill_client.generate(prefill_request).await;
-            (prefill_start.elapsed(), result)
-        };
-        let ((prefill_elapsed, prefill_result), decode_result): ((_, StreamResult), StreamResult) =
-            tokio::join!(prefill_fut, decode_client.generate(decode_request));
-
-        Metrics::record_pd_prefill_duration(
-            metrics_labels::BACKEND_PD,
-            model,
-            &runtime,
-            prefill_elapsed,
+        let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
+            prefill_client.generate(prefill_request),
+            decode_client.generate(decode_request)
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
@@ -407,7 +399,7 @@ impl RequestExecutionStage {
             decode: Box::new(decode_stream),
             pd_timing: PdTiming {
                 prefill_start,
-                runtime: intern_string(&runtime),
+                runtime,
             },
         })
     }
@@ -427,8 +419,8 @@ impl RequestExecutionStage {
     ) -> Result<ExecutionResult, Response> {
         let runtime = workers
             .pd_runtime_type()
-            .map(RuntimeType::to_string)
-            .unwrap_or_default();
+            .map(RuntimeType::as_str)
+            .unwrap_or("");
         let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",
@@ -577,7 +569,7 @@ impl RequestExecutionStage {
         Metrics::record_pd_prefill_duration(
             metrics_labels::BACKEND_PD,
             model,
-            &runtime,
+            runtime,
             prefill_start.elapsed(),
         );
 
@@ -665,7 +657,7 @@ impl RequestExecutionStage {
         Metrics::record_pd_kv_transfer_duration(
             metrics_labels::BACKEND_PD,
             model,
-            &runtime,
+            runtime,
             kv_window_start.elapsed(),
         );
 

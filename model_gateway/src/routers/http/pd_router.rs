@@ -651,16 +651,23 @@ impl PDRouter {
         // hits a transport error, the other is cancelled immediately — otherwise
         // the surviving request hangs waiting for a PD bootstrap that will never
         // come (see #831).
-        // PD timing uses a monotonic clock from dispatch; the recorders below sit
-        // on the success path only, so retried attempts never double-count.
-        let runtime = prefill.metadata().spec.runtime_type.to_string();
-        let prefill_start = Instant::now();
-        let pd_result = tokio::try_join!(prefill_request.send(), decode_request.send());
+        // Time each leg from its own dispatch on a monotonic clock. The decode
+        // future captures its own head-arrival elapsed so TTFT is not conflated
+        // with the prefill-head wait; prefill duration is measured below, after
+        // its body is drained. All recorders sit on the success path only, so
+        // failed/retried attempts never pollute or double-count the signal.
+        let runtime = prefill.metadata().spec.runtime_type.as_str();
+        let dispatch_start = Instant::now();
+        let decode_fut = async {
+            let resp = decode_request.send().await?;
+            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+        };
+        let pd_result = tokio::try_join!(prefill_request.send(), decode_fut);
 
         events::RequestReceivedEvent {}.emit();
 
-        let (prefill_response, decode_response) = match pd_result {
-            Ok((prefill_resp, decode_resp)) => (prefill_resp, decode_resp),
+        let (prefill_response, (decode_head_elapsed, decode_response)) = match pd_result {
+            Ok(pair) => pair,
             Err(e) => {
                 error!("PD request transport error, both sides aborted: {e}");
                 // Don't record_outcome here — the caller (execute_dual_dispatch)
@@ -689,16 +696,15 @@ impl PDRouter {
                 .await;
         }
 
-        // Honest PD TTFT (prefill start to first decode output): the decode
-        // response head is the first user-visible decode output, since the
-        // gateway forwards the decode body unbuffered. Complements the
-        // decode-only `smg_router_ttft_seconds`, which PD never narrows to a
-        // single leg.
+        // Honest PD TTFT: dispatch to the decode response head — the first
+        // user-visible decode output, since the gateway forwards the decode body
+        // unbuffered. Complements the decode-only `smg_router_ttft_seconds`,
+        // which PD never narrows to a single leg.
         Metrics::record_pd_ttft(
             metrics_labels::BACKEND_PD,
             context.model_id,
-            &runtime,
-            prefill_start.elapsed(),
+            runtime,
+            decode_head_elapsed,
         );
 
         // Process prefill response
@@ -714,8 +720,8 @@ impl PDRouter {
         Metrics::record_pd_prefill_duration(
             metrics_labels::BACKEND_PD,
             context.model_id,
-            &runtime,
-            prefill_start.elapsed(),
+            runtime,
+            dispatch_start.elapsed(),
         );
 
         if context.is_stream {

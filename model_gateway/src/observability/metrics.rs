@@ -877,15 +877,14 @@ impl Metrics {
     // ========================================================================
 
     /// Record prefill-leg RPC duration.
-    /// Uses string interning for model_id and runtime.
+    /// Uses string interning for model_id; runtime is a static label.
     pub fn record_pd_prefill_duration(
         backend_type: &'static str,
         model_id: &str,
-        runtime: &str,
+        runtime: &'static str,
         duration: Duration,
     ) {
         let model = intern_string(model_id);
-        let runtime = intern_string(runtime);
         histogram!(
             "smg_pd_prefill_duration_seconds",
             "backend_type" => backend_type,
@@ -896,15 +895,14 @@ impl Metrics {
     }
 
     /// Record the KV-transfer window (prefill drain to decode send) for vLLM
-    /// sequential PD. Uses string interning for model_id and runtime.
+    /// sequential PD. Uses string interning for model_id; runtime is a static label.
     pub fn record_pd_kv_transfer_duration(
         backend_type: &'static str,
         model_id: &str,
-        runtime: &str,
+        runtime: &'static str,
         duration: Duration,
     ) {
         let model = intern_string(model_id);
-        let runtime = intern_string(runtime);
         histogram!(
             "smg_pd_kv_transfer_duration_seconds",
             "backend_type" => backend_type,
@@ -920,15 +918,14 @@ impl Metrics {
     /// `smg_router_ttft_seconds{backend_type="pd"}`, which measures only the
     /// decode leg (first decode token minus decode-send). For sequential PD the
     /// two differ by the prefill + KV-transfer time; both are kept on purpose.
-    /// Uses string interning for model_id and runtime.
+    /// Uses string interning for model_id; runtime is a static label.
     pub fn record_pd_ttft(
         backend_type: &'static str,
         model_id: &str,
-        runtime: &str,
+        runtime: &'static str,
         duration: Duration,
     ) {
         let model = intern_string(model_id);
-        let runtime = intern_string(runtime);
         histogram!(
             "smg_pd_ttft_seconds",
             "backend_type" => backend_type,

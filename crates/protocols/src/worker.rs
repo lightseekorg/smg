@@ -215,19 +215,25 @@ impl RuntimeType {
     pub fn is_specified(self) -> bool {
         !matches!(self, RuntimeType::Unspecified)
     }
+
+    /// Static string form, identical to `Display`. For hot-path metric labels
+    /// that must avoid per-call allocation/interning.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeType::Unspecified => "unspecified",
+            RuntimeType::Sglang => "sglang",
+            RuntimeType::Vllm => "vllm",
+            RuntimeType::Trtllm => "trtllm",
+            RuntimeType::Mlx => "mlx",
+            RuntimeType::TokenSpeed => "tokenspeed",
+            RuntimeType::External => "external",
+        }
+    }
 }
 
 impl std::fmt::Display for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeType::Unspecified => write!(f, "unspecified"),
-            RuntimeType::Sglang => write!(f, "sglang"),
-            RuntimeType::Vllm => write!(f, "vllm"),
-            RuntimeType::Trtllm => write!(f, "trtllm"),
-            RuntimeType::Mlx => write!(f, "mlx"),
-            RuntimeType::TokenSpeed => write!(f, "tokenspeed"),
-            RuntimeType::External => write!(f, "external"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

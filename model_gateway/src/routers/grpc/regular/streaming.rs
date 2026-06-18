@@ -338,7 +338,7 @@ impl StreamingProcessor {
                             Metrics::record_pd_ttft(
                                 self.backend_type,
                                 model,
-                                &timing.runtime,
+                                timing.runtime,
                                 timing.prefill_start.elapsed(),
                             );
                         }
@@ -969,7 +969,7 @@ impl StreamingProcessor {
                             Metrics::record_pd_ttft(
                                 ctx.backend_type,
                                 &ctx.model,
-                                &timing.runtime,
+                                timing.runtime,
                                 timing.prefill_start.elapsed(),
                             );
                         }

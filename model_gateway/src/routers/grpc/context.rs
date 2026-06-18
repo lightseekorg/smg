@@ -723,7 +723,7 @@ pub(crate) struct PdTiming {
     /// Monotonic instant the prefill RPC was dispatched.
     pub prefill_start: std::time::Instant,
     /// Backend runtime label (e.g. "sglang", "vllm") for the PD metric set.
-    pub runtime: Arc<str>,
+    pub runtime: &'static str,
 }
 
 /// Final processed response
