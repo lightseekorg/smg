@@ -278,6 +278,7 @@ pub struct GenerateMetaInfo {
     pub output_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
     pub completion_tokens: u32,
     pub cached_tokens: u32,
+    pub reasoning_tokens: Option<u32>,
     pub e2e_latency: f64,
     pub matched_stop: Option<Value>,
 }

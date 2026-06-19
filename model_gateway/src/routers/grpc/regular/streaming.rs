@@ -213,6 +213,7 @@ impl StreamingProcessor {
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut reasoning_tokens: HashMap<u32, u32> = HashMap::new();
 
         // Parser state (lazy initialization per index)
         type PooledReasoningParser = Arc<tokio::sync::Mutex<Box<dyn ReasoningParser>>>;
@@ -496,6 +497,7 @@ impl StreamingProcessor {
                     completion_tokens.record_complete(&complete);
 
                     cached_tokens.insert(index, complete.cached_tokens());
+                    reasoning_tokens.insert(index, complete.reasoning_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
                     matched_stops.insert(index, complete.matched_stop_json());
@@ -570,12 +572,14 @@ impl StreamingProcessor {
                 let total_prompt: u32 = prompt_tokens.values().sum();
                 let total_completion: u32 = completion_tokens.total();
                 let total_cached: u32 = cached_tokens.values().sum();
+                let total_reasoning: u32 = reasoning_tokens.values().sum();
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
                     .usage(
                         Usage::from_counts(total_prompt, total_completion)
-                            .with_cached_tokens(total_cached),
+                            .with_cached_tokens(total_cached)
+                            .with_reasoning_tokens(total_reasoning),
                     )
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
@@ -795,7 +799,8 @@ impl StreamingProcessor {
                             "prompt_tokens": chunk.prompt_tokens(),
                             "weight_version": &ctx.weight_version,
                             "completion_tokens": current_completion_tokens,
-                            "cached_tokens": chunk.cached_tokens()
+                            "cached_tokens": chunk.cached_tokens(),
+                            "reasoning_tokens": chunk.reasoning_tokens()
                         },
                         "index": index
                     });
@@ -825,6 +830,7 @@ impl StreamingProcessor {
                             "weight_version": &ctx.weight_version,
                             "completion_tokens": completion_tokens,
                             "cached_tokens": complete.cached_tokens(),
+                            "reasoning_tokens": complete.reasoning_tokens(),
                             "e2e_latency": e2e_latency
                         },
                         "index": index
@@ -987,7 +993,8 @@ impl StreamingProcessor {
                             "input_token_logprobs": input_token_logprobs.as_ref(),
                             "output_token_logprobs": current_output_logprobs,
                             "completion_tokens": current_completion_tokens,
-                            "cached_tokens": chunk.cached_tokens()
+                            "cached_tokens": chunk.cached_tokens(),
+                            "reasoning_tokens": chunk.reasoning_tokens()
                         },
                         "index": index
                     });
@@ -1031,6 +1038,7 @@ impl StreamingProcessor {
                             "output_token_logprobs": final_output_logprobs,
                             "completion_tokens": completion_tokens,
                             "cached_tokens": complete.cached_tokens(),
+                            "reasoning_tokens": complete.reasoning_tokens(),
                             "e2e_latency": e2e_latency
                         },
                         "index": index
@@ -2370,6 +2378,7 @@ impl StreamingProcessor {
         // messages rather than summing (same prompt tokenized once, not per-choice).
         let mut total_prompt = 0u32;
         let mut total_cached = 0u32;
+        let mut reasoning_tokens: HashMap<u32, u32> = HashMap::new();
         let mut total_completion = CompletionTokenTracker::new();
 
         while let Some(response) = grpc_stream.next().await {
@@ -2490,6 +2499,7 @@ impl StreamingProcessor {
                     let index = complete.index();
                     total_prompt = total_prompt.max(complete.prompt_tokens());
                     total_cached = total_cached.max(complete.cached_tokens());
+                    reasoning_tokens.insert(index, complete.reasoning_tokens());
                     total_completion.record_complete(&complete);
 
                     if stopped_indices.contains(&index) {
@@ -2619,6 +2629,7 @@ impl StreamingProcessor {
         grpc_stream.mark_completed();
 
         if include_usage {
+            let total_reasoning: u32 = reasoning_tokens.values().sum();
             let usage_chunk = CompletionStreamResponse {
                 id: request_id.clone(),
                 object: "text_completion".to_string(),
@@ -2626,11 +2637,14 @@ impl StreamingProcessor {
                 choices: vec![],
                 model: model.clone(),
                 system_fingerprint: system_fingerprint.map(String::from),
-                usage: Some(
-                    Usage::from_counts(total_prompt, total_completion.total())
-                        .with_cached_tokens(total_cached),
-                ),
+                usage: Some(Self::build_completion_streaming_usage(
+                    total_prompt,
+                    total_completion.total(),
+                    total_cached,
+                    total_reasoning,
+                )),
             };
+
             Self::format_completion_sse_into(&mut sse_buffer, &usage_chunk);
             let _ = tx.send(Ok(Bytes::from(sse_buffer.clone())));
         }
@@ -2710,5 +2724,44 @@ impl StreamingProcessor {
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
+    }
+
+    fn build_completion_streaming_usage(
+        total_prompt: u32,
+        total_completion: u32,
+        total_cached: u32,
+        total_reasoning: u32,
+    ) -> Usage {
+        Usage::from_counts(total_prompt, total_completion)
+            .with_cached_tokens(total_cached)
+            .with_reasoning_tokens(total_reasoning)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_streaming_usage_includes_reasoning_tokens() {
+        let usage = StreamingProcessor::build_completion_streaming_usage(10, 5, 4, 3);
+
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(
+            usage
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(4)
+        );
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3)
+        );
     }
 }

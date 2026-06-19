@@ -132,6 +132,11 @@ func (c *GrpcClient) CreateChatCompletionStream(ctx context.Context, reqJSON str
 		model = "default"
 	}
 
+	requireReasoning, err := ffi.ChatRequiresReasoningWithTokenizer(reqJSON, c.tokenizerHandle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine require_reasoning: %w", err)
+	}
+
 	// Build GenerateRequest
 	// Generate unique request ID using timestamp + atomic counter to avoid collisions
 	// This matches Rust version's UUID-based approach for uniqueness
@@ -143,7 +148,8 @@ func (c *GrpcClient) CreateChatCompletionStream(ctx context.Context, reqJSON str
 			OriginalText: preprocessed.PromptText,
 			InputIds:     preprocessed.TokenIDs,
 		},
-		Stream: true,
+		Stream:           true,
+		RequireReasoning: requireReasoning,
 	}
 
 	// Set sampling parameters
@@ -606,6 +612,8 @@ func protoToJSON(resp *proto.GenerateResponse) (string, error) {
 		sb.WriteString(strconv.FormatInt(int64(r.Chunk.CompletionTokens), 10))
 		sb.WriteString(`,"cached_tokens":`)
 		sb.WriteString(strconv.FormatInt(int64(r.Chunk.CachedTokens), 10))
+		sb.WriteString(`,"reasoning_tokens":`)
+		sb.WriteString(strconv.FormatInt(int64(r.Chunk.ReasoningTokens), 10))
 		sb.WriteString(`,"index":`)
 		sb.WriteString(strconv.FormatInt(int64(r.Chunk.Index), 10))
 		sb.WriteString(`}`)
@@ -629,29 +637,8 @@ func protoToJSON(resp *proto.GenerateResponse) (string, error) {
 		sb.WriteString(strconv.FormatInt(int64(r.Complete.CompletionTokens), 10))
 		sb.WriteString(`,"cached_tokens":`)
 		sb.WriteString(strconv.FormatInt(int64(r.Complete.CachedTokens), 10))
-		sb.WriteString(`}`)
-	case *proto.GenerateResponse_Error:
-		sb.WriteString(`,"error":{`)
-		sb.WriteString(`"message":`)
-		messageJSON, err := json.Marshal(r.Error.Message)
-		if err != nil {
-			return "", err
-		}
-		sb.Write(messageJSON)
-		sb.WriteString(`,"http_status_code":`)
-		httpStatusCodeJSON, err := json.Marshal(r.Error.HttpStatusCode)
-		if err != nil {
-			return "", err
-		}
-		sb.Write(httpStatusCodeJSON)
-		if r.Error.Details != "" {
-			sb.WriteString(`,"details":`)
-			detailsJSON, err := json.Marshal(r.Error.Details)
-			if err != nil {
-				return "", err
-			}
-			sb.Write(detailsJSON)
-		}
+		sb.WriteString(`,"reasoning_tokens":`)
+		sb.WriteString(strconv.FormatInt(int64(r.Complete.ReasoningTokens), 10))
 		sb.WriteString(`}`)
 	}
 

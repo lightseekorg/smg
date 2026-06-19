@@ -60,6 +60,11 @@ fn parse_chunk(json: &Value) -> proto::GenerateStreamChunk {
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(0),
+        reasoning_tokens: json
+            .get("reasoning_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
         output_logprobs: None,
         hidden_states: vec![],
         input_logprobs: None,
@@ -95,6 +100,11 @@ fn parse_complete(json: &Value) -> proto::GenerateComplete {
             .unwrap_or(0),
         cached_tokens: json
             .get("cached_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        reasoning_tokens: json
+            .get("reasoning_tokens")
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(0),

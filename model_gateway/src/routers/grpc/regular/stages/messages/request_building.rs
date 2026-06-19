@@ -2,16 +2,19 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::messages;
 use tracing::error;
 use uuid::Uuid;
 
 use crate::routers::{
     error,
     grpc::{
+        client::GenerateRequestBuildOptions,
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext},
         multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
+        utils,
     },
 };
 
@@ -94,7 +97,17 @@ impl PipelineStage for MessageRequestBuildingStage {
             .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
                 error::bad_request("multimodal_not_supported", format!("{e}"))
-            })?;
+        })?;
+
+        let user_thinking = match &messages_request.thinking {
+            Some(messages::ThinkingConfig::Enabled { .. })
+            | Some(messages::ThinkingConfig::Adaptive { .. }) => Some(true),
+            Some(messages::ThinkingConfig::Disabled) => Some(false),
+            None => None,
+        };
+        let require_reasoning = ctx.tokenizer_arc().is_some_and(|tokenizer| {
+            utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref())
+        });
 
         let mut proto_request = builder_client
             .build_messages_request(
@@ -102,8 +115,11 @@ impl PipelineStage for MessageRequestBuildingStage {
                 &messages_request,
                 processed_messages.text,
                 token_ids,
-                multimodal_data,
-                tool_constraints,
+                GenerateRequestBuildOptions {
+                    multimodal_inputs: multimodal_data,
+                    tool_constraints,
+                    require_reasoning,
+                },
             )
             .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to build generate request");

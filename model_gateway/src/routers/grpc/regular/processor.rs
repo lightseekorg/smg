@@ -291,7 +291,7 @@ impl ResponseProcessor {
             }
         }
 
-        // Build usage
+        // Build usage from gRPC response counters.
         let usage = response_formatting::build_usage(&all_responses);
 
         // Build final ChatCompletionResponse
@@ -457,6 +457,7 @@ impl ResponseProcessor {
                 output_token_logprobs,
                 completion_tokens: complete.completion_tokens(),
                 cached_tokens: complete.cached_tokens(),
+                reasoning_tokens: Some(complete.reasoning_tokens()),
                 e2e_latency: start_time.elapsed().as_secs_f64(),
                 matched_stop,
             };

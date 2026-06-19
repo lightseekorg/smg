@@ -8,10 +8,12 @@ use uuid::Uuid;
 use crate::routers::{
     error,
     grpc::{
+        client::GenerateRequestBuildOptions,
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext},
         multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
+        utils,
     },
 };
 
@@ -93,7 +95,17 @@ impl PipelineStage for ChatRequestBuildingStage {
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
                 error::bad_request("multimodal_not_supported", format!("{e}"))
-            })?;
+        })?;
+
+        let require_reasoning = ctx.tokenizer_arc().is_some_and(|tokenizer| {
+            utils::should_mark_reasoning_started(
+                utils::extract_thinking_from_kwargs(
+                    chat_request.chat_template_kwargs.as_ref(),
+                    tokenizer.as_ref(),
+                ),
+                tokenizer.as_ref(),
+            )
+        });
 
         let mut proto_request = builder_client
             .build_chat_request(
@@ -101,8 +113,11 @@ impl PipelineStage for ChatRequestBuildingStage {
                 &chat_request,
                 processed_messages.text,
                 token_ids,
-                multimodal_data,
-                tool_constraints,
+                GenerateRequestBuildOptions {
+                    multimodal_inputs: multimodal_data,
+                    tool_constraints,
+                    require_reasoning,
+                },
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");

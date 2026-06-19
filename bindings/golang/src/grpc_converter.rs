@@ -587,7 +587,8 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             // Always create usage, even if values are 0 (defensive)
             let usage = Some(
                 Usage::from_counts(prompt_tokens, completion_tokens)
-                    .with_cached_tokens(complete.cached_tokens),
+                    .with_cached_tokens(complete.cached_tokens)
+                    .with_reasoning_tokens(complete.reasoning_tokens),
             );
 
             let finish_response = ChatCompletionStreamResponse {

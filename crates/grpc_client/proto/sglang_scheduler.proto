@@ -146,6 +146,10 @@ message GenerateRequest {
 
   // Whether client wants streaming response
   bool stream = 17;
+
+  // Ask SGLang scheduler to count reasoning tokens.
+  // Keep false unless the request explicitly enables reasoning/thinking.
+  bool require_reasoning = 18;
 }
 
 message TokenizedInput {
@@ -216,6 +220,7 @@ message GenerateStreamChunk {
   uint32 prompt_tokens = 2;
   uint32 completion_tokens = 3;
   uint32 cached_tokens = 4;
+  uint32 reasoning_tokens = 9;
 
   // Output logprobs (if requested) - incremental for streaming
   OutputLogProbs output_logprobs = 5;
@@ -241,6 +246,7 @@ message GenerateComplete {
   uint32 prompt_tokens = 3;
   uint32 completion_tokens = 4;
   uint32 cached_tokens = 5;
+  uint32 reasoning_tokens = 12;
 
   // Output logprobs if requested (cumulative)
   OutputLogProbs output_logprobs = 6;

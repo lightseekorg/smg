@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use smg_grpc_client::SglangGenerateRequestOptions;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -108,8 +109,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 token_ids,
-                                None,
-                                tool_constraints,
+                                SglangGenerateRequestOptions {
+                                    multimodal_inputs: None,
+                                    tool_call_constraint: tool_constraints,
+                                    require_reasoning: false,
+                                },
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request");

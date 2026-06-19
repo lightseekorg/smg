@@ -384,6 +384,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 stream=False,
                 mm_inputs=None,
                 token_ids_logprob=None,
+                require_reasoning=False,
             )
             # Set disaggregation params if needed
             if self.server_args.disaggregation_mode != DisaggregationMode.NULL.value:
@@ -967,6 +968,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             mm_inputs = self._parse_mm_inputs(grpc_req.mm_inputs)
 
         # Create request
+        require_reasoning = bool(grpc_req.require_reasoning)
+
         return TokenizedGenerateReqInput(
             rid=grpc_req.request_id,
             input_text=input_text,
@@ -986,6 +989,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
+            require_reasoning=require_reasoning,
         )
 
     @staticmethod
@@ -1212,6 +1216,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 prompt_tokens=meta_info.get("prompt_tokens", 0),
                 completion_tokens=meta_info.get("completion_tokens", 0),
                 cached_tokens=meta_info.get("cached_tokens", 0),
+                reasoning_tokens=meta_info.get("reasoning_tokens", 0),
                 output_logprobs=output_logprobs_proto,
                 input_logprobs=input_logprobs_proto,
                 index=output.get("index", 0),
@@ -1268,6 +1273,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                     "completion_tokens", len(output.get("token_ids", []))
                 ),
                 cached_tokens=meta_info.get("cached_tokens", 0),
+                reasoning_tokens=meta_info.get("reasoning_tokens", 0),
                 output_logprobs=output_logprobs_proto,
                 input_logprobs=input_logprobs_proto,
                 index=output.get("index", 0),

@@ -19,13 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SglangScheduler_Generate_FullMethodName      = "/sglang.grpc.scheduler.SglangScheduler/Generate"
-	SglangScheduler_Embed_FullMethodName         = "/sglang.grpc.scheduler.SglangScheduler/Embed"
-	SglangScheduler_HealthCheck_FullMethodName   = "/sglang.grpc.scheduler.SglangScheduler/HealthCheck"
-	SglangScheduler_Abort_FullMethodName         = "/sglang.grpc.scheduler.SglangScheduler/Abort"
-	SglangScheduler_GetModelInfo_FullMethodName  = "/sglang.grpc.scheduler.SglangScheduler/GetModelInfo"
-	SglangScheduler_GetServerInfo_FullMethodName = "/sglang.grpc.scheduler.SglangScheduler/GetServerInfo"
-	SglangScheduler_GetLoads_FullMethodName      = "/sglang.grpc.scheduler.SglangScheduler/GetLoads"
+	SglangScheduler_Generate_FullMethodName          = "/sglang.grpc.scheduler.SglangScheduler/Generate"
+	SglangScheduler_Embed_FullMethodName             = "/sglang.grpc.scheduler.SglangScheduler/Embed"
+	SglangScheduler_HealthCheck_FullMethodName       = "/sglang.grpc.scheduler.SglangScheduler/HealthCheck"
+	SglangScheduler_Abort_FullMethodName             = "/sglang.grpc.scheduler.SglangScheduler/Abort"
+	SglangScheduler_GetModelInfo_FullMethodName      = "/sglang.grpc.scheduler.SglangScheduler/GetModelInfo"
+	SglangScheduler_GetServerInfo_FullMethodName     = "/sglang.grpc.scheduler.SglangScheduler/GetServerInfo"
+	SglangScheduler_GetLoads_FullMethodName          = "/sglang.grpc.scheduler.SglangScheduler/GetLoads"
+	SglangScheduler_FlushCache_FullMethodName        = "/sglang.grpc.scheduler.SglangScheduler/FlushCache"
+	SglangScheduler_StartProfile_FullMethodName      = "/sglang.grpc.scheduler.SglangScheduler/StartProfile"
+	SglangScheduler_StopProfile_FullMethodName       = "/sglang.grpc.scheduler.SglangScheduler/StopProfile"
+	SglangScheduler_GetTokenizer_FullMethodName      = "/sglang.grpc.scheduler.SglangScheduler/GetTokenizer"
+	SglangScheduler_SubscribeKvEvents_FullMethodName = "/sglang.grpc.scheduler.SglangScheduler/SubscribeKvEvents"
 )
 
 // SglangSchedulerClient is the client API for SglangScheduler service.
@@ -49,6 +54,16 @@ type SglangSchedulerClient interface {
 	GetServerInfo(ctx context.Context, in *GetServerInfoRequest, opts ...grpc.CallOption) (*GetServerInfoResponse, error)
 	// Get comprehensive load metrics
 	GetLoads(ctx context.Context, in *GetLoadsRequest, opts ...grpc.CallOption) (*GetLoadsResponse, error)
+	// Flush the KV cache on all scheduler processes
+	FlushCache(ctx context.Context, in *FlushCacheRequest, opts ...grpc.CallOption) (*FlushCacheResponse, error)
+	// Start the profiler on all scheduler processes
+	StartProfile(ctx context.Context, in *StartProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error)
+	// Stop the profiler and export traces
+	StopProfile(ctx context.Context, in *StopProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error)
+	// Get tokenizer artifacts for remote construction
+	GetTokenizer(ctx context.Context, in *GetTokenizerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetTokenizerChunk], error)
+	// Subscribe to KV cache events (server-streaming)
+	SubscribeKvEvents(ctx context.Context, in *SubscribeKvEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[KvEventBatch], error)
 }
 
 type sglangSchedulerClient struct {
@@ -138,6 +153,74 @@ func (c *sglangSchedulerClient) GetLoads(ctx context.Context, in *GetLoadsReques
 	return out, nil
 }
 
+func (c *sglangSchedulerClient) FlushCache(ctx context.Context, in *FlushCacheRequest, opts ...grpc.CallOption) (*FlushCacheResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FlushCacheResponse)
+	err := c.cc.Invoke(ctx, SglangScheduler_FlushCache_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangSchedulerClient) StartProfile(ctx context.Context, in *StartProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProfileResponse)
+	err := c.cc.Invoke(ctx, SglangScheduler_StartProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangSchedulerClient) StopProfile(ctx context.Context, in *StopProfileRequest, opts ...grpc.CallOption) (*ProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProfileResponse)
+	err := c.cc.Invoke(ctx, SglangScheduler_StopProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sglangSchedulerClient) GetTokenizer(ctx context.Context, in *GetTokenizerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetTokenizerChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangScheduler_ServiceDesc.Streams[1], SglangScheduler_GetTokenizer_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetTokenizerRequest, GetTokenizerChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangScheduler_GetTokenizerClient = grpc.ServerStreamingClient[GetTokenizerChunk]
+
+func (c *sglangSchedulerClient) SubscribeKvEvents(ctx context.Context, in *SubscribeKvEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[KvEventBatch], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SglangScheduler_ServiceDesc.Streams[2], SglangScheduler_SubscribeKvEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeKvEventsRequest, KvEventBatch]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangScheduler_SubscribeKvEventsClient = grpc.ServerStreamingClient[KvEventBatch]
+
 // SglangSchedulerServer is the server API for SglangScheduler service.
 // All implementations must embed UnimplementedSglangSchedulerServer
 // for forward compatibility.
@@ -159,6 +242,16 @@ type SglangSchedulerServer interface {
 	GetServerInfo(context.Context, *GetServerInfoRequest) (*GetServerInfoResponse, error)
 	// Get comprehensive load metrics
 	GetLoads(context.Context, *GetLoadsRequest) (*GetLoadsResponse, error)
+	// Flush the KV cache on all scheduler processes
+	FlushCache(context.Context, *FlushCacheRequest) (*FlushCacheResponse, error)
+	// Start the profiler on all scheduler processes
+	StartProfile(context.Context, *StartProfileRequest) (*ProfileResponse, error)
+	// Stop the profiler and export traces
+	StopProfile(context.Context, *StopProfileRequest) (*ProfileResponse, error)
+	// Get tokenizer artifacts for remote construction
+	GetTokenizer(*GetTokenizerRequest, grpc.ServerStreamingServer[GetTokenizerChunk]) error
+	// Subscribe to KV cache events (server-streaming)
+	SubscribeKvEvents(*SubscribeKvEventsRequest, grpc.ServerStreamingServer[KvEventBatch]) error
 	mustEmbedUnimplementedSglangSchedulerServer()
 }
 
@@ -189,6 +282,21 @@ func (UnimplementedSglangSchedulerServer) GetServerInfo(context.Context, *GetSer
 }
 func (UnimplementedSglangSchedulerServer) GetLoads(context.Context, *GetLoadsRequest) (*GetLoadsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetLoads not implemented")
+}
+func (UnimplementedSglangSchedulerServer) FlushCache(context.Context, *FlushCacheRequest) (*FlushCacheResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FlushCache not implemented")
+}
+func (UnimplementedSglangSchedulerServer) StartProfile(context.Context, *StartProfileRequest) (*ProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartProfile not implemented")
+}
+func (UnimplementedSglangSchedulerServer) StopProfile(context.Context, *StopProfileRequest) (*ProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopProfile not implemented")
+}
+func (UnimplementedSglangSchedulerServer) GetTokenizer(*GetTokenizerRequest, grpc.ServerStreamingServer[GetTokenizerChunk]) error {
+	return status.Errorf(codes.Unimplemented, "method GetTokenizer not implemented")
+}
+func (UnimplementedSglangSchedulerServer) SubscribeKvEvents(*SubscribeKvEventsRequest, grpc.ServerStreamingServer[KvEventBatch]) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeKvEvents not implemented")
 }
 func (UnimplementedSglangSchedulerServer) mustEmbedUnimplementedSglangSchedulerServer() {}
 func (UnimplementedSglangSchedulerServer) testEmbeddedByValue()                         {}
@@ -330,6 +438,82 @@ func _SglangScheduler_GetLoads_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SglangScheduler_FlushCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FlushCacheRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangSchedulerServer).FlushCache(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangScheduler_FlushCache_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangSchedulerServer).FlushCache(ctx, req.(*FlushCacheRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangScheduler_StartProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangSchedulerServer).StartProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangScheduler_StartProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangSchedulerServer).StartProfile(ctx, req.(*StartProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangScheduler_StopProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StopProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SglangSchedulerServer).StopProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SglangScheduler_StopProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SglangSchedulerServer).StopProfile(ctx, req.(*StopProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SglangScheduler_GetTokenizer_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetTokenizerRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangSchedulerServer).GetTokenizer(m, &grpc.GenericServerStream[GetTokenizerRequest, GetTokenizerChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangScheduler_GetTokenizerServer = grpc.ServerStreamingServer[GetTokenizerChunk]
+
+func _SglangScheduler_SubscribeKvEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeKvEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SglangSchedulerServer).SubscribeKvEvents(m, &grpc.GenericServerStream[SubscribeKvEventsRequest, KvEventBatch]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SglangScheduler_SubscribeKvEventsServer = grpc.ServerStreamingServer[KvEventBatch]
+
 // SglangScheduler_ServiceDesc is the grpc.ServiceDesc for SglangScheduler service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -361,11 +545,33 @@ var SglangScheduler_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetLoads",
 			Handler:    _SglangScheduler_GetLoads_Handler,
 		},
+		{
+			MethodName: "FlushCache",
+			Handler:    _SglangScheduler_FlushCache_Handler,
+		},
+		{
+			MethodName: "StartProfile",
+			Handler:    _SglangScheduler_StartProfile_Handler,
+		},
+		{
+			MethodName: "StopProfile",
+			Handler:    _SglangScheduler_StopProfile_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Generate",
 			Handler:       _SglangScheduler_Generate_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "GetTokenizer",
+			Handler:       _SglangScheduler_GetTokenizer_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SubscribeKvEvents",
+			Handler:       _SglangScheduler_SubscribeKvEvents_Handler,
 			ServerStreams: true,
 		},
 	},

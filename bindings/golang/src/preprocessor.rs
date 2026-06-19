@@ -21,6 +21,7 @@ use super::{
     error::{set_error_message, SglErrorCode},
     memory::{sgl_free_string, sgl_free_token_ids},
     tokenizer::TokenizerHandle,
+    utils::chat_requires_reasoning,
 };
 
 /// Result of preprocessing a chat request
@@ -350,4 +351,48 @@ pub unsafe extern "C" fn sgl_preprocessed_request_free(
     if !tool_constraints_json.is_null() {
         sgl_free_string(tool_constraints_json);
     }
+}
+
+/// Determine whether a chat request should ask SGLang to count reasoning tokens.
+///
+/// # Safety
+/// - `request_json` must be a valid null-terminated C string.
+/// - `tokenizer_handle` must be a valid pointer returned by `sgl_tokenizer_create`.
+/// - `require_reasoning_out` must point to writable memory.
+/// - `error_out` may be null; if non-null, must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn sgl_chat_requires_reasoning_with_tokenizer(
+    request_json: *const c_char,
+    tokenizer_handle: *mut TokenizerHandle,
+    require_reasoning_out: *mut c_int,
+    error_out: *mut *mut c_char,
+) -> SglErrorCode {
+    if request_json.is_null() || tokenizer_handle.is_null() || require_reasoning_out.is_null() {
+        set_error_message(error_out, "Invalid arguments: null pointer");
+        return SglErrorCode::InvalidArgument;
+    }
+
+    let request_str = match CStr::from_ptr(request_json).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid UTF-8 in request_json");
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+
+    let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
+        Ok(req) => req,
+        Err(e) => {
+            set_error_message(error_out, &format!("Failed to parse request JSON: {e}"));
+            return SglErrorCode::ParsingError;
+        }
+    };
+
+    let handle_ref = &*tokenizer_handle;
+    *require_reasoning_out = i32::from(chat_requires_reasoning(
+        &chat_request,
+        handle_ref.tokenizer.as_ref(),
+    ));
+
+    SglErrorCode::Success
 }

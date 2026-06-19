@@ -839,6 +839,14 @@ impl ProtoGenerateStreamChunk {
             Self::TokenSpeed(c) => c.cached_tokens,
         }
     }
+
+    /// Get reasoning tokens (cumulative).
+    pub fn reasoning_tokens(&self) -> u32 {
+        match self {
+            Self::Sglang(c) => c.reasoning_tokens,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => 0,
+        }
+    }
 }
 
 /// Unified GenerateComplete response
@@ -1042,6 +1050,14 @@ impl ProtoGenerateComplete {
             Self::Trtllm(c) => c.cached_tokens,
             Self::Mlx(c) => c.cached_tokens,
             Self::TokenSpeed(c) => c.cached_tokens,
+        }
+    }
+
+    /// Get reasoning tokens.
+    pub fn reasoning_tokens(&self) -> u32 {
+        match self {
+            Self::Sglang(c) => c.reasoning_tokens,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => 0,
         }
     }
 
