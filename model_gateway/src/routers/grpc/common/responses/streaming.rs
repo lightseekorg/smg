@@ -1133,11 +1133,19 @@ impl ResponseStreamEventEmitter {
                         }
 
                         if self.has_emitted_output_item_added {
-                            // Build complete message item for output_item.done
+                            // Build complete message item for output_item.done.
+                            // `status` is REQUIRED: ResponseOutputItem::Message has
+                            // `status: Option<String>` with no serde default, so a
+                            // message item without it fails to deserialize and is
+                            // silently dropped by `finalize_with_status` (the
+                            // typed materializer feeding the WS cache + store=true
+                            // persistence) — losing the model's final answer from
+                            // the persisted/cached response.
                             let item = json!({
                                 "id": item_id,
                                 "type": "message",
                                 "role": "assistant",
+                                "status": "completed",
                                 "content": [{
                                     "type": "output_text",
                                     "text": std::mem::take(&mut self.accumulated_text)
@@ -1347,5 +1355,69 @@ mod tests {
         // Draining the receiver frees capacity and sends resume.
         let _ = rx.recv().await.expect("buffered frame is receivable");
         assert!(sink.send_event(&event).is_ok());
+    }
+
+    /// Regression: a streamed text message must survive `finalize_with_status`
+    /// (the typed materializer feeding the WS connection cache and store=true
+    /// persistence). The emitter builds the message output item as raw JSON; if
+    /// it omits the required `status` field it fails to deserialize into
+    /// `ResponseOutputItem` and is silently dropped, so the persisted/cached
+    /// response loses the model's final answer. Caught only end-to-end (MCP
+    /// streaming GET returned the tool calls but not the message) before this.
+    #[test]
+    fn finalize_with_status_keeps_text_message_item() {
+        struct NullSink;
+        impl ResponseEventSink for NullSink {
+            fn send_event(&self, _event: &serde_json::Value) -> Result<(), String> {
+                Ok(())
+            }
+            fn send_raw_json(&self, _payload: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_x".to_string(), "test-model".to_string(), 0);
+        let sink = NullSink;
+
+        // A content delta, then a terminal chunk carrying finish_reason=stop, so
+        // the emitter builds + stores the message output item (output_item.done).
+        let content = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "the answer is 42")
+            .build();
+        emitter
+            .process_chunk(&content, &sink)
+            .expect("content chunk processes");
+
+        let mut finish = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model").build();
+        finish
+            .choices
+            .push(openai_protocol::chat::ChatStreamChoice {
+                index: 0,
+                delta: openai_protocol::chat::ChatMessageDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: None,
+                    reasoning_content: None,
+                },
+                logprobs: None,
+                finish_reason: Some("stop".to_string()),
+                matched_stop: None,
+            });
+        emitter
+            .process_chunk(&finish, &sink)
+            .expect("finish chunk processes");
+
+        let response = emitter.finalize_with_status(None, ResponseStatus::Completed);
+        let has_message = response
+            .output
+            .iter()
+            .any(|item| matches!(item, ResponseOutputItem::Message { .. }));
+        assert!(
+            has_message,
+            "finalize_with_status must keep the text message item (status field present so it \
+             round-trips through ResponseOutputItem); got {:?}",
+            response.output
+        );
     }
 }

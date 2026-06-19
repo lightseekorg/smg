@@ -1111,18 +1111,24 @@ async fn execute_tool_loop_streaming_internal(
     // clients see the turn is still pending rather than a hardcoded `completed`.
     // WS always emits with the explicit status (clone) so `finalize_with_status`
     // below still materializes the full output.
+    // Materialize the finalized response BEFORE the terminal emit. On the SSE
+    // `Completed` path `emit_completed` DRAINS emitter state via `take()`, while
+    // `finalize_with_status` reads non-destructively — so finalize MUST run first
+    // or the persisted response (SSE store=true) and the WS connection cache lose
+    // every output item (e.g. an MCP turn's mcp_list_tools / mcp_call / message).
+    // The terminal event is emitted afterwards and still drains for byte-identical
+    // SSE output. Both transports consume this value: the WS caller caches and
+    // persists it, the SSE caller persists it (store=true) in the spawned task.
+    let final_response = emitter.finalize_with_status(terminal_usage, terminal_status.clone());
+
     let event = if drain_completed && matches!(terminal_status, ResponseStatus::Completed) {
         emitter.emit_completed(terminal_usage_json.as_ref())
     } else {
-        emitter.emit_completed_with_status(terminal_status.clone(), terminal_usage_json.as_ref())
+        emitter.emit_completed_with_status(terminal_status, terminal_usage_json.as_ref())
     };
     emitter.send_event(&event, sink)?;
 
-    // Materialize the finalized response from the (non-drained) emitter state so
-    // the WS connection cache and persistence see the full output. Both
-    // transports consume this value: the WS caller caches and persists it, and
-    // the SSE caller persists it (store=true) in the spawned tool-loop task.
-    Ok(emitter.finalize_with_status(terminal_usage, terminal_status))
+    Ok(final_response)
 }
 
 /// Convert chat stream to Responses API events while accumulating for tool call detection
