@@ -541,18 +541,16 @@ async fn handle_text_event(
                             .then_some(cached_response);
                     }
                     Err(err) => {
-                        let should_evict_cached_response = referenced_previous_response_id
-                            .as_deref()
-                            .is_some_and(|previous_id| {
-                                session_guard
-                                    .cached_response
-                                    .as_ref()
-                                    .map(|cached| cached.response.id == previous_id)
-                                    .unwrap_or(false)
-                            });
-                        if should_evict_cached_response {
-                            session_guard.cached_response = None;
-                        }
+                        // A failed continuation must NOT evict the cached parent.
+                        // The child failed for its own reason (unsupported
+                        // parameter, transient worker/MCP error, or a caught
+                        // panic); the still-valid parent response is unchanged.
+                        // Evicting it would make a `store:false` parent — which is
+                        // chainable only through this connection cache —
+                        // unretryable, so a retry of the same
+                        // `previous_response_id` would spuriously return
+                        // `previous_response_not_found`.
+                        //
                         // Release lock before sending error to avoid holding it
                         // while the bounded channel potentially blocks. Notify is
                         // signalled AFTER the lock is dropped.

@@ -1446,8 +1446,13 @@ async fn test_v1_responses_ws_accepts_generate_false_warmup() {
     );
 }
 
+/// A continuation that fails for its OWN reason (here an unsupported
+/// `conversation` parameter) must NOT evict the still-valid cached parent: a
+/// `store: false` parent is chainable only through the connection cache, so a
+/// subsequent retry of the same `previous_response_id` must still resolve.
+/// Regression for the cached-parent-eviction review (ws_responses.rs).
 #[tokio::test]
-async fn test_v1_responses_ws_evicts_cached_response_after_failed_continuation() {
+async fn test_v1_responses_ws_keeps_cached_response_after_failed_continuation() {
     let url = serve_app(build_stub_app(Arc::new(SemanticWsExecutor::new())).await).await;
     let (mut socket, _) = connect_async(ws_endpoint(&url)).await.unwrap();
 
@@ -1466,6 +1471,7 @@ async fn test_v1_responses_ws_evicts_cached_response_after_failed_continuation()
         .expect("completed response should include id")
         .to_string();
 
+    // A continuation that fails for its own reason (unsupported parameter).
     let failed_events = send_ws_request_and_collect(
         &mut socket,
         ws_create_request(serde_json::json!({
@@ -1481,6 +1487,8 @@ async fn test_v1_responses_ws_evicts_cached_response_after_failed_continuation()
     assert_eq!(failed_error["type"], "error");
     assert_eq!(ws_error_code(failed_error), "unsupported_parameter");
 
+    // Retrying the same previous_response_id must still resolve — the failed
+    // child did not invalidate the cached parent.
     let retry_events = send_ws_request_and_collect(
         &mut socket,
         ws_create_request(serde_json::json!({
@@ -1491,9 +1499,8 @@ async fn test_v1_responses_ws_evicts_cached_response_after_failed_continuation()
         })),
     )
     .await;
-    let retry_error = retry_events.last().unwrap();
-    assert_eq!(retry_error["type"], "error");
-    assert_eq!(ws_error_code(retry_error), "previous_response_not_found");
+    let retry_completed = retry_events.last().unwrap();
+    assert_eq!(retry_completed["type"], "response.completed");
 }
 
 #[tokio::test]
