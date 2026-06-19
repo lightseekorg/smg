@@ -58,19 +58,47 @@ Key env knobs for `launch_arm.sh`: `BFCL_GPU` (CUDA_VISIBLE_DEVICES, e.g. `0,1`)
 
 `run_ab.py` exits non-zero if the candidate's overall accuracy drops more than `--tolerance` (default 2pp) below the baseline.
 
-## Per-model parser flags (vLLM ~0.22.x)
+## Per-model parser flags (the nightly matrix)
 
-| model family | pure-vLLM `--tool-call-parser` / `--reasoning-parser` | SMG `--tool-call-parser` / `--reasoning-parser` |
-|---|---|---|
-| Qwen3 dense Instruct (e.g. Qwen3-4B-Instruct-2507) | `hermes` / — | `qwen` / — |
-| Qwen3 thinking | `hermes` / `qwen3` | `qwen` / `qwen3` |
-| Qwen3-Coder / 3.5 / 3.6 | `qwen3_coder` / `qwen3` | `qwen_xml` / `qwen3` |
-| DeepSeek V3/R1 | `deepseek_v3` / `deepseek_r1` | `deepseek` / `deepseek_r1` |
-| DeepSeek V3.1/V3.2/V4 | `deepseek_v31` / `deepseek_v3` | `deepseek31` / `deepseek_v4` (DSML) / … |
-| Kimi K2 | `kimi_k2` / — | `kimik2` / `kimi` |
-| MiniMax M2 | `minimax_m2` / `minimax_m2` | `minimax_m2` / `minimax` |
+| model (matrix leg) | runner | TP/arm | pure-vLLM `--tool-call-parser` / `--reasoning-parser` | SMG `--tool-call-parser` / `--reasoning-parser` |
+|---|---|---|---|---|
+| Qwen3.6-27B (`qwen3.6`) | `4-gpu-h100` | 2 | `qwen3_xml` / `qwen3` | `qwen_xml` / `qwen3` |
+| gpt-oss-120b (`gpt-oss`) | `4-gpu-h100` | 2 | `openai` / — | _(none — SMG auto-routes harmony)_ / — |
+| DeepSeek-V4-Flash (`deepseek-v4`) | `blackwell` | 4 | `deepseek_v4` / `deepseek_v4` (+`--tokenizer-mode deepseek_v4 --trust-remote-code`) | `deepseek_v4` / `deepseek_v31`† |
+| MiniMax-M2.7 (`minimax-m2.7`) | `blackwell` | 4 | `minimax_m2` / `minimax_m2` (+`--trust-remote-code`) | `minimax_m2` / `minimax` |
+| Kimi-K2.6 int4 (`kimi-k2.6`) | `blackwell` | 4 | `kimi_k2` / `kimi_k2` (+`--trust-remote-code`) | `kimik2` / `kimi_k25`† |
 
-> The mid-2026 SKUs (DeepSeek V4, Kimi K2.6, Qwen3.6, MiniMax M2.7) may use newer parser names; confirm against the installed vLLM build: `vllm serve --help | grep -A40 tool-call-parser`.
+> **gpt-oss has no SMG tool-call-parser.** SMG handles gpt-oss through its harmony
+> pipeline (`model_gateway/src/routers/grpc/harmony/`), auto-activated by
+> `HarmonyDetector` on a `gpt-oss` model id / `GptOssForCausalLM` architecture. So
+> the SMG arm passes **no** `--tool-call-parser` (`BFCL_SMG_TOOL_PARSER=""`).
+>
+> **† Reasoning-parser fallbacks.** SMG's reasoning registry has no `deepseek_v4` or
+> `kimi_k2` entry yet; the closest existing parsers (`deepseek_v31`, `kimi_k25`) are
+> used. Confirm on the first nightly; adding exact parsers to `crates/reasoning_parser`
+> is a follow-up if outputs diverge.
+>
+> The mid-2026 SKU ids and a couple of vLLM parser names may shift; confirm against
+> the installed vLLM build: `vllm serve --help | grep -A40 tool-call-parser`.
+
+## Matrix & runners
+
+The nightly (`.github/workflows/nightly-bfcl.yml`) runs the A/B as a GitHub Actions
+matrix — one leg per model, `fail-fast: false`, each on its own runner:
+
+- `4-gpu-h100` — Qwen3.6-27B and gpt-oss-120b, TP=2 per arm (GPUs 0,1 + 2,3).
+- `blackwell` (8×B300) — DeepSeek-V4-Flash, MiniMax-M2.7, Kimi-K2.6, TP=4 per arm
+  (GPUs 0-3 + 4-7).
+
+All legs run **both arms concurrently**; no sequential path is needed because the
+"flash"/int4 checkpoints fit half a node. Per the A/B's premise, model size is
+irrelevant — a smaller same-family checkpoint exercises the identical parser, so the
+matrix uses DeepSeek-V4-Flash and int4 Kimi-K2.6 to validate the `deepseek_v4` /
+`kimi_k2` parsers without paying for the full production weights.
+
+`workflow_dispatch` can target one leg via the `only` input and override
+`model`/`bfcl_model`/parsers per run. PRs touching this pipeline run only the cheap
+`4-gpu-h100` legs as an end-to-end sanity check.
 
 ## Gotchas discovered while bringing this up (read before debugging)
 
