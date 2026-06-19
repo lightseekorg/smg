@@ -263,3 +263,12 @@ jobs:
       - name: Teardown arms
         if: always()
         run: bash scripts/bfcl/launch_arm.sh stop || true
+      - name: Release GPUs (nuke + verify, same util as nightly-benchmark)
+        if: always()
+        # Backstop the pidfile teardown above: kill ANY process still holding the
+        # GPUs (by occupancy, not name) and assert the node is actually free. This
+        # catches root-owned, setsid-detached vLLM workers that survive a
+        # hard-killed launch step — exactly the leak that pinned ~250 GiB/GPU
+        # across jobs. Each bfcl leg uses the whole node (TP fills it), so no
+        # co-tenant job shares these GPUs.
+        run: bash scripts/ci_killall_sglang.sh nuke_gpus || true

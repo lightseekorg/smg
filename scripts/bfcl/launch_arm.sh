@@ -148,11 +148,25 @@ case "$ARM" in
     ;;
 
   stop)
+    # Collect recorded pids first, then kill the whole PROCESS GROUP of each.
+    # start() uses setsid, so the recorded pid is the session/group leader and
+    # vLLM's worker/engine children share its pgid. Killing only the leader (the
+    # old behavior) orphaned those children — they kept ~250 GiB pinned per GPU
+    # across jobs. Negative pid = "signal the process group".
+    declare -a pids=()
     for pf in "$RUN_DIR"/*.pid; do
       [ -e "$pf" ] || continue
-      pid="$(cat "$pf")"
-      kill "$pid" 2>/dev/null && echo "[launch_arm] killed $(basename "$pf" .pid) (pid $pid)" >&2 || true
+      pids+=("$(cat "$pf")")
       rm -f "$pf"
+    done
+    [ "${#pids[@]}" -eq 0 ] && exit 0
+    for pid in "${pids[@]}"; do
+      kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 5  # let them drain on SIGTERM before the hard kill
+    for pid in "${pids[@]}"; do
+      kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      echo "[launch_arm] stopped process group $pid" >&2
     done
     ;;
 
