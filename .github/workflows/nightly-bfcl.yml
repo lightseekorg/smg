@@ -27,11 +27,11 @@ on:
         required: false
         default: ""
       model:
-        description: "Override HF model id (weights) for the selected leg; empty = matrix default"
+        description: "Override HF model id (weights) for the selected leg; empty = matrix default. Override model and bfcl_model together — mismatched weights/handler pair if only one is overridden."
         required: false
         default: ""
       bfcl_model:
-        description: "Override BFCL FC handler name (must end in -FC); empty = matrix default"
+        description: "Override BFCL FC handler name (must end in -FC); empty = matrix default. Override model and bfcl_model together — mismatched weights/handler pair if only one is overridden."
         required: false
         default: ""
       categories:
@@ -99,6 +99,8 @@ jobs:
   # excluding the scarce Blackwell legs on PRs) can depend on event/inputs —
   # the `matrix` context is not available in a job-level `if`.
   setup:
+    # No needs: build-wheel — this job is pure CPU JSON generation with no wheel
+    # dependency. bfcl-ab still gates on build-wheel.result == 'success'.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -152,11 +154,16 @@ jobs:
           ]
           only = os.environ.get("ONLY", "")
           event = os.environ.get("EVENT", "")
+          valid_names = [l["name"] for l in legs]
           if only:
               legs = [l for l in legs if l["name"] == only]
+          # `only` and `pull_request` can't co-occur: PRs carry no workflow_dispatch
+          # inputs, so the two filters never conflict.
           if event == "pull_request":
               # PR sanity = cheap H100 legs only; don't queue scarce Blackwell capacity.
               legs = [l for l in legs if l["runner"] == "4-gpu-h100"]
+          if only and not legs:
+              raise SystemExit(f"unknown leg {only!r}; valid: {valid_names}")
           print("matrix=" + json.dumps({"include": legs}))
           PY
 
