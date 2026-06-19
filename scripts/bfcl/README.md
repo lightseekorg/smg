@@ -97,8 +97,9 @@ matrix uses DeepSeek-V4-Flash and int4 Kimi-K2.6 to validate the `deepseek_v4` /
 `kimi_k2` parsers without paying for the full production weights.
 
 `workflow_dispatch` can target one leg via the `only` input and override
-`model`/`bfcl_model`/parsers per run. PRs touching this pipeline run only the cheap
-`4-gpu-h100` legs as an end-to-end sanity check.
+`model`/`bfcl_model`/parsers per run. PRs touching this pipeline run **all** legs
+(H100 + Blackwell) as an end-to-end sanity check, but cheaply — the PR category set
+is a tiny non-live subset (`simple_python,irrelevance`) for every leg.
 
 ## Gotchas discovered while bringing this up (read before debugging)
 

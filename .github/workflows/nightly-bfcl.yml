@@ -95,9 +95,8 @@ jobs:
           path: bindings/python/dist/*.whl
           retention-days: 7
 
-  # Compute the model matrix as JSON so leg-filtering (dispatch `only`, and
-  # excluding the scarce Blackwell legs on PRs) can depend on event/inputs —
-  # the `matrix` context is not available in a job-level `if`.
+  # Compute the model matrix as JSON so the dispatch `only` leg-filter can depend
+  # on inputs — the `matrix` context is not available in a job-level `if`.
   setup:
     # No needs: build-wheel — this job is pure CPU JSON generation with no wheel
     # dependency. bfcl-ab still gates on build-wheel.result == 'success'.
@@ -110,7 +109,6 @@ jobs:
       - id: build
         env:
           ONLY: ${{ github.event.inputs.only }}
-          EVENT: ${{ github.event_name }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -153,21 +151,20 @@ jobs:
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90"},
           ]
           only = os.environ.get("ONLY", "")
-          event = os.environ.get("EVENT", "")
           valid_names = [l["name"] for l in legs]
           if only:
               legs = [l for l in legs if l["name"] == only]
-          # `only` and `pull_request` can't co-occur: PRs carry no workflow_dispatch
-          # inputs, so the two filters never conflict.
-          if event == "pull_request":
-              # PR sanity = cheap H100 legs only; don't queue scarce Blackwell capacity.
-              legs = [l for l in legs if l["runner"] == "4-gpu-h100"]
+          # All legs (H100 + Blackwell) run on PRs as a sanity check; the run stays
+          # cheap because the PR CATEGORIES below are a tiny non-live subset
+          # (simple_python,irrelevance) for every leg regardless of runner.
           if only and not legs:
               raise SystemExit(f"unknown leg {only!r}; valid: {valid_names}")
           print("matrix=" + json.dumps({"include": legs}))
           PY
 
   bfcl-ab:
+    # Concise leg label (default would list every matrix field): model + runner + TP.
+    name: bfcl-ab ${{ matrix.model }} (${{ matrix.runner }} TP${{ matrix.tp }})
     needs: [build-wheel, setup]
     if: ${{ !cancelled() && needs.build-wheel.result == 'success' && needs.setup.result == 'success' }}
     strategy:

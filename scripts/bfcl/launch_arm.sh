@@ -64,6 +64,12 @@ start() {
   echo "[launch_arm] started $name (pid $(cat "$RUN_DIR/$name.pid")) -> $log" >&2
 }
 
+# Tail a logfile to stderr for real-time startup visibility in CI. Stdout is
+# reserved for the base_url (captured by the caller's $(...)), so logs must go to
+# stderr — which still streams live to the CI console. Prints the tail pid so the
+# caller can stop it once the server is healthy.
+stream_log() { tail -n +1 -F "$1" >&2 & echo $!; }
+
 wait_http() {  # wait_http <url> <timeout_s>
   local url="$1" timeout="${2:-300}" waited=0
   until curl -sf -m 3 "$url" >/dev/null 2>&1; do
@@ -100,7 +106,9 @@ case "$ARM" in
     # shellcheck disable=SC2206  # intentional word-split of optional extra flags
     [ -n "$VLLM_EXTRA" ] && cmd+=($VLLM_EXTRA)
     start arm_a "$RUN_DIR/arm_a_vllm.log" "${cmd[@]}"
+    log_tail=$(stream_log "$RUN_DIR/arm_a_vllm.log")
     wait_http "http://127.0.0.1:$ARM_A_PORT/health" "${BFCL_STARTUP_TIMEOUT:-420}"
+    kill "$log_tail" 2>/dev/null || true
     echo "http://127.0.0.1:$ARM_A_PORT"
     ;;
 
@@ -117,7 +125,9 @@ case "$ARM" in
     # shellcheck disable=SC2206  # intentional word-split of optional extra flags
     [ -n "$VLLM_EXTRA" ] && wcmd+=($VLLM_EXTRA)
     start arm_b_worker "$RUN_DIR/arm_b_worker.log" "${wcmd[@]}"
+    log_tail=$(stream_log "$RUN_DIR/arm_b_worker.log")
     wait_grpc "$ARM_B_GRPC_PORT" "${BFCL_STARTUP_TIMEOUT:-420}"
+    kill "$log_tail" 2>/dev/null || true
     # 2) SMG gateway in front, exposing the OpenAI API.
     # shellcheck disable=SC2206  # intentional word-split of SMG_LAUNCH
     declare -a smg_cmd=(
@@ -131,7 +141,9 @@ case "$ARM" in
     [ -n "$SMG_TOOL_PARSER" ] && smg_cmd+=(--tool-call-parser "$SMG_TOOL_PARSER")
     [ -n "$SMG_REASONING_PARSER" ] && smg_cmd+=(--reasoning-parser "$SMG_REASONING_PARSER")
     start arm_b_gateway "$RUN_DIR/arm_b_gateway.log" "${smg_cmd[@]}"
+    log_tail=$(stream_log "$RUN_DIR/arm_b_gateway.log")
     wait_http "http://127.0.0.1:$ARM_B_GW_PORT/health" "${BFCL_STARTUP_TIMEOUT:-420}"
+    kill "$log_tail" 2>/dev/null || true
     echo "http://127.0.0.1:$ARM_B_GW_PORT"
     ;;
 
