@@ -28,7 +28,15 @@
     clippy::allow_attributes
 )]
 
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -410,6 +418,72 @@ impl WsResponsesExecutor for FailedResponseWsExecutor {
                 "object": "response",
                 "status": "in_progress",
                 "model": response_model,
+                "output": []
+            }
+        });
+        let _ = outbound_tx.try_send(Message::Text(created.to_string().into()));
+
+        let completed = serde_json::json!({
+            "type": "response.completed",
+            "response": response.clone(),
+        });
+        let _ = outbound_tx.try_send(Message::Text(completed.to_string().into()));
+
+        Ok(CachedWsResponse {
+            response,
+            input_items: vec![],
+        })
+    }
+}
+
+/// Panics on the FIRST `response.create`, then succeeds on every later call.
+/// Used to prove a panicking handler releases the in-flight slot: the catch in
+/// the session loop routes the panic through the error path instead of wedging
+/// the connection so all future turns reject with `concurrent_response_create`.
+#[derive(Clone, Default)]
+struct PanicOnceWsExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl WsResponsesExecutor for PanicOnceWsExecutor {
+    async fn execute_response_create(
+        &self,
+        _headers: HeaderMap,
+        request: ResponsesRequest,
+        _options: WsResponseCreateOptions,
+        _cached_response: Option<CachedWsResponse>,
+        outbound_tx: mpsc::Sender<Message>,
+    ) -> Result<CachedWsResponse, WsClientError> {
+        // Panic on the first call (returns 0); succeed on every later call.
+        assert!(
+            self.calls.fetch_add(1, Ordering::SeqCst) != 0,
+            "simulated response.create handler panic"
+        );
+
+        let response = ResponsesResponse::builder("resp_ws_recovered", request.model.clone())
+            .copy_from_request(&request)
+            .status(ResponseStatus::Completed)
+            .output(vec![ResponseOutputItem::Message {
+                id: "msg_ws_recovered".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ResponseContentPart::OutputText {
+                    text: "recovered websocket output".to_string(),
+                    annotations: vec![],
+                    logprobs: None,
+                }],
+                status: "completed".to_string(),
+                phase: None,
+            }])
+            .build();
+
+        let created = serde_json::json!({
+            "type": "response.created",
+            "response": {
+                "id": response.id,
+                "object": "response",
+                "status": "in_progress",
+                "model": request.model,
                 "output": []
             }
         });
@@ -1476,4 +1550,48 @@ async fn test_v1_responses_ws_errors_echo_event_id() {
     assert_eq!(ws_error_code(error), "unsupported_parameter");
     assert_eq!(error["event_id"], "evt_ws_123");
     assert!(!ws_error_message(error).is_empty());
+}
+
+#[tokio::test]
+async fn test_v1_responses_ws_releases_slot_after_handler_panic() {
+    let url = serve_app(build_stub_app(Arc::new(PanicOnceWsExecutor::default())).await).await;
+    let (mut socket, _) = connect_async(ws_endpoint(&url)).await.unwrap();
+
+    // First turn: the handler panics. The session must catch it, surface an
+    // `error` event (NOT hang), and release the in-flight slot.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            ws_create_request(serde_json::json!({
+                "model": "mock-model",
+                "input": "trigger panic",
+                "store": false
+            }))
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let first = recv_json(&mut socket).await;
+    assert_eq!(first["type"], "error");
+    assert_eq!(ws_error_code(&first), "internal_error");
+
+    // Second turn on the SAME connection must be accepted and complete —
+    // proving the panic did not wedge the slot (no `concurrent_response_create`)
+    // and the connection survived.
+    let second_events = send_ws_request_and_collect(
+        &mut socket,
+        ws_create_request(serde_json::json!({
+            "model": "mock-model",
+            "input": "after panic",
+            "store": false
+        })),
+    )
+    .await;
+    let completed = second_events.last().unwrap();
+    assert_eq!(completed["type"], "response.completed");
+    assert_eq!(
+        completed["response"]["output"][0]["content"][0]["text"],
+        "recovered websocket output"
+    );
 }

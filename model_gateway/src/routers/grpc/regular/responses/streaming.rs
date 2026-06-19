@@ -558,11 +558,29 @@ pub(super) fn execute_tool_loop_streaming(
         )
         .await;
 
-        // The SSE path discards the materialized response (persistence happens
-        // inside the tool loop / accumulator); only surface errors.
-        if let Err(e) = result {
-            warn!("Streaming tool loop error: {}", e);
-            utils::send_error_sse(&tx, &e, "tool_loop_error");
+        match result {
+            // Persist (when store=true) the finalized tool-using response so
+            // GET /v1/responses/{id} retrieval and durable previous_response_id
+            // resolution work on the SSE MCP path too — mirroring the non-MCP
+            // SSE path (`process_and_transform_sse_stream`) and the WS executor
+            // (`websocket.rs`). The sink-generic refactor previously dropped this,
+            // silently breaking store=true durability for streaming tool-call
+            // responses (default store=true → GET 404 + broken chaining).
+            Ok(final_response) => {
+                persist_response_if_needed(
+                    ctx_clone.conversation_storage.clone(),
+                    ctx_clone.conversation_item_storage.clone(),
+                    ctx_clone.response_storage.clone(),
+                    &final_response,
+                    &original_request_clone,
+                    ctx_clone.request_context.clone(),
+                )
+                .await;
+            }
+            Err(e) => {
+                warn!("Streaming tool loop error: {}", e);
+                utils::send_error_sse(&tx, &e, "tool_loop_error");
+            }
         }
 
         // Send [DONE]
@@ -1101,8 +1119,9 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, sink)?;
 
     // Materialize the finalized response from the (non-drained) emitter state so
-    // the WS connection cache and any persistence see the full output. On the SSE
-    // path the caller discards this value.
+    // the WS connection cache and persistence see the full output. Both
+    // transports consume this value: the WS caller caches and persists it, and
+    // the SSE caller persists it (store=true) in the spawned tool-loop task.
     Ok(emitter.finalize_with_status(terminal_usage, terminal_status))
 }
 
@@ -1128,12 +1147,37 @@ async fn convert_and_accumulate_stream(
 
         if let Some(json_str) = event.strip_prefix("data: ") {
             let json_str = json_str.trim();
-            if let Ok(chat_chunk) = serde_json::from_str::<ChatCompletionStreamResponse>(json_str) {
-                // Convert chat chunk to Responses API events and emit
-                emitter.process_chunk(&chat_chunk, sink)?;
+            match serde_json::from_str::<ChatCompletionStreamResponse>(json_str) {
+                Ok(chat_chunk) => {
+                    // Convert chat chunk to Responses API events and emit
+                    emitter.process_chunk(&chat_chunk, sink)?;
 
-                // Accumulate for tool call detection
-                accumulator.process_chunk(&chat_chunk);
+                    // Accumulate for tool call detection
+                    accumulator.process_chunk(&chat_chunk);
+                }
+                Err(_) => {
+                    // A frame that isn't a chat-completion delta but carries an
+                    // `error` object is a mid-stream worker error. The MCP tool
+                    // loop must surface it rather than silently drop the frame and
+                    // finalize a bogus `response.completed` (the non-MCP path
+                    // forwards such frames to the client; here we fail the turn so
+                    // the caller emits `response.failed` / an error event). Other
+                    // unrecognized informational frames stay lenient (ignored).
+                    if let Some(message) = serde_json::from_str::<Value>(json_str)
+                        .ok()
+                        .as_ref()
+                        .and_then(|value| value.get("error"))
+                        .map(|error| {
+                            error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("upstream worker stream error")
+                                .to_string()
+                        })
+                    {
+                        return Err(message);
+                    }
+                }
             }
         }
     }
@@ -1461,5 +1505,76 @@ mod tests {
             "forwarded payload must not retain the SSE `data: ` prefix (would double-frame), got {:?}",
             raw[0]
         );
+    }
+
+    /// Frame chat chunks + extra raw `data:` lines into a multi-frame SSE body
+    /// (each `Bytes` is one SSE event), so a non-chat frame can be interleaved.
+    fn sse_body_from_lines(lines: &[String]) -> Body {
+        let frames: Vec<Result<Bytes, std::io::Error>> = lines
+            .iter()
+            .map(|line| Ok(Bytes::from(format!("data: {line}\n\n"))))
+            .chain(std::iter::once(Ok(Bytes::from("data: [DONE]\n\n"))))
+            .collect();
+        Body::from_stream(futures_util::stream::iter(frames))
+    }
+
+    /// Regression: on the MCP tool-loop path a mid-stream worker error frame
+    /// (`data: {"error":…}`) must FAIL the turn rather than be silently dropped
+    /// and finalized as a bogus successful response. The non-MCP path forwards
+    /// such frames to the client; the MCP accumulator (which feeds tool-call
+    /// detection) had no `else` branch, so the error chunk failed
+    /// `ChatCompletionStreamResponse` parsing and was ignored, and the loop
+    /// returned `Ok(empty completed)` — the caller then emitted a spurious
+    /// `response.completed`. The error must now surface as `Err` so the caller
+    /// emits `response.failed` / an error event.
+    #[tokio::test]
+    async fn convert_and_accumulate_stream_surfaces_worker_error_frame() {
+        let valid = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "partial")
+            .build();
+        let error_json = r#"{"error":{"message":"worker exploded","type":"server_error","code":"internal_error"}}"#;
+        let body = sse_body_from_lines(&[
+            serde_json::to_string(&valid).expect("chunk serializes"),
+            error_json.to_string(),
+        ]);
+
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 0);
+        let sink = CollectingSink::default();
+
+        let err = convert_and_accumulate_stream(body, &mut emitter, &sink)
+            .await
+            .expect_err("a mid-stream worker error frame must fail the turn");
+        assert!(
+            err.contains("worker exploded"),
+            "surfaced error must carry the upstream worker message, got {err:?}"
+        );
+        assert!(
+            sink.streamed_completed_id().is_none(),
+            "no terminal response.completed may be emitted for a failed turn"
+        );
+    }
+
+    /// Companion to the worker-error test: a non-chat frame WITHOUT an `error`
+    /// object (e.g. an unrecognized informational/keepalive event) must stay
+    /// lenient — ignored, not turned into a turn failure — so the fix does not
+    /// regress benign streams.
+    #[tokio::test]
+    async fn convert_and_accumulate_stream_ignores_benign_unknown_frame() {
+        let valid = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "hello")
+            .build();
+        let body = sse_body_from_lines(&[
+            serde_json::to_string(&valid).expect("chunk serializes"),
+            r#"{"note":"keepalive","seq":7}"#.to_string(),
+        ]);
+
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 0);
+        let sink = CollectingSink::default();
+
+        convert_and_accumulate_stream(body, &mut emitter, &sink)
+            .await
+            .expect("a benign non-error frame must not fail the turn");
     }
 }

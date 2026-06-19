@@ -18,7 +18,7 @@ use axum::{
     extract::ws::{close_code, CloseFrame, Message, WebSocket},
     http::HeaderMap,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::FutureExt as _, SinkExt, StreamExt};
 use openai_protocol::responses::{
     ResponseInputOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse,
 };
@@ -270,6 +270,10 @@ pub async fn serve_responses_ws_with_config(
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(OUTBOUND_CHANNEL_CAPACITY);
     let session = Arc::new(Mutex::new(WsSessionState::default()));
     let closing = Arc::new(AtomicBool::new(false));
+    // Signalled by the lifetime-cap timeout so the reader loop can stop parking
+    // on `stream.next()` (which only wakes on client traffic) and tear the
+    // connection down even when an idle/uncooperative client never echoes Close.
+    let shutdown = Arc::new(Notify::new());
 
     #[expect(
         clippy::disallowed_methods,
@@ -285,6 +289,11 @@ pub async fn serve_responses_ws_with_config(
                 Message::Ping(payload) | Message::Pong(payload) => payload.len(),
                 Message::Close(_) => 0,
             };
+            // RFC 6455: the Close frame is the final frame on the connection; no
+            // data frames may follow it. Stop the writer once Close is flushed so
+            // a late-queued event (e.g. an in-flight stream racing the
+            // lifetime-cap Close) is not written after the close handshake.
+            let is_close = matches!(message, Message::Close(_));
 
             if sink.send(message).await.is_err() {
                 break;
@@ -299,12 +308,17 @@ pub async fn serve_responses_ws_with_config(
                     "responses websocket writer flushed frame"
                 );
             }
+
+            if is_close {
+                break;
+            }
         }
     });
 
     let session_timeout = {
         let outbound_tx = outbound_tx.clone();
         let closing = closing.clone();
+        let shutdown = shutdown.clone();
         let max_session_lifetime = runtime_config.max_session_lifetime;
         #[expect(
             clippy::disallowed_methods,
@@ -331,13 +345,36 @@ pub async fn serve_responses_ws_with_config(
                     reason: message.into(),
                 })))
                 .await;
+            // Wake the reader loop so it tears down even if the client never
+            // sends another frame (the lifetime cap is otherwise unenforced for
+            // an idle connection parked on `stream.next()`).
+            shutdown.notify_waiters();
         })
     };
 
     // Track the current executor task so we can abort it on disconnect.
     let mut executor_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-    while let Some(message_result) = stream.next().await {
+    // Arm the shutdown waiter before the loop so a lifetime-cap signal that fires
+    // between iterations cannot be missed (same `Notified::enable()` idiom as
+    // `acquire_request_slot`).
+    let shutdown_signal = shutdown.notified();
+    tokio::pin!(shutdown_signal);
+    shutdown_signal.as_mut().enable();
+
+    loop {
+        let message_result = tokio::select! {
+            biased;
+            () = shutdown_signal.as_mut() => {
+                debug!("responses websocket reader stopping: session lifetime reached");
+                break;
+            }
+            message_result = stream.next() => message_result,
+        };
+
+        let Some(message_result) = message_result else {
+            break;
+        };
         let message = match message_result {
             Ok(message) => message,
             Err(err) => {
@@ -460,15 +497,32 @@ async fn handle_text_event(
                 reason = "handle is tracked by the caller and aborted on client disconnect"
             )]
             let handle = tokio::spawn(async move {
-                let result = executor
-                    .execute_response_create(
-                        headers,
-                        request,
-                        options,
-                        cached_response,
-                        outbound_clone.clone(),
+                // Catch a panic in the executor so it routes through the error
+                // path below: a panicking turn must release the in-flight slot
+                // (and evict a referenced cache entry) instead of wedging the
+                // connection so every future `response.create` rejects with
+                // `concurrent_response_create`.
+                let result = std::panic::AssertUnwindSafe(executor.execute_response_create(
+                    headers,
+                    request,
+                    options,
+                    cached_response,
+                    outbound_clone.clone(),
+                ))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_panic| {
+                    warn!(
+                        event_id = event_id.as_deref().unwrap_or(""),
+                        "websocket response.create handler panicked; releasing slot and surfacing error"
+                    );
+                    Err(WsClientError::new(
+                        "internal_error",
+                        "Internal error while processing response.create.",
                     )
-                    .await;
+                    .with_status(500)
+                    .with_type("server_error"))
+                });
 
                 let mut session_guard = session_clone.lock().await;
                 // Update cache *before* clearing active_request to prevent a
