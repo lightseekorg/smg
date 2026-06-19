@@ -22,30 +22,34 @@ on:
       - ".github/workflows/nightly-bfcl.yml"
   workflow_dispatch:
     inputs:
+      only:
+        description: "Run only this matrix leg (qwen3.6|gpt-oss|deepseek-v4|minimax-m2.7|kimi-k2.6); empty = all"
+        required: false
+        default: ""
       model:
-        description: "HF model id (weights) served on both arms"
+        description: "Override HF model id (weights) for the selected leg; empty = matrix default"
         required: false
-        default: "Qwen/Qwen3.6-27B"
+        default: ""
       bfcl_model:
-        description: "BFCL FC handler name (must end in -FC; auto-registered if new)"
+        description: "Override BFCL FC handler name (must end in -FC); empty = matrix default"
         required: false
-        default: "Qwen/Qwen3.6-27B-FC"
+        default: ""
       categories:
         description: "Comma-separated BFCL test categories"
         required: false
         default: "simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance,live_simple,live_multiple,live_parallel,live_parallel_multiple,live_irrelevance,live_relevance,multi_turn_base,multi_turn_miss_func,multi_turn_miss_param,multi_turn_long_context"
       vllm_tool_parser:
-        description: "pure-vLLM --tool-call-parser"
+        description: "Override pure-vLLM --tool-call-parser; empty = matrix default"
         required: false
-        default: "qwen3_xml"
+        default: ""
       smg_tool_parser:
-        description: "SMG --tool-call-parser"
+        description: "Override SMG --tool-call-parser; empty = matrix default (empty also = SMG auto-detect)"
         required: false
-        default: "qwen_xml"
+        default: ""
       reasoning_parser:
-        description: "reasoning parser for both arms (empty for non-thinking SKUs)"
+        description: "Override reasoning parser for BOTH arms; empty = matrix defaults"
         required: false
-        default: "qwen3"
+        default: ""
 
 concurrency:
   group: nightly-bfcl-${{ github.event_name }}-${{ github.ref }}
@@ -93,18 +97,94 @@ jobs:
 
   bfcl-ab:
     needs: build-wheel
-    if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
-    runs-on: 4-gpu-h100 # TP=2 per arm, both arms concurrent (GPUs 0,1 + 2,3)
-    # Generous: the nightly set adds multi_turn (multi-turn state simulation),
-    # which is much slower than the single-turn AST/live categories.
+    if: >-
+      ${{ !cancelled() && needs.build-wheel.result == 'success'
+          && (github.event.inputs.only == '' || github.event.inputs.only == matrix.name)
+          && (github.event_name != 'pull_request' || matrix.runner == '4-gpu-h100') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # H100 legs (TP=2 per arm, both arms concurrent: GPUs 0,1 + 2,3).
+          - name: qwen3.6
+            runner: 4-gpu-h100
+            tp: 2
+            gpu_a: "0,1"
+            gpu_b: "2,3"
+            model: Qwen/Qwen3.6-27B
+            bfcl_model: Qwen/Qwen3.6-27B-FC
+            vllm_tool: qwen3_xml
+            vllm_reason: qwen3
+            smg_tool: qwen_xml
+            smg_reason: qwen3
+            vllm_extra: ""
+            gpu_mem: "0.85"
+          # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
+          - name: gpt-oss
+            runner: 4-gpu-h100
+            tp: 2
+            gpu_a: "0,1"
+            gpu_b: "2,3"
+            model: openai/gpt-oss-120b
+            bfcl_model: openai/gpt-oss-120b-FC
+            vllm_tool: openai
+            vllm_reason: ""
+            smg_tool: ""
+            smg_reason: ""
+            vllm_extra: ""
+            gpu_mem: "0.85"
+          # Blackwell legs (8xB300, TP=4 per arm, both arms concurrent: 0-3 + 4-7).
+          - name: deepseek-v4
+            runner: blackwell
+            tp: 4
+            gpu_a: "0,1,2,3"
+            gpu_b: "4,5,6,7"
+            model: deepseek-ai/DeepSeek-V4-Flash
+            bfcl_model: deepseek-ai/DeepSeek-V4-Flash-FC
+            vllm_tool: deepseek_v4
+            vllm_reason: deepseek_v4
+            smg_tool: deepseek_v4
+            smg_reason: deepseek_v31 # TODO(confirm): no deepseek_v4 SMG reasoning parser yet
+            vllm_extra: "--tokenizer-mode deepseek_v4 --trust-remote-code"
+            gpu_mem: "0.90"
+          - name: minimax-m2.7
+            runner: blackwell
+            tp: 4
+            gpu_a: "0,1,2,3"
+            gpu_b: "4,5,6,7"
+            model: MiniMaxAI/MiniMax-M2.7
+            bfcl_model: MiniMaxAI/MiniMax-M2.7-FC
+            vllm_tool: minimax_m2
+            vllm_reason: minimax_m2
+            smg_tool: minimax_m2
+            smg_reason: minimax
+            vllm_extra: "--trust-remote-code"
+            gpu_mem: "0.90"
+          # Kimi-K2.6 loads native int4 weights (~500GB) -> fits TP=4 half-node.
+          - name: kimi-k2.6
+            runner: blackwell
+            tp: 4
+            gpu_a: "0,1,2,3"
+            gpu_b: "4,5,6,7"
+            model: moonshotai/Kimi-K2.6
+            bfcl_model: moonshotai/Kimi-K2.6-FC
+            vllm_tool: kimi_k2
+            vllm_reason: kimi_k2
+            smg_tool: kimik2
+            smg_reason: kimi_k25 # TODO(confirm): no kimi_k2 SMG reasoning parser yet
+            vllm_extra: "--trust-remote-code"
+            gpu_mem: "0.90"
+    runs-on: ${{ matrix.runner }}
+    # Generous: the nightly set adds multi_turn (state simulation), much slower
+    # than the single-turn AST/live categories.
     timeout-minutes: 240
     permissions:
       contents: read
     env:
       ROUTER_LOCAL_MODEL_PATH: /models
       HF_HOME: /models
-      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
-      BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3.6-27B-FC' }}
+      MODEL: ${{ github.event.inputs.model || matrix.model }}
+      BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || matrix.bfcl_model }}
       # PR = quick non-live sanity subset; schedule/dispatch = non_live + live + multi_turn.
       CATEGORIES: ${{ github.event.inputs.categories || (github.event_name == 'pull_request' && 'simple_python,irrelevance' || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance,live_simple,live_multiple,live_parallel,live_parallel_multiple,live_irrelevance,live_relevance,multi_turn_base,multi_turn_miss_func,multi_turn_miss_param,multi_turn_long_context') }}
     steps:
@@ -130,20 +210,21 @@ jobs:
           VLLM_BIN: vllm
           VLLM_PYTHON: python
           SMG_LAUNCH: "python -m smg.launch_router"
-          BFCL_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
-          BFCL_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen_xml' }}
-          BFCL_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
-          BFCL_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
-          BFCL_TP: "2"
+          BFCL_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || matrix.vllm_tool }}
+          BFCL_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || matrix.smg_tool }}
+          BFCL_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || matrix.vllm_reason }}
+          BFCL_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || matrix.smg_reason }}
+          BFCL_VLLM_EXTRA: ${{ matrix.vllm_extra }}
+          BFCL_TP: ${{ matrix.tp }}
           BFCL_MAX_MODEL_LEN: "16384"
-          BFCL_GPU_MEM_UTIL: "0.85"
+          BFCL_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
         run: |
           set -euo pipefail
-          # TP=2 per arm: Arm A (pure vLLM) on GPUs 0,1; Arm B (SMG -> vLLM gRPC) on GPUs 2,3.
-          # Ports are left unset so launch_arm.sh picks free ones — lets two bfcl
-          # runners share a node (bin-packed, hostNetwork) without port collisions.
-          A_URL=$(BFCL_GPU=0,1 bash scripts/bfcl/launch_arm.sh a)
-          B_URL=$(BFCL_GPU=2,3 bash scripts/bfcl/launch_arm.sh b)
+          # Both arms concurrent: arm A (pure vLLM) on the first GPU half, arm B
+          # (SMG -> vLLM gRPC) on the second. Ports left unset so launch_arm.sh
+          # picks free ones (lets bin-packed runners share a node).
+          A_URL=$(BFCL_GPU=${{ matrix.gpu_a }} bash scripts/bfcl/launch_arm.sh a)
+          B_URL=$(BFCL_GPU=${{ matrix.gpu_b }} bash scripts/bfcl/launch_arm.sh b)
           echo "arm A: $A_URL   arm B: $B_URL"
           python scripts/bfcl/run_ab.py \
             --baseline  "vllm=$A_URL" \
@@ -157,12 +238,16 @@ jobs:
             --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
       - name: Render summary
         if: always()
-        run: cat "$RUNNER_TEMP/bfcl_ab.md" >> "$GITHUB_STEP_SUMMARY" || echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          {
+            echo "## BFCL A/B — ${{ matrix.name }} (${{ matrix.model }})"
+            cat "$RUNNER_TEMP/bfcl_ab.md"
+          } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload comparison
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bfcl-ab-${{ github.run_id }}
+          name: bfcl-ab-${{ matrix.name }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/bfcl_ab.md
             ${{ runner.temp }}/bfcl_ab.json
