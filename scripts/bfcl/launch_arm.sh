@@ -33,7 +33,10 @@ RUN_DIR="${BFCL_RUN_DIR:-/tmp/bfcl_ab}"
 VLLM_TOOL_PARSER="${BFCL_VLLM_TOOL_PARSER:-hermes}"
 VLLM_REASONING_PARSER="${BFCL_VLLM_REASONING_PARSER:-}"   # empty = none (non-thinking SKU)
 # SMG (arm B) parser flags — SMG registry names, NOT vLLM's.
-SMG_TOOL_PARSER="${BFCL_SMG_TOOL_PARSER:-qwen}"
+# Use `-` (not `:-`) so an explicit empty value passes through unchanged (omits
+# --tool-call-parser → SMG auto-detect, e.g. harmony for gpt-oss); only a fully
+# UNSET var falls back to the qwen default for standalone/manual use.
+SMG_TOOL_PARSER="${BFCL_SMG_TOOL_PARSER-qwen}"
 SMG_REASONING_PARSER="${BFCL_SMG_REASONING_PARSER:-}"
 
 # Extra args appended to every vLLM process (both arms). e.g.

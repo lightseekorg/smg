@@ -71,7 +71,9 @@ Key env knobs for `launch_arm.sh`: `BFCL_GPU` (CUDA_VISIBLE_DEVICES, e.g. `0,1`)
 > **gpt-oss has no SMG tool-call-parser.** SMG handles gpt-oss through its harmony
 > pipeline (`model_gateway/src/routers/grpc/harmony/`), auto-activated by
 > `HarmonyDetector` on a `gpt-oss` model id / `GptOssForCausalLM` architecture. So
-> the SMG arm passes **no** `--tool-call-parser` (`BFCL_SMG_TOOL_PARSER=""`).
+> the SMG arm passes **no** `--tool-call-parser` (`BFCL_SMG_TOOL_PARSER=""`). The
+> `—` in **both** reasoning-parser columns for gpt-oss is likewise intentional:
+> harmony carries its own reasoning channel, so neither arm sets a reasoning parser.
 >
 > **† Reasoning-parser fallbacks.** SMG's reasoning registry has no `deepseek_v4` or
 > `kimi_k2` entry yet; the closest existing parsers (`deepseek_v31`, `kimi_k25`) are

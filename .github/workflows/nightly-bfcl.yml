@@ -109,7 +109,18 @@ jobs:
       - id: build
         env:
           ONLY: ${{ github.event.inputs.only }}
+          MODEL_OVERRIDE: ${{ github.event.inputs.model }}
+          BFCL_OVERRIDE: ${{ github.event.inputs.bfcl_model }}
         run: |
+          set -euo pipefail
+          # Enforce the paired-override contract: `model` and `bfcl_model` must be
+          # given together or not at all (an overridden model with the default FC
+          # handler — or vice versa — is a mismatched weights/handler pair).
+          if { [ -n "$MODEL_OVERRIDE" ] && [ -z "$BFCL_OVERRIDE" ]; } || \
+             { [ -z "$MODEL_OVERRIDE" ] && [ -n "$BFCL_OVERRIDE" ]; }; then
+            echo "::error::Set BOTH 'model' and 'bfcl_model' (or neither): model='$MODEL_OVERRIDE' bfcl_model='$BFCL_OVERRIDE'"
+            exit 1
+          fi
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           legs = [
