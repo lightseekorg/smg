@@ -187,10 +187,21 @@ async fn fetch_sglang_http_metadata(url: &str, api_key: Option<&str>) -> HashMap
         labels.extend(flat_labels(&info));
     }
 
-    // /v1/models gives us max_model_len (fills context_length when /server_info returns null)
+    // /v1/models gives us model identity and max_model_len when a compatible
+    // local frontend does not expose the SGLang-specific metadata endpoints.
     if let Ok(models) = http_get_json::<ModelsResponse>(&format!("{base}/v1/models"), api_key).await
     {
         if let Some(m) = models.data.first() {
+            if let Some(id) = m.id.as_ref().filter(|id| !id.is_empty()) {
+                labels
+                    .entry("served_model_name".to_string())
+                    .or_insert_with(|| id.clone());
+            }
+            if let Some(root) = m.root.as_ref().filter(|root| !root.is_empty()) {
+                labels
+                    .entry("model_path".to_string())
+                    .or_insert_with(|| root.clone());
+            }
             if let Some(len) = m.max_model_len.filter(|&n| n > 0) {
                 labels
                     .entry("max_model_len".to_string())
@@ -472,5 +483,53 @@ mod tests {
 
         let labels = flat_labels(&info);
         assert!(!labels.contains_key("max_running_requests"));
+    }
+
+    #[tokio::test]
+    async fn test_sglang_http_metadata_uses_models_identity() {
+        use axum::{routing::get, Json, Router};
+        use serde_json::json;
+        use tokio::net::TcpListener;
+
+        async fn models() -> Json<serde_json::Value> {
+            Json(json!({
+                "data": [{
+                    "id": "test-model",
+                    "max_model_len": 4096,
+                    "object": "model",
+                    "owned_by": "nvidia",
+                    "root": "test-root"
+                }],
+                "object": "list"
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only mock /v1/models server; handle is aborted at test end"
+        )]
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/v1/models", get(models)))
+                .await
+                .unwrap();
+        });
+
+        let labels = fetch_sglang_http_metadata(&format!("http://{addr}"), None).await;
+        server.abort();
+
+        assert_eq!(
+            labels.get("served_model_name").map(String::as_str),
+            Some("test-model")
+        );
+        assert_eq!(
+            labels.get("model_path").map(String::as_str),
+            Some("test-root")
+        );
+        assert_eq!(
+            labels.get("max_model_len").map(String::as_str),
+            Some("4096")
+        );
     }
 }
