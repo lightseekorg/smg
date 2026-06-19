@@ -145,8 +145,8 @@ jobs:
                "vllm_tool": "deepseek_v4", "vllm_reason": "deepseek_v4",
                "smg_tool": "deepseek_v4",
                "smg_reason": "deepseek_v31",  # TODO(confirm): no deepseek_v4 SMG reasoning parser yet
-               # --kv-cache-dtype fp8 + --block-size 256 are REQUIRED: V4 auto-quantizes to
-               # deepseek_v4_fp8 and its FlashMLA kernel asserts fp8 kv-cache (else EngineCore dies).
+               # --kv-cache-dtype fp8 + --block-size 256 REQUIRED: V4's FlashMLA fp8
+               # kernel asserts fp8 kv-cache (else EngineCore dies at startup).
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
                "gpu_mem": "0.90", "startup_timeout": "2400"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
@@ -162,17 +162,15 @@ jobs:
                "vllm_tool": "kimi_k2", "vllm_reason": "kimi_k2",
                "smg_tool": "kimik2",
                "smg_reason": "kimi_k25",  # TODO(confirm): no kimi_k2 SMG reasoning parser yet
-               # Generous startup: 1T MoE at TP=4 spends minutes on load + torch.compile +
-               # weight quant; the default 420s timed out mid-compile.
+               # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
           if only:
               legs = [l for l in legs if l["name"] == only]
-          # All legs (H100 + Blackwell) run on PRs as a sanity check; the run stays
-          # cheap because the PR CATEGORIES below are a tiny non-live subset
-          # (simple_python,irrelevance) for every leg regardless of runner.
+          # All legs (incl. Blackwell) run on PRs; cheap because the PR CATEGORIES
+          # below are a tiny non-live subset for every leg.
           if only and not legs:
               raise SystemExit(f"unknown leg {only!r}; valid: {valid_names}")
           print("matrix=" + json.dumps({"include": legs}))
@@ -197,8 +195,7 @@ jobs:
       HF_HOME: /models
       MODEL: ${{ github.event.inputs.model || matrix.model }}
       BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || matrix.bfcl_model }}
-      # Auth for gated/private HF repos + higher download rate limits (used by the
-      # weight-staging step and by vLLM/SMG at serve time).
+      # Auth for gated/private HF repos + higher download rate limits.
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # PR = quick non-live sanity subset; schedule/dispatch = non_live + live + multi_turn.
       CATEGORIES: ${{ github.event.inputs.categories || (github.event_name == 'pull_request' && 'simple_python,irrelevance' || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance,live_simple,live_multiple,live_parallel,live_parallel_multiple,live_irrelevance,live_relevance,multi_turn_base,multi_turn_miss_func,multi_turn_miss_param,multi_turn_long_context') }}
@@ -237,8 +234,7 @@ jobs:
           BFCL_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
           # Per-leg health-wait budget: big MoEs need minutes for load + compile + quant.
           BFCL_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
-          # Keep arm logs + pidfiles under RUNNER_TEMP (per-job, and uploadable as
-          # artifacts) instead of the shared /tmp default.
+          # Arm logs + pidfiles under RUNNER_TEMP (per-job, uploadable) not /tmp.
           BFCL_RUN_DIR: ${{ runner.temp }}/bfcl_run
         run: |
           set -euo pipefail
@@ -270,10 +266,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bfcl-ab-${{ matrix.name }}-${{ github.run_id }}
-          # Summary table + the per-category score files, which list the exact
-          # failed cases (id, model output, expected, error) for both arms — enough
-          # to trace any vLLM-vs-SMG divergence. The bulky raw generate dumps
-          # (bfcl_ab/<arm>/result/**) are intentionally excluded.
+          # Summary + per-category score files (which list each failed case for
+          # both arms). Raw generate dumps (bfcl_ab/<arm>/result/**) excluded as bulky.
           path: |
             ${{ runner.temp }}/bfcl_ab.md
             ${{ runner.temp }}/bfcl_ab.json
@@ -285,8 +279,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bfcl-ab-${{ matrix.name }}-logs-${{ github.run_id }}
-          # vLLM/SMG startup+serve logs — only useful when a leg crashed or timed
-          # out; huge and noise-only on success, so gated on failure.
+          # vLLM/SMG logs — only useful on crash/timeout; noise on success.
           path: ${{ runner.temp }}/bfcl_run/*.log
           if-no-files-found: ignore
           retention-days: 14

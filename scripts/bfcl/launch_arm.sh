@@ -33,9 +33,8 @@ RUN_DIR="${BFCL_RUN_DIR:-/tmp/bfcl_ab}"
 VLLM_TOOL_PARSER="${BFCL_VLLM_TOOL_PARSER:-hermes}"
 VLLM_REASONING_PARSER="${BFCL_VLLM_REASONING_PARSER:-}"   # empty = none (non-thinking SKU)
 # SMG (arm B) parser flags — SMG registry names, NOT vLLM's.
-# Use `-` (not `:-`) so an explicit empty value passes through unchanged (omits
-# --tool-call-parser → SMG auto-detect, e.g. harmony for gpt-oss); only a fully
-# UNSET var falls back to the qwen default for standalone/manual use.
+# `-` not `:-`: an explicit empty value passes through (omits the flag → SMG
+# auto-detect, e.g. harmony for gpt-oss); only an unset var defaults to qwen.
 SMG_TOOL_PARSER="${BFCL_SMG_TOOL_PARSER-qwen}"
 SMG_REASONING_PARSER="${BFCL_SMG_REASONING_PARSER:-}"
 
@@ -67,10 +66,8 @@ start() {
   echo "[launch_arm] started $name (pid $(cat "$RUN_DIR/$name.pid")) -> $log" >&2
 }
 
-# Tail a logfile to stderr for real-time startup visibility in CI. Stdout is
-# reserved for the base_url (captured by the caller's $(...)), so logs must go to
-# stderr — which still streams live to the CI console. Prints the tail pid so the
-# caller can stop it once the server is healthy.
+# Tail a logfile to stderr (streams live in CI; stdout is reserved for the
+# base_url). Prints the tail pid so the caller can stop it once healthy.
 stream_log() { tail -n +1 -F "$1" >&2 & echo $!; }
 
 wait_http() {  # wait_http <url> <timeout_s>
@@ -139,8 +136,7 @@ case "$ARM" in
       --worker-urls "grpc://127.0.0.1:$ARM_B_GRPC_PORT"
       --host 0.0.0.0 --port "$ARM_B_GW_PORT"
     )
-    # Empty tool-call-parser => let SMG auto-detect (e.g. gpt-oss routes through
-    # the harmony pipeline via HarmonyDetector; passing a parser there is wrong).
+    # Empty => omit, so SMG auto-detects (e.g. gpt-oss → harmony pipeline).
     [ -n "$SMG_TOOL_PARSER" ] && smg_cmd+=(--tool-call-parser "$SMG_TOOL_PARSER")
     [ -n "$SMG_REASONING_PARSER" ] && smg_cmd+=(--reasoning-parser "$SMG_REASONING_PARSER")
     start arm_b_gateway "$RUN_DIR/arm_b_gateway.log" "${smg_cmd[@]}"
@@ -151,11 +147,9 @@ case "$ARM" in
     ;;
 
   stop)
-    # Collect recorded pids first, then kill the whole PROCESS GROUP of each.
-    # start() uses setsid, so the recorded pid is the session/group leader and
-    # vLLM's worker/engine children share its pgid. Killing only the leader (the
-    # old behavior) orphaned those children — they kept ~250 GiB pinned per GPU
-    # across jobs. Negative pid = "signal the process group".
+    # Kill each recorded pid's whole PROCESS GROUP (negative pid). start() uses
+    # setsid, so the pid is the group leader; killing only it orphaned vLLM's
+    # worker children, leaving ~250 GiB pinned per GPU across jobs.
     declare -a pids=()
     for pf in "$RUN_DIR"/*.pid; do
       [ -e "$pf" ] || continue
