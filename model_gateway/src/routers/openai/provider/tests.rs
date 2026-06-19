@@ -13,7 +13,7 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 
-use super::{OpenAIProvider, Provider, XAIProvider};
+use super::{types::strip_default_sglang_fields, OpenAIProvider, Provider, XAIProvider};
 use crate::worker::Endpoint;
 
 /// Build a `ResponsesRequest` whose single input message carries every
@@ -65,6 +65,28 @@ fn first_content_array(payload: &Value) -> &Vec<Value> {
     payload["input"][0]["content"]
         .as_array()
         .expect("content array present on first input item")
+}
+
+#[test]
+fn strip_default_sglang_fields_removes_false_and_null_values() {
+    let mut payload = json!({
+        "continue_final_message": false,
+        "messages": [],
+        "model": "test-model",
+        "no_stop_trim": true,
+        "return_hidden_states": null,
+        "separate_reasoning": true,
+        "stream_reasoning": true
+    });
+
+    strip_default_sglang_fields(&mut payload);
+
+    assert_eq!(payload.get("continue_final_message"), None);
+    assert_eq!(payload.get("return_hidden_states"), None);
+    assert_eq!(payload.get("separate_reasoning"), None);
+    assert_eq!(payload.get("stream_reasoning"), None);
+    assert_eq!(payload.get("no_stop_trim"), Some(&json!(true)));
+    assert_eq!(payload.get("model"), Some(&json!("test-model")));
 }
 
 #[test]
