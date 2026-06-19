@@ -23,6 +23,14 @@ set -euo pipefail
 ARM="${1:?usage: launch_arm.sh <a|b|stop>}"
 
 MODEL="${BFCL_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
+# Load source: prefer a pre-staged local copy at $ROUTER_LOCAL_MODEL_PATH/<id>
+# (e.g. NVMe /raid/models on the Blackwell node — no download); else the HF repo
+# id, which vLLM/HF downloads into HF_HOME. The canonical served name stays
+# $MODEL (passed as --served-model-name) so the BFCL handler + requests match.
+MODEL_SRC="$MODEL"
+if [ -n "${ROUTER_LOCAL_MODEL_PATH:-}" ] && [ -d "$ROUTER_LOCAL_MODEL_PATH/$MODEL" ]; then
+  MODEL_SRC="$ROUTER_LOCAL_MODEL_PATH/$MODEL"
+fi
 GPU="${BFCL_GPU:-0}"                              # CUDA_VISIBLE_DEVICES (e.g. "0" or "0,1")
 TP="${BFCL_TP:-1}"                               # tensor-parallel size (match GPU count)
 MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-16384}"
@@ -95,7 +103,7 @@ case "$ARM" in
   a)
     ARM_A_PORT="${ARM_A_PORT:-$(free_port)}"
     declare -a cmd=(
-      CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_BIN" serve "$MODEL"
+      CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_BIN" serve "$MODEL_SRC"
       --served-model-name "$MODEL"
       --enable-auto-tool-choice --tool-call-parser "$VLLM_TOOL_PARSER"
       --host 0.0.0.0 --port "$ARM_A_PORT"
@@ -118,7 +126,8 @@ case "$ARM" in
     # 1) vLLM gRPC worker (raw-token; SMG will own template+parsing).
     declare -a wcmd=(
       CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server
-      --model "$MODEL" --host 0.0.0.0 --port "$ARM_B_GRPC_PORT"
+      --model "$MODEL_SRC" --served-model-name "$MODEL"
+      --host 0.0.0.0 --port "$ARM_B_GRPC_PORT"
       --tensor-parallel-size "$TP" --max-model-len "$MAX_MODEL_LEN"
       --gpu-memory-utilization "$GPU_MEM_UTIL"
     )
@@ -132,7 +141,7 @@ case "$ARM" in
     # shellcheck disable=SC2206  # intentional word-split of SMG_LAUNCH
     declare -a smg_cmd=(
       $SMG_LAUNCH
-      --model-path "$MODEL"
+      --model-path "$MODEL_SRC"
       --worker-urls "grpc://127.0.0.1:$ARM_B_GRPC_PORT"
       --host 0.0.0.0 --port "$ARM_B_GW_PORT"
     )

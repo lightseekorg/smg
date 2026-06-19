@@ -130,15 +130,18 @@ jobs:
                "model": "Qwen/Qwen3.6-27B", "bfcl_model": "Qwen/Qwen3.6-27B-FC",
                "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
-               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600"},
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               "model_cache": "/models"},
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
                "model": "openai/gpt-oss-120b", "bfcl_model": "openai/gpt-oss-120b-FC",
                "vllm_tool": "openai", "vllm_reason": "",
                "smg_tool": "", "smg_reason": "",
-               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600"},
-              # Blackwell legs (8xB300, TP=4 per arm, both arms concurrent: 0-3 + 4-7).
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               "model_cache": "/models"},
+              # Blackwell legs (B200, TP=4 per arm, both arms concurrent: 0-3 + 4-7).
+              # Models are pre-staged on NVMe at /raid/models/<id> (no download).
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "deepseek-ai/DeepSeek-V4-Flash", "bfcl_model": "deepseek-ai/DeepSeek-V4-Flash-FC",
@@ -148,13 +151,14 @@ jobs:
                # --kv-cache-dtype fp8 + --block-size 256 REQUIRED: V4's FlashMLA fp8
                # kernel asserts fp8 kv-cache (else EngineCore dies at startup).
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
-               "gpu_mem": "0.90", "startup_timeout": "2400"},
+               "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "MiniMaxAI/MiniMax-M2.7", "bfcl_model": "MiniMaxAI/MiniMax-M2.7-FC",
                "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
-               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400"},
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "model_cache": "/raid/models"},
               # Kimi-K2.6 loads native int4 weights (~500GB) -> fits TP=4 half-node.
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
@@ -163,7 +167,8 @@ jobs:
                "smg_tool": "kimik2",
                "smg_reason": "kimi_k25",  # TODO(confirm): no kimi_k2 SMG reasoning parser yet
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
-               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400"},
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "model_cache": "/raid/models"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
@@ -191,8 +196,11 @@ jobs:
     permissions:
       contents: read
     env:
-      ROUTER_LOCAL_MODEL_PATH: /models
-      HF_HOME: /models
+      # Per-runner model store: /models on h100, /raid/models (NVMe) on blackwell.
+      # Models pre-staged at <cache>/<id> load locally; anything missing downloads
+      # into the same dir's HF cache.
+      ROUTER_LOCAL_MODEL_PATH: ${{ matrix.model_cache }}
+      HF_HOME: ${{ matrix.model_cache }}
       MODEL: ${{ github.event.inputs.model || matrix.model }}
       BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || matrix.bfcl_model }}
       # Auth for gated/private HF repos + higher download rate limits.
@@ -215,9 +223,15 @@ jobs:
       - name: Register model in bfcl (no-op if bfcl already ships a handler)
         run: python scripts/bfcl/register_bfcl_model.py --model-id "$MODEL" || true
       - name: Stage model weights
-        # Only this leg's model — not the whole GPU tier (which pulls unrelated,
-        # sometimes-gated repos this A/B never serves).
-        run: bash scripts/ci_download_model.sh "$MODEL"
+        # Skip if pre-staged locally at <cache>/<id> (e.g. blackwell NVMe); else
+        # download just this leg's model (not the whole GPU tier, which pulls
+        # unrelated, sometimes-gated repos this A/B never serves).
+        run: |
+          if [ -d "$ROUTER_LOCAL_MODEL_PATH/$MODEL" ]; then
+            echo "model present at $ROUTER_LOCAL_MODEL_PATH/$MODEL — skipping download"
+          else
+            bash scripts/ci_download_model.sh "$MODEL"
+          fi
       - name: Launch arms + run official BFCL A/B
         env:
           BFCL_MODEL: ${{ env.MODEL }}
