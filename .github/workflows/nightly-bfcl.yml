@@ -237,6 +237,9 @@ jobs:
           BFCL_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
           # Per-leg health-wait budget: big MoEs need minutes for load + compile + quant.
           BFCL_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
+          # Keep arm logs + pidfiles under RUNNER_TEMP (per-job, and uploadable as
+          # artifacts) instead of the shared /tmp default.
+          BFCL_RUN_DIR: ${{ runner.temp }}/bfcl_run
         run: |
           set -euo pipefail
           # Both arms concurrent: arm A (pure vLLM) on the first GPU half, arm B
@@ -262,15 +265,31 @@ jobs:
             echo "## BFCL A/B — ${{ matrix.name }} (${{ matrix.model }})"
             cat "$RUNNER_TEMP/bfcl_ab.md"
           } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload comparison
+      - name: Upload results (summary + per-case scores)
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bfcl-ab-${{ matrix.name }}-${{ github.run_id }}
+          # Summary table + the per-category score files, which list the exact
+          # failed cases (id, model output, expected, error) for both arms — enough
+          # to trace any vLLM-vs-SMG divergence. The bulky raw generate dumps
+          # (bfcl_ab/<arm>/result/**) are intentionally excluded.
           path: |
             ${{ runner.temp }}/bfcl_ab.md
             ${{ runner.temp }}/bfcl_ab.json
+            ${{ runner.temp }}/bfcl_ab/*/score/**
+          if-no-files-found: warn
           retention-days: 30
+      - name: Upload arm logs (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bfcl-ab-${{ matrix.name }}-logs-${{ github.run_id }}
+          # vLLM/SMG startup+serve logs — only useful when a leg crashed or timed
+          # out; huge and noise-only on success, so gated on failure.
+          path: ${{ runner.temp }}/bfcl_run/*.log
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Teardown arms
         if: always()
         run: bash scripts/bfcl/launch_arm.sh stop || true
