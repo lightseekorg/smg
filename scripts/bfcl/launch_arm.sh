@@ -119,13 +119,16 @@ case "$ARM" in
     start arm_b_worker "$RUN_DIR/arm_b_worker.log" "${wcmd[@]}"
     wait_grpc "$ARM_B_GRPC_PORT" "${BFCL_STARTUP_TIMEOUT:-420}"
     # 2) SMG gateway in front, exposing the OpenAI API.
+    # shellcheck disable=SC2206  # intentional word-split of SMG_LAUNCH
     declare -a smg_cmd=(
       $SMG_LAUNCH
       --model-path "$MODEL"
       --worker-urls "grpc://127.0.0.1:$ARM_B_GRPC_PORT"
-      --tool-call-parser "$SMG_TOOL_PARSER"
       --host 0.0.0.0 --port "$ARM_B_GW_PORT"
     )
+    # Empty tool-call-parser => let SMG auto-detect (e.g. gpt-oss routes through
+    # the harmony pipeline via HarmonyDetector; passing a parser there is wrong).
+    [ -n "$SMG_TOOL_PARSER" ] && smg_cmd+=(--tool-call-parser "$SMG_TOOL_PARSER")
     [ -n "$SMG_REASONING_PARSER" ] && smg_cmd+=(--reasoning-parser "$SMG_REASONING_PARSER")
     start arm_b_gateway "$RUN_DIR/arm_b_gateway.log" "${smg_cmd[@]}"
     wait_http "http://127.0.0.1:$ARM_B_GW_PORT/health" "${BFCL_STARTUP_TIMEOUT:-420}"
