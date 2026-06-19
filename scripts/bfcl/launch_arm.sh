@@ -58,6 +58,7 @@ VLLM_EXTRA="${BFCL_VLLM_EXTRA:-}"
 ARM_A_PORT="${BFCL_ARM_A_PORT:-}"          # pure-vLLM OpenAI port
 ARM_B_GRPC_PORT="${BFCL_ARM_B_GRPC_PORT:-}" # vLLM gRPC worker port
 ARM_B_GW_PORT="${BFCL_ARM_B_GW_PORT:-}"     # SMG OpenAI gateway port
+ARM_B_METRICS_PORT="${BFCL_ARM_B_METRICS_PORT:-}" # SMG Prometheus port (defaults to 29000 — collides when arms/legs share a host)
 
 # Executables (override for venv / box paths).
 VLLM_BIN="${VLLM_BIN:-vllm}"                      # `vllm serve` console script
@@ -123,6 +124,7 @@ case "$ARM" in
   b)
     ARM_B_GRPC_PORT="${ARM_B_GRPC_PORT:-$(free_port)}"
     ARM_B_GW_PORT="${ARM_B_GW_PORT:-$(free_port)}"
+    ARM_B_METRICS_PORT="${ARM_B_METRICS_PORT:-$(free_port)}"
     # 1) vLLM gRPC worker (raw-token; SMG will own template+parsing).
     declare -a wcmd=(
       CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server
@@ -144,6 +146,9 @@ case "$ARM" in
       --model-path "$MODEL_SRC"
       --worker-urls "grpc://127.0.0.1:$ARM_B_GRPC_PORT"
       --host 0.0.0.0 --port "$ARM_B_GW_PORT"
+      # Free port, not the fixed 29000 default — else a second SMG on the same
+      # host (concurrent arm/leg) panics with "metrics server bind failed".
+      --prometheus-port "$ARM_B_METRICS_PORT"
     )
     # Empty => omit, so SMG auto-detects (e.g. gpt-oss → harmony pipeline).
     [ -n "$SMG_TOOL_PARSER" ] && smg_cmd+=(--tool-call-parser "$SMG_TOOL_PARSER")
