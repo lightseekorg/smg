@@ -119,14 +119,14 @@ jobs:
                "model": "Qwen/Qwen3.6-27B", "bfcl_model": "Qwen/Qwen3.6-27B-FC",
                "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
-               "vllm_extra": "", "gpu_mem": "0.85"},
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600"},
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
                "model": "openai/gpt-oss-120b", "bfcl_model": "openai/gpt-oss-120b-FC",
                "vllm_tool": "openai", "vllm_reason": "",
                "smg_tool": "", "smg_reason": "",
-               "vllm_extra": "", "gpu_mem": "0.85"},
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600"},
               # Blackwell legs (8xB300, TP=4 per arm, both arms concurrent: 0-3 + 4-7).
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
@@ -134,13 +134,16 @@ jobs:
                "vllm_tool": "deepseek_v4", "vllm_reason": "deepseek_v4",
                "smg_tool": "deepseek_v4",
                "smg_reason": "deepseek_v31",  # TODO(confirm): no deepseek_v4 SMG reasoning parser yet
-               "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code", "gpu_mem": "0.90"},
+               # --kv-cache-dtype fp8 + --block-size 256 are REQUIRED: V4 auto-quantizes to
+               # deepseek_v4_fp8 and its FlashMLA kernel asserts fp8 kv-cache (else EngineCore dies).
+               "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
+               "gpu_mem": "0.90", "startup_timeout": "2400"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "MiniMaxAI/MiniMax-M2.7", "bfcl_model": "MiniMaxAI/MiniMax-M2.7-FC",
                "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
-               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90"},
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400"},
               # Kimi-K2.6 loads native int4 weights (~500GB) -> fits TP=4 half-node.
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
@@ -148,7 +151,9 @@ jobs:
                "vllm_tool": "kimi_k2", "vllm_reason": "kimi_k2",
                "smg_tool": "kimik2",
                "smg_reason": "kimi_k25",  # TODO(confirm): no kimi_k2 SMG reasoning parser yet
-               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90"},
+               # Generous startup: 1T MoE at TP=4 spends minutes on load + torch.compile +
+               # weight quant; the default 420s timed out mid-compile.
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
@@ -219,6 +224,8 @@ jobs:
           BFCL_TP: ${{ matrix.tp }}
           BFCL_MAX_MODEL_LEN: "16384"
           BFCL_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
+          # Per-leg health-wait budget: big MoEs need minutes for load + compile + quant.
+          BFCL_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
         run: |
           set -euo pipefail
           # Both arms concurrent: arm A (pure vLLM) on the first GPU half, arm B
