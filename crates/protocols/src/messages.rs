@@ -279,6 +279,17 @@ pub struct InputMessage {
 pub enum Role {
     User,
     Assistant,
+    /// `system` role inside `messages[]`.
+    ///
+    /// The Anthropic Messages API carries the system prompt in the top-level
+    /// `system` field, but some clients (e.g. Claude Code) additionally send a
+    /// `system`-role message *in the array* — often mid-conversation. Accepting
+    /// it (instead of 400ing) lets those requests through; the message is
+    /// forwarded to the chat template **in place**, so backends that render
+    /// `system` inline (e.g. GLM-4.5+/5.x) keep its position, while backends
+    /// that only read a leading system (e.g. MiniMax-M2) handle it per their
+    /// own template. See https://github.com/lightseekorg/smg/issues/1795
+    System,
 }
 
 /// Input content can be a string or an array of content blocks
@@ -2423,5 +2434,25 @@ mod tests {
             ContentBlock::ToolSearchToolResult { .. }
         ));
         assert!(matches!(msg.content[2], ContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn test_system_role_in_messages_is_accepted_and_preserved() {
+        // Claude Code sends a `system`-role message in `messages[]` (in addition
+        // to the top-level `system`). It must parse (not 400) and stay in place
+        // so inline-`system` templates render it where it was sent.
+        let body = json!({
+            "model": "m",
+            "max_tokens": 16,
+            "system": "main prompt",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "mid-conversation system"}
+            ]
+        });
+        let req: CreateMessageRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.messages[0].role, Role::User);
+        assert_eq!(req.messages[1].role, Role::System); // preserved in place
     }
 }
