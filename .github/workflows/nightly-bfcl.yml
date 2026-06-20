@@ -252,9 +252,21 @@ jobs:
           BFCL_RUN_DIR: ${{ runner.temp }}/bfcl_run
         run: |
           set -euo pipefail
-          # Both arms concurrent: arm A (pure vLLM) on the first GPU half, arm B
-          # (SMG -> vLLM gRPC) on the second. Ports left unset so launch_arm.sh
-          # picks free ones (lets bin-packed runners share a node).
+          # Serialize the heavy launch->serve->teardown phase PER HOST. Multiple
+          # Blackwell runner agents share one bare-metal machine (host network +
+          # the same 8 GPUs), so two legs at once collide: on ports (free_port
+          # picks a port, frees it, then vLLM binds it ~40s later — another leg
+          # grabs it meanwhile) and on GPU memory. A host-wide flock runs them one
+          # at a time; the lock releases when this step's shell exits.
+          exec 9>/tmp/bfcl-host.lock
+          echo "waiting for host lock..."; flock 9; echo "acquired host lock"
+          # Tear this leg's servers down before releasing the lock, so the next
+          # leg starts on a clean host (the always() steps below are backstops).
+          cleanup() { bash scripts/bfcl/launch_arm.sh stop || true; }
+          trap cleanup EXIT
+          trap 'cleanup; exit 143' INT TERM
+          # Arm A (pure vLLM) on the first GPU half, arm B (SMG -> vLLM gRPC) on
+          # the second; ports left unset so launch_arm.sh picks free ones.
           A_URL=$(BFCL_GPU=${{ matrix.gpu_a }} bash scripts/bfcl/launch_arm.sh a)
           B_URL=$(BFCL_GPU=${{ matrix.gpu_b }} bash scripts/bfcl/launch_arm.sh b)
           echo "arm A: $A_URL   arm B: $B_URL"
@@ -297,15 +309,9 @@ jobs:
           path: ${{ runner.temp }}/bfcl_run/*.log
           if-no-files-found: ignore
           retention-days: 14
-      - name: Teardown arms
+      - name: Teardown arms (leg-scoped backstop)
         if: always()
+        # Backstop to the in-step trap: kill THIS leg's process groups via its
+        # pidfiles. NOT a node-wide GPU nuke — these hosts run other orgs' runner
+        # agents, so killing by GPU occupancy would take down their jobs too.
         run: bash scripts/bfcl/launch_arm.sh stop || true
-      - name: Release GPUs (nuke + verify, same util as nightly-benchmark)
-        if: always()
-        # Backstop the pidfile teardown above: kill ANY process still holding the
-        # GPUs (by occupancy, not name) and assert the node is actually free. This
-        # catches root-owned, setsid-detached vLLM workers that survive a
-        # hard-killed launch step — exactly the leak that pinned ~250 GiB/GPU
-        # across jobs. Each bfcl leg uses the whole node (TP fills it), so no
-        # co-tenant job shares these GPUs.
-        run: bash scripts/ci_killall_sglang.sh nuke_gpus || true
