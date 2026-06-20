@@ -239,6 +239,7 @@ impl ConfigValidator {
         match policy {
             PolicyConfig::Random
             | PolicyConfig::RoundRobin
+            | PolicyConfig::Passthrough
             | PolicyConfig::Manual { .. }
             | PolicyConfig::ConsistentHashing => {}
             PolicyConfig::CacheAware {

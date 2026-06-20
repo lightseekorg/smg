@@ -651,6 +651,16 @@ class ServeOrchestrator:
                     self.args.data_parallel_size,
                 )
                 router_args.disable_circuit_breaker = True
+            # A single backend has nothing to balance across, so force the
+            # passthrough policy (overriding any --policy). It skips load
+            # monitoring and KV-event subscription, dropping that overhead.
+            if router_args.policy != "passthrough":
+                logger.info(
+                    "dp=%d: forcing router policy to passthrough (single backend; "
+                    "skips load monitoring and KV-event subscription)",
+                    self.args.data_parallel_size,
+                )
+                router_args.policy = "passthrough"
         return router_args
 
     def _signal_handler(self, signum: int, frame: object) -> None:

@@ -11,6 +11,7 @@ use smg_auth as auth;
 pub enum PolicyType {
     Random,
     RoundRobin,
+    Passthrough,
     CacheAware,
     PowerOfTwo,
     LeastLoad,
@@ -512,6 +513,7 @@ impl Router {
             Ok(match policy {
                 PolicyType::Random => ConfigPolicyConfig::Random,
                 PolicyType::RoundRobin => ConfigPolicyConfig::RoundRobin,
+                PolicyType::Passthrough => ConfigPolicyConfig::Passthrough,
                 PolicyType::CacheAware => ConfigPolicyConfig::CacheAware {
                     cache_threshold: self.cache_threshold,
                     balance_abs_threshold: self.balance_abs_threshold,

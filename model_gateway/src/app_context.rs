@@ -688,3 +688,48 @@ impl Default for AppContextBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::PolicyConfig;
+
+    fn config_with_policy(policy: PolicyConfig) -> RouterConfig {
+        RouterConfig {
+            policy,
+            ..Default::default()
+        }
+    }
+
+    /// `with_kv_event_monitor` only creates a monitor for the cache-aware policy.
+    /// This run of the builder needs no storage or network, so it exercises the
+    /// real gating path rather than the predicate in isolation.
+    fn kv_monitor_created_for(policy: PolicyConfig) -> bool {
+        let config = config_with_policy(policy);
+        AppContextBuilder::new()
+            .with_policy_registry(&config)
+            .with_kv_event_monitor(&config)
+            .kv_event_monitor
+            .is_some()
+    }
+
+    /// The #1794-relevant guarantee: passthrough never starts the KV-event
+    /// monitor, so single-backend gateways skip the `SubscribeKvEvents` overhead.
+    #[test]
+    fn test_passthrough_does_not_create_kv_event_monitor() {
+        assert!(!kv_monitor_created_for(PolicyConfig::Passthrough));
+        // Other non-cache-aware policies are likewise skipped.
+        assert!(!kv_monitor_created_for(PolicyConfig::RoundRobin));
+        // Control: cache-aware still creates the monitor.
+        assert!(kv_monitor_created_for(PolicyConfig::CacheAware {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 32,
+            balance_rel_threshold: 1.1,
+            eviction_interval_secs: 30,
+            max_tree_size: 1000,
+            block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
+        }));
+    }
+}

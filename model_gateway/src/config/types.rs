@@ -308,6 +308,12 @@ pub enum PolicyConfig {
     #[serde(rename = "round_robin")]
     RoundRobin,
 
+    /// Forward every request to the single backend with no load balancing,
+    /// load monitoring, or KV-event subscription. Intended for single-worker
+    /// gateways. See `policies/passthrough.rs`.
+    #[serde(rename = "passthrough")]
+    Passthrough,
+
     #[serde(rename = "cache_aware")]
     CacheAware {
         cache_threshold: f32,
@@ -450,6 +456,7 @@ impl PolicyConfig {
         match self {
             PolicyConfig::Random => "random",
             PolicyConfig::RoundRobin => "round_robin",
+            PolicyConfig::Passthrough => "passthrough",
             PolicyConfig::CacheAware { .. } => "cache_aware",
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
             PolicyConfig::LeastLoad { .. } => "least_load",
@@ -953,6 +960,7 @@ mod tests {
     fn test_policy_config_name() {
         assert_eq!(PolicyConfig::Random.name(), "random");
         assert_eq!(PolicyConfig::RoundRobin.name(), "round_robin");
+        assert_eq!(PolicyConfig::Passthrough.name(), "passthrough");
 
         let cache_aware = PolicyConfig::CacheAware {
             cache_threshold: 0.8,
