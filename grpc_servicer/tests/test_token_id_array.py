@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 from array import array
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -30,13 +31,21 @@ import pytest
 # helper itself is stdlib + grpc only, so a direct file load keeps this test
 # runnable without the full inference stack.
 _UTILS_PATH = Path(__file__).resolve().parent.parent / "smg_grpc_servicer" / "sglang" / "utils.py"
-_spec = importlib.util.spec_from_file_location("_smg_sglang_utils_under_test", _UTILS_PATH)
-_utils = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_utils)
-to_token_id_array = _utils.to_token_id_array
+
+
+def _load_utils() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("_smg_sglang_utils_under_test", _UTILS_PATH)
+    utils = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(utils)
+    return utils
+
+
+def to_token_id_array(token_ids):
+    return _load_utils().to_token_id_array(token_ids)
 
 # Env var that toggles the array("q") (new) vs list (old) SGLang contract.
-_TOKEN_ID_ARRAY_ENV = _utils._TOKEN_ID_ARRAY_ENV
+_TOKEN_ID_ARRAY_ENV = "SGLANG_GRPC_TOKEN_ID_ARRAY"
 
 
 @pytest.fixture(autouse=True)

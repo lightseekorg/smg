@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Output, Stdio},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,10 @@ use url::Url;
 
 const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_VIDEO_MAX_DECODED_BYTES: usize = 1024 * 1024 * 1024;
+static VIDEO_DECODE_BACKEND: OnceLock<Option<String>> = OnceLock::new();
+static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
+static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 
 use super::{
     error::MediaConnectorError,
@@ -394,7 +398,7 @@ async fn decode_video_frames(
             .map_err(MediaConnectorError::Blocking)??
     };
     let input_path = input_file.path().to_path_buf();
-    match video_decode_backend_override().as_deref() {
+    match video_decode_backend_override() {
         Some("ffmpeg") => decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await,
         Some("opencv") => {
             #[cfg(feature = "opencv-video")]
@@ -473,26 +477,32 @@ fn decode_video_with_opencv_logged(
     result
 }
 
-fn video_decode_backend_override() -> Option<String> {
-    let backend = std::env::var("SMG_VIDEO_DECODE_BACKEND")
-        .ok()?
-        .trim()
-        .to_ascii_lowercase();
-    match backend.as_str() {
-        "" | "auto" => None,
-        _ => Some(backend),
-    }
+fn video_decode_backend_override() -> Option<&'static str> {
+    VIDEO_DECODE_BACKEND
+        .get_or_init(|| {
+            let backend = std::env::var("SMG_VIDEO_DECODE_BACKEND")
+                .ok()?
+                .trim()
+                .to_ascii_lowercase();
+            match backend.as_str() {
+                "" | "auto" => None,
+                _ => Some(backend),
+            }
+        })
+        .as_deref()
 }
 
 fn log_video_decode_timing_enabled() -> bool {
-    std::env::var("SMG_LOG_MM_TIMING")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    *LOG_VIDEO_DECODE_TIMING.get_or_init(|| {
+        std::env::var("SMG_LOG_MM_TIMING")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn log_video_decode_backend_timing(
@@ -827,20 +837,24 @@ fn video_temp_suffix(bytes: &[u8]) -> &'static str {
 }
 
 fn video_process_timeout() -> Duration {
-    std::env::var("SMG_VIDEO_PROCESS_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-        .map(Duration::from_secs_f64)
-        .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
+    *VIDEO_PROCESS_TIMEOUT.get_or_init(|| {
+        std::env::var("SMG_VIDEO_PROCESS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(Duration::from_secs_f64)
+            .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
+    })
 }
 
 fn video_max_decoded_bytes() -> usize {
-    std::env::var("SMG_VIDEO_MAX_DECODED_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|bytes| *bytes > 0)
-        .unwrap_or(DEFAULT_VIDEO_MAX_DECODED_BYTES)
+    *VIDEO_MAX_DECODED_BYTES.get_or_init(|| {
+        std::env::var("SMG_VIDEO_MAX_DECODED_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(DEFAULT_VIDEO_MAX_DECODED_BYTES)
+    })
 }
 
 fn ensure_decoded_byte_limit(bytes: usize) -> Result<(), MediaConnectorError> {
