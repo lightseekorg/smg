@@ -15,8 +15,7 @@ use llm_multimodal::vision::{
 #[test]
 #[ignore = "perf microbench; needs REAL_JPEG + PP_CONFIG"]
 fn bench_decode_preprocess() {
-    let jpeg_path = std::env::var("REAL_JPEG")
-        .unwrap_or_else(|_| "/workspace/yechan/runtime_tmp/pp_probe/images/3508.jpg".into());
+    let jpeg_path = std::env::var("REAL_JPEG").expect("set REAL_JPEG to a JPEG path");
     let cfg_path = std::env::var("PP_CONFIG").expect("set PP_CONFIG to preprocessor_config.json");
 
     let bytes = std::fs::read(&jpeg_path).expect("read jpeg");

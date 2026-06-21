@@ -59,8 +59,19 @@ pub fn decode_jpeg_rgb(bytes: &[u8]) -> Option<DynamicImage> {
     if !is_jpeg(bytes) {
         return None;
     }
-    // SAFETY: handle is checked for null; buffers are sized from the decoded
-    // header; the handle is always destroyed before returning.
+    // SAFETY:
+    // - `tjInitDecompress` is null-checked before any use; every early return
+    //   below calls `tjDestroy(handle)` first, so the handle is always freed
+    //   exactly once and never used after destruction.
+    // - `bytes` is a live `&[u8]`; `bytes.as_ptr()`/`bytes.len()` describe a
+    //   valid, immutable region for the duration of the FFI calls (libjpeg-turbo
+    //   only reads it).
+    // - The output `buf` is an owned `Vec<u8>` sized to exactly `w*h*3` (checked
+    //   for overflow above) from the header dimensions, and `buf.as_mut_ptr()`
+    //   is the sole alias passed to the decoder; with `pitch=0` (=> `w*3`) and
+    //   `TJPF_RGB` the decoder writes at most `w*h*3` bytes, so no out-of-bounds
+    //   write occurs. We only construct the image after `rc == 0` confirms the
+    //   buffer was fully and successfully written.
     unsafe {
         let handle = tjInitDecompress();
         if handle.is_null() {
