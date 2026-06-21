@@ -597,6 +597,16 @@ mod tests {
     }
 
     #[test]
+    fn test_passthrough_is_not_load_aware() {
+        // Passthrough must not be polled by the WorkerMonitor: with it as the
+        // default policy (and a passthrough model policy too), the load-aware
+        // set stays empty.
+        let registry = PolicyRegistry::new(PolicyConfig::Passthrough);
+        registry.on_worker_added("m", Some("passthrough"));
+        assert!(registry.get_all_load_aware_policies().is_empty());
+    }
+
+    #[test]
     fn test_default_policy() {
         let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
 

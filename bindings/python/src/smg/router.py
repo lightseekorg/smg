@@ -23,6 +23,7 @@ def policy_from_str(policy_str: str | None) -> PolicyType:
     policy_map = {
         "random": PolicyType.Random,
         "round_robin": PolicyType.RoundRobin,
+        "passthrough": PolicyType.Passthrough,
         "cache_aware": PolicyType.CacheAware,
         "power_of_two": PolicyType.PowerOfTwo,
         "least_load": PolicyType.LeastLoad,

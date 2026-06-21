@@ -155,9 +155,34 @@ pub(crate) fn process_message_content_format(
             messages::Role::Assistant => {
                 result.push(convert_assistant_message(&message.content, content_format));
             }
+            // A `system`-role message in `messages[]` (e.g. from Claude Code) is
+            // forwarded in place, preserving its position in the conversation so
+            // inline-`system` chat templates render it where it was sent.
+            // See https://github.com/lightseekorg/smg/issues/1795
+            messages::Role::System => {
+                result.push(convert_system_message(&message.content));
+            }
         }
         Ok(result)
     })
+}
+
+/// Convert a `system`-role message's content to a chat-template JSON value,
+/// preserving its position in `messages[]`. System content is text; text blocks
+/// are concatenated.
+fn convert_system_message(content: &InputContent) -> Value {
+    let text = match content {
+        InputContent::String(text) => text.clone(),
+        InputContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                InputContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    json!({"role": "system", "content": text})
 }
 
 /// Convert a user message content to JSON values.

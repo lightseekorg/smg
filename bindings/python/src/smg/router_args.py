@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 COMMON_POLICY_CHOICES = [
     "random",
     "round_robin",
+    "passthrough",
     "cache_aware",
     "power_of_two",
     "least_load",
