@@ -73,6 +73,43 @@ pub fn deinterleave_rgb_to_planes(
     debug_assert_eq!(pixels, b_plane.len());
     debug_assert!(rgb.len() >= pixels * 3);
 
+    // Each output element depends only on its own input byte, so banding the
+    // pixel range across threads is BIT-IDENTICAL (elementwise f32, no
+    // reduction). Small images stay serial.
+    let nthreads = par_threads(pixels * 3 * 4, pixels);
+    if nthreads <= 1 {
+        deinterleave_contiguous(rgb, r_plane, g_plane, b_plane, scale, bias);
+        return;
+    }
+    let chunk = pixels.div_ceil(nthreads);
+    let (mut rr, mut gg, mut bb) = (r_plane, g_plane, b_plane);
+    std::thread::scope(|s| {
+        let mut p0 = 0usize;
+        while p0 < pixels {
+            let n = chunk.min(pixels - p0);
+            let (rb, rt) = rr.split_at_mut(n);
+            let (gb, gt) = gg.split_at_mut(n);
+            let (bbnd, bt) = bb.split_at_mut(n);
+            rr = rt;
+            gg = gt;
+            bb = bt;
+            let rgb_band = &rgb[p0 * 3..(p0 + n) * 3];
+            s.spawn(move || deinterleave_contiguous(rgb_band, rb, gb, bbnd, scale, bias));
+            p0 += n;
+        }
+    });
+}
+
+/// Deinterleave a contiguous pixel range (planes/rgb already sliced to the band).
+fn deinterleave_contiguous(
+    rgb: &[u8],
+    r_plane: &mut [f32],
+    g_plane: &mut [f32],
+    b_plane: &mut [f32],
+    scale: [f32; 3],
+    bias: [f32; 3],
+) {
+    let pixels = r_plane.len();
     let full_blocks = pixels / 8;
     let remainder = pixels % 8;
 
@@ -383,7 +420,7 @@ fn pil_clip8(v: i64) -> u8 {
 /// independent fixed-point integer sum, so banding rows over threads yields
 /// BIT-IDENTICAL output (no shared accumulation, inner sum order unchanged).
 /// Small images run serial to avoid thread-spawn overhead.
-fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
+pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
     const PAR_MIN_BYTES: usize = 1 << 19; // ~512 KiB output; below this, serial
     const MIN_ROWS_PER_THREAD: usize = 32; // keep enough work per thread
     const MAX_THREADS: usize = 32; // spawning hundreds of threads costs more than it saves

@@ -32,8 +32,8 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            pil_to_filter, resize, resize_bicubic_pil, resize_rgb_bytes, rgb_bytes, to_tensor,
-            to_tensor_and_normalize, TransformError,
+            par_threads, pil_to_filter, resize, resize_bicubic_pil, resize_rgb_bytes, rgb_bytes,
+            to_tensor, to_tensor_and_normalize, TransformError,
         },
     },
 };
@@ -342,35 +342,89 @@ impl QwenVLProcessorBase {
             .collect();
 
         let merged_patch = merge_size * patch_size;
-        let mut out_idx = base_idx;
+        let pr_blocks = grid_h / merge_size;
+        let pc_blocks = grid_w / merge_size;
+        let n_blocks = grid_t * pr_blocks * pc_blocks;
+        let block_out = merge_size * merge_size * patch_features;
+        // Each (gt,pr,pc) block writes a contiguous, deterministic output
+        // region of pure copies, so banding blocks across threads is
+        // BIT-IDENTICAL. Small grids stay serial.
+        let region = &mut output[base_idx..base_idx + n_blocks * block_out];
+        let nthreads = par_threads(region.len() * 4, n_blocks);
+        if nthreads <= 1 {
+            Self::patchify_block_band(
+                &planes, width, patch_size, merge_size, temporal_patch_size, merged_patch,
+                pr_blocks, pc_blocks, 0, region,
+            );
+        } else {
+            let chunk_blocks = n_blocks.div_ceil(nthreads);
+            let planes_ref = &planes;
+            std::thread::scope(|s| {
+                let mut rest = &mut *region;
+                let mut b0 = 0usize;
+                while b0 < n_blocks {
+                    let nb = chunk_blocks.min(n_blocks - b0);
+                    let (band, tail) = rest.split_at_mut(nb * block_out);
+                    rest = tail;
+                    let start = b0;
+                    s.spawn(move || {
+                        Self::patchify_block_band(
+                            planes_ref, width, patch_size, merge_size, temporal_patch_size,
+                            merged_patch, pr_blocks, pc_blocks, start, band,
+                        )
+                    });
+                    b0 += nb;
+                }
+            });
+        }
 
-        for _gt in 0..grid_t {
-            for pr in 0..grid_h / merge_size {
-                for pc in 0..grid_w / merge_size {
-                    let y0 = pr * merged_patch;
-                    let x0 = pc * merged_patch;
+        Ok(())
+    }
 
-                    for mh in 0..merge_size {
-                        for mw in 0..merge_size {
-                            for plane in &planes {
-                                for _tp in 0..temporal_patch_size {
-                                    for py in 0..patch_size {
-                                        let row = (y0 + mh * patch_size + py) * width
-                                            + x0
-                                            + mw * patch_size;
-                                        output[out_idx..out_idx + patch_size]
-                                            .copy_from_slice(&plane[row..row + patch_size]);
-                                        out_idx += patch_size;
-                                    }
-                                }
+    /// Fill `band` with the patchified output for blocks
+    /// `[block_start, block_start + band.len()/block_out)` in (gt, pr, pc)
+    /// row-major order. Pure gather/copy from `planes`; deterministic and
+    /// independent per block (safe to call concurrently on disjoint bands).
+    #[allow(clippy::too_many_arguments)]
+    fn patchify_block_band(
+        planes: &[&[f32]],
+        width: usize,
+        patch_size: usize,
+        merge_size: usize,
+        temporal_patch_size: usize,
+        merged_patch: usize,
+        pr_blocks: usize,
+        pc_blocks: usize,
+        block_start: usize,
+        band: &mut [f32],
+    ) {
+        let block_out =
+            merge_size * merge_size * planes.len() * temporal_patch_size * patch_size * patch_size;
+        let per_t = pr_blocks * pc_blocks;
+        for (bi, chunk) in band.chunks_mut(block_out).enumerate() {
+            let blk = block_start + bi;
+            let rem = blk % per_t;
+            let pr = rem / pc_blocks;
+            let pc = rem % pc_blocks;
+            let y0 = pr * merged_patch;
+            let x0 = pc * merged_patch;
+            let mut o = 0usize;
+            for mh in 0..merge_size {
+                for mw in 0..merge_size {
+                    for plane in planes {
+                        for _tp in 0..temporal_patch_size {
+                            for py in 0..patch_size {
+                                let row =
+                                    (y0 + mh * patch_size + py) * width + x0 + mw * patch_size;
+                                chunk[o..o + patch_size]
+                                    .copy_from_slice(&plane[row..row + patch_size]);
+                                o += patch_size;
                             }
                         }
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Patchify a sequence of frame tensors into Qwen's video patch layout.
