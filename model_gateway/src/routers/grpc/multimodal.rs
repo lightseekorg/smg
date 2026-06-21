@@ -1473,25 +1473,31 @@ fn write_array_as_u16<F>(
 where
     F: Fn(f32) -> u16 + Copy,
 {
+    // Convert in bounded chunks so peak memory stays at ~CHUNK_VALUES u16s
+    // regardless of tensor size, on both the contiguous and strided paths.
+    const CHUNK_VALUES: usize = 256 * 1024;
+
     if let Some(encoder_slice) = encoder_input
         .as_slice()
         .or_else(|| encoder_input.as_slice_memory_order())
     {
-        let converted: Vec<u16> = encoder_slice.iter().map(|&value| convert(value)).collect();
-        #[cfg(target_endian = "little")]
-        {
-            return writer.write_all(bytemuck::cast_slice(converted.as_slice()));
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            for value in converted {
-                writer.write_all(&value.to_le_bytes())?;
+        let mut converted: Vec<u16> = Vec::with_capacity(CHUNK_VALUES.min(encoder_slice.len()));
+        for chunk in encoder_slice.chunks(CHUNK_VALUES) {
+            converted.clear();
+            converted.extend(chunk.iter().map(|&value| convert(value)));
+            #[cfg(target_endian = "little")]
+            {
+                writer.write_all(bytemuck::cast_slice(converted.as_slice()))?;
             }
-            return Ok(());
+            #[cfg(not(target_endian = "little"))]
+            {
+                for value in &converted {
+                    writer.write_all(&value.to_le_bytes())?;
+                }
+            }
         }
+        return Ok(());
     }
-
-    const CHUNK_VALUES: usize = 256 * 1024;
 
     let mut converted = Vec::with_capacity(CHUNK_VALUES);
     let mut flush = |converted: &mut Vec<u16>| -> std::io::Result<()> {
