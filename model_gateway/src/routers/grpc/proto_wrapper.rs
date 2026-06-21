@@ -430,10 +430,17 @@ pub fn tokenspeed_shm_dev_writable() -> bool {
     *WRITABLE.get_or_init(|| {
         let name = format!("smg-tokenspeed-probe-{}", process::id());
         let path = tokenspeed_shm_path(&name);
-        let ok = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
+        // `create_new` (no clobber) + owner-only mode: /dev/shm is world-writable,
+        // so plain create(truncate) is open to symlink/clobber attacks and the
+        // file would otherwise inherit umask and be world-readable.
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let ok = opts
             .open(&path)
             .and_then(|mut file| file.write_all(b"x"))
             .is_ok();
@@ -504,10 +511,15 @@ pub fn write_tokenspeed_shm_with(
     sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();
     let path = tokenspeed_shm_path(&name);
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    // create_new (no clobber) + owner-only mode in world-writable /dev/shm.
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&path)?;
     let mut writer = BufWriter::new(file);
     if let Err(error) = write_fn(&mut writer) {
         drop(writer);
@@ -580,6 +592,35 @@ pub fn cleanup_tokenspeed_shm_handles(handles: &[tokenspeed::ShmHandle]) {
                 );
             }
         }
+    }
+}
+
+/// Unlink the `/dev/shm` segments backing the encoder inputs of intermediate
+/// `items` (plus an optional just-built `pending` tensor that hasn't been pushed
+/// yet). Used when multimodal assembly aborts partway: the successfully built
+/// `TokenSpeedTensor::Shm` segments would otherwise be dropped without their
+/// handles ever reaching the send-path cleanup hooks, leaking files until the
+/// next process sweep. Only the encoder input uses SHM (model-specific tensors
+/// stay inline). MUST run on the error path only — the success path keeps the
+/// files alive for the worker and unlinks them after the RPC.
+pub(crate) fn cleanup_tokenspeed_items_encoder_shm(
+    items: &[TokenSpeedMultimodalItem],
+    pending: Option<&TokenSpeedTensor>,
+) {
+    let mut handles = Vec::new();
+    let mut push = |tensor: &TokenSpeedTensor| {
+        if let TokenSpeedTensorStorage::Shm(handle) = &tensor.storage {
+            handles.push(handle.clone());
+        }
+    };
+    for item in items {
+        push(&item.encoder_input);
+    }
+    if let Some(tensor) = pending {
+        push(tensor);
+    }
+    if !handles.is_empty() {
+        cleanup_tokenspeed_shm_handles(&handles);
     }
 }
 

@@ -39,8 +39,8 @@ use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
     proto_wrapper::{
-        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode,
-        tokenspeed_shm_dev_writable, write_tokenspeed_shm_with,
+        cleanup_tokenspeed_items_encoder_shm, tokenspeed_mm_shm_min_bytes,
+        tokenspeed_mm_tensor_transport_mode, tokenspeed_shm_dev_writable, write_tokenspeed_shm_with,
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
         TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
     },
@@ -1080,57 +1080,70 @@ fn assemble_tokenspeed(
     };
 
     let item_count = precomputed_multimodal_item_count(&intermediate)?;
-    let items = (0..item_count)
-        .map(|item_index| {
-            let item_encoder_input = encoder_input_for_item(
-                &intermediate.preprocessed,
-                &intermediate.field_layouts,
-                item_index,
-            )?;
-            let encoder_input_started = Instant::now();
-            let encoder_input = serialize_array_as_tokenspeed_tensor(
-                &item_encoder_input,
-                &encoder_input_dtype,
-                shm_enabled,
-            );
-            let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
-            let model_specific_started = Instant::now();
-            let model_specific_tensors = serialize_model_specific_for_item(
-                &intermediate.preprocessed.model_specific,
-                &intermediate.field_layouts,
-                item_index,
-            )?;
-            let model_specific_serialize_ms =
-                model_specific_started.elapsed().as_secs_f64() * 1000.0;
-            let mm_placeholders =
-                placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
-            let content_hash =
-                content_hash_for_item(intermediate.modality, &intermediate, item_index);
-
-            if log_timing {
-                info!(
-                    modality = ?modality,
-                    item_index,
-                    encoder_input_dtype = %encoder_input.dtype,
-                    encoder_input_bytes = encoder_input.nbytes(),
-                    encoder_input_shape = ?encoder_input.shape,
-                    model_specific_tensor_count = model_specific_tensors.len(),
-                    encoder_input_serialize_ms,
-                    model_specific_serialize_ms,
-                    "smg_mm_timing assemble_tokenspeed_item"
-                );
+    // Build items imperatively so that if any step fails partway we can unlink
+    // the /dev/shm segments already created for prior items' encoder inputs
+    // (and this item's, once created). `?`/`collect` would drop those
+    // `TokenSpeedTensor::Shm` handles without ever reaching the send-path
+    // cleanup, leaking files until the next sweep.
+    let mut items: Vec<TokenSpeedMultimodalItem> = Vec::with_capacity(item_count);
+    for item_index in 0..item_count {
+        let item_encoder_input = match encoder_input_for_item(
+            &intermediate.preprocessed,
+            &intermediate.field_layouts,
+            item_index,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup_tokenspeed_items_encoder_shm(&items, None);
+                return Err(error);
             }
+        };
+        let encoder_input_started = Instant::now();
+        let encoder_input =
+            serialize_array_as_tokenspeed_tensor(&item_encoder_input, &encoder_input_dtype, shm_enabled);
+        let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
+        let model_specific_started = Instant::now();
+        let model_specific_tensors = match serialize_model_specific_for_item(
+            &intermediate.preprocessed.model_specific,
+            &intermediate.field_layouts,
+            item_index,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                // `encoder_input` (possibly SHM) was created for this item but the
+                // item isn't built; clean it plus all prior items.
+                cleanup_tokenspeed_items_encoder_shm(&items, Some(&encoder_input));
+                return Err(error);
+            }
+        };
+        let model_specific_serialize_ms = model_specific_started.elapsed().as_secs_f64() * 1000.0;
+        let mm_placeholders =
+            placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
+        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, item_index);
 
-            Ok(TokenSpeedMultimodalItem {
-                modality,
-                encoder_input,
-                model_specific_tensors,
-                placeholder_token_id: intermediate.placeholder_token_id,
-                mm_placeholders,
-                content_hash,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+        if log_timing {
+            info!(
+                modality = ?modality,
+                item_index,
+                encoder_input_dtype = %encoder_input.dtype,
+                encoder_input_bytes = encoder_input.nbytes(),
+                encoder_input_shape = ?encoder_input.shape,
+                model_specific_tensor_count = model_specific_tensors.len(),
+                encoder_input_serialize_ms,
+                model_specific_serialize_ms,
+                "smg_mm_timing assemble_tokenspeed_item"
+            );
+        }
+
+        items.push(TokenSpeedMultimodalItem {
+            modality,
+            encoder_input,
+            model_specific_tensors,
+            placeholder_token_id: intermediate.placeholder_token_id,
+            mm_placeholders,
+            content_hash,
+        });
+    }
 
     if log_timing {
         info!(
