@@ -1,5 +1,7 @@
 """gRPC utility functions."""
 
+from __future__ import annotations
+
 import os
 from array import array
 from collections.abc import Iterable
@@ -14,11 +16,12 @@ import grpc
 # ``array("q")``, which current SGLang requires (see ``to_token_id_array``).
 _TOKEN_ID_ARRAY_ENV = "SGLANG_GRPC_TOKEN_ID_ARRAY"
 _TRUTHY = ("1", "true", "yes")
+_USE_TOKEN_ID_ARRAY = os.getenv(_TOKEN_ID_ARRAY_ENV, "false").strip().lower() in _TRUTHY
 
 
 def _use_token_id_array() -> bool:
     """Whether to emit ``array("q")`` (new contract) vs ``list`` (old contract)."""
-    return os.getenv(_TOKEN_ID_ARRAY_ENV, "false").strip().lower() in _TRUTHY
+    return _USE_TOKEN_ID_ARRAY
 
 
 def to_token_id_array(token_ids: Iterable[int] | None) -> array | list | None:
