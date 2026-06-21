@@ -329,12 +329,24 @@ impl MediaConnector {
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
         let hash = crate::hasher::hash_image(&bytes);
 
-        let cursor = std::io::Cursor::new(bytes.clone());
-        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
-
-        let image = task::spawn_blocking(move || reader.decode())
-            .await
-            .map_err(MediaConnectorError::Blocking)??;
+        // Decode JPEGs through libjpeg-turbo (PIL-compatible defaults: accurate
+        // IDCT + fancy upsampling) so pixel values match vLLM bit-for-bit; the
+        // pure-Rust decoder diverges by a few levels, which the vision encoder
+        // amplifies into an embedding shift. Non-JPEG inputs and any turbojpeg
+        // failure fall back to the `image` crate.
+        let bytes_for_decode = bytes.clone();
+        let image = task::spawn_blocking(
+            move || -> Result<image::DynamicImage, MediaConnectorError> {
+                if let Some(img) = crate::jpeg_turbo::decode_jpeg_rgb(&bytes_for_decode) {
+                    return Ok(img);
+                }
+                let cursor = std::io::Cursor::new(bytes_for_decode);
+                let reader = image::ImageReader::new(cursor).with_guessed_format()?;
+                Ok(reader.decode()?)
+            },
+        )
+        .await
+        .map_err(MediaConnectorError::Blocking)??;
 
         Ok(Arc::new(ImageFrame::new(
             image, bytes, detail, source, hash,

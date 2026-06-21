@@ -23,7 +23,7 @@
 
 use std::borrow::Cow;
 
-use image::{DynamicImage, GenericImageView};
+use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3};
 
 use crate::{
@@ -32,8 +32,8 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            pil_to_filter, resize, resize_rgb_bytes, rgb_bytes, to_tensor, to_tensor_and_normalize,
-            TransformError,
+            pil_to_filter, resize, resize_bicubic_pil, resize_rgb_bytes, rgb_bytes, to_tensor,
+            to_tensor_and_normalize, TransformError,
         },
     },
 };
@@ -575,7 +575,13 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             let needs_resize = config.do_resize.unwrap_or(true) && (w != tw32 || h != th32);
             let resized;
             let img_ref = if needs_resize {
-                resized = resize(image, tw32, th32, filter);
+                // BICUBIC (Qwen default) must match PIL bit-for-bit so encoder
+                // inputs equal HF/vLLM; other filters keep the SIMD path.
+                resized = if filter == FilterType::CatmullRom {
+                    resize_bicubic_pil(image, tw32, th32)
+                } else {
+                    resize(image, tw32, th32, filter)
+                };
                 &resized
             } else {
                 image

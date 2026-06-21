@@ -1,6 +1,7 @@
 pub mod error;
 pub mod hasher;
 pub mod hub;
+pub mod jpeg_turbo;
 pub mod media;
 pub mod registry;
 pub mod tracker;
