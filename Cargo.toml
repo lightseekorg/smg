@@ -22,31 +22,31 @@ smg-grpc-client = { version = "1.7.0", path = "crates/grpc_client" }
 anyhow = "1.0"
 async-trait = "0.1"
 futures = "0.3"
-prost = "0.14.1"
-prost-types = "0.14.1"
-tonic = { version = "0.14.2", features = ["gzip", "transport"] }
-tonic-prost = "0.14.2"
-axum = { version = "0.8.6" }
-blake3 = "1.5"
+prost = "0.14.4"
+prost-types = "0.14.4"
+tonic = { version = "0.14.6", features = ["gzip", "transport"] }
+tonic-prost = "0.14.6"
+axum = { version = "0.8.9" }
+blake3 = "1.8"
 lz4_flex = "0.13"
-bytemuck = { version = "1.21" }
+bytemuck = { version = "1.25" }
 chrono = { version = "0.4" }
-dashmap = "6.1.0"
-http = "1.1.0"
+dashmap = "6.2.1"
+http = "1.4.2"
 lru = "0.18.0"
 num-traits = "0.2"
-parking_lot = "0.12.4"
+parking_lot = "0.12.5"
 rand = "0.10.1"
 reqwest = { version = "0.12.8", default-features = false }
 serde = { version = "1.0" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_with = { version = "3", features = ["macros"] }
 subtle = "2.6"
-thiserror = "2.0.12"
-tokio = { version = "1.42.0" }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
-uuid = { version = "1.10", features = ["v7", "serde"] }
+uuid = { version = "1.23", features = ["v7", "serde"] }
 wasmtime = { version = "45.0", features = ["component-model", "async"] }
 wasmtime-wasi = "45.0"
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -55,7 +55,7 @@ webpki-roots = "1.0"
 multer = "3"
 str0m = { version = "0.20", default-features = false, features = ["openssl"] }
 scopeguard = "1.2"
-bitflags = "2.10.0"
+bitflags = "2.13.0"
 schemars = "1.2"
 
 [workspace.lints.rust]

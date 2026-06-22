@@ -34,12 +34,12 @@ futures.workspace = true
 
 # Archive validation
 sha2 = "0.11"
-zip = "8.1"
-tempfile = "3.8"
+zip = "8.6"
+tempfile = "3.27"
 
 [build-dependencies]
-tonic-prost-build = "0.14.2"
-prost-build = "0.14.1"
+tonic-prost-build = "0.14.6"
+prost-build = "0.14.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
