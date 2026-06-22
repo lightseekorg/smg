@@ -718,15 +718,11 @@ mod tests {
     fn create_test_tool(name: &str) -> McpTool {
         use std::{borrow::Cow, sync::Arc};
 
-        McpTool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(format!("Test tool: {name}"))),
-            input_schema: Arc::new(serde_json::Map::new()),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        }
+        McpTool::new(
+            Cow::Owned(name.to_string()),
+            Cow::Owned(format!("Test tool: {name}")),
+            Arc::new(serde_json::Map::new()),
+        )
     }
 
     #[test]

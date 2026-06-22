@@ -261,17 +261,16 @@ impl MockSearchResponseServer {
 #[tool_handler]
 impl ServerHandler for MockSearchServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Mock server for testing".to_string()),
-        }
+        // `ServerInfo`/`InitializeResult` is `#[non_exhaustive]` in rmcp 1.7;
+        // build via the constructor instead of a struct literal.
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions("Mock server for testing")
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         Ok(self.get_info())
@@ -333,17 +332,14 @@ impl MockFailingSearchServer {
 #[tool_handler]
 impl ServerHandler for MockFailingSearchServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Mock failing server for testing".to_string()),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions("Mock failing server for testing")
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         Ok(self.get_info())
@@ -353,17 +349,14 @@ impl ServerHandler for MockFailingSearchServer {
 #[tool_handler]
 impl ServerHandler for MockSearchResponseServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Mock search response server for testing".to_string()),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions("Mock search response server for testing")
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         Ok(self.get_info())
@@ -477,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_failing_server_startup() {
         use rmcp::{
-            model::CallToolRequestParam, transport::StreamableHttpClientTransport, ServiceExt,
+            model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt,
         };
 
         let mut server = MockFailingMCPServer::start("marker").await.unwrap();
@@ -488,17 +481,14 @@ mod tests {
         let client = ().serve(transport).await.expect("connect failing mock server");
 
         let err = client
-            .call_tool(CallToolRequestParam {
-                name: "brave_web_search".into(),
-                arguments: Some(
-                    serde_json::json!({
-                        "query": "smoke"
-                    })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
+            .call_tool(
+                CallToolRequestParams::new("brave_web_search").with_arguments(
+                    serde_json::json!({ "query": "smoke" })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
                 ),
-            })
+            )
             .await
             .expect_err("failing mock tool call should error");
         assert!(err.to_string().contains("marker"));

@@ -233,15 +233,11 @@ mod tests {
             serde_json::Map::new()
         };
 
-        Tool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(format!("Test tool: {name}"))),
-            input_schema: Arc::new(schema_map),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        }
+        Tool::new(
+            Cow::Owned(name.to_string()),
+            Cow::Owned(format!("Test tool: {name}")),
+            Arc::new(schema_map),
+        )
     }
 
     #[test]

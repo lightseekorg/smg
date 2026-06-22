@@ -441,15 +441,7 @@ mod tests {
             }),
         );
 
-        Tool {
-            name: name.to_string().into(),
-            title: None,
-            description: Some("internal".into()),
-            input_schema: schema.into(),
-            output_schema: None,
-            icons: None,
-            annotations: None,
-        }
+        Tool::new(name.to_string(), "internal", schema)
     }
 
     #[tokio::test]

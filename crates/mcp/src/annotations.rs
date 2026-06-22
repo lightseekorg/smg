@@ -85,13 +85,13 @@ mod tests {
 
     #[test]
     fn test_from_rmcp() {
-        let rmcp = RmcpToolAnnotations {
-            read_only_hint: Some(true),
-            destructive_hint: Some(false),
-            idempotent_hint: Some(true),
-            open_world_hint: Some(false),
-            title: None,
-        };
+        // `RmcpToolAnnotations` is `#[non_exhaustive]` in rmcp 1.7; build via
+        // the chained setters instead of a struct literal.
+        let rmcp = RmcpToolAnnotations::new()
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(false);
         let ann = ToolAnnotations::from_rmcp(&rmcp);
         assert!(ann.read_only);
         assert!(!ann.destructive);
@@ -99,13 +99,7 @@ mod tests {
 
     #[test]
     fn test_conservative_defaults() {
-        let rmcp = RmcpToolAnnotations {
-            read_only_hint: None,
-            destructive_hint: None,
-            idempotent_hint: None,
-            open_world_hint: None,
-            title: None,
-        };
+        let rmcp = RmcpToolAnnotations::new();
         let ann = ToolAnnotations::from_rmcp(&rmcp);
         assert!(!ann.read_only); // assume writes
         assert!(ann.destructive); // assume dangerous

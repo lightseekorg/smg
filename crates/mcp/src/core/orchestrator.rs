@@ -38,7 +38,7 @@ use std::{
 
 use dashmap::DashMap;
 use rmcp::{
-    model::{CallToolRequestParam, CallToolResult},
+    model::{CallToolRequestParams, CallToolResult},
     service::{RunningService, ServiceError},
     RoleClient,
 };
@@ -116,6 +116,16 @@ fn build_http_client(
     builder
         .build()
         .map_err(|e| McpError::Transport(format!("build HTTP client: {e}")))
+}
+
+/// rmcp 1.7 dropped the standalone SSE client transport (HTTP+SSE was
+/// superseded by Streamable HTTP in the MCP spec). Servers still configured
+/// with `protocol: sse` get a clear error pointing at the replacement.
+fn sse_unsupported(server_name: &str) -> McpError {
+    McpError::Transport(format!(
+        "server '{server_name}': the SSE client transport was removed in rmcp 1.7; \
+         use 'protocol: streamable' instead"
+    ))
 }
 
 /// Type alias for MCP client with handler.
@@ -517,9 +527,8 @@ impl McpOrchestrator {
     ) -> McpResult<McpClientWithHandler> {
         use rmcp::{
             transport::{
-                sse_client::SseClientConfig,
                 streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-                SseClientTransport, StreamableHttpClientTransport, TokioChildProcess,
+                StreamableHttpClientTransport, TokioChildProcess,
             },
             ServiceExt,
         };
@@ -544,30 +553,7 @@ impl McpOrchestrator {
                 })
             }
 
-            McpTransport::Sse {
-                url,
-                token,
-                headers: custom_headers,
-            } => {
-                let proxy_config =
-                    super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
-                let http_client =
-                    build_http_client(proxy_config, token.as_deref(), custom_headers)?;
-
-                let sse_config = SseClientConfig {
-                    sse_endpoint: url.clone().into(),
-                    ..Default::default()
-                };
-
-                let transport = SseClientTransport::start_with_client(http_client, sse_config)
-                    .await
-                    .map_err(|e| McpError::Transport(format!("create SSE transport: {e}")))?;
-
-                handler
-                    .serve(transport)
-                    .await
-                    .map_err(|e| McpError::ConnectionFailed(format!("initialize SSE client: {e}")))
-            }
+            McpTransport::Sse { .. } => Err(sse_unsupported(&config.name)),
 
             McpTransport::Streamable {
                 url,
@@ -1075,17 +1061,12 @@ impl McpOrchestrator {
         // LLMs often return numbers as strings (e.g., "5" instead of 5)
         Self::coerce_arg_types(&mut arguments, &entry.tool.input_schema);
 
-        // Build request
-        let args_map = if let Value::Object(map) = arguments {
-            Some(map)
-        } else {
-            None
-        };
-
-        let request = CallToolRequestParam {
-            name: Cow::Owned(target_tool),
-            arguments: args_map,
-        };
+        // Build request. `CallToolRequestParams` is `#[non_exhaustive]` in rmcp
+        // 1.7 (added `meta`/`task`), so construct via the builder.
+        let mut request = CallToolRequestParams::new(Cow::Owned(target_tool));
+        if let Value::Object(map) = arguments {
+            request = request.with_arguments(map);
+        }
 
         // Execute on server
         self.execute_on_server(&target_server, request).await
@@ -1160,7 +1141,7 @@ impl McpOrchestrator {
     async fn execute_on_server(
         &self,
         server_key: &str,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
     ) -> McpResult<CallToolResult> {
         if let Some(entry) = self.static_servers.get(server_key) {
             return entry.client.call_tool(request).await.map_err(|e| match e {
@@ -1321,8 +1302,7 @@ impl McpOrchestrator {
     ) -> McpResult<String> {
         use rmcp::{
             transport::{
-                sse_client::SseClientConfig,
-                streamable_http_client::StreamableHttpClientTransportConfig, SseClientTransport,
+                streamable_http_client::StreamableHttpClientTransportConfig,
                 StreamableHttpClientTransport,
             },
             ServiceExt,
@@ -1364,32 +1344,7 @@ impl McpOrchestrator {
                             .await
                             .map_err(|e| McpError::ConnectionFailed(format!("streamable: {e}")))
                     }
-                    McpTransport::Sse {
-                        url,
-                        token,
-                        headers: custom_headers,
-                    } => {
-                        let proxy_config =
-                            super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
-                        let http_client =
-                            build_http_client(proxy_config, token.as_deref(), custom_headers)?;
-
-                        let sse_config = SseClientConfig {
-                            sse_endpoint: url.clone().into(),
-                            ..Default::default()
-                        };
-
-                        let transport =
-                            SseClientTransport::start_with_client(http_client, sse_config)
-                                .await
-                                .map_err(|e| {
-                                    McpError::Transport(format!("create SSE transport: {e}"))
-                                })?;
-
-                        ().serve(transport)
-                            .await
-                            .map_err(|e| McpError::ConnectionFailed(format!("SSE: {e}")))
-                    }
+                    McpTransport::Sse { .. } => Err(sse_unsupported(&cfg.name)),
                     McpTransport::Stdio { .. } => Err(McpError::Transport(
                         "Stdio not supported for dynamic connections".to_string(),
                     )),
@@ -1755,15 +1710,11 @@ mod tests {
     fn create_test_tool(name: &str) -> McpTool {
         use std::sync::Arc;
 
-        McpTool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(format!("Test tool: {name}"))),
-            input_schema: Arc::new(serde_json::Map::new()),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        }
+        McpTool::new(
+            Cow::Owned(name.to_string()),
+            Cow::Owned(format!("Test tool: {name}")),
+            Arc::new(serde_json::Map::new()),
+        )
     }
     #[tokio::test]
     async fn test_orchestrator_graceful_shutdown_flow() {
