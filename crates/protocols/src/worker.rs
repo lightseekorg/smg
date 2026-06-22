@@ -543,12 +543,12 @@ impl<'de> Deserialize<'de> for WorkerModels {
 
 /// JsonSchema: wire format is `Vec<ModelCard>`.
 impl JsonSchema for WorkerModels {
-    fn schema_name() -> String {
-        "WorkerModels".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WorkerModels".into()
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        Vec::<ModelCard>::json_schema(gen)
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        Vec::<ModelCard>::json_schema(generator)
     }
 }
 
