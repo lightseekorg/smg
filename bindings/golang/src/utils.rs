@@ -1,10 +1,8 @@
 //! Utility functions for FFI
 
-use llm_tokenizer::{
-    chat_template::{ThinkingKeyName, ThinkingToggle},
-    traits::Tokenizer,
-};
+use llm_tokenizer::traits::Tokenizer;
 use openai_protocol::chat::ChatCompletionRequest;
+use smg::routers::grpc::utils::{extract_thinking_from_kwargs, should_mark_reasoning_started};
 use uuid::Uuid;
 
 /// Helper function to generate tool call ID (matches router implementation)
@@ -33,19 +31,8 @@ pub(crate) fn chat_requires_reasoning(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
 ) -> bool {
-    let user_thinking = request
-        .chat_template_kwargs
-        .as_ref()
-        .and_then(|kwargs| match tokenizer.thinking_key_name() {
-            Some(ThinkingKeyName::EnableThinking) => kwargs.get("enable_thinking"),
-            Some(ThinkingKeyName::Thinking) => kwargs.get("thinking"),
-            None => None,
-        })
-        .and_then(|value| value.as_bool());
-
-    match tokenizer.thinking_toggle() {
-        ThinkingToggle::None => false,
-        ThinkingToggle::DefaultOn => user_thinking != Some(false),
-        ThinkingToggle::DefaultOff => user_thinking == Some(true),
-    }
+    should_mark_reasoning_started(
+        extract_thinking_from_kwargs(request.chat_template_kwargs.as_ref(), tokenizer),
+        tokenizer,
+    )
 }

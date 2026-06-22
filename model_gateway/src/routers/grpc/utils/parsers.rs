@@ -16,7 +16,7 @@ use tracing::warn;
 ///
 /// `user_thinking`: `Some(true)` = user enabled thinking, `Some(false)` = user
 /// disabled it, `None` = not specified (use template default).
-pub(crate) fn should_mark_reasoning_started(
+pub fn should_mark_reasoning_started(
     user_thinking: Option<bool>,
     tokenizer: &dyn Tokenizer,
 ) -> bool {
@@ -32,7 +32,7 @@ pub(crate) fn should_mark_reasoning_started(
 /// Only checks the key that the template actually uses (e.g. `enable_thinking`
 /// for Qwen3, `thinking` for Kimi-K2.5). This prevents mismatches where the
 /// user passes the wrong key name and the template ignores it.
-pub(crate) fn extract_thinking_from_kwargs(
+pub fn extract_thinking_from_kwargs(
     kwargs: Option<&std::collections::HashMap<String, Value>>,
     tokenizer: &dyn Tokenizer,
 ) -> Option<bool> {
