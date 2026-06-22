@@ -24,9 +24,7 @@ futures.workspace = true
 dashmap.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
-# rmcp 1.7 requires reqwest 0.13 (its `StreamableHttpClient` impl is on
-# reqwest 0.13's `Client`); pin here rather than via the workspace 0.12.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml = "0.9"
