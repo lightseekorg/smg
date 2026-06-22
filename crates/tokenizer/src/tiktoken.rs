@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use tiktoken_rs::{
     cl100k_base, o200k_base, p50k_base, p50k_edit, r50k_base,
     tokenizer::{get_tokenizer, Tokenizer},
-    CoreBPE,
+    CoreBPE, DecodeKeyError,
 };
 
 use crate::{
@@ -480,7 +480,7 @@ impl Encoder for TiktokenTokenizer {
 
 impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
-        match self.tokenizer.decode(token_ids.to_vec()) {
+        match self.tokenizer.decode(token_ids) {
             Ok(text) => Ok(text),
             Err(err) if is_unknown_tiktoken_decode_error(&err) => Err(Error::msg(format!(
                 "tiktoken decode failed for unknown token id: {err}"
@@ -506,12 +506,11 @@ impl Decoder for TiktokenTokenizer {
 /// Detect tiktoken's "unknown token id" error so we can surface a clean error
 /// instead of letting the lossy-decode fallback panic on a missing key.
 ///
-/// We match on the `Display` string because tiktoken-rs's `DecodeKeyError` lives
-/// in a private `vendor_tiktoken` module and isn't re-exported (as of 0.9.1),
-/// so a typed `downcast_ref` is not available. The message format is stable —
-/// see `vendor_tiktoken::DecodeKeyError::fmt` upstream.
+/// `CoreBPE::decode` surfaces a missing-token id as a `DecodeKeyError` (now
+/// re-exported as of tiktoken-rs 0.12), while UTF-8 failures arrive as a plain
+/// string error — so a typed `downcast_ref` cleanly separates the two cases.
 fn is_unknown_tiktoken_decode_error(err: &Error) -> bool {
-    err.to_string().starts_with("Invalid token for decoding:")
+    err.downcast_ref::<DecodeKeyError>().is_some()
 }
 
 impl TokenizerTrait for TiktokenTokenizer {
