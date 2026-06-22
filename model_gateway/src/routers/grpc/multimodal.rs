@@ -10,11 +10,11 @@
 //! `InputMessage`).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     mem::size_of,
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -39,11 +39,10 @@ use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
     proto_wrapper::{
-        cleanup_tokenspeed_items_encoder_shm, tokenspeed_mm_shm_min_bytes,
-        tokenspeed_mm_tensor_transport_mode, tokenspeed_shm_dev_writable,
-        write_tokenspeed_shm_with, SglangMultimodalData, TensorBytes, TokenSpeedModality,
-        TokenSpeedMultimodalData, TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData,
-        VllmMultimodalData,
+        cleanup_tokenspeed_items_encoder_shm, mm_shm_dev_writable, mm_shm_min_bytes_env,
+        mm_tensor_transport_mode_env, write_mm_shm_with, SglangMultimodalData, TensorBytes,
+        TokenSpeedModality, TokenSpeedMultimodalData, TokenSpeedMultimodalItem, TokenSpeedTensor,
+        TrtllmMultimodalData, VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -238,6 +237,42 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
     }
 }
 
+/// Built-in default multimodal tensor transport mode.
+const DEFAULT_MM_TENSOR_TRANSPORT: &str = "inline";
+/// Built-in default minimum tensor size (bytes) before the SHM transport is used.
+const DEFAULT_MM_SHM_MIN_BYTES: usize = 64 * 1024;
+
+/// Resolved global multimodal tensor-transport settings, computed once at router
+/// init (router config → `SMG_MM_*` env → built-in default) and stored on
+/// `MultimodalComponents`, so the multimodal subsystem never depends on
+/// `RouterConfig`. Per-worker `WorkerSpec` values override these per request.
+#[derive(Debug, Clone)]
+pub(crate) struct MmTransportConfig {
+    /// Transport mode: `inline` | `shm` | `auto`.
+    pub mode: String,
+    /// Minimum tensor size (bytes) before the SHM transport is used.
+    pub shm_min_bytes: usize,
+}
+
+impl MmTransportConfig {
+    /// Resolve the global config: explicit (router-config) values win, then
+    /// `SMG_MM_*` env vars, then built-in defaults.
+    pub fn resolve(mode: Option<&str>, shm_min_bytes: Option<usize>) -> Self {
+        let mode = mode
+            .map(|mode| mode.trim().to_ascii_lowercase())
+            .filter(|mode| !mode.is_empty())
+            .or_else(mm_tensor_transport_mode_env)
+            .unwrap_or_else(|| DEFAULT_MM_TENSOR_TRANSPORT.to_string());
+        let shm_min_bytes = shm_min_bytes
+            .or_else(mm_shm_min_bytes_env)
+            .unwrap_or(DEFAULT_MM_SHM_MIN_BYTES);
+        Self {
+            mode,
+            shm_min_bytes,
+        }
+    }
+}
+
 /// Shared multimodal components injected at router creation time.
 pub(crate) struct MultimodalComponents {
     pub media_connector: Arc<MediaConnector>,
@@ -245,12 +280,18 @@ pub(crate) struct MultimodalComponents {
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
+    /// Resolved global tensor-transport config (worker specs override per request).
+    pub transport: MmTransportConfig,
 }
 
 impl MultimodalComponents {
-    /// Create multimodal components with default registries and a reference
-    /// to the shared `MultimodalConfigRegistry` owned by `AppContext`.
-    pub fn new(config_registry: Arc<MultimodalConfigRegistry>) -> Result<Self> {
+    /// Create multimodal components with default registries, a reference to the
+    /// shared `MultimodalConfigRegistry` owned by `AppContext`, and the resolved
+    /// global tensor-transport config.
+    pub fn new(
+        config_registry: Arc<MultimodalConfigRegistry>,
+        transport: MmTransportConfig,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -263,6 +304,7 @@ impl MultimodalComponents {
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
+            transport,
         })
     }
 }
@@ -953,6 +995,7 @@ pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
+    transport: Option<&MmTransportConfig>,
 ) -> Result<MultimodalData> {
     match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
@@ -961,8 +1004,12 @@ pub(crate) fn assemble_multimodal_data(
                 Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
             }
             GrpcClient::Vllm(_) => {
-                ensure_image_only(&precomputed, "vLLM")?;
-                Ok(MultimodalData::Vllm(assemble_vllm(precomputed)))
+                ensure_image_or_video(&precomputed, "vLLM")?;
+                Ok(MultimodalData::Vllm(assemble_vllm(
+                    precomputed,
+                    workers,
+                    transport,
+                )))
             }
             GrpcClient::Trtllm(_) => {
                 ensure_image_only(&precomputed, "TRT-LLM")?;
@@ -971,6 +1018,7 @@ pub(crate) fn assemble_multimodal_data(
             GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
                 precomputed,
                 workers,
+                transport,
             )?)),
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
@@ -986,6 +1034,19 @@ fn ensure_image_only(
     if intermediate.modality != Modality::Image {
         return Err(anyhow::anyhow!(
             "{backend} multimodal path currently supports image inputs only; got {}",
+            intermediate.modality
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_image_or_video(
+    intermediate: &PrecomputedMultimodalIntermediate,
+    backend: &str,
+) -> Result<()> {
+    if !matches!(intermediate.modality, Modality::Image | Modality::Video) {
+        return Err(anyhow::anyhow!(
+            "{backend} multimodal path supports image and video inputs only; got {}",
             intermediate.modality
         ));
     }
@@ -1022,10 +1083,19 @@ fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMul
     }
 }
 
-fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
+fn assemble_vllm(
+    intermediate: PrecomputedMultimodalIntermediate,
+    workers: Option<&WorkerSelection>,
+    transport: Option<&MmTransportConfig>,
+) -> VllmMultimodalData {
+    let is_video = intermediate.modality == Modality::Video;
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
-    let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
+    let mm_hashes = if is_video {
+        intermediate.videos.iter().map(|v| v.hash.clone()).collect()
+    } else {
+        intermediate.images.iter().map(|f| f.hash.clone()).collect()
+    };
     let mm_placeholders = intermediate
         .placeholders
         .iter()
@@ -1033,6 +1103,8 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
         .collect();
     let batched_keys = PreprocessedEncoderInputs::batched_keys(&intermediate.field_layouts);
     let flat_keys = PreprocessedEncoderInputs::flat_keys(&intermediate.field_layouts);
+    let shm_enabled = resolve_mm_shm_enabled(workers, transport);
+    let shm_min_bytes = resolve_mm_shm_min_bytes(workers, transport);
 
     VllmMultimodalData {
         pixel_values,
@@ -1044,6 +1116,9 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
         batched_keys,
         flat_keys,
         keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
+        is_video,
+        shm_enabled,
+        shm_min_bytes,
     }
 }
 
@@ -1059,13 +1134,15 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
 fn assemble_tokenspeed(
     intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
+    transport: Option<&MmTransportConfig>,
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
     // Resolve the multimodal tensor transport once per request: `shm` always on,
     // `auto` only when the worker is verified to share /dev/shm (matching
     // namespace token), otherwise inline. See `worker_shares_dev_shm`.
-    let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
+    let shm_enabled = resolve_mm_shm_enabled(workers, transport);
+    let shm_min_bytes = resolve_mm_shm_min_bytes(workers, transport);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
     let patch_offsets = intermediate
@@ -1105,6 +1182,7 @@ fn assemble_tokenspeed(
             &item_encoder_input,
             &encoder_input_dtype,
             shm_enabled,
+            shm_min_bytes,
         );
         let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
         let model_specific_started = Instant::now();
@@ -1159,7 +1237,11 @@ fn assemble_tokenspeed(
         );
     }
 
-    Ok(TokenSpeedMultimodalData { items, shm_enabled })
+    Ok(TokenSpeedMultimodalData {
+        items,
+        shm_enabled,
+        shm_min_bytes,
+    })
 }
 
 fn precomputed_multimodal_item_count(
@@ -1377,6 +1459,7 @@ fn serialize_array_as_tokenspeed_tensor(
     encoder_input: &ArrayD<f32>,
     dtype: &str,
     shm_enabled: bool,
+    shm_min_bytes: usize,
 ) -> TokenSpeedTensor {
     let dtype = match canonical_float_dtype(dtype).as_deref() {
         Some("float32") => "float32".to_string(),
@@ -1398,9 +1481,9 @@ fn serialize_array_as_tokenspeed_tensor(
     };
     let nbytes = encoder_input.len() * element_size;
 
-    if shm_enabled && nbytes >= tokenspeed_mm_shm_min_bytes() {
+    if shm_enabled && nbytes >= shm_min_bytes {
         let started = Instant::now();
-        match write_tokenspeed_shm_with(nbytes, |file| {
+        match write_mm_shm_with(nbytes, |file| {
             write_array_as_dtype(file, encoder_input, &dtype)
         }) {
             Ok(handle) => {
@@ -1659,44 +1742,97 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
 }
 
 /// Resolve whether large multimodal tensors should use the SHM transport for
-/// this request. `shm` = always (legacy explicit opt-in); `auto` = only when the
-/// worker is known to share SMG's `/dev/shm`; anything else (including unset or
-/// `inline`) keeps the inline gRPC path.
-fn resolve_tokenspeed_shm_enabled(workers: Option<&WorkerSelection>) -> bool {
-    let mode = tokenspeed_mm_tensor_transport_mode();
-    log_tokenspeed_transport_config_once(&mode);
+/// this request. Precedence: per-worker `WorkerSpec` override → resolved global
+/// `transport` → `inline`. `shm` = always (explicit opt-in); `auto` = only when
+/// the worker is known to share SMG's `/dev/shm`; anything else keeps inline.
+fn resolve_mm_shm_enabled(
+    workers: Option<&WorkerSelection>,
+    transport: Option<&MmTransportConfig>,
+) -> bool {
+    log_mm_transport_config_once(transport);
+    let global_mode = transport
+        .map(|transport| transport.mode.as_str())
+        .unwrap_or(DEFAULT_MM_TENSOR_TRANSPORT);
+    let mode = worker_transport_mode_override(workers).unwrap_or_else(|| global_mode.to_string());
     match mode.as_str() {
         // SHM only ever happens when SMG can actually write /dev/shm.
-        "shm" => tokenspeed_shm_dev_writable(),
-        "auto" => worker_shares_dev_shm(workers) && tokenspeed_shm_dev_writable(),
+        "shm" => mm_shm_dev_writable(),
+        "auto" => worker_shares_dev_shm(workers) && mm_shm_dev_writable(),
         "" | "inline" => false,
         other => {
-            log_unknown_tokenspeed_transport_once(other);
+            log_unknown_mm_transport_once(other);
             false
         }
     }
 }
 
-fn log_tokenspeed_transport_config_once(mode: &str) {
+/// Resolve the minimum tensor size (bytes) before SHM is used for this request.
+/// Precedence: per-worker `WorkerSpec` override → resolved global → built-in default.
+fn resolve_mm_shm_min_bytes(
+    workers: Option<&WorkerSelection>,
+    transport: Option<&MmTransportConfig>,
+) -> usize {
+    worker_shm_min_bytes_override(workers)
+        .or_else(|| transport.map(|transport| transport.shm_min_bytes))
+        .unwrap_or(DEFAULT_MM_SHM_MIN_BYTES)
+}
+
+/// Per-worker `multimodal_tensor_transport` override from the selected worker's spec.
+fn worker_transport_mode_override(workers: Option<&WorkerSelection>) -> Option<String> {
+    let worker = match workers? {
+        WorkerSelection::Single { worker } => worker,
+        WorkerSelection::Dual { prefill, .. } => prefill,
+    };
+    worker
+        .metadata()
+        .spec
+        .multimodal_tensor_transport
+        .as_ref()
+        .map(|mode| mode.trim().to_ascii_lowercase())
+        .filter(|mode| !mode.is_empty())
+}
+
+/// Per-worker `multimodal_shm_min_bytes` override from the selected worker's spec.
+fn worker_shm_min_bytes_override(workers: Option<&WorkerSelection>) -> Option<usize> {
+    let worker = match workers? {
+        WorkerSelection::Single { worker } => worker,
+        WorkerSelection::Dual { prefill, .. } => prefill,
+    };
+    worker.metadata().spec.multimodal_shm_min_bytes
+}
+
+fn log_mm_transport_config_once(transport: Option<&MmTransportConfig>) {
     static LOGGED: OnceLock<()> = OnceLock::new();
     LOGGED.get_or_init(|| {
+        let mode = transport
+            .map(|transport| transport.mode.as_str())
+            .unwrap_or(DEFAULT_MM_TENSOR_TRANSPORT);
+        let shm_min_bytes = transport
+            .map(|transport| transport.shm_min_bytes)
+            .unwrap_or(DEFAULT_MM_SHM_MIN_BYTES);
         info!(
             mode,
-            shm_min_bytes = tokenspeed_mm_shm_min_bytes(),
-            dev_writable = tokenspeed_shm_dev_writable(),
-            "TokenSpeed multimodal tensor transport configured"
+            shm_min_bytes,
+            dev_writable = mm_shm_dev_writable(),
+            "Multimodal tensor transport configured (global default; worker specs may override)"
         );
     });
 }
 
-fn log_unknown_tokenspeed_transport_once(value: &str) {
-    static WARNED: OnceLock<()> = OnceLock::new();
-    WARNED.get_or_init(|| {
+fn log_unknown_mm_transport_once(value: &str) {
+    // Dedupe per distinct value so a second worker misconfigured with a
+    // different typo still surfaces a warning (not just the first one ever).
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.insert(value.to_string()) {
         warn!(
             value,
-            "Unknown SMG_TOKENSPEED_MM_TENSOR_TRANSPORT value; expected inline|shm|auto, using inline"
+            "Unknown multimodal tensor transport value; expected inline|shm|auto, using inline"
         );
-    });
+    }
 }
 
 /// Whether the worker is *verified* to share SMG's `/dev/shm`, making the SHM
@@ -2178,7 +2314,7 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(intermediate, None, None).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];
@@ -2284,7 +2420,7 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(intermediate, None, None).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];

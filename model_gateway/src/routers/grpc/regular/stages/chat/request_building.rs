@@ -89,7 +89,12 @@ impl PipelineStage for ChatRequestBuildingStage {
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| {
-                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                assemble_multimodal_data(
+                    intermediate,
+                    builder_client,
+                    ctx.state.workers.as_ref(),
+                    ctx.components.multimodal.as_ref().map(|mm| &mm.transport),
+                )
             })
             .transpose()
             .map_err(|e| {

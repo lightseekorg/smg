@@ -92,3 +92,26 @@ message ProfileResponse {
   bool success = 1;
   string message = 2;
 }
+
+// =====================
+// Multimodal Tensor Transport
+// =====================
+//
+// Out-of-band transport descriptors for large multimodal tensor payloads,
+// shared by every engine's TensorData. The raw tensor bytes live in exactly
+// one transport; the engine's TensorData carries shape and dtype.
+
+message ShmHandle {
+  string name = 1;
+  uint64 offset = 2;
+  uint64 nbytes = 3;
+  // Producer/lifetime owner. Used by implementations to coordinate cleanup.
+  string owner_id = 4;
+}
+
+message RemoteTensorHandle {
+  // Examples: "nixl", "ucx", "object_store".
+  string transport = 1;
+  bytes descriptor = 2;
+  uint64 nbytes = 3;
+}

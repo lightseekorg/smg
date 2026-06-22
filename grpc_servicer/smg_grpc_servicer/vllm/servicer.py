@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import math
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ from vllm.multimodal.inputs import (
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
+from smg_grpc_servicer import mm_shm
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 from smg_grpc_servicer.vllm.kv_events import (
     endpoint_for_rank,
@@ -73,12 +75,33 @@ _PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
 }
 
 
+def _tensor_payload_bytes(td: vllm_engine_pb2.TensorData) -> bytes:
+    """Materialize a TensorData payload, whatever transport it arrived on."""
+    payload = td.WhichOneof("payload")
+    if payload == "inline":
+        return bytes(td.inline)
+    if payload == "shm":
+        return mm_shm.tensor_payload_bytes_from_shm(td.shm)
+    if payload == "remote":
+        raise ValueError("TensorData.remote payload is not implemented yet")
+    raise ValueError("TensorData payload is required")
+
+
 def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
     """Deserialize a TensorData proto message into a torch.Tensor."""
     torch_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
     if torch_dtype is None:
         raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
-    return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(*td.shape)
+    raw = _tensor_payload_bytes(td)
+    expected = (
+        math.prod(int(d) for d in td.shape) * torch.empty((), dtype=torch_dtype).element_size()
+    )
+    if len(raw) != expected:
+        raise ValueError(
+            f"TensorData byte length mismatch for dtype={td.dtype}, shape={list(td.shape)}: "
+            f"expected {expected}, got {len(raw)}"
+        )
+    return torch.frombuffer(bytearray(raw), dtype=torch_dtype).reshape(*td.shape)
 
 
 try:
@@ -487,6 +510,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             kv_role=kv_role,
             kv_engine_id=kv_engine_id,
             data_parallel_size=parallel.data_parallel_size,
+            shm_namespace_id=mm_shm.shm_namespace_id(),
         )
 
     async def GetLoads(
@@ -611,11 +635,17 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         ``batched_keys`` and ``flat_keys`` proto fields.
         """
         prompt_token_ids = list(tokenized.input_ids)
-        num_images = len(mm_proto.mm_placeholders)
+        num_items = len(mm_proto.mm_placeholders)
+
+        is_video = mm_proto.is_video
+        modality = "video" if is_video else "image"
+        # The router names the encoder tensor "pixel_values" internally for both
+        # modalities; vLLM keys video pixels under "pixel_values_videos".
+        encoder_key = "pixel_values_videos" if is_video else "pixel_values"
 
         # Deserialize all tensors from proto
         hf_dict: dict[str, torch.Tensor] = {
-            "pixel_values": _tensor_from_proto(mm_proto.pixel_values),
+            encoder_key: _tensor_from_proto(mm_proto.pixel_values),
         }
         for key, td in mm_proto.model_specific_tensors.items():
             hf_dict[key] = _tensor_from_proto(td)
@@ -630,24 +660,40 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         cpu_keys = set(mm_proto.keep_on_cpu_keys)
 
-        # Field configs are fully determined by the Rust router.
+        # Field configs are fully determined by the Rust router. The layout key
+        # sets reference the internal "pixel_values" name; point them at the
+        # modality-specific encoder key.
         batched = set(mm_proto.batched_keys)
         flat = dict(mm_proto.flat_keys)
+        if encoder_key != "pixel_values":
+            if "pixel_values" in batched:
+                batched.discard("pixel_values")
+                batched.add(encoder_key)
+            if "pixel_values" in flat:
+                flat[encoder_key] = flat.pop("pixel_values")
+            if "pixel_values" in cpu_keys:
+                cpu_keys.discard("pixel_values")
+                cpu_keys.add(encoder_key)
+
         fields_config: dict[str, MultiModalFieldConfig] = {}
         flat_sizes_cache: dict[str, torch.Tensor] = {}
         for key in hf_dict:
             on_cpu = key in cpu_keys
             if key in batched:
-                fields_config[key] = MultiModalFieldConfig.batched("image", keep_on_cpu=on_cpu)
+                fields_config[key] = MultiModalFieldConfig.batched(modality, keep_on_cpu=on_cpu)
             elif key in flat:
                 sizes_key = flat[key]
+                if sizes_key not in hf_dict:
+                    raise ValueError(
+                        f"Flat sizes key {sizes_key!r} for {key!r} not found in model_specific_tensors"
+                    )
                 if sizes_key not in flat_sizes_cache:
                     flat_sizes_cache[sizes_key] = hf_dict[sizes_key].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
-                    "image", flat_sizes_cache[sizes_key], keep_on_cpu=on_cpu
+                    modality, flat_sizes_cache[sizes_key], keep_on_cpu=on_cpu
                 )
             else:
-                fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
+                fields_config[key] = MultiModalFieldConfig.shared(modality, num_items)
 
         batch_feature = BatchFeature(hf_dict, tensor_type="pt")
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(batch_feature, fields_config)
@@ -655,26 +701,33 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Build mm_hashes: dict[str, list[str]]
         mm_hashes: dict[str, list[str]] = {}
         if mm_proto.mm_hashes:
-            mm_hashes["image"] = list(mm_proto.mm_hashes)
+            mm_hashes[modality] = list(mm_proto.mm_hashes)
 
         # Build mm_placeholders: dict[str, list[PlaceholderRange]]
         # When structural tokens (e.g. <|image_start|>, separators) are present
         # in the placeholder range, we must set is_embed so vLLM only scatters
-        # encoder embeddings into patch-token positions (im_token_id).
+        # encoder embeddings into patch-token positions (the modality pad token).
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         if mm_proto.mm_placeholders:
-            im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
+            pad_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
             # Pre-convert to tensor for vectorized mask building
             prompt_ids_tensor = (
                 torch.tensor(prompt_token_ids, dtype=torch.int64)
-                if im_token_id is not None
+                if pad_token_id is not None
                 else None
             )
             placeholders = []
             for p in mm_proto.mm_placeholders:
+                # Reject out-of-bounds ranges: a Python slice would silently clamp
+                # and misalign the is_embed mask / embedding placement otherwise.
+                if p.length == 0 or p.offset + p.length > len(prompt_token_ids):
+                    raise ValueError(
+                        f"Multimodal placeholder out of bounds: offset={p.offset}, "
+                        f"length={p.length}, prompt_len={len(prompt_token_ids)}"
+                    )
                 is_embed = None
                 if prompt_ids_tensor is not None:
-                    mask = prompt_ids_tensor[p.offset : p.offset + p.length] == im_token_id
+                    mask = prompt_ids_tensor[p.offset : p.offset + p.length] == pad_token_id
                     # Only set is_embed when there are non-embed positions,
                     # otherwise None means "all positions are embeds" which is
                     # both correct and avoids unnecessary overhead.
@@ -683,7 +736,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 placeholders.append(
                     PlaceholderRange(offset=p.offset, length=p.length, is_embed=is_embed)
                 )
-            mm_placeholders["image"] = placeholders
+            mm_placeholders[modality] = placeholders
 
         return mm_input(
             prompt_token_ids=prompt_token_ids,

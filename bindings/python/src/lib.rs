@@ -387,6 +387,8 @@ struct Router {
     max_idle_secs: u64,
     assignment_mode: String,
     max_payload_size: usize,
+    multimodal_tensor_transport: Option<String>,
+    multimodal_shm_min_bytes: Option<usize>,
     dp_aware: bool,
     dp_minimum_tokens_scheduler: bool,
     api_key: Option<String>,
@@ -691,6 +693,8 @@ impl Router {
             .health_check_port(self.health_check_port)
             .connection_mode(self.connection_mode)
             .max_payload_size(self.max_payload_size)
+            .multimodal_tensor_transport(self.multimodal_tensor_transport.clone())
+            .multimodal_shm_min_bytes(self.multimodal_shm_min_bytes)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
@@ -798,6 +802,8 @@ impl Router {
         max_idle_secs = 14400,
         assignment_mode = String::from("random"),
         max_payload_size = 512 * 1024 * 1024,
+        multimodal_tensor_transport = None,
+        multimodal_shm_min_bytes = None,
         dp_aware = false,
         dp_minimum_tokens_scheduler = false,
         api_key = None,
@@ -918,6 +924,8 @@ impl Router {
         max_idle_secs: u64,
         assignment_mode: String,
         max_payload_size: usize,
+        multimodal_tensor_transport: Option<String>,
+        multimodal_shm_min_bytes: Option<usize>,
         dp_aware: bool,
         dp_minimum_tokens_scheduler: bool,
         api_key: Option<String>,
@@ -1047,6 +1055,8 @@ impl Router {
             max_idle_secs,
             assignment_mode,
             max_payload_size,
+            multimodal_tensor_transport,
+            multimodal_shm_min_bytes,
             dp_aware,
             dp_minimum_tokens_scheduler,
             api_key,

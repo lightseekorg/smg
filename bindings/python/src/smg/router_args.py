@@ -64,6 +64,9 @@ class RouterArgs:
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
+    # Multimodal tensor transport (None = use env/default)
+    multimodal_tensor_transport: str | None = None
+    multimodal_shm_min_bytes: int | None = None
     bucket_adjust_interval_secs: int = 5
     dp_aware: bool = False
     dp_minimum_tokens_scheduler: bool = False
@@ -482,6 +485,24 @@ class RouterArgs:
             f"--{prefix}enable-igw",
             action="store_true",
             help="Enable IGW (Inference-Gateway) mode for multi-model support",
+        )
+
+        # Multimodal arguments
+        multimodal_group = parser.add_argument_group(
+            "Multimodal", "Multimodal tensor transport configuration"
+        )
+        multimodal_group.add_argument(
+            f"--{prefix}multimodal-tensor-transport",
+            type=str,
+            choices=["inline", "shm", "auto"],
+            default=None,
+            help="Transport for large multimodal tensors (inline|shm|auto)",
+        )
+        multimodal_group.add_argument(
+            f"--{prefix}multimodal-shm-min-bytes",
+            type=int,
+            default=None,
+            help="Minimum multimodal tensor size (bytes) before the SHM transport is used",
         )
 
         # PD-specific arguments

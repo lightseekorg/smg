@@ -12,6 +12,21 @@ fi
 echo "Installing e2e test dependencies..."
 python3 -m pip install e2e_test/
 
+# ffmpeg is the video-decode backend for multimodal `video_url` inputs: the
+# gateway shells out to it (when built without the opencv feature) to decode
+# video before preprocessing. Required by the multimodal video e2e tests.
+# Non-fatal: only video tests need it, so a failure here must not break the
+# rest of the suite.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "Installing ffmpeg (video decode backend)..."
+        apt-get update -qq && apt-get install -y --no-install-recommends ffmpeg \
+            || echo "WARNING: ffmpeg install failed; multimodal video e2e tests will fail" >&2
+    else
+        echo "WARNING: ffmpeg + apt-get unavailable; multimodal video e2e tests will fail" >&2
+    fi
+fi
+
 # Install SmgClient (pure Python client for cross-SDK parity testing)
 echo "Installing smg-client..."
 python3 -m pip install clients/python/

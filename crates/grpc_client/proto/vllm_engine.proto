@@ -95,11 +95,22 @@ message TokenizedInput {
   repeated uint32 input_ids = 2;  // Actual token IDs to process
 }
 
-// A typed tensor: raw little-endian bytes + shape + dtype.
+// A typed tensor descriptor. The raw bytes live in exactly one payload
+// transport; shape and dtype describe how the receiver interprets them.
 message TensorData {
-  bytes data = 1;              // Raw little-endian bytes (f32/i64/u32)
   repeated uint32 shape = 2;   // Dimension sizes
   string dtype = 3;            // "float32", "int64", "uint32"
+
+  oneof payload {
+    // Current path: raw little-endian bytes carried in the gRPC message
+    // (field 1, formerly `bytes data`, kept for wire compatibility).
+    bytes inline = 1;
+    // Same-host CPU shared memory path; preferred for large payloads when
+    // SMG and the vLLM worker share /dev/shm.
+    smg.grpc.common.ShmHandle shm = 4;
+    // Cross-node or non-shared-memory transport (e.g. NIXL). Not implemented.
+    smg.grpc.common.RemoteTensorHandle remote = 5;
+  }
 }
 
 message PlaceholderRange {
@@ -140,6 +151,12 @@ message MultimodalInputs {
   // Tensor keys that should remain on CPU (not transferred to GPU).
   // Maps to vLLM's MultiModalFieldConfig keep_on_cpu flag.
   repeated string keep_on_cpu_keys = 9;
+
+  // Whether this payload is video (vs image). `false` (default) keeps wire
+  // compatibility with existing image-only senders; `true` routes the encoder
+  // tensor to vLLM's `pixel_values_videos` input with `video` field configs on
+  // the servicer. vLLM multimodal is image|video only, so a bool suffices.
+  bool is_video = 10;
 }
 
 // =====================
@@ -339,6 +356,11 @@ message GetServerInfoResponse {
   string kv_engine_id = 8;  // kv_transfer_config.engine_id, "" if not configured
 
   int32 data_parallel_size = 9;  // parallel_config.data_parallel_size (1 when DP is off)
+
+  // This worker's /dev/shm tmpfs identity (<boot_id>:<st_dev>), advertised so
+  // the router can verify a shared /dev/shm before using the SHM tensor
+  // transport under `auto`. Empty when it can't be determined.
+  string shm_namespace_id = 10;
 }
 
 // =====================
