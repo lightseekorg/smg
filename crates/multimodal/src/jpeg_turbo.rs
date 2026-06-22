@@ -20,8 +20,10 @@
 //! workspace-wide `unsafe_code = "deny"` for the C bindings.
 #![allow(unsafe_code)]
 
-use std::os::raw::{c_int, c_uchar, c_ulong, c_void};
-use std::sync::OnceLock;
+use std::{
+    os::raw::{c_int, c_uchar, c_ulong, c_void},
+    sync::OnceLock,
+};
 
 use image::{DynamicImage, RgbImage};
 use libloading::{Library, Symbol};

@@ -13,9 +13,11 @@
 )]
 use std::time::Instant;
 
-use llm_multimodal::jpeg_turbo;
-use llm_multimodal::vision::{
-    preprocessor_config::PreProcessorConfig, processors::Qwen3VLProcessor, VisionPreProcessor,
+use llm_multimodal::{
+    jpeg_turbo,
+    vision::{
+        preprocessor_config::PreProcessorConfig, processors::Qwen3VLProcessor, VisionPreProcessor,
+    },
 };
 
 #[test]
@@ -52,8 +54,16 @@ fn bench_decode_preprocess() {
     }
     let pp_ms = t1.elapsed().as_secs_f64() * 1000.0 / n_pp as f64;
 
-    eprintln!("image: {}x{}  ({} bytes jpeg)", img.width(), img.height(), bytes.len());
+    eprintln!(
+        "image: {}x{}  ({} bytes jpeg)",
+        img.width(),
+        img.height(),
+        bytes.len()
+    );
     eprintln!("SMG(Rust) decode  (libjpeg-turbo): {dec_ms:.3} ms/img  [{n_dec} iters]");
     eprintln!("SMG(Rust) preprocess (Qwen3-VL)  : {pp_ms:.3} ms/img  [{n_pp} iters]");
-    eprintln!("SMG(Rust) decode+preprocess total: {:.3} ms/img", dec_ms + pp_ms);
+    eprintln!(
+        "SMG(Rust) decode+preprocess total: {:.3} ms/img",
+        dec_ms + pp_ms
+    );
 }

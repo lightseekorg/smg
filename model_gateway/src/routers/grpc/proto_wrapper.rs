@@ -298,7 +298,10 @@ impl TokenSpeedMultimodalItem {
     }
 }
 
-fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tokenspeed::TensorData {
+fn tokenspeed_tensor_to_proto(
+    value: TokenSpeedTensor,
+    shm_enabled: bool,
+) -> tokenspeed::TensorData {
     use crate::observability::metrics::Metrics;
     let TokenSpeedTensor {
         storage,

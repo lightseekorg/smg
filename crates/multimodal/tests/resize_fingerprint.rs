@@ -34,11 +34,11 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 const CASES: &[(u32, u32, u32, u32)] = &[
-    (800, 600, 200, 150),    // downscale
-    (640, 480, 336, 336),    // downscale to square
-    (1280, 960, 512, 384),   // downscale large
-    (259, 194, 280, 196),    // slight upscale (real MMBench-ish)
-    (200, 200, 700, 700),    // upscale
+    (800, 600, 200, 150),  // downscale
+    (640, 480, 336, 336),  // downscale to square
+    (1280, 960, 512, 384), // downscale large
+    (259, 194, 280, 196),  // slight upscale (real MMBench-ish)
+    (200, 200, 700, 700),  // upscale
 ];
 
 // Captured under the serial implementation; PARALLELIZATION MUST NOT CHANGE THESE.
@@ -69,6 +69,9 @@ fn resize_bicubic_pil_bit_identity() {
     for ((iw, ih, ow, oh), &exp) in CASES.iter().zip(EXPECTED) {
         let out = resize_bicubic_pil(&make(*iw, *ih), *ow, *oh);
         let got = fnv1a(out.to_rgb8().as_raw());
-        assert_eq!(got, exp, "resize fingerprint changed for {iw}x{ih}->{ow}x{oh}");
+        assert_eq!(
+            got, exp,
+            "resize fingerprint changed for {iw}x{ih}->{ow}x{oh}"
+        );
     }
 }

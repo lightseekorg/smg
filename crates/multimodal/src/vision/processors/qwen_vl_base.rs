@@ -353,8 +353,16 @@ impl QwenVLProcessorBase {
         let nthreads = par_threads(region.len() * 4, n_blocks);
         if nthreads <= 1 {
             Self::patchify_block_band(
-                &planes, width, patch_size, merge_size, temporal_patch_size, merged_patch,
-                pr_blocks, pc_blocks, 0, region,
+                &planes,
+                width,
+                patch_size,
+                merge_size,
+                temporal_patch_size,
+                merged_patch,
+                pr_blocks,
+                pc_blocks,
+                0,
+                region,
             );
         } else {
             let chunk_blocks = n_blocks.div_ceil(nthreads);
@@ -369,8 +377,16 @@ impl QwenVLProcessorBase {
                     let start = b0;
                     s.spawn(move || {
                         Self::patchify_block_band(
-                            planes_ref, width, patch_size, merge_size, temporal_patch_size,
-                            merged_patch, pr_blocks, pc_blocks, start, band,
+                            planes_ref,
+                            width,
+                            patch_size,
+                            merge_size,
+                            temporal_patch_size,
+                            merged_patch,
+                            pr_blocks,
+                            pc_blocks,
+                            start,
+                            band,
                         );
                     });
                     b0 += nb;

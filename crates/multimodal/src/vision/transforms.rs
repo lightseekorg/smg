@@ -486,7 +486,9 @@ fn pil_resample_horizontal(
     let mut out = vec![0_u8; rows * row_out];
     let nthreads = par_threads(out.len(), rows);
     if nthreads <= 1 {
-        pil_h_band(src, &bounds, &kernels, half, in_w, out_w, channels, 0, &mut out);
+        pil_h_band(
+            src, &bounds, &kernels, half, in_w, out_w, channels, 0, &mut out,
+        );
     } else {
         let chunk_rows = rows.div_ceil(nthreads);
         std::thread::scope(|s| {
@@ -588,9 +590,7 @@ pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> Dynam
         clippy::expect_used,
         reason = "vert is exactly out_w*out_h*3 bytes by construction"
     )]
-    DynamicImage::ImageRgb8(
-        RgbImage::from_raw(out_w, out_h, vert).expect("pil resize buffer size"),
-    )
+    DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, vert).expect("pil resize buffer size"))
 }
 
 /// Resize image preserving aspect ratio, fitting within max dimensions.

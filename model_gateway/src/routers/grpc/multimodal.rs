@@ -40,9 +40,10 @@ use crate::routers::grpc::{
     context::WorkerSelection,
     proto_wrapper::{
         cleanup_tokenspeed_items_encoder_shm, tokenspeed_mm_shm_min_bytes,
-        tokenspeed_mm_tensor_transport_mode, tokenspeed_shm_dev_writable, write_tokenspeed_shm_with,
-        SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
-        TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
+        tokenspeed_mm_tensor_transport_mode, tokenspeed_shm_dev_writable,
+        write_tokenspeed_shm_with, SglangMultimodalData, TensorBytes, TokenSpeedModality,
+        TokenSpeedMultimodalData, TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData,
+        VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -1099,8 +1100,11 @@ fn assemble_tokenspeed(
             }
         };
         let encoder_input_started = Instant::now();
-        let encoder_input =
-            serialize_array_as_tokenspeed_tensor(&item_encoder_input, &encoder_input_dtype, shm_enabled);
+        let encoder_input = serialize_array_as_tokenspeed_tensor(
+            &item_encoder_input,
+            &encoder_input_dtype,
+            shm_enabled,
+        );
         let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
         let model_specific_started = Instant::now();
         let model_specific_tensors = match serialize_model_specific_for_item(

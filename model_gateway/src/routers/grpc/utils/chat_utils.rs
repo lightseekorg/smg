@@ -236,7 +236,9 @@ fn transform_content_field(
             let mut media_parts: Vec<String> = Vec::new();
             let mut text_parts: Vec<String> = Vec::new();
             for part in content_array {
-                let Some(obj) = part.as_object() else { continue };
+                let Some(obj) = part.as_object() else {
+                    continue;
+                };
                 match obj.get("type").and_then(|t| t.as_str()) {
                     Some("text") => {
                         if let Some(t) = obj.get("text").and_then(|t| t.as_str()) {
@@ -253,8 +255,7 @@ fn transform_content_field(
             }
 
             if !media_parts.is_empty() || !text_parts.is_empty() {
-                let ordered: Vec<String> =
-                    media_parts.into_iter().chain(text_parts).collect();
+                let ordered: Vec<String> = media_parts.into_iter().chain(text_parts).collect();
                 *content_value = Value::String(ordered.join("\n"));
             }
         }
@@ -1029,8 +1030,7 @@ mod tests {
             name: None,
         }];
 
-        let transformed =
-            process_content_format(&messages, format, Some("<|image_pad|>")).unwrap();
+        let transformed = process_content_format(&messages, format, Some("<|image_pad|>")).unwrap();
 
         let mut kwargs = HashMap::new();
         kwargs.insert("enable_thinking".to_string(), json!(false));
