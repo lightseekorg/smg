@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use smg::{
     config::{
         validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,

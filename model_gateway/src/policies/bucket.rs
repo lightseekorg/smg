@@ -6,7 +6,7 @@ use std::{
 
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use rand::Rng;
+use rand::RngExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 

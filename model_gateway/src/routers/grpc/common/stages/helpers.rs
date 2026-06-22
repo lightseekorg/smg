@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::RngExt;
 use smg_grpc_client::{
     mlx_proto,
     sglang_proto::{self, DisaggregatedParams},
