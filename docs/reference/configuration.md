@@ -945,9 +945,8 @@ accuracy — the inline and shared-memory paths produce byte-identical tensors.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is known to share it). |
+| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. No locality configuration is needed. |
 | `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
-| `SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED` | `false` | In `auto` mode, treat TCP-loopback workers as sharing the router's `/dev/shm`. Off by default because loopback only proves network locality, not a shared namespace. Accepts `1`/`true`/`yes`/`on`. |
 | `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
 
 The TokenSpeed gRPC servicer (worker side) reads two companion variables:

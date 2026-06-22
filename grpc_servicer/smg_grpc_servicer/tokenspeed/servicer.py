@@ -468,6 +468,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         scheduler_info_struct = Struct()
         scheduler_info_struct.update(_make_json_serializable(dict(self.scheduler_info)))
+        # Advertise this worker's /dev/shm namespace identity so the router can
+        # verify a shared /dev/shm before using the SHM tensor transport, instead
+        # of inferring locality from the worker URL.
+        scheduler_info_struct["shm_namespace_id"] = _shm_namespace_id()
 
         uptime = time.time() - self.start_time
         start_timestamp = Timestamp()
@@ -1411,3 +1415,23 @@ def _make_json_serializable(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {str(k): _make_json_serializable(v) for k, v in obj.items()}
     return str(obj)
+
+
+def _shm_namespace_id() -> str:
+    """Identity of this process's ``/dev/shm`` tmpfs: ``<boot_id>:<st_dev>``.
+
+    ``boot_id`` (``/proc/sys/kernel/random/boot_id``) is not namespaced, so it
+    pins the host; ``st_dev`` is the tmpfs superblock device backing
+    ``/dev/shm``. Two processes share ``/dev/shm`` iff both match — including
+    separate containers sharing it via ``--ipc``/bind-mount, where mount
+    namespaces differ but the underlying superblock (``st_dev``) is the same. The
+    router compares this token to its own to decide the SHM tensor transport.
+    Empty string if it can't be determined.
+    """
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
+            boot_id = f.read().strip()
+        shm_dev = os.stat("/dev/shm").st_dev
+        return f"{boot_id}:{shm_dev}"
+    except OSError:
+        return ""

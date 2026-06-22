@@ -1063,8 +1063,8 @@ fn assemble_tokenspeed(
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
     // Resolve the multimodal tensor transport once per request: `shm` always on,
-    // `auto` only when the worker is known to share /dev/shm (unix socket, or an
-    // operator-asserted loopback), otherwise inline. See `worker_shares_dev_shm`.
+    // `auto` only when the worker is verified to share /dev/shm (matching
+    // namespace token), otherwise inline. See `worker_shares_dev_shm`.
     let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
@@ -1699,75 +1699,59 @@ fn log_unknown_tokenspeed_transport_once(value: &str) {
     });
 }
 
-/// Whether the worker can be assumed to share SMG's `/dev/shm`, making the SHM
+/// Whether the worker is *verified* to share SMG's `/dev/shm`, making the SHM
 /// transport safe under `auto`.
 ///
-/// A unix-domain-socket worker is necessarily on the same host and, for the
-/// sidecar/IPC topologies the SHM transport targets, shares `/dev/shm`, so it
-/// qualifies. A TCP loopback worker only proves *network* locality — in common
-/// sidecar/container setups the worker can be reachable on `127.0.0.1` while
-/// using a private `/dev/shm`, and would then receive SHM handles it cannot
-/// read — so loopback does NOT qualify unless the operator explicitly asserts a
-/// shared namespace via `SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED`. Operators
-/// that always co-locate can instead force the transport with the explicit
-/// `shm` mode. An unknown worker is treated as non-sharing so `auto` falls back
-/// to the safe inline path.
+/// Rather than inferring locality from the worker URL (TCP loopback proves only
+/// network locality, not a shared `/dev/shm`), the worker advertises its
+/// `/dev/shm` filesystem identity (`<boot_id>:<st_dev of /dev/shm>`) via
+/// `GetServerInfo`, which discovery stores in the worker's `shm_namespace_id`
+/// label. Two processes share `/dev/shm` iff these tokens match: `boot_id` pins
+/// the host, and `st_dev` is the tmpfs superblock device, identical whenever the
+/// same tmpfs backs both `/dev/shm` mounts — including separate containers that
+/// share it via `--ipc`/bind-mount (where mount-namespace inodes differ but the
+/// underlying superblock is the same). We compare the worker's token to ours:
+/// equal ⇒ shared. A missing/empty token or any mismatch is treated as
+/// non-sharing, so `auto` safely falls back to inline.
 fn worker_shares_dev_shm(workers: Option<&WorkerSelection>) -> bool {
+    let Some(local) = local_shm_namespace_id() else {
+        return false;
+    };
     let worker = match workers {
         Some(WorkerSelection::Single { worker }) => worker,
         Some(WorkerSelection::Dual { prefill, .. }) => prefill,
         None => return false,
     };
-    let url = worker.url();
-    // A unix-domain socket proves same-host and (for co-located workers) a
-    // shared /dev/shm namespace.
-    if url.starts_with("unix:") {
-        return true;
-    }
-    // TCP loopback alone does not prove a shared /dev/shm; gate it behind an
-    // explicit operator assertion.
-    url_is_loopback(url) && tokenspeed_shm_assume_loopback_shared()
+    worker
+        .metadata()
+        .spec
+        .labels
+        .get("shm_namespace_id")
+        .is_some_and(|id| !id.is_empty() && id == local)
 }
 
-/// Operator assertion that TCP-loopback TokenSpeed workers share SMG's
-/// `/dev/shm` namespace. Off by default because loopback only proves network
-/// locality, not a shared `/dev/shm`.
-fn tokenspeed_shm_assume_loopback_shared() -> bool {
-    std::env::var("SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+/// This process's `/dev/shm` filesystem identity: `<boot_id>:<st_dev of /dev/shm>`.
+/// `boot_id` pins the host (it is not namespaced) and `st_dev` is the tmpfs
+/// superblock device backing `/dev/shm`; together they identify the tmpfs so two
+/// processes sharing it (even across containers via `--ipc`/bind-mount) produce
+/// the same token. Computed once; `None` if it can't be determined (then `auto`
+/// stays inline).
+fn local_shm_namespace_id() -> Option<&'static str> {
+    static ID: OnceLock<Option<String>> = OnceLock::new();
+    ID.get_or_init(compute_shm_namespace_id).as_deref()
 }
 
-fn url_is_loopback(url: &str) -> bool {
-    if url.starts_with("unix:") {
-        return true;
-    }
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        // IPv6 literal, e.g. [::1]:47165
-        stripped.split(']').next().unwrap_or(stripped)
-    } else {
-        authority
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(authority)
-    }
-    .trim();
-    host == "localhost"
-        || host
-            .parse::<std::net::Ipv4Addr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
-        || host
-            .parse::<std::net::Ipv6Addr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
+#[cfg(unix)]
+fn compute_shm_namespace_id() -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let shm_dev = std::fs::metadata("/dev/shm").ok()?.dev();
+    Some(format!("{}:{shm_dev}", boot_id.trim()))
+}
+
+#[cfg(not(unix))]
+fn compute_shm_namespace_id() -> Option<String> {
+    None
 }
 
 fn canonical_float_dtype(dtype: &str) -> Option<String> {
@@ -1895,6 +1879,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn local_shm_namespace_id_resolves_on_linux() {
+        // /proc/.../boot_id and /dev/shm both exist on the Linux CI/runtime
+        // image, so the token must resolve to `<boot_id>:<st_dev>`. If it ever
+        // returned None, `auto` would silently never enable SHM.
+        let id = local_shm_namespace_id().expect("shm namespace id should resolve on Linux");
+        assert!(
+            id.contains(':'),
+            "token must be <boot_id>:<st_dev>, got {id:?}"
+        );
+        let dev = id.rsplit(':').next().unwrap();
+        assert!(
+            dev.parse::<u64>().is_ok(),
+            "st_dev component must be numeric, got {id:?}"
+        );
+    }
 
     #[test]
     fn test_has_multimodal_content_with_images() {

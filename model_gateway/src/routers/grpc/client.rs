@@ -806,6 +806,13 @@ impl ServerInfo {
                 if !info.tokenspeed_version.is_empty() {
                     labels.insert("version".to_string(), info.tokenspeed_version.clone());
                 }
+                // Carry the worker's /dev/shm namespace identity (advertised in
+                // scheduler_info). The router compares it to its own to decide the
+                // SHM tensor transport by *verifying* a shared /dev/shm rather than
+                // inferring it from the worker URL. See `worker_shares_dev_shm`.
+                if let Some(ref sched) = info.scheduler_info {
+                    pick_prost_fields(&mut labels, sched, &["shm_namespace_id"]);
+                }
                 labels
             }
         }
