@@ -669,10 +669,6 @@ impl RequestPipeline {
         tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         let start = Instant::now();
-        let _epd_tl = std::env::var("EPD_TL").is_ok();
-        if _epd_tl {
-            tracing::info!(target: "smg::request", "EPD-TL gw_chat_start epoch_ms={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-        }
         // Clone Arc for metrics (cheap atomic increment) to avoid borrow issues
         let request_for_metrics = Arc::clone(&request);
         let streaming = request.stream;
@@ -691,9 +687,6 @@ impl RequestPipeline {
         ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
-            if _epd_tl {
-                tracing::info!(target: "smg::request", "EPD-TL gw_stage_start name={} epoch_ms={}", stage.name(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-            }
             match stage.execute(&mut ctx).await {
                 Ok(Some(response)) => {
                     // Stage completed with streaming response - record success and return

@@ -61,9 +61,6 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # made once per item in _items_from_proto; the encode worker
         # materializes (or unlinks, on a cache hit) the segment on its side.
         self._pixel_shm = bool(os.environ.get("EPD_PIXEL_SHM"))
-        self.server_args = server_args
-        self.scheduler_info = scheduler_info
-        self.health_servicer = health_servicer
 
         # The encode worker hosts its OWN Mooncake bootstrap server (it is the
         # data source); prefill workers discover it at (this host, the
@@ -140,14 +137,13 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         logger.info("TokenSpeedEncoderServicer initialized")
 
     def _ensure_remote_ready(self, gw_name, ip, port, remote, room):
-        """One-time bidirectional metadata handshake per gateway. The gateway's
-        pixel arena is registered ONCE at its init, so its metadata is fixed: we
-        fetch_remote_metadata + send_local_metadata + wait for it to load exactly
-        ONCE per (ip, port), then every later image reuses the loaded remote agent
-        (no per-image fetch -- that, plus the per-image register below, was the v1
-        control overhead that made RDMA slower than inline)."""
-        import time
-
+        """One-time metadata handshake per gateway. The gateway's pixel arena is
+        registered ONCE at its init, so its metadata is fixed: we
+        fetch_remote_metadata and wait for it to load exactly ONCE per (ip, port)
+        (send_local_metadata is skipped by default for the one-sided rc READ; see
+        SMG_RDMA_SEND_MD below), then every later image reuses the loaded remote
+        agent (no per-image fetch -- that, plus the per-image register below, was
+        the v1 control overhead that made RDMA slower than inline)."""
         key = (ip, port)
         if key in self._rdma_md_ready:
             return
@@ -188,7 +184,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         plus the content hash computed off the slot bytes (the item carries the
         hash so ``set_pad_value`` never needs the raw tensor again).
 
-        Descriptor wire format (gateway rdma.rs): [slot_addr u64 LE][port u16 LE][ip].
+        Descriptor wire format (gateway rdma.rs): [slot_addr u64 LE][gen u64 LE][port u16 LE][ip].
         Hot path per image: handshake-once (see _ensure_remote_ready) + lease a free
         landing slot + READ slot_addr -> our slot (no register/deregister, no metadata
         re-fetch) + length-assert + copy out before freeing the slot. The transfer
@@ -424,13 +420,6 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # room also tags the RDMA free-notif, so resolve it before reading pixels.
         bootstrap_room = request.items[0].bootstrap_room if request.items else 0
 
-        _tl = os.environ.get("EPD_TL")
-        if _tl:
-            print(
-                f"EPD-TL stage=svc_rpc_start rid={request.request_id} room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
-                flush=True,
-            )
-
         if os.environ.get("EPD_INGEST_OFFLOOP"):
             # Per-image ingest (~63ms: proto->tensor ~40ms + pickle ~20ms)
             # BLOCKS the lone asyncio event loop, so grpc.aio cannot deliver the
@@ -443,29 +432,18 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             # keeps it single-writer). Fire-and-forget like the legacy
             # send_pyobj (the returned Future is intentionally dropped).
             payload = await asyncio.to_thread(
-                self._parse_and_pickle, request, bootstrap_room, _tl
+                self._parse_and_pickle, request, bootstrap_room
             )
             self.async_llm.engine_core_client.send_to_scheduler.send(payload)
-            if _tl:
-                print(
-                    f"EPD-TL stage=svc_submit_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
-                    flush=True,
-                )
         else:
-            self._ingest(request, bootstrap_room, _tl)
+            self._ingest(request, bootstrap_room)
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
 
-    def _build_encode_request(self, request, bootstrap_room, _tl=None):
+    def _build_encode_request(self, request, bootstrap_room):
         """Proto -> engine EncodeRequest (the expensive per-image parse)."""
         items = []
         if request.HasField("mm_inputs"):
             items = self._items_from_proto(request.mm_inputs, bootstrap_room)
-
-        if _tl:
-            print(
-                f"EPD-TL stage=svc_parse_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
-                flush=True,
-            )
 
         EncodeRequest = _lazy_encode_request()
         return EncodeRequest(
@@ -476,24 +454,19 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             items=items,
         )
 
-    def _parse_and_pickle(self, request, bootstrap_room, _tl=None) -> bytes:
+    def _parse_and_pickle(self, request, bootstrap_room) -> bytes:
         """Worker-thread half of the off-loop ingest: parse + pickle. The
         pickled bytes match what send_pyobj would produce, so the scheduler's
         recv_pyobj is unchanged."""
         import pickle
 
-        encode_request = self._build_encode_request(request, bootstrap_room, _tl)
+        encode_request = self._build_encode_request(request, bootstrap_room)
         return pickle.dumps(encode_request, protocol=pickle.DEFAULT_PROTOCOL)
 
-    def _ingest(self, request, bootstrap_room, _tl=None) -> None:
+    def _ingest(self, request, bootstrap_room) -> None:
         """Legacy on-loop ingest (parse + submit on the event loop)."""
-        encode_request = self._build_encode_request(request, bootstrap_room, _tl)
+        encode_request = self._build_encode_request(request, bootstrap_room)
         self.async_llm.submit_encode(encode_request)
-        if _tl:
-            print(
-                f"EPD-TL stage=svc_submit_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
-                flush=True,
-            )
 
     async def shutdown(self) -> None:
         """No persistent per-request state to drain (encode is fire-and-forget)."""

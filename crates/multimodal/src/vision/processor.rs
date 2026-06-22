@@ -191,16 +191,6 @@ fn slice_1d<T>(values: &[T], start: usize, len: usize) -> AnyhowResult<&[T]> {
         .ok_or_else(|| anyhow::anyhow!("slice range {start}..{end} exceeds {}", values.len()))
 }
 
-/// Return `encoder_input` (`pixel_values`) storage to the scratch pool once its
-/// bytes have been serialized/copied; later preprocess calls reuse the pages
-/// instead of paying a fresh-mmap fault storm. No-op for non-standard layouts.
-pub fn recycle_pixel_values(pixel_values: ndarray::ArrayD<f32>) {
-    let (v, offset) = pixel_values.into_raw_vec_and_offset();
-    if offset.unwrap_or(0) == 0 {
-        crate::vision::scratch::give_f32(v);
-    }
-}
-
 /// Preprocessed encoder inputs ready for model consumption.
 ///
 /// This struct contains the processor outputs needed by serving backends to

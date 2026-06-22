@@ -96,9 +96,12 @@ async def serve_grpc(server_args: ServerArgs) -> None:
         # EPD encode worker: serve the vision-only encode loop via the encoder
         # service. ALSO mount the scheduler service so the gateway's generic
         # worker discovery (HealthCheck + GetModelInfo + GetServerInfo, all over
-        # the TokenSpeedScheduler stub) can reach this worker and register it;
-        # the encode pool only ever receives Encode RPCs, so the scheduler
-        # Generate path here is never exercised. HealthCheck short-circuits to a
+        # the TokenSpeedScheduler stub) can reach this worker and register it.
+        # Note: mounting the scheduler service means the unconditional startup
+        # warmup (stub.Generate) would route to the scheduler Generate path and
+        # drive the LM, which can SIGUSR1-kill the encode TP group -- encode
+        # workers must run with TOKENSPEED_SKIP_GRPC_WARMUP=1 (or warmup must be
+        # guarded to skip in encode mode). HealthCheck short-circuits to a
         # shallow probe for disaggregation roles, so it won't drive the LM.
         from smg_grpc_proto.generated import (
             tokenspeed_encoder_pb2,

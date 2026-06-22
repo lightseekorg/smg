@@ -686,10 +686,6 @@ async fn process_multimodal_parts(
         _ => model_config.preprocessor_config.clone(),
     };
     let preprocess_started = Instant::now();
-    let _epd_tl = std::env::var("EPD_TL").is_ok();
-    if _epd_tl {
-        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_start num_images={} epoch_ms={}", images.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-    }
 
     // Pixel-cache fast path (post-decode, per-image): when the cache is enabled and
     // this is an image request, preprocess + serialize only the cache misses and
@@ -788,10 +784,6 @@ async fn process_multimodal_parts(
         (preprocessed, None)
     };
     let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
-
-    if _epd_tl {
-        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_end num_tokens={} epoch_ms={}", preprocessed.feature_token_counts.iter().sum::<usize>(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-    }
 
     debug!(
         ?modality,
@@ -2062,16 +2054,6 @@ fn f32_to_f16_bits(value: f32) -> u16 {
         half += 1;
     }
     half
-}
-
-/// Benchmark-only entry to the encoder-input serialization path (`cargo build --bin dataplane-bench`).
-#[doc(hidden)]
-pub fn bench_serialize_pixel_values(
-    preprocessed: &PreprocessedEncoderInputs,
-    dtype: &str,
-) -> (Vec<u8>, Vec<u32>) {
-    let (bytes, shape, _dtype) = serialize_array_as_dtype(&preprocessed.encoder_input, dtype);
-    (bytes, shape)
 }
 
 /// Serialize model-specific values to TensorBytes, consuming the map to avoid key clones.

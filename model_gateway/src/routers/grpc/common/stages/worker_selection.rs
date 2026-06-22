@@ -456,9 +456,10 @@ impl WorkerSelectionStage {
         let prefill_idx = prefill_policy.select_worker(&available_prefill, &info)?;
         let decode_idx = decode_policy.select_worker(&available_decode, &info)?;
 
-        // Record worker selection metrics for prefill and decode (the encode
-        // worker is picked per image round-robin later, in the encode stage),
-        // each tagged with the policy that picked it.
+        // Record worker selection metrics for prefill and decode, each tagged
+        // with the policy that picked it. The encode worker(s) are selected
+        // later in the encode stage (content-hash affinity by default;
+        // round-robin only under SMG_ENCODE_ROUTING_POLICY=round_robin).
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,
