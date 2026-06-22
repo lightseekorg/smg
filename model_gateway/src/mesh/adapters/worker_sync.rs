@@ -23,11 +23,14 @@
 //!
 //! Known gap: only the owner tombstones its keys, so a permanently-dead
 //! node's `worker:` keys persist cluster-wide (imports stay registered,
-//! demoted by local probes), and a crash-restart that registers locally
-//! before its old state gossips back orphans up to one store key per
-//! worker per restart. Tombstone metadata also accrues per removed
+//! demoted by local probes). Tombstone metadata also accrues per removed
 //! worker (time-based collection would resurrect deleted keys; it is
 //! only sound at causal stability). Cleanup belongs to dead-node key GC.
+//!
+//! Restart-stable ids reuse keys across incarnations, so a prior
+//! incarnation's higher-timestamp ops can transiently shadow the fresh
+//! state; the reconcile pass re-asserts locally-owned state it finds
+//! mismatched, bounding the shadow to one pass.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -172,13 +175,24 @@ impl WorkerSyncAdapter {
         // to test membership, and feeds the backfill below so the
         // namespace is scanned once per pass.
         let live: HashSet<String> = self.workers.keys("").into_iter().collect();
-        for (id, _) in self.worker_registry.get_all_with_ids() {
+        for (id, worker) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
             if !live.contains(&key) {
                 // Missing backing key: same handling as a live tombstone
                 // event — imports are removed, locally-owned state is
                 // re-asserted.
                 self.sync_key_from_store(&key, id.as_str());
+            } else if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
+                // Present but stale: with restart-stable ids, a prior
+                // incarnation's higher-timestamp ops can dominate the
+                // reused key (LWW), shadowing the live state. By now the
+                // clock has observed those timestamps via the merge, so a
+                // re-put wins and the shadow is bounded to one pass.
+                let state = worker_state_of(&id, &worker);
+                if !self.store_matches(&id, &state) {
+                    warn!(worker_id = %id.as_str(), "re-asserting locally-owned state over stale store value");
+                    self.on_worker_changed(id.as_str(), &state);
+                }
             }
         }
         self.backfill_keys(live);
@@ -713,6 +727,35 @@ mod tests {
         assert!(
             registry.get_by_url("http://remote:8080").is_none(),
             "reconcile recovers a missed tombstone"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_reasserts_local_state_over_stale_store_value() {
+        // With restart-stable ids a prior incarnation's ops can dominate
+        // the reused key; reconcile must detect the mismatch and re-put
+        // the live state.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        let id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+        // A stale state (no spec) occupying the worker's own key models the
+        // prior incarnation's value winning LWW.
+        let key = format!("worker:{}", id.as_str());
+        ns.put(
+            &key,
+            bincode::serialize(&sample_state(id.as_str(), "http://local:8080")).unwrap(),
+        );
+
+        adapter.reconcile_once();
+        let stored: WorkerState = bincode::deserialize(&ns.get(&key).unwrap()).unwrap();
+        assert!(
+            !stored.spec.is_empty(),
+            "reconcile re-asserts the live local state over the stale value"
         );
     }
 
