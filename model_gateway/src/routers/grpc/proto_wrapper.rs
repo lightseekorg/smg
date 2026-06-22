@@ -395,24 +395,19 @@ fn log_tokenspeed_mm_timing_enabled() -> bool {
 /// Multimodal tensor transport mode for the TokenSpeed backend.
 ///
 /// This only governs multimodal tensor payloads (encoder inputs and
-/// model-specific tensors); prompt `input_ids` are always sent inline. The
-/// canonical env var is `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`; the legacy
-/// `SMG_TOKENSPEED_TENSOR_TRANSPORT` is still honored for backward
-/// compatibility.
+/// model-specific tensors); prompt `input_ids` are always sent inline. Set via
+/// `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`.
 pub fn tokenspeed_mm_tensor_transport_mode() -> String {
     std::env::var("SMG_TOKENSPEED_MM_TENSOR_TRANSPORT")
-        .or_else(|_| std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT"))
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
 }
 
 /// Minimum multimodal tensor size (bytes) before the SHM transport is used.
-/// Canonical env var `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`, with legacy fallback to
-/// `SMG_TOKENSPEED_SHM_MIN_BYTES`. Defaults to 64 KiB.
+/// Set via `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`. Defaults to 64 KiB.
 pub fn tokenspeed_mm_shm_min_bytes() -> usize {
     std::env::var("SMG_TOKENSPEED_MM_SHM_MIN_BYTES")
-        .or_else(|_| std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES"))
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(64 * 1024)
