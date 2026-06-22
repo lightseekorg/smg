@@ -107,10 +107,19 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                     ),
                 )
                 # Register the landing pool ONCE; per image we only lease a slot.
+                # Depth = max concurrent in-flight pixel pulls per encode worker. A
+                # too-shallow ring backpressures the puller and stalls the ViT behind
+                # it (slots aren't freed fast enough), so under encode-bound load /
+                # over-saturation throughput caps well below the compute limit
+                # (2E4P2D conc144 measured 5.5 at 16 slots vs 6.25 at 64, 0 ring
+                # exhaustion). Default 64 mirrors the engine's E->P embedding-send
+                # ring (TOKENSPEED_EPD_ENCODE_RING_SLOTS, set to 64 in the conc8/16
+                # cliff fix) -- the pixel-pull ring was the leg left at the shallow
+                # 16. At 32MiB/slot this is only 2GiB pinned/worker.
                 slot_bytes = int(
                     os.environ.get("SMG_RDMA_SLOT_BYTES", 32 * 1024 * 1024)
                 )
-                n_slots = int(os.environ.get("SMG_RDMA_LANDING_SLOTS", 16))
+                n_slots = int(os.environ.get("SMG_RDMA_LANDING_SLOTS", 64))
                 self._landing = torch.empty(
                     n_slots * slot_bytes, dtype=torch.uint8, pin_memory=True
                 )
