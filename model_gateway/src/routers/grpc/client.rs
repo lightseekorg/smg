@@ -15,8 +15,8 @@ use smg_grpc_client::{
 use crate::routers::grpc::{
     proto_wrapper::{
         cleanup_tokenspeed_shm_handles, collect_tokenspeed_generate_request_shm_handles,
-        collect_tokenspeed_multimodal_inputs_shm_handles, ProtoEmbedComplete, ProtoEmbedRequest,
-        ProtoGenerateRequest, ProtoStream,
+        finish_tokenspeed_request, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
+        ProtoStream,
     },
     MultimodalData,
 };
@@ -530,25 +530,16 @@ impl GrpcClient {
                     MultimodalData::TokenSpeed(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let shm_handles = tokenspeed_mm
-                    .as_ref()
-                    .map(collect_tokenspeed_multimodal_inputs_shm_handles)
-                    .unwrap_or_default();
-                let req = match client.build_generate_request_from_chat(
-                    request_id,
-                    body,
-                    processed_text,
-                    token_ids,
-                    tokenspeed_mm,
-                    options.tool_constraints,
-                ) {
-                    Ok(req) => req,
-                    Err(error) => {
-                        cleanup_tokenspeed_shm_handles(&shm_handles);
-                        return Err(error);
-                    }
-                };
-                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+                finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                    client.build_generate_request_from_chat(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
         }
     }
@@ -630,25 +621,16 @@ impl GrpcClient {
                     MultimodalData::TokenSpeed(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let shm_handles = tokenspeed_mm
-                    .as_ref()
-                    .map(collect_tokenspeed_multimodal_inputs_shm_handles)
-                    .unwrap_or_default();
-                let req = match client.build_generate_request_from_messages(
-                    request_id,
-                    body,
-                    processed_text,
-                    token_ids,
-                    tokenspeed_mm,
-                    options.tool_constraints,
-                ) {
-                    Ok(req) => req,
-                    Err(error) => {
-                        cleanup_tokenspeed_shm_handles(&shm_handles);
-                        return Err(error);
-                    }
-                };
-                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+                finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                    client.build_generate_request_from_messages(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
         }
     }

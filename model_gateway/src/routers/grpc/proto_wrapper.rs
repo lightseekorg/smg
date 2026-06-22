@@ -309,7 +309,8 @@ fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tok
         TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data, shm_enabled),
         // Encoder input already written directly to SHM upstream — meter it here.
         TokenSpeedTensorStorage::Shm(handle) => {
-            crate::observability::metrics::Metrics::record_tokenspeed_mm_tensor(
+            crate::observability::metrics::Metrics::record_mm_tensor(
+                "tokenspeed",
                 "shm",
                 handle.nbytes as usize,
             );
@@ -342,7 +343,7 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
         if log_timing {
             tracing::info!(nbytes, "smg_mm_timing tokenspeed_tensor_payload_inline");
         }
-        Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
+        Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
@@ -355,7 +356,7 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
                 "smg_mm_timing tokenspeed_tensor_payload_inline_below_threshold"
             );
         }
-        Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
+        Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
@@ -369,7 +370,7 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
                     "smg_mm_timing tokenspeed_shm_write"
                 );
             }
-            Metrics::record_tokenspeed_mm_tensor("shm", nbytes);
+            Metrics::record_mm_tensor("tokenspeed", "shm", nbytes);
             tokenspeed::tensor_data::Payload::Shm(handle)
         }
         Err(error) => {
@@ -378,8 +379,8 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
                 nbytes,
                 "Failed to create TokenSpeed SHM tensor payload; falling back to inline"
             );
-            Metrics::record_tokenspeed_mm_shm_write_failure();
-            Metrics::record_tokenspeed_mm_tensor("inline", nbytes);
+            Metrics::record_mm_shm_write_failure("tokenspeed");
+            Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
             tokenspeed::tensor_data::Payload::Inline(data)
         }
     }
@@ -591,6 +592,30 @@ pub fn cleanup_tokenspeed_shm_handles(handles: &[tokenspeed::ShmHandle]) {
                     "Failed to cleanup TokenSpeed SHM file"
                 );
             }
+        }
+    }
+}
+
+/// Build a TokenSpeed proto `GenerateRequest` from the already-converted
+/// multimodal proto, unlinking any `/dev/shm` segments it references if `build`
+/// fails — so a build error doesn't leak SHM files before the send-path cleanup
+/// can run. Keeping this engine-specific SHM lifecycle in the protocol layer
+/// lets the per-engine dispatch in `client.rs` stay a thin, neutral wrapper.
+pub(crate) fn finish_tokenspeed_request(
+    tokenspeed_mm: Option<tokenspeed::MultimodalInputs>,
+    build: impl FnOnce(
+        Option<tokenspeed::MultimodalInputs>,
+    ) -> Result<tokenspeed::GenerateRequest, String>,
+) -> Result<ProtoGenerateRequest, String> {
+    let shm_handles = tokenspeed_mm
+        .as_ref()
+        .map(collect_tokenspeed_multimodal_inputs_shm_handles)
+        .unwrap_or_default();
+    match build(tokenspeed_mm) {
+        Ok(req) => Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req))),
+        Err(error) => {
+            cleanup_tokenspeed_shm_handles(&shm_handles);
+            Err(error)
         }
     }
 }
