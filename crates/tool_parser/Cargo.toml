@@ -23,7 +23,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
 tracing.workspace = true
 # Only used by tool-parser
-regex = "1.10"
+regex = "1.12"
 rustpython-parser = "0.4.0"
 
 [lints]

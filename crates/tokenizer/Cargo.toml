@@ -32,9 +32,9 @@ aho-corasick = "1.1"
 base64 = "0.22"
 rustc-hash = "2"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
-minijinja-contrib = { version = "2.0", features = ["pycompat"] }
-rayon = "1.10"
+minijinja = { version = "2.21", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
+minijinja-contrib = { version = "2.21", features = ["pycompat"] }
+rayon = "1.12"
 tiktoken-rs = "0.12"
 tokenizers = "0.23.1"
 
@@ -42,7 +42,7 @@ tokenizers = "0.23.1"
 criterion = "0.8"
 openai-protocol.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
-tempfile = "3.8"
+tempfile = "3.27"
 
 [[bench]]
 name = "stop_sequence_search"

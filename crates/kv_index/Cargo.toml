@@ -17,9 +17,9 @@ categories = ["data-structures", "caching"]
 bincode = "1.3"
 blake3 = { workspace = true }
 dashmap = { workspace = true }
-once_cell = "1.21.3"
+once_cell = "1.21.4"
 parking_lot = { workspace = true }
-rustc-hash = "2.1.1"
+rustc-hash = "2.1.2"
 serde = { version = "1", features = ["derive"] }
 tracing = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

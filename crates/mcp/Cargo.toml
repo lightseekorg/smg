@@ -52,7 +52,7 @@ scopeguard = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-serial_test = "3.0"
+serial_test = "3.5"
 
 [lints]
 workspace = true
