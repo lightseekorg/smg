@@ -668,9 +668,19 @@ fn collect_tokenspeed_tensor_shm_handles(
     }
 }
 
+/// Prefix for every `/dev/shm` payload this transport creates
+/// (see [`next_tokenspeed_shm_name`]). Cleanup only ever unlinks names
+/// carrying this prefix so it cannot remove unrelated `/dev/shm` entries.
+const TOKENSPEED_SHM_NAME_PREFIX: &str = "smg-tokenspeed-";
+
 fn validate_tokenspeed_shm_name_for_cleanup(name: &str) -> Option<&str> {
     let name = name.strip_prefix('/').unwrap_or(name);
     if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.contains('\0') {
+        return None;
+    }
+    // Only unlink names this transport created; never touch arbitrary
+    // top-level /dev/shm entries.
+    if !name.starts_with(TOKENSPEED_SHM_NAME_PREFIX) {
         return None;
     }
     Some(name)
@@ -682,7 +692,13 @@ fn next_tokenspeed_shm_name() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("smg-tokenspeed-{}-{}-{}", process::id(), nanos, seq)
+    format!(
+        "{}{}-{}-{}",
+        TOKENSPEED_SHM_NAME_PREFIX,
+        process::id(),
+        nanos,
+        seq
+    )
 }
 
 fn tokenspeed_shm_path(name: &str) -> PathBuf {

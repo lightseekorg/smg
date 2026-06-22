@@ -32,8 +32,8 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            par_threads, pil_to_filter, resize, resize_bicubic_pil, resize_rgb_bytes, rgb_bytes,
-            to_tensor, to_tensor_and_normalize, TransformError,
+            par_threads, pil_to_filter, resize, resize_bicubic_pil, resize_bicubic_pil_rgb,
+            resize_rgb_bytes, rgb_bytes, to_tensor, to_tensor_and_normalize, TransformError,
         },
     },
 };
@@ -762,7 +762,14 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                 let needs_resize = config.do_resize.unwrap_or(true)
                     && (frame.width() != tw32 || frame.height() != th32);
                 if needs_resize {
-                    let resized = resize(frame, tw32, th32, filter);
+                    // BICUBIC (Qwen default) must match PIL bit-for-bit so video
+                    // encoder inputs equal HF/vLLM, same as the image path; other
+                    // filters keep the SIMD resizer.
+                    let resized = if filter == FilterType::CatmullRom {
+                        resize_bicubic_pil(frame, tw32, th32)
+                    } else {
+                        resize(frame, tw32, th32, filter)
+                    };
                     let (width, height, data) = rgb_bytes(&resized);
                     frame_rgbs.push(VideoFrameRgb {
                         width,
@@ -898,14 +905,27 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                     let frame = frames[idx];
                     let needs_resize = do_resize && (frame.width != tw32 || frame.height != th32);
                     if needs_resize {
-                        let resized = resize_rgb_bytes(
-                            frame.data,
-                            frame.width,
-                            frame.height,
-                            tw32,
-                            th32,
-                            filter,
-                        )?;
+                        // BICUBIC (Qwen default) must match PIL bit-for-bit so video
+                        // encoder inputs equal HF/vLLM, same as the image path; other
+                        // filters keep the SIMD resizer.
+                        let resized = if filter == FilterType::CatmullRom {
+                            resize_bicubic_pil_rgb(
+                                frame.data,
+                                frame.width,
+                                frame.height,
+                                tw32,
+                                th32,
+                            )?
+                        } else {
+                            resize_rgb_bytes(
+                                frame.data,
+                                frame.width,
+                                frame.height,
+                                tw32,
+                                th32,
+                                filter,
+                            )?
+                        };
                         frame_rgbs.push(VideoFrameRgb {
                             width: tw32 as usize,
                             height: th32 as usize,

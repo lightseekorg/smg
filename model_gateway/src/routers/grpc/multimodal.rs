@@ -1644,15 +1644,15 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
 
 /// Resolve whether large multimodal tensors should use the SHM transport for
 /// this request. `shm` = always (legacy explicit opt-in); `auto` = only when the
-/// worker is local and therefore shares SMG's `/dev/shm`; anything else
-/// (including unset or `inline`) keeps the inline gRPC path.
+/// worker is known to share SMG's `/dev/shm`; anything else (including unset or
+/// `inline`) keeps the inline gRPC path.
 fn resolve_tokenspeed_shm_enabled(workers: Option<&WorkerSelection>) -> bool {
     let mode = tokenspeed_mm_tensor_transport_mode();
     log_tokenspeed_transport_config_once(&mode);
     match mode.as_str() {
         // SHM only ever happens when SMG can actually write /dev/shm.
         "shm" => tokenspeed_shm_dev_writable(),
-        "auto" => worker_is_local(workers) && tokenspeed_shm_dev_writable(),
+        "auto" => worker_shares_dev_shm(workers) && tokenspeed_shm_dev_writable(),
         "" | "inline" => false,
         other => {
             log_unknown_tokenspeed_transport_once(other);
@@ -1683,16 +1683,48 @@ fn log_unknown_tokenspeed_transport_once(value: &str) {
     });
 }
 
-/// A worker is treated as "local" (assumed to share SMG's `/dev/shm`) when its
-/// gRPC URL targets a loopback host or a unix-domain socket. Conservative: an
-/// unknown worker is non-local so `auto` falls back to the safe inline path.
-fn worker_is_local(workers: Option<&WorkerSelection>) -> bool {
+/// Whether the worker can be assumed to share SMG's `/dev/shm`, making the SHM
+/// transport safe under `auto`.
+///
+/// A unix-domain-socket worker is necessarily on the same host and, for the
+/// sidecar/IPC topologies the SHM transport targets, shares `/dev/shm`, so it
+/// qualifies. A TCP loopback worker only proves *network* locality — in common
+/// sidecar/container setups the worker can be reachable on `127.0.0.1` while
+/// using a private `/dev/shm`, and would then receive SHM handles it cannot
+/// read — so loopback does NOT qualify unless the operator explicitly asserts a
+/// shared namespace via `SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED`. Operators
+/// that always co-locate can instead force the transport with the explicit
+/// `shm` mode. An unknown worker is treated as non-sharing so `auto` falls back
+/// to the safe inline path.
+fn worker_shares_dev_shm(workers: Option<&WorkerSelection>) -> bool {
     let worker = match workers {
         Some(WorkerSelection::Single { worker }) => worker,
         Some(WorkerSelection::Dual { prefill, .. }) => prefill,
         None => return false,
     };
-    url_is_loopback(worker.url())
+    let url = worker.url();
+    // A unix-domain socket proves same-host and (for co-located workers) a
+    // shared /dev/shm namespace.
+    if url.starts_with("unix:") {
+        return true;
+    }
+    // TCP loopback alone does not prove a shared /dev/shm; gate it behind an
+    // explicit operator assertion.
+    url_is_loopback(url) && tokenspeed_shm_assume_loopback_shared()
+}
+
+/// Operator assertion that TCP-loopback TokenSpeed workers share SMG's
+/// `/dev/shm` namespace. Off by default because loopback only proves network
+/// locality, not a shared `/dev/shm`.
+fn tokenspeed_shm_assume_loopback_shared() -> bool {
+    std::env::var("SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn url_is_loopback(url: &str) -> bool {

@@ -593,6 +593,41 @@ pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> Dynam
     DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, vert).expect("pil resize buffer size"))
 }
 
+/// PIL-exact bicubic resize over borrowed interleaved RGB bytes.
+///
+/// Byte-for-byte equivalent of [`resize_bicubic_pil`] but for the raw-RGB video
+/// frame path (`preprocess_video_rgb`), so default-bicubic video frames match
+/// HF/vLLM the same way images do. Returns an `RgbImage` to drop straight into
+/// the existing [`resize_rgb_bytes`] call sites.
+pub fn resize_bicubic_pil_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Result<RgbImage> {
+    let (in_w, in_h, out_w_u, out_h_u) = (
+        width as usize,
+        height as usize,
+        out_w as usize,
+        out_h as usize,
+    );
+    let expected = in_w.saturating_mul(in_h).saturating_mul(3);
+    if data.len() != expected {
+        return Err(TransformError::ShapeError(format!(
+            "PIL bicubic RGB source has {} bytes, expected {expected} for {width}x{height}",
+            data.len()
+        )));
+    }
+    let horiz = pil_resample_horizontal(data, in_h, in_w, out_w_u, 3);
+    let vert = pil_resample_vertical(&horiz, in_h, out_w_u, out_h_u, 3);
+    RgbImage::from_raw(out_w, out_h, vert).ok_or_else(|| {
+        TransformError::ShapeError(format!(
+            "failed to build PIL bicubic RGB image for {out_w}x{out_h}"
+        ))
+    })
+}
+
 /// Resize image preserving aspect ratio, fitting within max dimensions.
 pub fn resize_to_fit(
     image: &DynamicImage,
