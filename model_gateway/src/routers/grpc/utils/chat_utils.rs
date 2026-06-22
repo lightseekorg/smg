@@ -245,7 +245,7 @@ fn transform_content_field(
                             text_parts.push(t.to_string());
                         }
                     }
-                    Some("image_url") | Some("video_url") => {
+                    Some("image_url") | Some("video_url") | Some("audio_url") => {
                         if let Some(ph) = image_placeholder {
                             media_parts.push(ph.to_string());
                         }
