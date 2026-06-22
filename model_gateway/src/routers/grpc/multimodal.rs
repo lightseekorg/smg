@@ -1063,7 +1063,8 @@ fn assemble_tokenspeed(
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
     // Resolve the multimodal tensor transport once per request: `shm` always on,
-    // `auto` only when the worker is local (shares /dev/shm), otherwise inline.
+    // `auto` only when the worker is known to share /dev/shm (unix socket, or an
+    // operator-asserted loopback), otherwise inline. See `worker_shares_dev_shm`.
     let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
@@ -1344,8 +1345,12 @@ fn serialize_encoder_input(preprocessed: &PreprocessedEncoderInputs) -> (Vec<u8>
 
 fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
     let encoder_bytes: Vec<u8> = if let Some(encoder_slice) = encoder_input
+        // Fast path only for C-contiguous arrays, whose memory order equals
+        // logical (row-major) order. A non-C-contiguous array (e.g. a
+        // Fortran-contiguous view) falls through to logical `.iter()` below;
+        // `as_slice_memory_order()` is deliberately NOT used as a fallback
+        // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
-        .or_else(|| encoder_input.as_slice_memory_order())
     {
         // Zero-copy reinterpret: &[f32] → &[u8] on little-endian (x86).
         // This replaces the per-element flat_map(to_le_bytes) which was the
@@ -1360,9 +1365,8 @@ fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
             encoder_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
         }
     } else {
-        // Non-C-contiguous array: .iter() walks in logical (row-major) order,
-        // which matches the shape — unlike as_slice_memory_order() which would
-        // silently serialize in wrong dimension order for Fortran-contiguous arrays.
+        // Non-C-contiguous array: `.iter()` walks in logical (row-major) order,
+        // which matches the shape.
         encoder_input.iter().flat_map(|v| v.to_le_bytes()).collect()
     };
     (encoder_bytes, array_shape(encoder_input))
@@ -1444,8 +1448,12 @@ fn write_array_as_dtype(
 
 fn write_array_as_f32(writer: &mut impl Write, encoder_input: &ArrayD<f32>) -> std::io::Result<()> {
     if let Some(encoder_slice) = encoder_input
+        // Fast path only for C-contiguous arrays, whose memory order equals
+        // logical (row-major) order. A non-C-contiguous array (e.g. a
+        // Fortran-contiguous view) falls through to logical `.iter()` below;
+        // `as_slice_memory_order()` is deliberately NOT used as a fallback
+        // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
-        .or_else(|| encoder_input.as_slice_memory_order())
     {
         return write_f32_slice(writer, encoder_slice);
     }
@@ -1483,8 +1491,12 @@ where
     const CHUNK_VALUES: usize = 256 * 1024;
 
     if let Some(encoder_slice) = encoder_input
+        // Fast path only for C-contiguous arrays, whose memory order equals
+        // logical (row-major) order. A non-C-contiguous array (e.g. a
+        // Fortran-contiguous view) falls through to logical `.iter()` below;
+        // `as_slice_memory_order()` is deliberately NOT used as a fallback
+        // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
-        .or_else(|| encoder_input.as_slice_memory_order())
     {
         let mut converted: Vec<u16> = Vec::with_capacity(CHUNK_VALUES.min(encoder_slice.len()));
         for chunk in encoder_slice.chunks(CHUNK_VALUES) {
@@ -1570,8 +1582,12 @@ where
     let mut converted = Vec::with_capacity(element_count);
 
     if let Some(encoder_slice) = encoder_input
+        // Fast path only for C-contiguous arrays, whose memory order equals
+        // logical (row-major) order. A non-C-contiguous array (e.g. a
+        // Fortran-contiguous view) falls through to logical `.iter()` below;
+        // `as_slice_memory_order()` is deliberately NOT used as a fallback
+        // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
-        .or_else(|| encoder_input.as_slice_memory_order())
     {
         converted.extend(encoder_slice.iter().map(|&value| convert(value)));
     } else {

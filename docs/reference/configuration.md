@@ -936,3 +936,21 @@ smg \
 | `JWT_AUDIENCE` | `--jwt-audience` | JWT audience |
 | `JWT_JWKS_URI` | `--jwt-jwks-uri` | JWKS URI |
 | `CONTROL_PLANE_API_KEYS` | `--control-plane-api-keys` | Control plane API keys |
+
+### TokenSpeed Multimodal Tensor Transport
+
+These env-only variables tune how the router ships preprocessed multimodal
+tensors (image/video encoder inputs) to a TokenSpeed worker. They do not affect
+accuracy — the inline and shared-memory paths produce byte-identical tensors.
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is known to share it). Legacy alias: `SMG_TOKENSPEED_TENSOR_TRANSPORT`. |
+| `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. Legacy alias: `SMG_TOKENSPEED_SHM_MIN_BYTES`. |
+| `SMG_TOKENSPEED_SHM_ASSUME_LOOPBACK_SHARED` | `false` | In `auto` mode, treat TCP-loopback workers as sharing the router's `/dev/shm`. Off by default because loopback only proves network locality, not a shared namespace. Accepts `1`/`true`/`yes`/`on`. |
+| `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
+
+The TokenSpeed gRPC servicer (worker side) reads two companion variables:
+`TOKENSPEED_UNLINK_MM_SHM_AFTER_READ` (default on — unlink each `/dev/shm`
+segment after the worker reads it) and `TOKENSPEED_LOG_MM_TIMING` (worker-side
+timing logs).
