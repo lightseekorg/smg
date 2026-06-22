@@ -157,11 +157,17 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             agent = self._nixl_agent
             agent.fetch_remote_metadata(gw_name, ip, port)
             # For a one-sided READ the initiator only needs the target's md (fetched
-            # above). Pushing our md to the gateway makes its listener thread
-            # loadRemoteMD our md, which over rc returns NIXL_ERR_NOT_ALLOWED (the
-            # gateway can't load a peer md for rc) and stalls the reverse QP. Gate it:
-            # skip the push over rc (SMG_RDMA_NO_SEND_MD); keep it for tcp.
-            if os.environ.get("SMG_RDMA_NO_SEND_MD") not in ("1", "true"):
+            # above) -- the gateway never reads from us, so it never needs ours.
+            # Pushing our md to the gateway makes its listener thread loadRemoteMD
+            # our md, which over rc returns NIXL_ERR_NOT_ALLOWED (the gateway can't
+            # load a peer md for rc) and stalls the reverse QP -- under cross-node
+            # load this is the flaky pixel-pull hang (handshake holds _rdma_md_lock,
+            # every other image blocks behind it, encode stalls after parse with idle
+            # GPUs). The push is unnecessary for the one-sided READ and only matters
+            # for a tcp transport, so DEFAULT to skipping it; SMG_RDMA_SEND_MD=1
+            # re-enables it for tcp deploys. (Was: send-by-default gated by
+            # SMG_RDMA_NO_SEND_MD, which left rc deploys hanging out of the box.)
+            if os.environ.get("SMG_RDMA_SEND_MD") in ("1", "true"):
                 agent.send_local_metadata(ip, port)
             ready = False
             for _ in range(5000):
