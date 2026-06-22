@@ -3,6 +3,12 @@
 //! resize (e.g. parallelization for speed) MUST keep these identical — the
 //! resize feeds vision-encoder input, so its output must stay bit-for-bit
 //! stable to preserve vLLM/PIL parity (accuracy).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 use image::{DynamicImage, RgbImage};
 use llm_multimodal::vision::transforms::resize_bicubic_pil;
 

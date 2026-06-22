@@ -371,7 +371,7 @@ impl QwenVLProcessorBase {
                         Self::patchify_block_band(
                             planes_ref, width, patch_size, merge_size, temporal_patch_size,
                             merged_patch, pr_blocks, pc_blocks, start, band,
-                        )
+                        );
                     });
                     b0 += nb;
                 }
@@ -385,7 +385,10 @@ impl QwenVLProcessorBase {
     /// `[block_start, block_start + band.len()/block_out)` in (gt, pr, pc)
     /// row-major order. Pure gather/copy from `planes`; deterministic and
     /// independent per block (safe to call concurrently on disjoint bands).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "block-band patchifier: planes + grid dims + output band"
+    )]
     fn patchify_block_band(
         planes: &[&[f32]],
         width: usize,

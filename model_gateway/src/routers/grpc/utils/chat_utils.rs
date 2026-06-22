@@ -1011,7 +1011,6 @@ mod tests {
         };
         let template = std::fs::read_to_string(&path).expect("read template");
         let format = detect_chat_template_content_format(&template);
-        eprintln!("detected content format: {format}");
 
         let messages = vec![ChatMessage::User {
             content: MessageContent::Parts(vec![
@@ -1033,7 +1032,7 @@ mod tests {
         let transformed =
             process_content_format(&messages, format, Some("<|image_pad|>")).unwrap();
 
-        let mut kwargs = std::collections::HashMap::new();
+        let mut kwargs = HashMap::new();
         kwargs.insert("enable_thinking".to_string(), json!(false));
         let params = ChatTemplateParams {
             add_generation_prompt: true,
@@ -1051,7 +1050,6 @@ mod tests {
         let qpos = rendered
             .find("Question:")
             .expect("rendered prompt has the question");
-        eprintln!("vision_start@{vstart}  question@{qpos}");
         assert!(
             vstart < qpos,
             "image must precede the question (vstart={vstart}, qpos={qpos}).\n--- rendered ---\n{rendered}"

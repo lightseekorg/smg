@@ -2,6 +2,12 @@
 //! patchify). Pins the EXACT f32 encoder_input bytes. Any perf change to those
 //! stages (parallelization) MUST keep these identical to preserve vLLM/PIL
 //! parity (accuracy).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 use image::{DynamicImage, RgbImage};
 use llm_multimodal::vision::{
     preprocessor_config::PreProcessorConfig, processors::Qwen3VLProcessor, VisionPreProcessor,
@@ -32,7 +38,7 @@ fn config() -> PreProcessorConfig {
 fn fnv1a_f32(data: &[f32]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &v in data {
-        for &b in v.to_le_bytes().iter() {
+        for b in v.to_le_bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }

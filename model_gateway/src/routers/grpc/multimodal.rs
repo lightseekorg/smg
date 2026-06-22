@@ -1406,13 +1406,14 @@ fn serialize_array_as_tokenspeed_tensor(
                 return TokenSpeedTensor::shm(handle, shape, dtype);
             }
             Err(error) => {
+                use crate::observability::metrics::Metrics;
                 warn!(
                     ?error,
                     nbytes,
                     dtype = %dtype,
                     "Failed to write TokenSpeed encoder input directly to SHM; falling back to bytes path"
                 );
-                crate::observability::metrics::Metrics::record_mm_shm_write_failure("tokenspeed");
+                Metrics::record_mm_shm_write_failure("tokenspeed");
             }
         }
     }

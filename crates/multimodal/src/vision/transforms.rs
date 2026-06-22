@@ -432,14 +432,16 @@ pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
         .unwrap_or(1);
     (out_rows / MIN_ROWS_PER_THREAD)
         .min(avail)
-        .min(MAX_THREADS)
-        .max(1)
+        .clamp(1, MAX_THREADS)
 }
 
 /// Process output rows `[oy0, oy0 + out_band.len()/row_out)` of the horizontal
 /// pass into `out_band`. Horizontal pass preserves row count, so output row i
 /// reads input row `oy0 + i`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "row-band resampler: precomputed coeffs + dims + output band"
+)]
 fn pil_h_band(
     src: &[u8],
     bounds: &[(usize, usize)],
@@ -497,7 +499,7 @@ fn pil_resample_horizontal(
                 rest = tail;
                 let start = oy0;
                 s.spawn(move || {
-                    pil_h_band(src, b, k, half, in_w, out_w, channels, start, band)
+                    pil_h_band(src, b, k, half, in_w, out_w, channels, start, band);
                 });
                 oy0 += n;
             }
@@ -508,7 +510,10 @@ fn pil_resample_horizontal(
 
 /// Process output rows `[oy0, oy0 + out_band.len()/row_out)` of the vertical
 /// pass into `out_band`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "row-band resampler: precomputed coeffs + dims + output band"
+)]
 fn pil_v_band(
     src: &[u8],
     bounds: &[(usize, usize)],
@@ -579,6 +584,10 @@ pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> Dynam
         (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
     let horiz = pil_resample_horizontal(rgb.as_raw(), in_h, in_w, out_w_u, 3);
     let vert = pil_resample_vertical(&horiz, in_h, out_w_u, out_h_u, 3);
+    #[expect(
+        clippy::expect_used,
+        reason = "vert is exactly out_w*out_h*3 bytes by construction"
+    )]
     DynamicImage::ImageRgb8(
         RgbImage::from_raw(out_w, out_h, vert).expect("pil resize buffer size"),
     )

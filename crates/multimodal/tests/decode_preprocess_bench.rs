@@ -5,6 +5,12 @@
 //! Run:
 //!   REAL_JPEG=/path/x.jpg PP_CONFIG=/path/preprocessor_config.json \
 //!     cargo test -p llm-multimodal --test decode_preprocess_bench -- --ignored --nocapture
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 use std::time::Instant;
 
 use llm_multimodal::jpeg_turbo;

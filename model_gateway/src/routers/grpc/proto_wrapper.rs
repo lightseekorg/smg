@@ -299,6 +299,7 @@ impl TokenSpeedMultimodalItem {
 }
 
 fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tokenspeed::TensorData {
+    use crate::observability::metrics::Metrics;
     let TokenSpeedTensor {
         storage,
         shape,
@@ -309,11 +310,7 @@ fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor, shm_enabled: bool) -> tok
         TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data, shm_enabled),
         // Encoder input already written directly to SHM upstream — meter it here.
         TokenSpeedTensorStorage::Shm(handle) => {
-            crate::observability::metrics::Metrics::record_mm_tensor(
-                "tokenspeed",
-                "shm",
-                handle.nbytes as usize,
-            );
+            Metrics::record_mm_tensor("tokenspeed", "shm", handle.nbytes as usize);
             tokenspeed::tensor_data::Payload::Shm(handle)
         }
     };
