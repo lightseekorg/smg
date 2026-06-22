@@ -143,12 +143,23 @@ where
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
+// digest 0.11's `Output` is a `hybrid_array::Array` without `LowerHex`, so format bytes ourselves.
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
+
 pub fn validate_bundle_sha256(bundle: &StreamBundle) -> Result<(), String> {
     if bundle.sha256.is_empty() {
         return Ok(());
     }
 
-    let computed = format!("{:x}", Sha256::digest(&bundle.compressed_data));
+    let computed = hex_lower(&Sha256::digest(&bundle.compressed_data));
     if !computed.eq_ignore_ascii_case(&bundle.sha256) {
         return Err(format!(
             "Bundle fingerprint mismatch: expected {}, got {}",
@@ -361,7 +372,7 @@ mod tests {
     #[test]
     fn validate_sha256_accepts_matching_fingerprint() {
         let compressed_data = b"test-bundle".to_vec();
-        let sha256 = format!("{:x}", Sha256::digest(&compressed_data));
+        let sha256 = hex_lower(&Sha256::digest(&compressed_data));
         let bundle = make_bundle(compressed_data, sha256);
 
         validate_bundle_sha256(&bundle).unwrap();
@@ -370,7 +381,7 @@ mod tests {
     #[test]
     fn validate_sha256_accepts_uppercase_fingerprint() {
         let compressed_data = b"test-bundle".to_vec();
-        let sha256 = format!("{:x}", Sha256::digest(&compressed_data)).to_uppercase();
+        let sha256 = hex_lower(&Sha256::digest(&compressed_data)).to_uppercase();
         let bundle = make_bundle(compressed_data, sha256);
 
         validate_bundle_sha256(&bundle).unwrap();
@@ -437,7 +448,7 @@ mod tests {
     #[test]
     fn extract_bundle_extracts_files() {
         let zip_bytes = build_test_zip(1, b"hello");
-        let sha256 = format!("{:x}", Sha256::digest(&zip_bytes));
+        let sha256 = hex_lower(&Sha256::digest(&zip_bytes));
         let bundle = make_bundle(zip_bytes, sha256);
 
         let extracted = extract_bundle_to_tempdir(&bundle).unwrap();
