@@ -42,7 +42,8 @@ impl<B> MakeSpan<B> for RequestSpan {
             module = "smg"
         );
 
-        span.set_parent(parent_cx);
+        // 0.33 returns a Result; a missing/empty parent context is not actionable here.
+        let _ = span.set_parent(parent_cx);
         span
     }
 }
