@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::{http::StatusCode, response::Response};
-use rand::Rng;
+use rand::RngExt;
 use tracing::debug;
 
 use crate::config::types::RetryConfig;

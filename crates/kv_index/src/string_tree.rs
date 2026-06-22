@@ -1830,7 +1830,7 @@ mod tests {
 
     use rand::{
         distr::{Alphanumeric, SampleString},
-        rng as thread_rng, Rng,
+        rng as thread_rng, RngExt,
     };
 
     use super::*;

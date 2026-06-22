@@ -1217,7 +1217,7 @@ impl Router {
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: if self.enable_mesh {
                     let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
-                        use rand::{distr::Alphanumeric, Rng};
+                        use rand::{distr::Alphanumeric, RngExt};
                         let random_string: String = (0..4)
                             .map(|_| rand::rng().sample(Alphanumeric) as char)
                             .collect();

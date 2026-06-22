@@ -30,7 +30,7 @@ use kv_index::{
     compute_content_hash, ContentHash, OverlapScores, PositionalIndexer, SequenceHash, StoredBlock,
     WorkerBlockMap,
 };
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 
 // ---------------------------------------------------------------------------
 // CLI

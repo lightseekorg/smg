@@ -3623,7 +3623,7 @@ pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutp
 }
 
 pub fn generate_id(prefix: &str) -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut rng = rand::rng();
     // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
     let mut bytes = [0u8; 25];

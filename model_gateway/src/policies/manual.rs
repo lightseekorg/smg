@@ -16,7 +16,7 @@
 use std::{sync::Arc, time::Instant};
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use rand::Rng;
+use rand::RngExt;
 use tracing::info;
 
 use super::{

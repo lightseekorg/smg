@@ -32,7 +32,7 @@ use kv_index::{
 };
 use rand::{
     distr::{Alphanumeric, SampleString},
-    rng as thread_rng, Rng,
+    rng as thread_rng, RngExt,
 };
 
 // Global results storage for summary

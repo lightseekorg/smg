@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use rand::Rng as _;
+use rand::RngExt as _;
 
 use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::{

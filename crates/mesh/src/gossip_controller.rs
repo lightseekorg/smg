@@ -807,7 +807,7 @@ fn get_random_values_refs<K, V>(map: &BTreeMap<K, V>, k: usize) -> Vec<&V> {
 
     let mut rng = rand::rng();
 
-    values.choose_multiple(&mut rng, k).copied().collect()
+    values.sample(&mut rng, k).copied().collect()
 }
 
 /// Exponential backoff calculator used by the per-peer reconnect loop.
