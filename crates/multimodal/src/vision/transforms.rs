@@ -875,6 +875,48 @@ mod tests {
         DynamicImage::from(RgbImage::from_pixel(width, height, color))
     }
 
+    /// The raw-RGB video resizer must be byte-for-byte identical to the
+    /// DynamicImage PIL-bicubic resizer used for images, so default-bicubic
+    /// video frames match HF/vLLM exactly — the same bit-identity guarantee
+    /// images get via the fingerprint tests. Guards the video resize path added
+    /// for HF/vLLM parity (`preprocess_video_rgb`).
+    #[test]
+    fn resize_bicubic_pil_rgb_matches_dynamic_path() {
+        let (src_w, src_h) = (37u32, 23u32); // non-aligned source, non-trivial ratios
+        let (out_w, out_h) = (16u32, 28u32); // downscale width, upscale height
+        let mut img = RgbImage::new(src_w, src_h);
+        for y in 0..src_h {
+            for x in 0..src_w {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        ((x * 7) ^ (y * 13)) as u8,
+                        (x * 3 + y * 5) as u8,
+                        (x + y * y) as u8,
+                    ]),
+                );
+            }
+        }
+        let via_dynamic = resize_bicubic_pil(&DynamicImage::ImageRgb8(img.clone()), out_w, out_h);
+        let via_bytes = resize_bicubic_pil_rgb(img.as_raw(), src_w, src_h, out_w, out_h).unwrap();
+        assert_eq!(
+            via_dynamic.to_rgb8().into_raw(),
+            via_bytes.into_raw(),
+            "raw-RGB PIL bicubic must equal DynamicImage PIL bicubic byte-for-byte"
+        );
+    }
+
+    /// `resize_bicubic_pil_rgb` rejects a buffer whose length doesn't match the
+    /// declared dimensions rather than reading out of bounds.
+    #[test]
+    fn resize_bicubic_pil_rgb_rejects_wrong_length() {
+        assert!(
+            resize_bicubic_pil_rgb(&[0u8; 10], 4, 4, 2, 2).is_err(),
+            "wrong-length RGB buffer must error, not panic"
+        );
+    }
+
     #[test]
     fn test_to_tensor_shape() {
         let img = create_test_image(10, 20, Rgb([255, 128, 0]));

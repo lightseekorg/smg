@@ -1079,6 +1079,85 @@ mod tests {
         DynamicImage::ImageRgb8(image)
     }
 
+    fn create_sized_pattern_frame(w: u32, h: u32, seed: u8) -> DynamicImage {
+        let mut image = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                image.put_pixel(
+                    x,
+                    y,
+                    image::Rgb([
+                        seed.wrapping_add((x * 3 + y) as u8),
+                        seed.wrapping_add((x + y * 5) as u8),
+                        seed.wrapping_add((x * 7 + y * 11) as u8),
+                    ]),
+                );
+            }
+        }
+        DynamicImage::ImageRgb8(image)
+    }
+
+    /// When a video frame actually needs resizing, the DynamicImage path
+    /// (`preprocess_video` → `resize_bicubic_pil`) and the raw-RGB path
+    /// (`preprocess_video_rgb` → `resize_bicubic_pil_rgb`) must produce
+    /// byte-for-byte identical encoder inputs. The other video tests use 4x4
+    /// frames that need no resize, so this is the only one exercising the
+    /// default-bicubic resize branch added for HF/vLLM parity.
+    #[test]
+    fn test_preprocess_video_rgb_matches_dynamic_with_resize() {
+        let processor = QwenVLProcessorBase::new(create_video_test_config());
+        let config = PreProcessorConfig {
+            image_mean: Some(processor.default_mean().to_vec()),
+            image_std: Some(processor.default_std().to_vec()),
+            ..Default::default()
+        };
+        // Odd dimensions force smart_resize_video to a different factor-aligned
+        // target, guaranteeing the resize branch runs.
+        let frames = vec![
+            create_sized_pattern_frame(7, 9, 3),
+            create_sized_pattern_frame(7, 9, 101),
+        ];
+        let (target_h, target_w) = processor.smart_resize_video(frames.len(), 9, 7).unwrap();
+        assert!(
+            (target_w as u32, target_h as u32) != (7u32, 9u32),
+            "test must force a resize; target {target_w}x{target_h} should differ from 7x9"
+        );
+
+        let rgb_frames = frames
+            .iter()
+            .map(|frame| {
+                let DynamicImage::ImageRgb8(rgb) = frame else {
+                    panic!("test frame is not RGB8");
+                };
+                RgbFrameRef {
+                    width: rgb.width(),
+                    height: rgb.height(),
+                    data: rgb.as_raw(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let dynamic = processor.preprocess_video(&frames, &config).unwrap();
+        let rgb = processor
+            .preprocess_video_rgb(&rgb_frames, &config)
+            .unwrap();
+
+        let a = dynamic.encoder_input.as_slice_memory_order().unwrap();
+        let b = rgb.encoder_input.as_slice_memory_order().unwrap();
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "resized video encoder input length differs"
+        );
+        for (idx, (&got, &want)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "resized video path diverges at index {idx}: dynamic {got} vs rgb {want}"
+            );
+        }
+    }
+
     #[test]
     fn test_qwen_vl_base_factor() {
         let processor = QwenVLProcessorBase::new(create_test_config());
