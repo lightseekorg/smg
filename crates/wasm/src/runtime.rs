@@ -260,7 +260,8 @@ impl WasmThreadPool {
         wasmtime_config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool_config));
 
         wasmtime_config.async_stack_size(config.max_stack_size);
-        wasmtime_config.async_support(true);
+        // wasmtime 45+ enables async via the `async` crate feature; Config::async_support
+        // is a deprecated no-op.
         wasmtime_config.wasm_component_model(true);
         wasmtime_config.epoch_interruption(true); // Enable epoch-based timeout interruption
 

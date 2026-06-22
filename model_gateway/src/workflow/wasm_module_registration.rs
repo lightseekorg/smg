@@ -401,7 +401,6 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateWasmComponentStep {
 
         // Create a temporary engine to validate the component
         let mut config = Config::new();
-        config.async_support(true);
         config.wasm_component_model(true);
 
         let engine = Engine::new(&config).map_err(|e| WorkflowError::StepFailed {
