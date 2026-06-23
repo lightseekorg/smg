@@ -43,7 +43,7 @@ jobs:
 
       - name: Cache wheel artifacts
         id: cache-wheel
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             bindings/python/dist/*.whl
