@@ -191,6 +191,7 @@ impl ParserFactory {
         registry.register_pattern("qwen", "qwen3");
         registry.register_pattern("glm45", "glm45");
         registry.register_pattern("glm47", "glm45"); // glm47 uses same reasoning format as glm45
+        registry.register_pattern("glm-5", "glm45"); // GLM-5.x reuse glm45 reasoning format
         registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
         registry.register_pattern("kimi-k2.5", "kimi_k25");
         registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
@@ -305,6 +306,8 @@ mod tests {
         let factory = ParserFactory::new();
         let glm45 = factory.create("glm45-v2");
         assert_eq!(glm45.model_type(), "glm45");
+        // GLM-5.x reuse the glm45 reasoning parser.
+        assert_eq!(factory.create("glm-5.2-fp8").model_type(), "glm45");
     }
 
     #[test]
