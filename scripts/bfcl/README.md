@@ -20,7 +20,7 @@ Two arms expose an identical OpenAI `/v1` endpoint. The same official `bfcl` CLI
 | file | what |
 |---|---|
 | `launch_arm.sh` | bring up one arm (`a` = pure vLLM, `b` = vLLM-gRPC + SMG); prints its base_url; `stop` tears down via pidfiles. Fully env-parameterised. |
-| `run_ab.py` | point official `bfcl generate`+`evaluate` (FC mode) at both arms, parse per-category accuracy, emit a markdown + JSON comparison table, and a regression gate. Arms must already be serving. |
+| `run_ab.py` | point official `bfcl generate`+`evaluate` (FC mode) at both arms, parse per-category accuracy + test-case count, emit a markdown + JSON comparison table (with both **unweighted** = mean-of-categories and **weighted-by-n** = micro overall, matching BFCL's `calculate_unweighted/weighted_accuracy`), and a regression gate. Arms must already be serving. |
 | `register_bfcl_model.py` | register a model that bfcl-eval doesn't ship a handler for yet (new SKUs), by cloning an existing FC entry. Idempotent. |
 
 ## Quick start (manual, e.g. on a GPU box)

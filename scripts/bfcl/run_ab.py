@@ -51,6 +51,7 @@ class Arm:
     port: str = ""
     project_root: Path = field(default_factory=Path)
     scores: dict[str, float] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)  # per-category test-case count
 
 
 def parse_arm(spec: str, project_root: Path) -> Arm:
@@ -122,7 +123,7 @@ def run_bfcl(
         env,
         f"[{arm.name}] evaluate",
     )
-    arm.scores = parse_scores(arm.project_root, model, categories)
+    arm.scores, arm.counts = parse_scores(arm.project_root, model, categories)
 
 
 def _run(cmd: list[str], env: dict[str, str], label: str) -> None:
@@ -132,26 +133,31 @@ def _run(cmd: list[str], env: dict[str, str], label: str) -> None:
         print(f"WARNING: {label} exited {proc.returncode}", file=sys.stderr)
 
 
-def parse_scores(project_root: Path, model: str, categories: list[str]) -> dict[str, float]:
-    """Extract per-category accuracy from BFCL's score output.
+def parse_scores(
+    project_root: Path, model: str, categories: list[str]
+) -> tuple[dict[str, float], dict[str, int]]:
+    """Extract per-category accuracy and test-case count from BFCL's score output.
 
     BFCL writes ``<root>/score/<sanitized-model>/<category>_score.json`` whose
-    FIRST line is a summary dict containing ``accuracy``. We glob for the model
-    dir (sanitization differs across versions) and read each category's summary.
+    FIRST line is a summary dict ``{"accuracy", "correct_count", "total_count"}``.
+    We glob for the model dir (sanitization differs across versions) and read each
+    category's summary. ``total_count`` is what weights the weighted overall.
     """
     score_root = project_root / "score"
-    out: dict[str, float] = {}
+    scores: dict[str, float] = {}
+    counts: dict[str, int] = {}
     if not score_root.is_dir():
         print(f"WARNING: no score dir at {score_root}", file=sys.stderr)
-        return out
+        return scores, counts
     for cat in categories:
-        acc = _find_category_accuracy(score_root, cat)
-        if acc is not None:
-            out[cat] = acc
-    return out
+        summary = _find_category_summary(score_root, cat)
+        if summary is not None:
+            scores[cat] = summary[0]
+            counts[cat] = summary[1]
+    return scores, counts
 
 
-def _find_category_accuracy(score_root: Path, category: str) -> float | None:
+def _find_category_summary(score_root: Path, category: str) -> tuple[float, int] | None:
     # BFCL nests scores as <model>/<section>/BFCL_v4_<category>_score.json, so
     # match a trailing-wildcard pattern (the BFCL_v4_ prefix varies by version).
     for path in score_root.rglob(f"*{category}_score.json"):
@@ -160,9 +166,9 @@ def _find_category_accuracy(score_root: Path, category: str) -> float | None:
             summary = json.loads(first)
         except (OSError, ValueError, IndexError):
             continue
-        for key in ("accuracy", "acc", "score"):
-            if key in summary:
-                return float(summary[key])
+        acc = next((summary[k] for k in ("accuracy", "acc", "score") if k in summary), None)
+        if acc is not None:
+            return float(acc), int(summary.get("total_count", 0))
     return None
 
 
@@ -173,15 +179,31 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
         b = baseline.scores.get(cat)
         c = candidate.scores.get(cat)
         delta = (c - b) if (b is not None and c is not None) else None
-        rows.append({"category": cat, "baseline": b, "candidate": c, "delta": delta})
+        # Per-category count is the same on both arms (same test set); fall back
+        # across arms in case one didn't score the category.
+        n = baseline.counts.get(cat) or candidate.counts.get(cat)
+        rows.append({"category": cat, "baseline": b, "candidate": c, "delta": delta, "count": n})
 
-    b_vals = [r["baseline"] for r in rows if r["baseline"] is not None]
-    c_vals = [r["candidate"] for r in rows if r["candidate"] is not None]
-    b_overall = sum(b_vals) / len(b_vals) if b_vals else None
-    c_overall = sum(c_vals) / len(c_vals) if c_vals else None
-    overall_delta = (
-        (c_overall - b_overall) if (b_overall is not None and c_overall is not None) else None
-    )
+    def unweighted(key: str) -> float | None:
+        # macro average: mean of per-category accuracies (BFCL calculate_unweighted_accuracy)
+        vals = [r[key] for r in rows if r[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    def weighted(key: str) -> float | None:
+        # micro average: weighted by each category's test-case count
+        # (BFCL calculate_weighted_accuracy = total correct / total cases)
+        num = sum(r[key] * r["count"] for r in rows if r[key] is not None and r["count"])
+        den = sum(r["count"] for r in rows if r[key] is not None and r["count"])
+        return num / den if den else None
+
+    def delta_of(fn) -> float | None:
+        b, c = fn("baseline"), fn("candidate")
+        return (c - b) if (b is not None and c is not None) else None
+
+    b_overall, c_overall = unweighted("baseline"), unweighted("candidate")
+    overall_delta = delta_of(unweighted)
+    b_weighted, c_weighted = weighted("baseline"), weighted("candidate")
+    weighted_delta = delta_of(weighted)
 
     def fmt(x: float | None) -> str:
         return "—" if x is None else f"{x * 100:.2f}"
@@ -192,21 +214,29 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
     lines = [
         f"# BFCL A/B — {candidate.name} (candidate) vs {baseline.name} (baseline)",
         "",
-        f"| category | {baseline.name} | {candidate.name} | Δ (cand−base) |",
-        "|---|---|---|---|",
+        f"| category | n | {baseline.name} | {candidate.name} | Δ (cand−base) |",
+        "|---|---|---|---|---|",
     ]
     for r in rows:
+        n = "—" if r["count"] is None else str(r["count"])
         lines.append(
-            f"| {r['category']} | {fmt(r['baseline'])} | {fmt(r['candidate'])} | {fmt_d(r['delta'])} |"
+            f"| {r['category']} | {n} | {fmt(r['baseline'])} | {fmt(r['candidate'])} | {fmt_d(r['delta'])} |"
         )
-    lines.append(
-        f"| **overall (unweighted)** | **{fmt(b_overall)}** | **{fmt(c_overall)}** | **{fmt_d(overall_delta)}** |"
-    )
+    n_total = sum(r["count"] for r in rows if r["count"]) or "—"
+
+    def overall_row(label: str, b: float | None, c: float | None, d: float | None) -> str:
+        return f"| **{label}** | {n_total} | **{fmt(b)}** | **{fmt(c)}** | **{fmt_d(d)}** |"
+
+    lines.append(overall_row("overall (unweighted)", b_overall, c_overall, overall_delta))
+    lines.append(overall_row("overall (weighted by n)", b_weighted, c_weighted, weighted_delta))
     lines.append("")
     lines.append(
         "_Scores are % accuracy (official BFCL, FC mode). Same model, engine, "
         "checkpoint and sampling on both arms — the only difference is the "
-        "frontend, so Δ is attributable to the tokenization+parsing layer._"
+        "frontend, so Δ is attributable to the tokenization+parsing layer. "
+        "Unweighted = mean of category accuracies (macro); weighted = by test-case "
+        "count n (micro = total correct / total cases), matching BFCL's "
+        "calculate_unweighted/weighted_accuracy._"
     )
 
     payload = {
@@ -214,14 +244,21 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
             "name": baseline.name,
             "base_url": baseline.base_url,
             "scores": baseline.scores,
+            "counts": baseline.counts,
         },
         "candidate": {
             "name": candidate.name,
             "base_url": candidate.base_url,
             "scores": candidate.scores,
+            "counts": candidate.counts,
         },
         "per_category": rows,
         "overall": {"baseline": b_overall, "candidate": c_overall, "delta": overall_delta},
+        "overall_weighted": {
+            "baseline": b_weighted,
+            "candidate": c_weighted,
+            "delta": weighted_delta,
+        },
     }
     return "\n".join(lines), payload
 
@@ -233,16 +270,29 @@ def save_scores(arm: Arm, path: Path) -> None:
     arms cannot run at once, so each is scored on its own and diffed afterwards.
     """
     path.write_text(
-        json.dumps({"name": arm.name, "base_url": arm.base_url, "scores": arm.scores}, indent=2)
+        json.dumps(
+            {
+                "name": arm.name,
+                "base_url": arm.base_url,
+                "scores": arm.scores,
+                "counts": arm.counts,
+            },
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )
 
 
 def load_scores(path: Path) -> Arm:
-    """Rebuild an Arm (name + scores) from a file written by save_scores."""
+    """Rebuild an Arm (name + scores + counts) from a file written by save_scores."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    return Arm(name=data["name"], base_url=data.get("base_url", ""), scores=data["scores"])
+    return Arm(
+        name=data["name"],
+        base_url=data.get("base_url", ""),
+        scores=data["scores"],
+        counts=data.get("counts", {}),
+    )
 
 
 def write_report_and_gate(
