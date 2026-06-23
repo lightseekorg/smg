@@ -6,7 +6,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    errors::{ParserError, ParserResult},
+    errors::ParserResult,
     parsers::helpers,
     traits::ToolParser,
     types::{FunctionCall, StreamingParseResult, ToolCall, ToolCallItem},
@@ -39,7 +39,6 @@ pub struct MinimaxM2Parser {
     current_parameters: HashMap<String, Value>,
     in_tool_call: bool,
     function_name_sent: bool,
-    waiting_for_tool_call_end: bool,
 
     // Token configuration
     tool_call_start_token: &'static str,
@@ -102,7 +101,6 @@ impl MinimaxM2Parser {
             current_parameters: HashMap::new(),
             in_tool_call: false,
             function_name_sent: false,
-            waiting_for_tool_call_end: false,
             tool_call_start_token: "<minimax:tool_call>",
             tool_call_end_token: "</minimax:tool_call>",
             invoke_end_token: "</invoke>",
@@ -144,9 +142,14 @@ impl MinimaxM2Parser {
             .replace("&apos;", "'")
     }
 
-    /// Parse a single tool call block
-    fn parse_tool_call(&self, block: &str, tools: &[Tool]) -> ParserResult<Option<ToolCall>> {
-        if let Some(captures) = self.invoke_extractor.captures(block) {
+    /// Parse every `<invoke>` block in a tool-call wrapper into tool calls.
+    ///
+    /// MiniMax M2 emits parallel calls as multiple `<invoke>` blocks inside a single
+    /// `<minimax:tool_call>` wrapper (Anthropic-style), so we iterate all matches —
+    /// a single capture would drop every call after the first.
+    fn parse_tool_call(&self, block: &str, tools: &[Tool]) -> Vec<ToolCall> {
+        let mut calls = Vec::new();
+        for captures in self.invoke_extractor.captures_iter(block) {
             // Get function name from invoke tag attribute
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
 
@@ -157,18 +160,17 @@ impl MinimaxM2Parser {
             let param_types = helpers::param_types_for_function(tools, func_name);
             let parameters = self.parse_parameters(params_text, &param_types);
 
-            let arguments_str = serde_json::to_string(&parameters)
-                .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
-
-            Ok(Some(ToolCall {
-                function: FunctionCall {
-                    name: func_name.to_string(),
-                    arguments: arguments_str,
-                },
-            }))
-        } else {
-            Ok(None)
+            match serde_json::to_string(&parameters) {
+                Ok(arguments_str) => calls.push(ToolCall {
+                    function: FunctionCall {
+                        name: func_name.to_string(),
+                        arguments: arguments_str,
+                    },
+                }),
+                Err(e) => tracing::debug!("Failed to serialize tool call arguments: {}", e),
+            }
         }
+        calls
     }
 
     /// Parse all tool calls from text and return first valid position
@@ -181,19 +183,11 @@ impl MinimaxM2Parser {
         let mut first_valid_pos = None;
 
         for mat in self.tool_call_extractor.find_iter(text) {
-            match self.parse_tool_call(mat.as_str(), tools) {
-                Ok(Some(tool)) => {
-                    if first_valid_pos.is_none() {
-                        first_valid_pos = Some(mat.start());
-                    }
-                    tool_calls.push(tool);
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::debug!("Failed to parse tool call: {}", e);
-                    continue;
-                }
+            let calls = self.parse_tool_call(mat.as_str(), tools);
+            if !calls.is_empty() && first_valid_pos.is_none() {
+                first_valid_pos = Some(mat.start());
             }
+            tool_calls.extend(calls);
         }
 
         (tool_calls, first_valid_pos)
@@ -363,25 +357,6 @@ impl ToolParser for MinimaxM2Parser {
         let mut calls = Vec::new();
 
         loop {
-            // If we're waiting for the tool call end tag, check for it first
-            if self.waiting_for_tool_call_end {
-                if let Some(end_pos) = self.buffer.find(self.tool_call_end_token) {
-                    // Complete tool call found
-                    self.buffer =
-                        self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
-                    self.in_tool_call = false;
-                    self.waiting_for_tool_call_end = false;
-                    self.function_name_sent = false;
-                    self.current_function_name.clear();
-                    self.current_parameters.clear();
-                    self.current_tool_id += 1;
-                    continue;
-                } else {
-                    // End tag not complete yet, wait for more text
-                    break;
-                }
-            }
-
             // If we're not in a tool call and don't see a start token, return normal text
             if !self.in_tool_call && !self.buffer.contains(self.tool_call_start_token) {
                 // Check if buffer might contain a partial start token at the end
@@ -421,6 +396,20 @@ impl ToolParser for MinimaxM2Parser {
 
             // We're in a tool call, try to parse function name if not sent yet
             if !self.function_name_sent {
+                // Between invokes in a wrapper: if the wrapper-end tag arrives before
+                // the next <invoke>, the wrapper is finished — consume it and exit.
+                if let Some(end_pos) = self.buffer.find(self.tool_call_end_token) {
+                    let next_invoke = self.buffer.find("<invoke");
+                    if next_invoke.is_none_or(|i| end_pos < i) {
+                        self.buffer =
+                            self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
+                        self.in_tool_call = false;
+                        self.current_function_name.clear();
+                        self.current_parameters.clear();
+                        continue;
+                    }
+                }
+
                 // Use regex to extract function name from <invoke name="..."> pattern
                 // Check if we have enough text to match the invoke pattern
                 if let Some(captures) = self.invoke_extractor.captures(&self.buffer) {
@@ -497,22 +486,16 @@ impl ToolParser for MinimaxM2Parser {
                     self.buffer =
                         self.buffer[invoke_end + self.invoke_end_token.len()..].to_string();
 
-                    // Check if we have the closing </minimax:tool_call>
-                    if let Some(end_pos) = self.buffer.find(self.tool_call_end_token) {
-                        // Complete tool call found
-                        self.buffer =
-                            self.buffer[end_pos + self.tool_call_end_token.len()..].to_string();
-                        self.in_tool_call = false;
-                        self.function_name_sent = false;
-                        self.current_function_name.clear();
-                        self.current_parameters.clear();
-                        self.current_tool_id += 1;
-                        continue;
-                    } else {
-                        // End tag not complete yet, mark that we're waiting for it
-                        self.waiting_for_tool_call_end = true;
-                        break;
-                    }
+                    // This invoke is done. Reset per-invoke state and advance the
+                    // tool index; the next loop iteration either parses another
+                    // <invoke> in the same wrapper or closes the wrapper (handled in
+                    // the !function_name_sent branch). MiniMax M2 packs parallel calls
+                    // as multiple <invoke> blocks in one <minimax:tool_call> wrapper.
+                    self.function_name_sent = false;
+                    self.current_function_name.clear();
+                    self.current_parameters.clear();
+                    self.current_tool_id += 1;
+                    continue;
                 }
                 // Tool call not complete yet, wait for more text
                 break;
@@ -539,6 +522,5 @@ impl ToolParser for MinimaxM2Parser {
         self.current_parameters.clear();
         self.in_tool_call = false;
         self.function_name_sent = false;
-        self.waiting_for_tool_call_end = false;
     }
 }

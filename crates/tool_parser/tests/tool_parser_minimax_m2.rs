@@ -172,6 +172,32 @@ async fn test_minimax_multiple_tools() {
 }
 
 #[tokio::test]
+async fn test_minimax_parallel_invokes_in_one_wrapper() {
+    // MiniMax M2 emits parallel calls as multiple <invoke> blocks inside a SINGLE
+    // <minimax:tool_call> wrapper (Anthropic-style). All must be extracted — the
+    // earlier single-capture parse dropped every invoke after the first, zeroing
+    // the parallel/parallel_multiple BFCL categories.
+    let parser = MinimaxM2Parser::new();
+
+    let input = r#"<minimax:tool_call>
+<invoke name="get_current_weather">
+<parameter name="location">Beijing</parameter>
+</invoke>
+<invoke name="get_current_weather">
+<parameter name="location">Shanghai</parameter>
+</invoke>
+</minimax:tool_call>"#;
+
+    let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 2, "both invokes in one wrapper must be parsed");
+    assert_eq!(normal_text, "");
+    assert_eq!(tools[0].function.name, "get_current_weather");
+    assert_eq!(tools[1].function.name, "get_current_weather");
+    assert!(tools[0].function.arguments.contains("Beijing"));
+    assert!(tools[1].function.arguments.contains("Shanghai"));
+}
+
+#[tokio::test]
 async fn test_minimax_type_conversion() {
     let parser = MinimaxM2Parser::new();
 
@@ -232,6 +258,39 @@ async fn test_minimax_streaming_basic() {
 
     assert!(found_name, "Should have found tool name during streaming");
     assert!(found_params, "Should have streamed parameters");
+}
+
+#[tokio::test]
+async fn test_minimax_streaming_parallel_invokes_in_one_wrapper() {
+    // Two <invoke> blocks inside ONE <minimax:tool_call> wrapper must both stream.
+    let mut parser = MinimaxM2Parser::new();
+    let tools = create_test_tools();
+
+    let chunks = vec![
+        "<minimax:tool_call>",
+        r#"<invoke name="get_weather"><parameter name="city">Beijing</parameter></invoke>"#,
+        r#"<invoke name="get_weather"><parameter name="city">Shanghai</parameter></invoke>"#,
+        "</minimax:tool_call>",
+    ];
+
+    let mut names = Vec::new();
+    let mut max_index = 0usize;
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                names.push(name);
+            }
+            max_index = max_index.max(call.tool_index);
+        }
+    }
+
+    assert_eq!(
+        names.len(),
+        2,
+        "both invokes must stream a tool name, got {names:?}"
+    );
+    assert_eq!(max_index, 1, "second invoke must use tool_index 1");
 }
 
 #[test]
