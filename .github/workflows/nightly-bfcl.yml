@@ -174,14 +174,10 @@ jobs:
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
                "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
-              # GLM-5.2-FP8 (~744GB FP8 weights) does NOT fit a TP=4 half-node — it needs
-              # the whole 8-GPU node, so unlike the concurrent legs above it runs SEQUENTIAL:
-              # arm A on all 8 GPUs, torn down, then arm B on all 8 (gpu_b unused). vLLM's
-              # GLM-5.2 recipe serves it with TP=8 + glm47/glm45 parsers; SMG's tool parser
-              # is glm47_moe. --kv-cache-dtype fp8_e4m3 per the B200 recipe (DeepSeek-style
-              # sparse-attention fp8 path). MTP speculative decoding is omitted — perf-only,
-              # and the A/B isolates parsing. Served name is the org-prefixed HF id, which
-              # SMG auto-detect won't match, so smg_tool is passed explicitly.
+              # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
+              # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
+              # vLLM recipe: TP=8, glm47/glm45, --kv-cache-dtype fp8_e4m3. SMG passes
+              # glm47_moe explicitly (org-prefixed served name won't auto-detect).
               {"name": "glm-5.2", "runner": "blackwell", "tp": 8,
                "gpu_a": "0,1,2,3,4,5,6,7", "gpu_b": "",  # sequential: arm B reuses GPU_A (whole node)
                "model": "zai-org/GLM-5.2-FP8", "bfcl_model": "zai-org/GLM-5.2-FP8-FC",
