@@ -131,7 +131,7 @@ jobs:
                "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
-               "model_cache": "/models"},
+               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "32768"},
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
@@ -139,9 +139,12 @@ jobs:
                "vllm_tool": "openai", "vllm_reason": "",
                "smg_tool": "", "smg_reason": "",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
-               "model_cache": "/models"},
-              # Blackwell legs (B200, TP=4 per arm, both arms concurrent: 0-3 + 4-7).
-              # Models are pre-staged on NVMe at /raid/models/<id> (no download).
+               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+              # Blackwell legs (B200). Models pre-staged on NVMe at /raid/models/<id>.
+              # Concurrent TP=4 per arm (0-3 + 4-7) with max_model_len 32768: the
+              # multi_turn categories emit ~18k-token prompts that 400'd at 16384.
+              # Weights already fit at TP=4, and the extra KV for 32k is only a few
+              # GB/sequence, so the larger window fits without needing the whole node.
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "deepseek-ai/DeepSeek-V4-Flash", "bfcl_model": "deepseek-ai/DeepSeek-V4-Flash-FC",
@@ -151,15 +154,16 @@ jobs:
                # --kv-cache-dtype fp8 + --block-size 256 REQUIRED: V4's FlashMLA fp8
                # kernel asserts fp8 kv-cache (else EngineCore dies at startup).
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
-               "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models"},
+               "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models",
+               "arm_mode": "concurrent", "max_model_len": "32768"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "MiniMaxAI/MiniMax-M2.7", "bfcl_model": "MiniMaxAI/MiniMax-M2.7-FC",
                "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
-               "model_cache": "/raid/models"},
-              # Kimi-K2.6 loads native int4 weights (~500GB) -> fits TP=4 half-node.
+               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+              # Kimi-K2.6 int4 (~500GB) fits TP=4 half-node.
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "moonshotai/Kimi-K2.6", "bfcl_model": "moonshotai/Kimi-K2.6-FC",
@@ -168,7 +172,7 @@ jobs:
                "smg_reason": "kimi_k25",  # TODO(confirm): no kimi_k2 SMG reasoning parser yet
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
-               "model_cache": "/raid/models"},
+               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
@@ -244,8 +248,11 @@ jobs:
           BFCL_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || matrix.smg_reason }}
           BFCL_VLLM_EXTRA: ${{ matrix.vllm_extra }}
           BFCL_TP: ${{ matrix.tp }}
-          BFCL_MAX_MODEL_LEN: "16384"
+          BFCL_MAX_MODEL_LEN: ${{ matrix.max_model_len }}
           BFCL_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
+          ARM_MODE: ${{ matrix.arm_mode }}
+          GPU_A: ${{ matrix.gpu_a }}
+          GPU_B: ${{ matrix.gpu_b }}
           # Per-leg health-wait budget: big MoEs need minutes for load + compile + quant.
           BFCL_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
           # Arm logs + pidfiles under RUNNER_TEMP (per-job, uploadable) not /tmp.
@@ -265,21 +272,48 @@ jobs:
           cleanup() { bash scripts/bfcl/launch_arm.sh stop || true; }
           trap cleanup EXIT
           trap 'cleanup; exit 143' INT TERM
-          # Arm A (pure vLLM) on the first GPU half, arm B (SMG -> vLLM gRPC) on
-          # the second; ports left unset so launch_arm.sh picks free ones.
-          A_URL=$(BFCL_GPU=${{ matrix.gpu_a }} bash scripts/bfcl/launch_arm.sh a)
-          B_URL=$(BFCL_GPU=${{ matrix.gpu_b }} bash scripts/bfcl/launch_arm.sh b)
-          echo "arm A: $A_URL   arm B: $B_URL"
-          python scripts/bfcl/run_ab.py \
-            --baseline  "vllm=$A_URL" \
-            --candidate "smg=$B_URL" \
-            --bfcl-model "$BFCL_MODEL_FC" \
-            --categories "$CATEGORIES" \
-            --bfcl "$(command -v bfcl)" \
-            --project-root "$RUNNER_TEMP/bfcl_ab" \
-            --out "$RUNNER_TEMP/bfcl_ab.md" \
-            --json-out "$RUNNER_TEMP/bfcl_ab.json" \
-            --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          BFCL="$(command -v bfcl)"
+          ROOT="$RUNNER_TEMP/bfcl_ab"
+          if [ "$ARM_MODE" = sequential ]; then
+            # Whole node per arm (TP=8), one at a time: each model needs all 8 GPUs
+            # for enough KV cache at the larger max_model_len. Score arm A, tear it
+            # down to free the GPUs, score arm B, then diff the two saved results.
+            A_URL=$(BFCL_GPU="$GPU_A" bash scripts/bfcl/launch_arm.sh a)
+            echo "arm A (vllm): $A_URL"
+            python scripts/bfcl/run_ab.py --score-arm "vllm=$A_URL" \
+              --scores-out "$ROOT/scores_vllm.json" \
+              --bfcl-model "$BFCL_MODEL_FC" --categories "$CATEGORIES" \
+              --bfcl "$BFCL" --project-root "$ROOT"
+            bash scripts/bfcl/launch_arm.sh stop
+            B_URL=$(BFCL_GPU="$GPU_A" bash scripts/bfcl/launch_arm.sh b)
+            echo "arm B (smg): $B_URL"
+            python scripts/bfcl/run_ab.py --score-arm "smg=$B_URL" \
+              --scores-out "$ROOT/scores_smg.json" \
+              --bfcl-model "$BFCL_MODEL_FC" --categories "$CATEGORIES" \
+              --bfcl "$BFCL" --project-root "$ROOT"
+            bash scripts/bfcl/launch_arm.sh stop
+            python scripts/bfcl/run_ab.py \
+              --diff-baseline "$ROOT/scores_vllm.json" --diff-candidate "$ROOT/scores_smg.json" \
+              --categories "$CATEGORIES" \
+              --out "$RUNNER_TEMP/bfcl_ab.md" --json-out "$RUNNER_TEMP/bfcl_ab.json" \
+              --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          else
+            # Concurrent: arm A (pure vLLM) on the first GPU half, arm B (SMG ->
+            # vLLM gRPC) on the second; ports left unset so launch_arm.sh picks free.
+            A_URL=$(BFCL_GPU="$GPU_A" bash scripts/bfcl/launch_arm.sh a)
+            B_URL=$(BFCL_GPU="$GPU_B" bash scripts/bfcl/launch_arm.sh b)
+            echo "arm A: $A_URL   arm B: $B_URL"
+            python scripts/bfcl/run_ab.py \
+              --baseline  "vllm=$A_URL" \
+              --candidate "smg=$B_URL" \
+              --bfcl-model "$BFCL_MODEL_FC" \
+              --categories "$CATEGORIES" \
+              --bfcl "$BFCL" \
+              --project-root "$ROOT" \
+              --out "$RUNNER_TEMP/bfcl_ab.md" \
+              --json-out "$RUNNER_TEMP/bfcl_ab.json" \
+              --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          fi
       - name: Render summary
         if: always()
         run: |

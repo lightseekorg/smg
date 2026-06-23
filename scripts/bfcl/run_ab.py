@@ -84,6 +84,11 @@ def run_bfcl(
     arm.project_root.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["BFCL_PROJECT_ROOT"] = str(arm.project_root)
+    # OpenAICompletionsHandler (the FC handler we register the models with) talks to
+    # this arm's OpenAI-compatible endpoint via OPENAI_BASE_URL. LOCAL_SERVER_* is
+    # kept for any model bfcl ships with a local OSS handler instead.
+    env["OPENAI_BASE_URL"] = f"http://{arm.host}:{arm.port}/v1"
+    env.setdefault("OPENAI_API_KEY", "EMPTY")
     env["LOCAL_SERVER_ENDPOINT"] = arm.host
     env["LOCAL_SERVER_PORT"] = arm.port
     # NOTE: we do NOT force HF_HUB_OFFLINE. With the model cached, bfcl runs fine
@@ -221,19 +226,62 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
     return "\n".join(lines), payload
 
 
+def save_scores(arm: Arm, path: Path) -> None:
+    """Persist one arm's per-category scores so a later --diff can compare them.
+
+    Used by the sequential mode: when a model needs the whole node (TP=8) the two
+    arms cannot run at once, so each is scored on its own and diffed afterwards.
+    """
+    path.write_text(
+        json.dumps({"name": arm.name, "base_url": arm.base_url, "scores": arm.scores}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_scores(path: Path) -> Arm:
+    """Rebuild an Arm (name + scores) from a file written by save_scores."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return Arm(name=data["name"], base_url=data.get("base_url", ""), scores=data["scores"])
+
+
+def write_report_and_gate(
+    baseline: Arm, candidate: Arm, categories: list[str], args: argparse.Namespace
+) -> int:
+    """Emit the markdown + JSON comparison and apply the regression gate."""
+    report_md, payload = build_report(baseline, candidate, categories)
+    print("\n" + report_md)
+    if args.out:
+        args.out.write_text(report_md + "\n", encoding="utf-8")
+    if args.json_out:
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    overall = payload["overall"]
+    if overall["delta"] is not None and overall["delta"] < -args.tolerance:
+        print(
+            f"\nREGRESSION: {candidate.name} overall is {overall['delta'] * 100:.2f}pp "
+            f"below {baseline.name} (tolerance {args.tolerance * 100:.2f}pp)",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument(
-        "--baseline", required=True, help="name=base_url, e.g. vllm=http://127.0.0.1:31199"
-    )
-    p.add_argument(
-        "--candidate", required=True, help="name=base_url, e.g. smg=http://127.0.0.1:31200"
-    )
+    # Concurrent mode (both arms serving at once): pass both.
+    p.add_argument("--baseline", help="name=base_url, e.g. vllm=http://127.0.0.1:31199")
+    p.add_argument("--candidate", help="name=base_url, e.g. smg=http://127.0.0.1:31200")
+    # Sequential mode (one arm owns the whole node, TP=8): score one live arm now,
+    # then later diff the two saved score files.
+    p.add_argument("--score-arm", help="name=base_url of the single live arm to score")
+    p.add_argument("--scores-out", type=Path, help="write this arm's scores JSON here")
+    p.add_argument("--diff-baseline", type=Path, help="baseline scores JSON (from --scores-out)")
+    p.add_argument("--diff-candidate", type=Path, help="candidate scores JSON (from --scores-out)")
     p.add_argument(
         "--bfcl-model",
-        required=True,
         help="BFCL model handler name, e.g. Qwen/Qwen3-4B-Instruct-2507-FC",
     )
     p.add_argument(
@@ -259,9 +307,38 @@ def main() -> int:
     args = p.parse_args()
 
     categories = [c.strip() for c in args.categories.split(",") if c.strip()]
+
+    # Mode: diff two previously-saved score files (sequential mode, final step).
+    if args.diff_baseline or args.diff_candidate:
+        if not (args.diff_baseline and args.diff_candidate):
+            p.error("--diff-baseline and --diff-candidate must be given together")
+        return write_report_and_gate(
+            load_scores(args.diff_baseline), load_scores(args.diff_candidate), categories, args
+        )
+
+    # Mode: score a single live arm and persist its scores (sequential mode, per arm).
+    if args.score_arm:
+        if not (args.bfcl_model and args.scores_out):
+            p.error("--score-arm requires --bfcl-model and --scores-out")
+        arm = parse_arm(args.score_arm, args.project_root)
+        run_bfcl(
+            arm,
+            bfcl=args.bfcl,
+            model=args.bfcl_model,
+            categories=categories,
+            num_threads=args.num_threads,
+            temperature=args.temperature,
+            skip_generate=args.skip_generate,
+        )
+        save_scores(arm, args.scores_out)
+        print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
+        return 0
+
+    # Mode: concurrent A/B — both arms serving at once.
+    if not (args.baseline and args.candidate and args.bfcl_model):
+        p.error("concurrent mode requires --baseline, --candidate and --bfcl-model")
     baseline = parse_arm(args.baseline, args.project_root)
     candidate = parse_arm(args.candidate, args.project_root)
-
     for arm in (baseline, candidate):
         run_bfcl(
             arm,
@@ -272,23 +349,7 @@ def main() -> int:
             temperature=args.temperature,
             skip_generate=args.skip_generate,
         )
-
-    report_md, payload = build_report(baseline, candidate, categories)
-    print("\n" + report_md)
-    if args.out:
-        args.out.write_text(report_md + "\n", encoding="utf-8")
-    if args.json_out:
-        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-    overall = payload["overall"]
-    if overall["delta"] is not None and overall["delta"] < -args.tolerance:
-        print(
-            f"\nREGRESSION: {candidate.name} overall is {overall['delta'] * 100:.2f}pp "
-            f"below {baseline.name} (tolerance {args.tolerance * 100:.2f}pp)",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
+    return write_report_and_gate(baseline, candidate, categories, args)
 
 
 if __name__ == "__main__":

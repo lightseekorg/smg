@@ -89,14 +89,26 @@ The nightly (`.github/workflows/nightly-bfcl.yml`) runs the A/B as a GitHub Acti
 matrix — one leg per model, `fail-fast: false`, each on its own runner:
 
 - `4-gpu-h100` — Qwen3.6-27B and gpt-oss-120b, TP=2 per arm (GPUs 0,1 + 2,3).
-- `blackwell` (8×B300) — DeepSeek-V4-Flash, MiniMax-M2.7, Kimi-K2.6, TP=4 per arm
+- `blackwell` (B200) — DeepSeek-V4-Flash, MiniMax-M2.7, Kimi-K2.6 int4, TP=4 per arm
   (GPUs 0-3 + 4-7).
 
-All legs run **both arms concurrently**; no sequential path is needed because the
-"flash"/int4 checkpoints fit half a node. Per the A/B's premise, model size is
-irrelevant — a smaller same-family checkpoint exercises the identical parser, so the
-matrix uses DeepSeek-V4-Flash and int4 Kimi-K2.6 to validate the `deepseek_v4` /
-`kimi_k2` parsers without paying for the full production weights.
+All legs use `max_model_len` **32768**: the `multi_turn` categories emit ~18k-token
+prompts that 400'd ("decoder prompt longer than the maximum model length") at 16384.
+Weights already fit at each leg's TP and the extra KV for a 32k window is only a few
+GB/sequence, so the larger context needs no extra GPUs — arms stay **concurrent**.
+
+Each leg sets `arm_mode`:
+
+- **concurrent** (all current legs) — both arms serve at once on opposite GPU halves;
+  one `run_ab.py` scores both live and diffs.
+- **sequential** (in reserve, unused) — for a model that needs the whole node (TP=8)
+  so the arms can't coexist: `run_ab.py --score-arm` scores arm A alone → tears it
+  down → scores arm B alone → `--diff-baseline/--diff-candidate` compares the two
+  saved score files. Flip a leg's `arm_mode` to enable it.
+
+Per the A/B's premise, model size is irrelevant — a smaller same-family checkpoint
+exercises the identical parser — so the matrix uses DeepSeek-V4-Flash and int4
+Kimi-K2.6 to validate the `deepseek_v4` / `kimi_k2` parsers without the full weights.
 
 `workflow_dispatch` can target one leg via the `only` input and override
 `model`/`bfcl_model`/parsers per run. PRs touching this pipeline run **all** legs
@@ -109,7 +121,7 @@ is a tiny non-live subset (`simple_python,irrelevance`) for every leg.
 - **Cap the context.** Qwen3-4B defaults to a 256K `max_model_len` → ~36 GiB KV cache → engine init OOM. Pass `--max-model-len 16384` (the launch helper defaults to this); use the **same** value on both arms.
 - **Install `ninja` in the vLLM env (do NOT reach for `--enforce-eager`).** vLLM's torch.compile / CUDA-graph path shells out to `ninja` to build kernels (required for newer archs like Qwen3.6's `qwen3_5`); if it's missing the engine dies with `No such file or directory: 'ninja'`. `--enforce-eager` only *hides* this by skipping compilation (slower). Real fix: `pip install ninja` in the vLLM env **and put its bin on `PATH`** (vLLM execs `ninja` by name) — then run with CUDA graphs, no `--enforce-eager`.
 - **Don't force HF offline.** With the model cached, bfcl runs fine online (~7 req/s measured); a one-off slow run is usually a transient HF hiccup, not a systematic per-request throttle. `run_ab.py` does **not** set `HF_HUB_OFFLINE`; set it yourself only for air-gapped boxes. No HF token is needed for public models.
-- **New models need a bfcl handler.** bfcl-eval pins a fixed model list; a brand-new SKU (e.g. `Qwen/Qwen3.6-27B`) isn't in it, so `bfcl generate --model <id>-FC` fails with "Unknown model_name". Run `register_bfcl_model.py --model-id <id>` first.
+- **New models need a bfcl handler.** bfcl-eval pins a fixed model list; a brand-new SKU (e.g. `Qwen/Qwen3.6-27B`) isn't in it, so `bfcl generate --model <id>-FC` fails with "Unknown model_name". Run `register_bfcl_model.py --model-id <id>` first — it registers the id with **`OpenAICompletionsHandler`** (generic OpenAI Chat Completions FC: native `tools`, server-parsed `tool_calls`, OpenAI-message multi-turn). Do **not** use the model-family *local* handlers (e.g. `QwenFCHandler`): they re-serialize multi-turn tool calls into a text prompt assuming a `{"name","arguments"}` shape and `KeyError` on SKUs whose tool-call JSON differs (DeepSeek-V4 → `'arguments'`, MiniMax-M2 → `'name'`). `run_ab.py` points bfcl at each arm via `OPENAI_BASE_URL`.
 - **SMG auto model→parser mapping lags new SKUs.** SMG's factory doesn't yet map `Qwen3.6*` (it falls back to the JSON `qwen` parser, wrong for the XML format), so pass `--tool-call-parser qwen_xml` explicitly. Adding a `Qwen3.6*`→`qwen_xml` mapping to `crates/tool_parser` is a good follow-up.
 - **Use the `-FC` handler.** `Qwen/Qwen3-4B-Instruct-2507-FC`, not the bare name (which is prompt mode and bypasses the server parser).
 - **`bfcl generate --skip-server-setup`** points at `LOCAL_SERVER_ENDPOINT` / `LOCAL_SERVER_PORT`. (Custom full base_urls behind a proxy are still rigid — gorilla issue #1280.)

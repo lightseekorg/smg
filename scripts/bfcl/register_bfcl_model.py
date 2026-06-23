@@ -4,16 +4,22 @@
 The BFCL leaderboard package pins a fixed ``MODEL_CONFIG_MAPPING``; brand-new
 models (e.g. ``Qwen/Qwen3.6-27B``, released after the package was cut) aren't in
 it, so ``bfcl generate --model <id>-FC`` fails with "Unknown model_name". For an
-A/B that only needs FC mode against a self-hosted OpenAI endpoint, the handler
-logic is identical to any other Qwen FC model (send native ``tools``, read
-``tool_calls``), so we clone an existing FC entry under the new id.
+A/B against a self-hosted OpenAI-compatible endpoint we register the new id with
+``OpenAICompletionsHandler`` — the generic OpenAI Chat Completions FC handler: it
+sends native ``tools`` and reads the server's parsed ``tool_calls`` (keeping the
+server parser on the critical path), and across multi-turn it re-inserts tool
+calls as proper OpenAI messages. The model-family *local* handlers (e.g.
+``QwenFCHandler``) instead re-serialize multi-turn tool calls into a text prompt
+assuming a ``{"name","arguments"}`` shape, which ``KeyError``s on SKUs whose
+tool-call JSON differs (DeepSeek-V4, MiniMax-M2). bfcl reads the endpoint from
+``OPENAI_BASE_URL`` (set per arm by run_ab.py).
 
 This edits the *installed* ``bfcl_eval/constants/model_config.py`` in place
 (idempotent). Re-running is safe. Intended for nightly "test the latest models"
 flows where the bfcl release lags new releases.
 
     python register_bfcl_model.py --model-id Qwen/Qwen3.6-27B
-    # registers "Qwen/Qwen3.6-27B-FC" cloned from "Qwen/Qwen3-32B-FC"
+    # registers "Qwen/Qwen3.6-27B-FC" with OpenAICompletionsHandler
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ def main() -> int:
     p.add_argument("--model-id", required=True, help="HF id, e.g. Qwen/Qwen3.6-27B")
     p.add_argument(
         "--handler",
-        default="QwenFCHandler",
+        default="OpenAICompletionsHandler",
         help="bfcl handler class already imported in model_config.py",
     )
     p.add_argument("--anchor", default=DEFAULT_ANCHOR, help="existing entry line to insert before")
