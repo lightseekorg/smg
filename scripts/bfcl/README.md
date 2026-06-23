@@ -100,7 +100,7 @@ GB/sequence, so the larger context needs no extra GPUs — arms stay **concurren
 Each leg sets `arm_mode`:
 
 - **concurrent** (all current legs) — both arms serve at once on opposite GPU halves;
-  one `run_ab.py` scores both live and diffs.
+  `run_ab.py` scores them **in parallel** (separate servers/GPUs, no contention) and diffs.
 - **sequential** (in reserve, unused) — for a model that needs the whole node (TP=8)
   so the arms can't coexist: `run_ab.py --score-arm` scores arm A alone → tears it
   down → scores arm B alone → `--diff-baseline/--diff-candidate` compares the two

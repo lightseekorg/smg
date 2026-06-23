@@ -32,6 +32,7 @@ launch them. Example::
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -384,12 +385,15 @@ def main() -> int:
         print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
         return 0
 
-    # Mode: concurrent A/B — both arms serving at once.
+    # Mode: concurrent A/B — both arms serve at once on opposite GPU halves, so
+    # score them in PARALLEL (separate servers, separate project_roots, no
+    # contention) — roughly halves wall-clock vs scoring one then the other.
     if not (args.baseline and args.candidate and args.bfcl_model):
         p.error("concurrent mode requires --baseline, --candidate and --bfcl-model")
     baseline = parse_arm(args.baseline, args.project_root)
     candidate = parse_arm(args.candidate, args.project_root)
-    for arm in (baseline, candidate):
+
+    def score(arm: Arm) -> None:
         run_bfcl(
             arm,
             bfcl=args.bfcl,
@@ -399,6 +403,10 @@ def main() -> int:
             temperature=args.temperature,
             skip_generate=args.skip_generate,
         )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        # list() forces both futures to complete and re-raises any exception.
+        list(ex.map(score, (baseline, candidate)))
     return write_report_and_gate(baseline, candidate, categories, args)
 
 
