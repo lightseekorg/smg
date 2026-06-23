@@ -193,11 +193,9 @@ impl ResponseProcessor {
         // Step 5: Build ChatCompletionMessage (proper response message type)
         let chat_message = ChatCompletionMessage {
             role: "assistant".to_string(),
-            content: if processed_text.is_empty() {
-                None
-            } else {
-                Some(processed_text)
-            },
+            // Whitespace-only residual (e.g. "\n\n" between </think> and <tool_call>)
+            // must be None, not Some("\n\n") — see normalize_assistant_content.
+            content: normalize_assistant_content(processed_text),
             tool_calls,
             reasoning_content: reasoning_text,
         };
@@ -687,8 +685,8 @@ impl ResponseProcessor {
             });
         }
 
-        // Text block (if non-empty)
-        if !processed_text.is_empty() {
+        // Text block (only if non-whitespace; a bare "\n\n" residual must not become one).
+        if !processed_text.trim().is_empty() {
             content_blocks.push(messages::ContentBlock::Text {
                 text: processed_text,
                 citations: None,
@@ -873,5 +871,31 @@ impl ResponseProcessor {
             usage: Some(Usage::from_counts(total_prompt, total_completion)),
             system_fingerprint: dispatch.weight_version.clone(),
         })
+    }
+}
+
+/// Residual assistant text → OpenAI `content`. Whitespace-only (the `"\n\n"` left
+/// after reasoning + tool-call extraction) becomes `None`, not `Some("\n\n")`, which
+/// would otherwise diverge multi-turn conversations. Real content is kept verbatim.
+fn normalize_assistant_content(text: String) -> Option<String> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+#[cfg(test)]
+mod content_normalization_tests {
+    use super::normalize_assistant_content;
+
+    #[test]
+    fn whitespace_only_is_none_real_text_kept_verbatim() {
+        assert_eq!(normalize_assistant_content("\n\n".to_string()), None);
+        assert_eq!(normalize_assistant_content("  \t".to_string()), None);
+        assert_eq!(
+            normalize_assistant_content("\n\nDone.".to_string()),
+            Some("\n\nDone.".to_string())
+        );
     }
 }
