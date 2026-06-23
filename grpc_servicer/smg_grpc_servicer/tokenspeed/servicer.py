@@ -831,19 +831,29 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             )
 
         # EPD: per-item encode->prefill handshakes. Each entry tells the prefill
-        # which Mooncake room to receive that image's embedding on, and the
-        # encode worker's bootstrap endpoint to discover it. Absent for non-EPD.
-        encode_handshake = None
+        # which Mooncake room to receive that item's embedding on, and the encode
+        # worker's bootstrap endpoint to discover it. The gateway splits the mm
+        # payload one item per image, so ``item_index`` indexes ``mm_items`` 1:1;
+        # we attach each handshake ONTO its item (``item.encode_handshake``) so it
+        # rides with the item through the engine. Absent for non-EPD.
         if request.HasField("encode"):
-            encode_handshake = [
-                {
-                    "item_index": h.item_index,
+            if precomputed_mm is None:
+                raise ValueError(
+                    "GenerateRequest.encode (EPD handshakes) present but mm_inputs "
+                    "is missing; handshakes describe images that must be in mm_inputs"
+                )
+            n_items = len(precomputed_mm.mm_items)
+            for h in request.encode.items:
+                if not 0 <= h.item_index < n_items:
+                    raise ValueError(
+                        f"EPD handshake item_index {h.item_index} out of range "
+                        f"for {n_items} mm item(s)"
+                    )
+                precomputed_mm.mm_items[h.item_index].encode_handshake = {
                     "bootstrap_room": h.bootstrap_room,
                     "bootstrap_host": h.bootstrap_host,
                     "bootstrap_port": h.bootstrap_port,
                 }
-                for h in request.encode.items
-            ]
 
         # PD: prefill->decode KV rendezvous. The gateway sends identical params to
         # both workers; the engine keys the Mooncake transfer on ``bootstrap_room``
@@ -875,7 +885,6 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 list(request.token_ids_logprob) if request.token_ids_logprob else None
             ),
             precomputed_multimodal_inputs=precomputed_mm,
-            encode_handshake=encode_handshake,
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
