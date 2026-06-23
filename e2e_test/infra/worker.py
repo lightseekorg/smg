@@ -397,12 +397,21 @@ class Worker:
                 self.nixl_port = get_open_port()
                 env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_port)
 
-        # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
-        if self.engine == "trtllm" and len(self.gpu_ids) > 1:
-            env["NCCL_DEBUG"] = "WARN"
-            env["NCCL_IB_DISABLE"] = "1"
-            env["NCCL_SHM_DISABLE"] = "1"
-            env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
+        if self.engine == "trtllm":
+            # TRT-LLM bootstraps workers over Open MPI even at TP=1. On CI pods the
+            # MPI OOB/BTL can pick the routable pod interface and flakily fail to
+            # TCP-connect to a peer ("connect() to <pod-ip>:1025 failed"), so the
+            # engine never starts and the health check times out. All ranks are
+            # co-located on one node, so pin MPI to loopback. setdefault keeps any
+            # explicit override. Applies at TP=1 too (where the flake was seen).
+            env.setdefault("OMPI_MCA_oob_tcp_if_include", "lo")
+            env.setdefault("OMPI_MCA_btl_tcp_if_include", "lo")
+            # Multi-GPU additionally needs NCCL tuning for CI compatibility.
+            if len(self.gpu_ids) > 1:
+                env["NCCL_DEBUG"] = "WARN"
+                env["NCCL_IB_DISABLE"] = "1"
+                env["NCCL_SHM_DISABLE"] = "1"
+                env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
 
         return env
 
