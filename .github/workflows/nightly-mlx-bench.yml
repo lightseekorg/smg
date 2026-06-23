@@ -77,7 +77,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6

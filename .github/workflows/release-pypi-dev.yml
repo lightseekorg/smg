@@ -40,7 +40,7 @@ jobs:
       servicer_version: ${{ steps.compute.outputs.servicer_version }}
       release_tag: ${{ steps.compute.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: compute
         run: |
@@ -88,7 +88,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.release_smg }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: smg-repo
 
@@ -173,7 +173,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.release_proto }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -208,7 +208,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || inputs.release_servicer }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -279,12 +279,12 @@ jobs:
         run: ls -lh dist/
 
       - name: Check out smg repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           path: smg-repo
 
       - name: Check out whl index repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: lightseekorg/whl
           ref: gh-pages

@@ -93,7 +93,7 @@ jobs:
           echo "| source_build_ref | \`${SOURCE_BUILD_REF}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: Checkout SMG
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Validate inputs
         env:
@@ -136,7 +136,7 @@ jobs:
 
       - name: Checkout source build repo
         if: inputs.engine == 'trtllm' && inputs.base_image_ref == '' && inputs.source_build_repo != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.source-ref.outputs.repo }}
           ref: ${{ steps.source-ref.outputs.ref }}

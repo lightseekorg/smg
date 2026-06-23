@@ -64,7 +64,7 @@ jobs:
       ROUTER_LOCAL_MODEL_PATH: /models
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Engine-specific setup
       - name: Setup SGLang backend
