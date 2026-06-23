@@ -12,7 +12,7 @@ name: Nightly BFCL
 
 on:
   schedule:
-    - cron: "17 7 * * *" # 00:17 PDT (07:00 UTC = midnight Pacific/PDT)
+    - cron: "17 7 * * *" # 07:17 UTC = 00:17 PDT
   # PR sanity: only when the BFCL pipeline itself changes. Runs a quick non-live
   # subset so the A/B is exercised end-to-end (engine, FC mode, parser, scoring)
   # before merge — confidence the pipeline works, not a statistical result.
