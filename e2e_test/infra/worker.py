@@ -26,9 +26,27 @@ from .constants import (
     vllm_kv_backend,
 )
 from .model_specs import get_model_spec
-from .process_utils import detect_ib_device, get_open_port, wait_for_health
+from .process_utils import detect_ib_device, get_open_port, release_port, wait_for_health
 
 logger = logging.getLogger(__name__)
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """True while any process remains in the group (signal-0 liveness probe)."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _killpg(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 @dataclass
@@ -48,6 +66,7 @@ class Worker:
     extra_engine_args: list[str] | None = None
     process: subprocess.Popen | None = field(default=None, repr=False)
     _log_file: IO[Any] | None = field(default=None, repr=False)
+    _pgid: int | None = field(default=None, repr=False)
 
     @property
     def base_url(self) -> str:
@@ -92,6 +111,13 @@ class Worker:
         logger.debug("Command: %s", " ".join(cmd))
 
         self.process = self._spawn_process(cmd, env)
+        # Record the group id while the leader is alive so teardown can reap
+        # orphaned children even if the parent exits first. start_new_session
+        # makes the worker its own group leader (pgid == pid).
+        try:
+            self._pgid = os.getpgid(self.process.pid)
+        except (ProcessLookupError, OSError):
+            self._pgid = self.process.pid
 
         if not wait_ready:
             logger.info(
@@ -120,32 +146,30 @@ class Worker:
         )
 
     def stop(self) -> None:
-        """Terminate worker process and all child processes."""
-        if self.process is None or self.process.poll() is not None:
-            return
+        """Terminate the worker's entire process group.
 
-        pid = self.process.pid
-        logger.info("Stopping worker %s (PID %d)", self.model_id, pid)
+        Engines such as sglang fork a scheduler subprocess that holds the GPU
+        and shares the worker's process group (we launch with
+        ``start_new_session=True``). Killing by the group id reaps that child
+        even when the parent crashed first and orphaned it — leaving it alive
+        would keep the GPU pinned and OOM the next launch.
+        """
+        pgid = self._pgid
+        if pgid is not None and _process_group_alive(pgid):
+            logger.info("Stopping worker %s (PGID %d)", self.model_id, pgid)
+            _killpg(pgid, signal.SIGTERM)
+            deadline = time.perf_counter() + 10
+            while _process_group_alive(pgid) and time.perf_counter() < deadline:
+                time.sleep(0.2)
+            if _process_group_alive(pgid):
+                logger.warning(
+                    "Worker %s (PGID %d) survived SIGTERM; sending SIGKILL", self.model_id, pgid
+                )
+                _killpg(pgid, signal.SIGKILL)
 
-        # Kill entire process group (workers run in their own session)
-        try:
-            pgid = os.getpgid(pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            self.process.terminate()
-
-        try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            try:
-                pgid = os.getpgid(pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                self.process.kill()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.error("Worker PID %d did not die after SIGKILL", pid)
+        # Reap the parent zombie if it has exited.
+        if self.process is not None:
+            self.process.poll()
 
         # Clean up log file
         if self._log_file is not None:
@@ -156,8 +180,6 @@ class Worker:
             self._log_file = None
 
         # Release reserved ports
-        from .process_utils import release_port
-
         release_port(self.port)
         if self.bootstrap_port is not None:
             release_port(self.bootstrap_port)
