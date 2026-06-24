@@ -141,7 +141,7 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 // separators, raw UTF-8. Compact `serde_json::to_string` would change the
 // prompt bytes vLLM trained on.
 fn to_json(value: &Value) -> String {
-    crate::python_json::to_python_json_string(value)
+    crate::json_dumps::to_string(value)
 }
 fn tools_from_openai_format(tools: &[Value]) -> Vec<Value> {
     tools

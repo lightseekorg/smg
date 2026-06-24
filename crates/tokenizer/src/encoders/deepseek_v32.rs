@@ -145,7 +145,7 @@ fn user_msg(content: &str) -> String {
 /// which uses spaced `", "` / `": "` separators. Compact `serde_json::to_string`
 /// would change the prompt bytes vLLM renders from.
 fn to_json(value: &Value) -> String {
-    crate::python_json::to_python_json_string(value)
+    crate::json_dumps::to_string(value)
 }
 
 /// `[tool["function"] for tool in tools]`
