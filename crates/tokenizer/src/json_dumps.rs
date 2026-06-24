@@ -79,4 +79,26 @@ mod tests {
         assert_eq!(to_string(&json!({})), "{}");
         assert_eq!(to_string(&json!([])), "[]");
     }
+
+    #[test]
+    fn separators_inside_content_are_left_untouched() {
+        // `,` / `:` inside keys and values must not be spaced — only the
+        // structural separators are. Each matches json.dumps(ensure_ascii=False).
+        assert_eq!(to_string(&json!({"a": "x, y: z"})), r#"{"a": "x, y: z"}"#);
+        assert_eq!(to_string(&json!({"k:1": "v,2"})), r#"{"k:1": "v,2"}"#);
+        // A value that *is* a separator string.
+        assert_eq!(
+            to_string(&json!({"sep": ", ", "kv": ": "})),
+            r#"{"sep": ", ", "kv": ": "}"#
+        );
+        // A value that is itself a JSON-looking string (stays escaped, unspaced).
+        assert_eq!(
+            to_string(&json!({"s": "{\"inner\": 1, \"b\": [2, 3]}"})),
+            r#"{"s": "{\"inner\": 1, \"b\": [2, 3]}"}"#
+        );
+        assert_eq!(
+            to_string(&json!(["a,b", "c:d", "e, f: g"])),
+            r#"["a,b", "c:d", "e, f: g"]"#
+        );
+    }
 }
