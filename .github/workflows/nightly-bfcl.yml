@@ -354,17 +354,36 @@ jobs:
             echo "## BFCL A/B — ${{ matrix.name }} (${{ matrix.model }})"
             cat "$RUNNER_TEMP/bfcl_ab.md"
           } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload results (summary + per-case scores)
+      - name: Collect BFCL transcripts (both arms)
+        if: always()
+        # Tar the whole A/B root — both arms' raw per-turn model outputs (result)
+        # and per-case verdicts (score). gzip'd JSON is small (a few MB for a
+        # multi_turn-only run, tens of MB for the full suite), and tarring the
+        # entire tree is more robust than the upload-artifact glob that silently
+        # matched nothing. Lets us diff arm-A (vLLM) vs arm-B (SMG) turn by turn.
+        run: |
+          set -uo pipefail
+          ROOT="$RUNNER_TEMP/bfcl_ab"
+          OUT="$RUNNER_TEMP/bfcl_transcripts.tgz"
+          if [ -d "$ROOT" ]; then
+            tar -czf "$OUT" -C "$ROOT" . 2>/dev/null || true
+            echo "transcript tarball: $(du -h "$OUT" 2>/dev/null | cut -f1)"
+            echo "contents (head):"; tar tzf "$OUT" 2>/dev/null | head -40 || echo "(empty)"
+          else
+            echo "no $ROOT"
+          fi
+      - name: Upload results (summary + per-case scores + transcripts)
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bfcl-ab-${{ matrix.name }}-${{ github.run_id }}
           # Summary + per-category score files (which list each failed case for
-          # both arms). Raw generate dumps (bfcl_ab/<arm>/result/**) excluded as bulky.
+          # both arms) + a tarball of both arms' raw per-turn transcripts.
           path: |
             ${{ runner.temp }}/bfcl_ab.md
             ${{ runner.temp }}/bfcl_ab.json
             ${{ runner.temp }}/bfcl_ab/*/score/**
+            ${{ runner.temp }}/bfcl_transcripts.tgz
           if-no-files-found: warn
           retention-days: 30
       - name: Upload arm logs (failure only)
