@@ -137,8 +137,11 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 // ---------------------------------------------------------------------------
 // JSON helpers (mirror V3.2)
 // ---------------------------------------------------------------------------
+// Python's `to_json` is `json.dumps(value, ensure_ascii=False)`: spaced
+// separators, raw UTF-8. Compact `serde_json::to_string` would change the
+// prompt bytes vLLM trained on.
 fn to_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+    crate::python_json::to_python_json_string(value)
 }
 fn tools_from_openai_format(tools: &[Value]) -> Vec<Value> {
     tools

@@ -8,6 +8,7 @@ pub mod eos;
 pub mod factory;
 pub mod hub;
 pub mod mock;
+pub(crate) mod python_json;
 pub mod registry;
 pub mod sequence;
 pub mod stop;

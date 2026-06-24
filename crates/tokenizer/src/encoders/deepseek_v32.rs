@@ -141,11 +141,11 @@ fn user_msg(content: &str) -> String {
 // JSON helpers
 // ---------------------------------------------------------------------------
 
-/// Mirrors the Python `to_json` helper. serde_json always emits valid UTF-8
-/// without escaping, so the `ensure_ascii` fallback in the Python version is
-/// effectively a no-op here.
+/// Mirrors the Python `to_json` helper: `json.dumps(value, ensure_ascii=False)`,
+/// which uses spaced `", "` / `": "` separators. Compact `serde_json::to_string`
+/// would change the prompt bytes vLLM renders from.
 fn to_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+    crate::python_json::to_python_json_string(value)
 }
 
 /// `[tool["function"] for tool in tools]`

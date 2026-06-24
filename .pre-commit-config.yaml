@@ -7,7 +7,9 @@ repos:
       - id: check-symlinks
       - id: destroyed-symlinks
       - id: trailing-whitespace
+        exclude: ^crates/tokenizer/tests/fixtures/dsv4/
       - id: end-of-file-fixer
+        exclude: ^crates/tokenizer/tests/fixtures/dsv4/
       - id: check-yaml
         args: [--allow-multiple-documents, --unsafe]
         exclude: ^deploy/helm/.*/templates/|^deploy/helm/.*/tests/
@@ -19,6 +21,7 @@ repos:
       - id: detect-private-key
         exclude: .*tests/.*_test\.rs$
       - id: mixed-line-ending
+        exclude: ^crates/tokenizer/tests/fixtures/dsv4/
       - id: no-commit-to-branch
 
   - repo: https://github.com/codespell-project/codespell
@@ -33,6 +36,7 @@ repos:
             src/mesh/proto/.*\.proto$|
             src/tokenizer/chat_template\.rs|
             crates/multimodal/tests/fixtures/.*|
+            crates/tokenizer/tests/fixtures/dsv4/.*|
             target/.*
           )$
 
