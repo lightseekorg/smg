@@ -682,4 +682,31 @@ mod tests {
         let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["count"], Value::Number(5.into()));
     }
+
+    // The streaming path coerces by schema too: concatenated parameter fragments
+    // keep a string-typed value quoted while a non-string one is parsed.
+    #[tokio::test]
+    async fn test_streaming_schema_aware_coercion() {
+        let tools = tool_with_props(serde_json::json!({
+            "limit": {"type": "string"},
+            "count": {"type": "integer"},
+        }));
+        let text = "<tool_call>\n<function=f>\n\
+            <parameter=limit>4</parameter>\n\
+            <parameter=count>5</parameter>\n\
+            </function>\n</tool_call>";
+        let result = QwenXmlParser::new()
+            .parse_incremental(text, &tools)
+            .await
+            .unwrap();
+        let args: String = result.calls.iter().map(|c| c.parameters.as_str()).collect();
+        assert!(
+            args.contains(r#""limit": "4""#),
+            "string param must stay string: {args}"
+        );
+        assert!(
+            args.contains(r#""count": 5"#),
+            "int param must coerce: {args}"
+        );
+    }
 }
