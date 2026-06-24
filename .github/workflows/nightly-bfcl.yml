@@ -124,6 +124,8 @@ jobs:
           fi
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
+          # max_model_len "auto": largest window that fits in GPU memory (capped at
+          # native max). A fixed 32768 400'd on multi_turn_long_context (>32k prompts).
           legs = [
               # H100 legs (TP=2 per arm, both arms concurrent: GPUs 0,1 + 2,3).
               {"name": "qwen3.6", "runner": "4-gpu-h100", "tp": 2,
@@ -132,7 +134,7 @@ jobs:
                "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
-               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
@@ -140,12 +142,9 @@ jobs:
                "vllm_tool": "openai", "vllm_reason": "",
                "smg_tool": "", "smg_reason": "",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
-               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+               "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # Blackwell legs (B200). Models pre-staged on NVMe at /raid/models/<id>.
-              # Concurrent TP=4 per arm (0-3 + 4-7) with max_model_len 32768: the
-              # multi_turn categories emit ~18k-token prompts that 400'd at 16384.
-              # Weights already fit at TP=4, and the extra KV for 32k is only a few
-              # GB/sequence, so the larger window fits without needing the whole node.
+              # Concurrent TP=4 per arm (0-3 + 4-7).
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "deepseek-ai/DeepSeek-V4-Flash", "bfcl_model": "deepseek-ai/DeepSeek-V4-Flash-FC",
@@ -156,14 +155,14 @@ jobs:
                # kernel asserts fp8 kv-cache (else EngineCore dies at startup).
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
                "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models",
-               "arm_mode": "concurrent", "max_model_len": "32768"},
+               "arm_mode": "concurrent", "max_model_len": "auto"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "MiniMaxAI/MiniMax-M2.7", "bfcl_model": "MiniMaxAI/MiniMax-M2.7-FC",
                "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
-               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # Kimi-K2.6 int4 (~500GB) fits TP=4 half-node.
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
@@ -173,7 +172,7 @@ jobs:
                "smg_reason": "kimi_k25",  # TODO(confirm): no kimi_k2 SMG reasoning parser yet
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
-               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+               "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
               # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
               # vLLM recipe: TP=8, glm47/glm45, --kv-cache-dtype fp8_e4m3. SMG passes
@@ -185,7 +184,7 @@ jobs:
                "smg_tool": "glm47_moe", "smg_reason": "glm45",
                # FP8 load + DeepGEMM warmup on the largest leg: generous startup ceiling.
                "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3", "gpu_mem": "0.90", "startup_timeout": "3000",
-               "model_cache": "/raid/models", "arm_mode": "sequential", "max_model_len": "32768"},
+               "model_cache": "/raid/models", "arm_mode": "sequential", "max_model_len": "auto"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
