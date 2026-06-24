@@ -968,8 +968,7 @@ async fn test_minimax_invalid_json_in_parameters() {
 
 #[tokio::test]
 async fn test_minimax_arguments_use_python_json_spacing() {
-    // Args must serialize with spaced separators (", " / ": "), matching vLLM's
-    // json.dumps — so multi-turn fed-back tool_calls produce identical prompt tokens.
+    // Spaced separators (", " / ": "), matching vLLM's json.dumps.
     let parser = MinimaxM2Parser::new();
     let input = r#"<minimax:tool_call>
 <invoke name="get_weather">

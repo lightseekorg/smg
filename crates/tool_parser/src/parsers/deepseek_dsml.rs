@@ -232,8 +232,6 @@ impl DeepSeekDsmlParser {
             }
         }
 
-        // Spaced separators (Python json.dumps / vLLM) so multi-turn fed-back
-        // tool_calls render to the same prompt tokens as pure vLLM.
         helpers::args_to_json_string(&Value::Object(params)).unwrap_or_else(|_| "{}".to_string())
     }
 

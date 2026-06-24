@@ -216,8 +216,6 @@ impl QwenXmlParser {
             }
         }
 
-        // Spaced separators (Python json.dumps / vLLM) so multi-turn fed-back
-        // tool_calls render to the same prompt tokens as pure vLLM.
         let arguments = helpers::args_to_json_string(&parameters)?;
 
         Ok(Some(ToolCall {
