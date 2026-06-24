@@ -965,3 +965,24 @@ async fn test_minimax_invalid_json_in_parameters() {
 
     assert_eq!(normal_text, "");
 }
+
+#[tokio::test]
+async fn test_minimax_arguments_use_python_json_spacing() {
+    // Args must serialize with spaced separators (", " / ": "), matching vLLM's
+    // json.dumps — so multi-turn fed-back tool_calls produce identical prompt tokens.
+    let parser = MinimaxM2Parser::new();
+    let input = r#"<minimax:tool_call>
+<invoke name="get_weather">
+<parameter name="city">Tokyo</parameter>
+<parameter name="units">celsius</parameter>
+</invoke>
+</minimax:tool_call>"#;
+    let (_n, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    let a = &tools[0].function.arguments;
+    assert!(
+        a.contains("\": \""),
+        "expected spaced key/value separators, got {a}"
+    );
+    assert!(!a.contains("\":\""), "must not be compact, got {a}");
+}

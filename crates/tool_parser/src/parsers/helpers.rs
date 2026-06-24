@@ -394,6 +394,58 @@ pub(crate) fn handle_json_tool_streaming(
     Ok(result)
 }
 
+/// serde_json formatter matching Python `json.dumps` default item/key separators
+/// (`", "` and `": "`).
+struct SpacedFormatter;
+
+impl serde_json::ser::Formatter for SpacedFormatter {
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        writer.write_all(b": ")
+    }
+}
+
+/// Serialize tool-call arguments like Python `json.dumps` — spaced separators
+/// (`", "` / `": "`), no newlines. vLLM serializes `tool_calls[].arguments` with
+/// `json.dumps`, so SMG must match the spacing: otherwise the assistant tool_calls
+/// fed back across a multi-turn conversation render to different prompt tokens than
+/// pure vLLM (the chat template emits `arguments` verbatim), diverging generations.
+/// String escaping is left as serde's UTF-8 default (`ensure_ascii=False`).
+pub fn args_to_json_string<T: serde::Serialize>(value: &T) -> ParserResult<String> {
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, SpacedFormatter);
+    value
+        .serialize(&mut ser)
+        .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

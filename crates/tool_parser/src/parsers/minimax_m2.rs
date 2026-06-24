@@ -160,7 +160,9 @@ impl MinimaxM2Parser {
             let param_types = helpers::param_types_for_function(tools, func_name);
             let parameters = self.parse_parameters(params_text, &param_types);
 
-            match serde_json::to_string(&parameters) {
+            // Spaced separators (Python json.dumps / vLLM) so multi-turn fed-back
+            // tool_calls render to the same prompt tokens as pure vLLM.
+            match helpers::args_to_json_string(&parameters) {
                 Ok(arguments_str) => calls.push(ToolCall {
                     function: FunctionCall {
                         name: func_name.to_string(),
