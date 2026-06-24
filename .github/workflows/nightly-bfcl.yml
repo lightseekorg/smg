@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Run only this matrix leg (qwen3.6|gpt-oss|deepseek-v4|minimax-m2.7|kimi-k2.6); empty = all"
+        description: "Run only this matrix leg (qwen3.6|gpt-oss|deepseek-v4|minimax-m2.7|kimi-k2.6|glm-5.2); empty = all"
         required: false
         default: ""
       model:
@@ -64,8 +64,9 @@ env:
 
 jobs:
   # Build the smg wheel once (mirrors nightly-benchmark.yml build-wheel + cache).
+  # CPU-only work (Rust/maturin compile) — no GPU needed, so don't occupy a GPU runner.
   build-wheel:
-    runs-on: k8s-runner-gpu
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
@@ -173,6 +174,18 @@ jobs:
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
                "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "32768"},
+              # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
+              # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
+              # vLLM recipe: TP=8, glm47/glm45, --kv-cache-dtype fp8_e4m3. SMG passes
+              # glm47_moe explicitly (org-prefixed served name won't auto-detect).
+              {"name": "glm-5.2", "runner": "blackwell", "tp": 8,
+               "gpu_a": "0,1,2,3,4,5,6,7", "gpu_b": "",  # sequential: arm B reuses GPU_A (whole node)
+               "model": "zai-org/GLM-5.2-FP8", "bfcl_model": "zai-org/GLM-5.2-FP8-FC",
+               "vllm_tool": "glm47", "vllm_reason": "glm45",
+               "smg_tool": "glm47_moe", "smg_reason": "glm45",
+               # FP8 load + DeepGEMM warmup on the largest leg: generous startup ceiling.
+               "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3", "gpu_mem": "0.90", "startup_timeout": "3000",
+               "model_cache": "/raid/models", "arm_mode": "sequential", "max_model_len": "32768"},
           ]
           only = os.environ.get("ONLY", "")
           valid_names = [l["name"] for l in legs]
@@ -195,8 +208,10 @@ jobs:
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     # Generous: the nightly set adds multi_turn (state simulation), much slower
-    # than the single-turn AST/live categories.
-    timeout-minutes: 240
+    # than the single-turn AST/live categories. The sequential glm-5.2 leg needs
+    # the most headroom — two whole-node arms (startup + scoring) run serially,
+    # not concurrently like the half-node legs. Ceiling only; fast legs finish early.
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
