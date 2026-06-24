@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use openai_protocol::common::Tool;
 use regex::Regex;
@@ -89,37 +91,23 @@ impl Glm4MoeParser {
         Self::new(r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>")
     }
 
-    /// Parse arguments from key-value pairs
-    fn parse_arguments(&self, args_text: &str) -> serde_json::Map<String, Value> {
+    /// Parse arguments from key-value pairs, coerced by the function's declared
+    /// schema. A `string` parameter keeps a numeric/bool/array-looking value as a
+    /// string (matches vLLM); unknown types fall back to [`infer_value`].
+    fn parse_arguments(
+        &self,
+        args_text: &str,
+        param_types: &HashMap<String, String>,
+    ) -> serde_json::Map<String, Value> {
         let mut arguments = serde_json::Map::new();
 
         for capture in self.arg_extractor.captures_iter(args_text) {
             let key = capture.get(1).map_or("", |m| m.as_str()).trim();
             let value_str = capture.get(2).map_or("", |m| m.as_str()).trim();
 
-            // Try to parse the value as JSON first, fallback to string
-            let value = if let Ok(json_val) = serde_json::from_str::<Value>(value_str) {
-                json_val
-            } else {
-                // Try parsing as Python literal (similar to Python's ast.literal_eval)
-                if value_str == "true" || value_str == "True" {
-                    Value::Bool(true)
-                } else if value_str == "false" || value_str == "False" {
-                    Value::Bool(false)
-                } else if value_str == "null" || value_str == "None" {
-                    Value::Null
-                } else if let Ok(num) = value_str.parse::<i64>() {
-                    Value::Number(num.into())
-                } else if let Ok(num) = value_str.parse::<f64>() {
-                    if let Some(n) = serde_json::Number::from_f64(num) {
-                        Value::Number(n)
-                    } else {
-                        Value::String(value_str.to_string())
-                    }
-                } else {
-                    Value::String(value_str.to_string())
-                }
-            };
+            let value =
+                helpers::coerce_by_schema_type(value_str, param_types.get(key).map(String::as_str))
+                    .unwrap_or_else(|| infer_value(value_str));
 
             arguments.insert(key.to_string(), value);
         }
@@ -128,7 +116,7 @@ impl Glm4MoeParser {
     }
 
     /// Parse a single tool call block
-    fn parse_tool_call(&self, block: &str) -> ParserResult<Option<ToolCall>> {
+    fn parse_tool_call(&self, block: &str, tools: &[Tool]) -> ParserResult<Option<ToolCall>> {
         if let Some(captures) = self.func_detail_extractor.captures(block) {
             // Get function name
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
@@ -136,8 +124,9 @@ impl Glm4MoeParser {
             // Get arguments text
             let args_text = captures.get(2).map_or("", |m| m.as_str());
 
-            // Parse arguments
-            let arguments = self.parse_arguments(args_text);
+            // Parse arguments, coerced by this function's declared schema.
+            let param_types = helpers::param_types_for_function(tools, func_name);
+            let arguments = self.parse_arguments(args_text, &param_types);
 
             let arguments_str = serde_json::to_string(&arguments)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
@@ -154,12 +143,12 @@ impl Glm4MoeParser {
     }
 
     /// Parse all tool calls from text (shared logic for complete and incremental parsing)
-    fn parse_tool_calls_from_text(&self, text: &str) -> Vec<ToolCall> {
-        let mut tools = Vec::new();
+    fn parse_tool_calls_from_text(&self, text: &str, tools: &[Tool]) -> Vec<ToolCall> {
+        let mut parsed = Vec::new();
 
         for mat in self.tool_call_extractor.find_iter(text) {
-            match self.parse_tool_call(mat.as_str()) {
-                Ok(Some(tool)) => tools.push(tool),
+            match self.parse_tool_call(mat.as_str(), tools) {
+                Ok(Some(tool)) => parsed.push(tool),
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::debug!("Failed to parse tool call: {}", e);
@@ -168,7 +157,59 @@ impl Glm4MoeParser {
             }
         }
 
-        tools
+        parsed
+    }
+}
+
+impl Glm4MoeParser {
+    /// Shared non-streaming parse, schema-aware when `tools` are provided.
+    fn parse_complete_inner(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
+        if !self.has_tool_markers(text) {
+            return Ok((text.to_string(), vec![]));
+        }
+
+        // Find where tool calls begin
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<tool_call>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
+        let normal_text = text[..idx].to_string();
+
+        let parsed = self.parse_tool_calls_from_text(text, tools);
+
+        // If no tools were successfully parsed despite having markers, return entire text as fallback
+        if parsed.is_empty() {
+            return Ok((text.to_string(), vec![]));
+        }
+
+        Ok((normal_text, parsed))
+    }
+}
+
+/// Infer a JSON value from raw text when the schema type is unknown: JSON
+/// (numbers/bools/null/objects/arrays), then Python-style literals, then string.
+fn infer_value(value_str: &str) -> Value {
+    if let Ok(json_val) = serde_json::from_str::<Value>(value_str) {
+        return json_val;
+    }
+    match value_str {
+        "true" | "True" => Value::Bool(true),
+        "false" | "False" => Value::Bool(false),
+        "null" | "None" => Value::Null,
+        _ => {
+            if let Ok(num) = value_str.parse::<i64>() {
+                Value::Number(num.into())
+            } else if let Ok(num) = value_str.parse::<f64>() {
+                serde_json::Number::from_f64(num)
+                    .map_or_else(|| Value::String(value_str.to_string()), Value::Number)
+            } else {
+                Value::String(value_str.to_string())
+            }
+        }
     }
 }
 
@@ -181,27 +222,15 @@ impl Default for Glm4MoeParser {
 #[async_trait]
 impl ToolParser for Glm4MoeParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains GLM-4 MoE format
-        if !self.has_tool_markers(text) {
-            return Ok((text.to_string(), vec![]));
-        }
+        self.parse_complete_inner(text, &[])
+    }
 
-        // Find where tool calls begin
-        // Safe: has_tool_markers() already confirmed the marker exists
-        let idx = text
-            .find("<tool_call>")
-            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
-        let normal_text = text[..idx].to_string();
-
-        // Parse all tool calls using shared helper
-        let tools = self.parse_tool_calls_from_text(text);
-
-        // If no tools were successfully parsed despite having markers, return entire text as fallback
-        if tools.is_empty() {
-            return Ok((text.to_string(), vec![]));
-        }
-
-        Ok((normal_text, tools))
+    async fn parse_complete_with_tools(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
+        self.parse_complete_inner(text, tools)
     }
 
     async fn parse_incremental(
@@ -250,7 +279,7 @@ impl ToolParser for Glm4MoeParser {
 
             // Parse the complete block using shared helper
             let block_end = end_pos + self.eot_token.len();
-            let parsed_tools = self.parse_tool_calls_from_text(&current_text[..block_end]);
+            let parsed_tools = self.parse_tool_calls_from_text(&current_text[..block_end], tools);
 
             // Extract normal text before tool calls
             let idx = current_text.find(self.bot_token);
@@ -344,5 +373,61 @@ impl ToolParser for Glm4MoeParser {
         self.prev_tool_call_arr.clear();
         self.current_tool_id = -1;
         self.streamed_args_for_tool.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::common::Function;
+
+    use super::*;
+
+    fn tool_with_props(props: Value) -> Vec<Tool> {
+        vec![Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: "f".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object", "properties": props}),
+                strict: None,
+            },
+        }]
+    }
+
+    // String-typed params keep numeric/bool/array-looking values as strings (the
+    // JavaScript-category bug); non-string params still coerce.
+    #[tokio::test]
+    async fn test_schema_aware_coercion_keeps_strings() {
+        let tools = tool_with_props(serde_json::json!({
+            "limit": {"type": "string"},
+            "flag": {"type": "string"},
+            "coords": {"type": "string"},
+            "count": {"type": "integer"},
+        }));
+        let text = "<tool_call>f\n\
+            <arg_key>limit</arg_key>\n<arg_value>4</arg_value>\n\
+            <arg_key>flag</arg_key>\n<arg_value>true</arg_value>\n\
+            <arg_key>coords</arg_key>\n<arg_value>[60,30]</arg_value>\n\
+            <arg_key>count</arg_key>\n<arg_value>5</arg_value>\n\
+            </tool_call>";
+        let (_, calls) = Glm4MoeParser::glm45()
+            .parse_complete_with_tools(text, &tools)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["limit"], Value::String("4".to_string()));
+        assert_eq!(args["flag"], Value::String("true".to_string()));
+        assert_eq!(args["coords"], Value::String("[60,30]".to_string()));
+        assert_eq!(args["count"], Value::Number(5.into()));
+    }
+
+    // Without a schema (no tools), behavior is unchanged: blind inference.
+    #[tokio::test]
+    async fn test_no_schema_infers_type() {
+        let text = "<tool_call>f\n<arg_key>count</arg_key>\n<arg_value>5</arg_value>\n</tool_call>";
+        let (_, calls) = Glm4MoeParser::glm45().parse_complete(text).await.unwrap();
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["count"], Value::Number(5.into()));
     }
 }

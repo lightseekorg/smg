@@ -153,6 +153,16 @@ fn safe_val(raw: &str) -> Value {
     Value::String(unescaped)
 }
 
+/// Coerce a raw XML parameter value by its declared JSON-schema type: a declared
+/// `string` is kept verbatim (decoded), typed values are parsed, and an unknown
+/// type falls back to [`safe_val`]'s inference. Mirrors `minimax_m2`/vLLM so a
+/// numeric- or bool-looking value for a `string` parameter stays a string
+/// instead of being coerced to a number/bool/array/object.
+fn coerce_value(raw: &str, declared_type: Option<&str>) -> Value {
+    let decoded = html_unescape(raw.trim());
+    helpers::coerce_by_schema_type(&decoded, declared_type).unwrap_or_else(|| safe_val(raw))
+}
+
 impl QwenXmlParser {
     /// Create a new Qwen XML parser
     #[expect(
@@ -188,7 +198,7 @@ impl QwenXmlParser {
     }
 
     /// Parse XML format tool call: <function=name><parameter=key>value</parameter></function>
-    fn parse_xml_format(&self, content: &str) -> ParserResult<Option<ToolCall>> {
+    fn parse_xml_format(&self, content: &str, tools: &[Tool]) -> ParserResult<Option<ToolCall>> {
         let function_captures = self
             .xml_function_pattern
             .captures(content)
@@ -205,13 +215,16 @@ impl QwenXmlParser {
             return Ok(None);
         }
 
+        // Coerce by the function's declared schema so e.g. a `string` parameter
+        // whose value looks numeric/bool/array stays a string (matches vLLM).
+        let param_types = helpers::param_types_for_function(tools, &function_name);
         let mut parameters = serde_json::Map::new();
 
         for cap in self.xml_param_pattern.captures_iter(content) {
             if let (Some(key_match), Some(value_match)) = (cap.get(1), cap.get(2)) {
                 let key = key_match.as_str().trim().to_string();
                 let value = value_match.as_str();
-                let json_value = safe_val(value);
+                let json_value = coerce_value(value, param_types.get(&key).map(String::as_str));
                 parameters.insert(key, json_value);
             }
         }
@@ -229,8 +242,11 @@ impl QwenXmlParser {
 
     /// Parse and stream complete parameters from buffer
     /// Returns tool call items to emit (similar to Python's _parse_and_stream_parameters)
-    fn parse_and_stream_parameters(&mut self) -> Vec<ToolCallItem> {
+    fn parse_and_stream_parameters(&mut self, tools: &[Tool]) -> Vec<ToolCallItem> {
         let mut calls: Vec<ToolCallItem> = vec![];
+
+        // Coerce by the current function's declared schema (see parse_xml_format).
+        let param_types = helpers::param_types_for_function(tools, &self.current_function_name);
 
         // Find all complete parameter patterns in buffer
         let mut new_params = serde_json::Map::new();
@@ -238,7 +254,7 @@ impl QwenXmlParser {
             if let (Some(key_match), Some(value_match)) = (cap.get(1), cap.get(2)) {
                 let key = key_match.as_str().trim().to_string();
                 let value = value_match.as_str();
-                let json_value = safe_val(value);
+                let json_value = coerce_value(value, param_types.get(&key).map(String::as_str));
                 new_params.insert(key, json_value);
             }
         }
@@ -305,6 +321,49 @@ impl QwenXmlParser {
         calls
     }
 
+    /// Shared non-streaming parse, schema-aware when `tools` are provided.
+    fn parse_complete_inner(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
+        // Check if text contains Qwen XML format
+        if !self.has_tool_markers(text) {
+            return Ok((text.to_string(), vec![]));
+        }
+
+        // Find where the first tool call begins
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find(self.tool_call_start_token)
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
+        let normal_text = text[..idx].to_string();
+
+        // Extract tool calls
+        let mut parsed = Vec::new();
+        for captures in self.extractor.captures_iter(text) {
+            if let Some(content_str) = captures.get(1) {
+                let content = content_str.as_str().trim();
+
+                match self.parse_xml_format(content, tools) {
+                    Ok(Some(tool)) => parsed.push(tool),
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse XML tool call: {:?}", e);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // If no tools were successfully parsed despite having markers, return entire text
+        if parsed.is_empty() {
+            return Ok((text.to_string(), vec![]));
+        }
+
+        Ok((normal_text, parsed))
+    }
+
     /// Reset streaming state for next tool call
     fn reset_streaming_state(&mut self) {
         self.in_tool_call = false;
@@ -323,41 +382,15 @@ impl Default for QwenXmlParser {
 #[async_trait]
 impl ToolParser for QwenXmlParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains Qwen XML format
-        if !self.has_tool_markers(text) {
-            return Ok((text.to_string(), vec![]));
-        }
+        self.parse_complete_inner(text, &[])
+    }
 
-        // Find where the first tool call begins
-        // Safe: has_tool_markers() already confirmed the marker exists
-        let idx = text
-            .find(self.tool_call_start_token)
-            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
-        let normal_text = text[..idx].to_string();
-
-        // Extract tool calls
-        let mut tools = Vec::new();
-        for captures in self.extractor.captures_iter(text) {
-            if let Some(content_str) = captures.get(1) {
-                let content = content_str.as_str().trim();
-
-                match self.parse_xml_format(content) {
-                    Ok(Some(tool)) => tools.push(tool),
-                    Ok(None) => continue,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse XML tool call: {:?}", e);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // If no tools were successfully parsed despite having markers, return entire text
-        if tools.is_empty() {
-            return Ok((text.to_string(), vec![]));
-        }
-
-        Ok((normal_text, tools))
+    async fn parse_complete_with_tools(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
+        self.parse_complete_inner(text, tools)
     }
 
     async fn parse_incremental(
@@ -459,7 +492,7 @@ impl ToolParser for QwenXmlParser {
 
             // Parse parameters (only complete ones)
             if self.current_tool_name_sent {
-                let param_calls = self.parse_and_stream_parameters();
+                let param_calls = self.parse_and_stream_parameters(tools);
                 calls.extend(param_calls);
 
                 // Check if tool call is complete
@@ -520,6 +553,8 @@ impl ToolParser for QwenXmlParser {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::common::Function;
+
     use super::*;
 
     #[test]
@@ -593,5 +628,58 @@ mod tests {
             safe_val("Tom &amp; Jerry"),
             Value::String("Tom & Jerry".to_string())
         );
+    }
+
+    fn tool_with_props(props: Value) -> Vec<Tool> {
+        vec![Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: "f".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object", "properties": props}),
+                strict: None,
+            },
+        }]
+    }
+
+    // String-typed params keep numeric/bool/array/object-looking values as
+    // strings (the JavaScript-category bug); non-string params still coerce.
+    #[tokio::test]
+    async fn test_schema_aware_coercion_keeps_strings() {
+        let tools = tool_with_props(serde_json::json!({
+            "limit": {"type": "string"},
+            "flag": {"type": "string"},
+            "coords": {"type": "string"},
+            "cfg": {"type": "string"},
+            "count": {"type": "integer"},
+        }));
+        let text = "<tool_call>\n<function=f>\n\
+            <parameter=limit>4</parameter>\n\
+            <parameter=flag>true</parameter>\n\
+            <parameter=coords>[60,30]</parameter>\n\
+            <parameter=cfg>{\"a\": 1}</parameter>\n\
+            <parameter=count>5</parameter>\n\
+            </function>\n</tool_call>";
+        let (_, calls) = QwenXmlParser::new()
+            .parse_complete_with_tools(text, &tools)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["limit"], Value::String("4".to_string()));
+        assert_eq!(args["flag"], Value::String("true".to_string()));
+        assert_eq!(args["coords"], Value::String("[60,30]".to_string()));
+        assert_eq!(args["cfg"], Value::String("{\"a\": 1}".to_string()));
+        assert_eq!(args["count"], Value::Number(5.into()));
+    }
+
+    // Without a schema (no tools), behavior is unchanged: blind inference.
+    #[tokio::test]
+    async fn test_no_schema_infers_type() {
+        let text =
+            "<tool_call>\n<function=f>\n<parameter=count>5</parameter>\n</function>\n</tool_call>";
+        let (_, calls) = QwenXmlParser::new().parse_complete(text).await.unwrap();
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["count"], Value::Number(5.into()));
     }
 }
