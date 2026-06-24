@@ -341,7 +341,11 @@ def main() -> int:
     p.add_argument("--bfcl", default="bfcl", help="path to the bfcl executable")
     p.add_argument("--project-root", default="/tmp/bfcl_ab", type=Path)
     p.add_argument("--num-threads", default=16, type=int)
-    p.add_argument("--temperature", default=0.001, type=float)
+    # Greedy (temperature=0) so the A/B is reproducible and isolates the frontend.
+    # bfcl exposes no --seed, and temperature=0.001 is NOT deterministic — measured
+    # 2 distinct outputs in 4 identical runs (same model/prompt), which compounds
+    # across multi_turn and otherwise dominates the SMG-vs-vLLM delta as pure noise.
+    p.add_argument("--temperature", default=0.0, type=float)
     p.add_argument(
         "--tolerance",
         default=0.02,
