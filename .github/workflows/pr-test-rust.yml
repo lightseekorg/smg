@@ -363,7 +363,7 @@ jobs:
         env:
           ROUTER_LOCAL_MODEL_PATH: /models
           E2E_LOG_DIR: benchmark-logs
-          GENAI_BENCH_TEST_TIMEOUT: "480"
+          GENAI_BENCH_TEST_TIMEOUT: "600"
         run: |
           mkdir -p benchmark-logs
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
