@@ -1750,6 +1750,14 @@ fn resolve_mm_shm_enabled(
     transport: Option<&MmTransportConfig>,
 ) -> bool {
     log_mm_transport_config_once(transport);
+    // SHM is single-consumer (the servicer unlinks each segment after reading),
+    // but a PD request has two legs: prefill always reads, and decode re-reads
+    // whenever it recomputes the prompt instead of resuming from transferred KV.
+    // Force inline for disaggregated requests to avoid both the double-read and
+    // dropping pixels the decode leg still needs.
+    if matches!(workers, Some(WorkerSelection::Dual { .. })) {
+        return false;
+    }
     let global_mode = transport
         .map(|transport| transport.mode.as_str())
         .unwrap_or(DEFAULT_MM_TENSOR_TRANSPORT);
