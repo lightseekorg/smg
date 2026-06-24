@@ -4,7 +4,7 @@
 //! enums, and core configuration. These types are shared across API
 //! request/response boundaries and internal runtime state.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[cfg(feature = "axum")]
 use axum::{
@@ -116,6 +116,11 @@ pub enum WorkerStatus {
 
     /// Sustained liveness failure. Will be removed if `--remove-unhealthy-workers`.
     Failed = 3,
+
+    /// Marked for removal (e.g. K8s pod has `deletionTimestamp`). Excluded
+    /// from selection so no new traffic is routed, but kept in the registry
+    /// so in-flight requests can complete before the worker is removed.
+    Draining = 4,
 }
 
 impl WorkerStatus {
@@ -127,6 +132,7 @@ impl WorkerStatus {
             1 => Some(Self::Ready),
             2 => Some(Self::NotReady),
             3 => Some(Self::Failed),
+            4 => Some(Self::Draining),
             _ => None,
         }
     }
@@ -155,6 +161,7 @@ impl std::fmt::Display for WorkerStatus {
             WorkerStatus::Ready => write!(f, "ready"),
             WorkerStatus::NotReady => write!(f, "not_ready"),
             WorkerStatus::Failed => write!(f, "failed"),
+            WorkerStatus::Draining => write!(f, "draining"),
         }
     }
 }
@@ -197,6 +204,8 @@ pub enum RuntimeType {
     Trtllm,
     /// MLX runtime (Apple Silicon).
     Mlx,
+    /// TokenSpeed runtime.
+    TokenSpeed,
     /// External OpenAI-compatible API (not local inference).
     External,
 }
@@ -206,18 +215,25 @@ impl RuntimeType {
     pub fn is_specified(self) -> bool {
         !matches!(self, RuntimeType::Unspecified)
     }
+
+    /// Static string form, identical to `Display`. For hot-path metric labels
+    /// that must avoid per-call allocation/interning.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuntimeType::Unspecified => "unspecified",
+            RuntimeType::Sglang => "sglang",
+            RuntimeType::Vllm => "vllm",
+            RuntimeType::Trtllm => "trtllm",
+            RuntimeType::Mlx => "mlx",
+            RuntimeType::TokenSpeed => "tokenspeed",
+            RuntimeType::External => "external",
+        }
+    }
 }
 
 impl std::fmt::Display for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeType::Unspecified => write!(f, "unspecified"),
-            RuntimeType::Sglang => write!(f, "sglang"),
-            RuntimeType::Vllm => write!(f, "vllm"),
-            RuntimeType::Trtllm => write!(f, "trtllm"),
-            RuntimeType::Mlx => write!(f, "mlx"),
-            RuntimeType::External => write!(f, "external"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -235,6 +251,8 @@ impl std::str::FromStr for RuntimeType {
             Ok(RuntimeType::Trtllm)
         } else if s.eq_ignore_ascii_case("mlx") {
             Ok(RuntimeType::Mlx)
+        } else if s.eq_ignore_ascii_case("tokenspeed") {
+            Ok(RuntimeType::TokenSpeed)
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {
@@ -376,6 +394,10 @@ fn default_max_connection_attempts() -> u32 {
     20
 }
 
+fn default_drain_settle_secs() -> u64 {
+    5
+}
+
 // ── Health check config ─────────────────────────────────────────────
 
 /// Health check configuration shared across protocol and runtime layers.
@@ -400,6 +422,13 @@ pub struct HealthCheckConfig {
     /// Disable periodic health checks for this worker (default: false).
     #[serde(default)]
     pub disable_health_check: bool,
+
+    /// Seconds to keep a worker in `Draining` after `RemoveWorker` is
+    /// submitted before the registry entry is actually removed. Lets
+    /// in-flight requests complete naturally (default: 5). Set to `0`
+    /// to skip draining and remove immediately.
+    #[serde(default = "default_drain_settle_secs")]
+    pub drain_settle_secs: u64,
 }
 
 impl Default for HealthCheckConfig {
@@ -410,6 +439,7 @@ impl Default for HealthCheckConfig {
             success_threshold: default_health_success_threshold(),
             failure_threshold: default_health_failure_threshold(),
             disable_health_check: false,
+            drain_settle_secs: default_drain_settle_secs(),
         }
     }
 }
@@ -513,12 +543,12 @@ impl<'de> Deserialize<'de> for WorkerModels {
 
 /// JsonSchema: wire format is `Vec<ModelCard>`.
 impl JsonSchema for WorkerModels {
-    fn schema_name() -> String {
-        "WorkerModels".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WorkerModels".into()
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        Vec::<ModelCard>::json_schema(gen)
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        Vec::<ModelCard>::json_schema(generator)
     }
 }
 
@@ -603,6 +633,10 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_role: Option<String>,
 
+    /// KV transfer engine id (vLLM `kv_transfer_config.engine_id`; Mooncake PD).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_engine_id: Option<String>,
+
     /// KV cache block size (tokens per block) for event-driven routing.
     /// When set, overrides the router-level default for this worker's model.
     /// Typically matches the backend engine's page size (e.g. 16 for SGLang).
@@ -653,6 +687,7 @@ impl WorkerSpec {
             dp_size: None,
             kv_connector: None,
             kv_role: None,
+            kv_engine_id: None,
             kv_block_size: None,
             health: HealthCheckUpdate::default(),
             http_pool: HttpPoolConfig::default(),
@@ -678,8 +713,11 @@ pub struct WorkerInfo {
     pub model_id: Option<String>,
 
     /// Worker identity and configuration.
+    ///
+    /// Stored behind an `Arc` so building a `WorkerInfo` for a response (e.g.
+    /// `GET /workers`) shares the spec instead of deep-cloning it per worker.
     #[serde(flatten)]
-    pub spec: WorkerSpec,
+    pub spec: Arc<WorkerSpec>,
 
     /// Whether the worker is healthy.
     pub is_healthy: bool,
@@ -702,7 +740,7 @@ impl WorkerInfo {
         Self {
             id: worker_id.to_string(),
             model_id: None,
-            spec: WorkerSpec::new(url),
+            spec: Arc::new(WorkerSpec::new(url)),
             is_healthy: false,
             status: Some(WorkerStatus::Pending),
             load: 0,
@@ -806,6 +844,8 @@ pub struct HealthCheckUpdate {
     pub success_threshold: Option<u32>,
     pub failure_threshold: Option<u32>,
     pub disable_health_check: Option<bool>,
+    /// Per-worker override for `HealthCheckConfig::drain_settle_secs`.
+    pub drain_settle_secs: Option<u64>,
 }
 
 impl HealthCheckUpdate {
@@ -816,6 +856,7 @@ impl HealthCheckUpdate {
             && self.success_threshold.is_none()
             && self.failure_threshold.is_none()
             && self.disable_health_check.is_none()
+            && self.drain_settle_secs.is_none()
     }
 }
 
@@ -833,6 +874,7 @@ impl HealthCheckUpdate {
             disable_health_check: self
                 .disable_health_check
                 .unwrap_or(existing.disable_health_check),
+            drain_settle_secs: self.drain_settle_secs.unwrap_or(existing.drain_settle_secs),
         }
     }
 }
@@ -938,6 +980,16 @@ pub struct WorkerUpdateRequest {
     pub health: Option<HealthCheckUpdate>,
 }
 
+// ── Request types ───────────────────────────────────────────────────
+
+/// Query parameters for `GET /workers`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListWorkersQuery {
+    /// Only return workers serving this model, e.g. `?model=moonshotai/Kimi-K2.5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 // ── Response types ──────────────────────────────────────────────────
 
 /// Generic API response
@@ -964,7 +1016,62 @@ pub struct FlushCacheResult {
     pub failed: Vec<(String, String)>,
     pub total_workers: usize,
     pub http_workers: usize,
+    #[serde(default)]
+    pub grpc_workers: usize,
     pub message: String,
+}
+
+/// Options for starting a profiling run on workers.
+///
+/// Mirrors the engines' native profile parameters: serialized verbatim as
+/// the JSON body for HTTP workers and mapped to the `StartProfile` RPC for
+/// gRPC workers. Unset fields fall back to backend defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_step: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_steps: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_stack: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_shapes: Option<bool>,
+    pub profile_by_stage: bool,
+}
+
+/// Result from profile start/stop operations across workers
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProfileResult {
+    pub successful: Vec<String>,
+    pub failed: Vec<(String, String)>,
+    pub total_workers: usize,
+    pub message: String,
+}
+
+/// Request body for the gateway `/start_profile` route: profile options
+/// plus an optional worker URL to target a single worker (e.g. one
+/// PD-disaggregation role). All workers are profiled when `url` is unset.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartProfileRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(flatten)]
+    pub options: ProfileOptions,
+}
+
+/// Request body for the gateway `/stop_profile` route: optional worker URL
+/// to target a single worker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StopProfileRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Result from getting worker loads
@@ -986,6 +1093,9 @@ pub struct SchedulerLoadSnapshot {
     pub dp_rank: i32,
     pub num_running_reqs: i32,
     pub num_waiting_reqs: i32,
+    /// Queued token-work: waiting-queue tokens not yet served from cache. 0 when
+    /// the backend does not report it — callers degrade gracefully.
+    pub num_waiting_uncached_tokens: i32,
     pub num_total_reqs: i32,
     pub num_used_tokens: i32,
     pub max_total_num_tokens: i32,
@@ -995,6 +1105,21 @@ pub struct SchedulerLoadSnapshot {
     pub cache_hit_rate: f64,
     pub utilization: f64,
     pub max_running_requests: i32,
+    /// PD disaggregation signals, populated only when the backend reports a
+    /// `disagg` section. `None` for HTTP or older engines. Canonical schema
+    /// other engines map into; SGLang derives the queue depths from its
+    /// per-stage DisaggregationMetrics counters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_speed_gb_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_queue_reqs: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_queue_reqs: Option<i32>,
+    /// "prefill", "decode", or "null" as reported by the backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disagg_mode: Option<String>,
 }
 
 /// Full load response for a single worker across all DP ranks.
@@ -1018,6 +1143,19 @@ impl WorkerLoadResponse {
     /// Total used tokens summed across all DP ranks.
     pub fn total_used_tokens(&self) -> i64 {
         self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
+    }
+
+    /// Total queued (waiting, uncached) tokens summed across all DP ranks.
+    pub fn total_waiting_uncached_tokens(&self) -> i64 {
+        self.loads
+            .iter()
+            .map(|l| l.num_waiting_uncached_tokens as i64)
+            .sum()
+    }
+
+    /// Total generation throughput (tokens/s) summed across all DP ranks.
+    pub fn total_gen_throughput(&self) -> f64 {
+        self.loads.iter().map(|l| l.gen_throughput).sum()
     }
 
     pub fn dp_rank_loads(&self) -> HashMap<isize, isize> {
@@ -1054,6 +1192,43 @@ impl IntoResponse for FlushCacheResult {
             "message": self.message,
             "workers_flushed": self.successful.len(),
             "total_http_workers": self.http_workers,
+            "total_grpc_workers": self.grpc_workers,
+            "total_workers": self.total_workers
+        });
+
+        if !self.failed.is_empty() {
+            body["successful"] = json!(self.successful);
+            body["failed"] = json!(self
+                .failed
+                .into_iter()
+                .map(|(url, err)| json!({"worker": url, "error": err}))
+                .collect::<Vec<_>>());
+        }
+
+        (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(feature = "axum")]
+impl IntoResponse for ProfileResult {
+    fn into_response(self) -> Response {
+        let status = if self.total_workers == 0 {
+            StatusCode::NOT_FOUND
+        } else if self.failed.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::PARTIAL_CONTENT
+        };
+
+        let status_str = match status {
+            StatusCode::OK => "success",
+            StatusCode::PARTIAL_CONTENT => "partial_success",
+            _ => "error",
+        };
+        let mut body = json!({
+            "status": status_str,
+            "message": self.message,
+            "workers_profiled": self.successful.len(),
             "total_workers": self.total_workers
         });
 
@@ -1085,5 +1260,110 @@ impl IntoResponse for WorkerLoadsResult {
             })
             .collect();
         Json(json!({"workers": loads})).into_response()
+    }
+}
+
+#[cfg(test)]
+mod worker_status_tests {
+    use super::WorkerStatus;
+
+    #[test]
+    fn test_try_from_u8_draining() {
+        assert_eq!(WorkerStatus::try_from_u8(4), Some(WorkerStatus::Draining));
+    }
+
+    #[test]
+    fn test_try_from_u8_unknown_returns_none() {
+        assert_eq!(WorkerStatus::try_from_u8(5), None);
+        assert_eq!(WorkerStatus::try_from_u8(255), None);
+    }
+
+    #[test]
+    fn test_from_u8_draining() {
+        assert_eq!(WorkerStatus::from_u8(4), WorkerStatus::Draining);
+    }
+
+    #[test]
+    fn test_display_draining_is_snake_case() {
+        assert_eq!(WorkerStatus::Draining.to_string(), "draining");
+    }
+
+    #[test]
+    fn test_serde_round_trip_draining() {
+        let s = serde_json::to_string(&WorkerStatus::Draining).unwrap();
+        assert_eq!(s, "\"draining\"");
+        let back: WorkerStatus = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, WorkerStatus::Draining);
+    }
+
+    #[test]
+    fn test_draining_is_not_routable() {
+        assert!(!WorkerStatus::Draining.is_routable());
+    }
+
+    #[test]
+    fn test_only_ready_is_routable() {
+        for s in [
+            WorkerStatus::Pending,
+            WorkerStatus::Ready,
+            WorkerStatus::NotReady,
+            WorkerStatus::Failed,
+            WorkerStatus::Draining,
+        ] {
+            assert_eq!(s.is_routable(), s == WorkerStatus::Ready, "{s:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod health_check_drain_settle_tests {
+    use super::{HealthCheckConfig, HealthCheckUpdate};
+
+    #[test]
+    fn test_default_drain_settle_secs_is_5() {
+        assert_eq!(HealthCheckConfig::default().drain_settle_secs, 5);
+    }
+
+    #[test]
+    fn test_health_check_update_overrides_drain_settle_secs() {
+        let base = HealthCheckConfig::default();
+        let update = HealthCheckUpdate {
+            drain_settle_secs: Some(30),
+            ..Default::default()
+        };
+        let merged = update.apply_to(&base);
+        assert_eq!(merged.drain_settle_secs, 30);
+    }
+
+    #[test]
+    fn test_health_check_update_keeps_default_when_unset() {
+        let base = HealthCheckConfig {
+            drain_settle_secs: 12,
+            ..Default::default()
+        };
+        let update = HealthCheckUpdate::default();
+        assert_eq!(update.apply_to(&base).drain_settle_secs, 12);
+    }
+
+    #[test]
+    fn test_health_check_update_is_empty_includes_drain_settle_secs() {
+        let mut update = HealthCheckUpdate::default();
+        assert!(update.is_empty());
+        update.drain_settle_secs = Some(3);
+        assert!(!update.is_empty());
+    }
+
+    #[test]
+    fn test_health_check_config_deserialize_omitted_uses_default() {
+        // Existing serialized configs without drain_settle_secs must
+        // still deserialize with the default value, not fail.
+        let json = r#"{
+            "timeout_secs": 30,
+            "check_interval_secs": 60,
+            "success_threshold": 2,
+            "failure_threshold": 3
+        }"#;
+        let cfg: HealthCheckConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.drain_settle_secs, 5);
     }
 }

@@ -33,6 +33,7 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     Runtime,
     WorkerType,
     get_runtime,
+    is_mlx,
     is_sglang,
     is_trtllm,
     is_vllm,
@@ -40,7 +41,6 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
 from .gpu_monitor import GPUMonitor
 from .gpu_monitor import should_monitor as should_monitor_gpu
-from .mock_mcp import IMAGE_GENERATION_PNG_BASE64, MockMcpServer, mock_mcp_server
 from .model_specs import (  # Default model paths; Model groups
     CHAT_MODELS,
     DEFAULT_EMBEDDING_MODEL_PATH,
@@ -68,6 +68,7 @@ from .process_utils import (
 )
 from .run_eval import run_eval
 from .worker import Worker, start_workers, stop_workers
+from .worker_pool import WorkerPool, cleanup_pool, get_pool
 
 __all__ = [
     # Enums
@@ -111,6 +112,7 @@ __all__ = [
     "is_vllm",
     "is_sglang",
     "is_trtllm",
+    "is_mlx",
     # Port utilities
     "get_open_port",
     "release_port",
@@ -127,6 +129,10 @@ __all__ = [
     "Worker",
     "start_workers",
     "stop_workers",
+    # Session-scoped worker cache
+    "WorkerPool",
+    "get_pool",
+    "cleanup_pool",
     "MODEL_SPECS",
     # Gateway
     "Gateway",
@@ -154,3 +160,19 @@ __all__ = [
     # Evaluation
     "run_eval",
 ]
+
+# The mock MCP server is only used by the agentic (responses) lane and drags
+# in the `mcp` SDK at import time. Resolve its symbols lazily so infra
+# consumers that never touch it — model download, chat/router lanes — keep
+# working even when the venv's `mcp` lacks `mcp.server.fastmcp` (e.g.
+# TensorRT-LLM's `pip install --pre` resolving mcp to a 2.x pre-release,
+# which removed the module).
+_LAZY_MOCK_MCP = ("IMAGE_GENERATION_PNG_BASE64", "MockMcpServer", "mock_mcp_server")
+
+
+def __getattr__(name: str) -> object:
+    if name in _LAZY_MOCK_MCP:
+        from . import mock_mcp
+
+        return getattr(mock_mcp, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

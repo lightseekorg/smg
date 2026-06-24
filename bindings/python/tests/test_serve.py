@@ -1111,7 +1111,9 @@ class TestServeOrchestrator:
         orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
         orch.workers = [(MagicMock(), 31000)]
 
-        router_args = SimpleNamespace(disable_retries=False, disable_circuit_breaker=False)
+        router_args = SimpleNamespace(
+            disable_retries=False, disable_circuit_breaker=False, policy="cache_aware"
+        )
         with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
             result = orch._build_router_args()
 
@@ -1127,7 +1129,9 @@ class TestServeOrchestrator:
         orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
         orch.workers = [(MagicMock(), 31000), (MagicMock(), 31003)]
 
-        router_args = SimpleNamespace(disable_retries=False, disable_circuit_breaker=False)
+        router_args = SimpleNamespace(
+            disable_retries=False, disable_circuit_breaker=False, policy="cache_aware"
+        )
         with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
             result = orch._build_router_args()
 
@@ -1142,12 +1146,47 @@ class TestServeOrchestrator:
         orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
         orch.workers = [(MagicMock(), 31000)]
 
-        router_args = SimpleNamespace(disable_retries=True, disable_circuit_breaker=True)
+        router_args = SimpleNamespace(
+            disable_retries=True, disable_circuit_breaker=True, policy="cache_aware"
+        )
         with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
             result = orch._build_router_args()
 
         assert result.disable_retries is True
         assert result.disable_circuit_breaker is True
+
+    def test_build_router_args_dp1_forces_passthrough_policy(self):
+        """dp<=1 overrides an explicit --policy with passthrough (single backend)."""
+        from types import SimpleNamespace
+
+        args = _make_args(data_parallel_size=1)
+        orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
+        orch.workers = [(MagicMock(), 31000)]
+
+        # User explicitly asked for cache_aware; dp<=1 must override it.
+        router_args = SimpleNamespace(
+            disable_retries=False, disable_circuit_breaker=False, policy="cache_aware"
+        )
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.policy == "passthrough"
+
+    def test_build_router_args_dp2_preserves_policy(self):
+        """dp>1 leaves the chosen policy untouched."""
+        from types import SimpleNamespace
+
+        args = _make_args(data_parallel_size=2)
+        orch = ServeOrchestrator("sglang", args, ["--model-path", "/tmp/model"])
+        orch.workers = [(MagicMock(), 31000), (MagicMock(), 31003)]
+
+        router_args = SimpleNamespace(
+            disable_retries=False, disable_circuit_breaker=False, policy="cache_aware"
+        )
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.policy == "cache_aware"
 
     def test_cleanup_workers_handles_already_dead_process(self):
         args = _make_args()

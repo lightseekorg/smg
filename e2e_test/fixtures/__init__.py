@@ -12,6 +12,7 @@ from .hooks import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
 )
 
 # Marker helpers
@@ -25,6 +26,7 @@ __all__ = [
     "pytest_collection_modifyitems",
     "pytest_configure",
     "pytest_runtest_setup",
+    "pytest_sessionfinish",
     # Backend fixtures
     "setup_backend",
     "backend_router",

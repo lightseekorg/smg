@@ -23,7 +23,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -38,13 +38,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags
+        id: tags
+        run: |
+          SUFFIX="$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          {
+            echo "list<<EOF"
+            echo "ghcr.io/lightseekorg/smg:nightly"
+            echo "ghcr.io/lightseekorg/smg:nightly-${SUFFIX}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
           push: true
-          tags: ghcr.io/lightseekorg/smg:nightly
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64

@@ -16,8 +16,8 @@ use image::{imageops::FilterType, DynamicImage};
 use ndarray::{Array4, IxDyn};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{self, TransformError},
 };
 
@@ -162,7 +162,7 @@ impl PixtralProcessor {
     }
 }
 
-impl ImagePreProcessor for PixtralProcessor {
+impl VisionPreProcessor for PixtralProcessor {
     fn default_mean(&self) -> [f64; 3] {
         self.image_mean
     }
@@ -175,7 +175,7 @@ impl ImagePreProcessor for PixtralProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::InvalidShape {
                 expected: "non-empty image batch".to_string(),
@@ -197,7 +197,7 @@ impl ImagePreProcessor for PixtralProcessor {
         let mut all_pixel_values = Vec::new();
         let mut all_image_sizes = Vec::new();
         let mut original_sizes = Vec::new();
-        let mut num_img_tokens = Vec::new();
+        let mut feature_token_counts = Vec::new();
 
         for image in images {
             let (pixels, size) = processor.process_single_image(image)?;
@@ -206,7 +206,7 @@ impl ImagePreProcessor for PixtralProcessor {
             all_pixel_values.push(pixels);
             all_image_sizes.push(size);
             original_sizes.push((image.height(), image.width()));
-            num_img_tokens.push(tokens);
+            feature_token_counts.push(tokens);
         }
 
         // Pad images to the same size for batching
@@ -248,10 +248,10 @@ impl ImagePreProcessor for PixtralProcessor {
             },
         );
 
-        Ok(PreprocessedImages {
-            pixel_values: batch_tensor,
-            num_img_tokens,
-            image_sizes: original_sizes,
+        Ok(PreprocessedEncoderInputs {
+            encoder_input: batch_tensor,
+            feature_token_counts,
+            item_sizes: original_sizes,
             model_specific,
         })
     }
@@ -358,8 +358,8 @@ mod tests {
         // First image: 150x200 -> 160x208
         // Second image: 100x300 -> 112x304 (ceil(100/16)=7, ceil(300/16)=19)
         // Batch padded to max: 160x304
-        assert_eq!(result.pixel_values.shape()[0], 2); // batch size
-        assert_eq!(result.pixel_values.shape()[1], 3); // channels
+        assert_eq!(result.encoder_input.shape()[0], 2); // batch size
+        assert_eq!(result.encoder_input.shape()[1], 3); // channels
     }
 
     #[test]

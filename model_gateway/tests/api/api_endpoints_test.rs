@@ -777,55 +777,6 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
-    async fn test_v1_responses_cancel() {
-        let ctx = AppTestContext::new(vec![MockWorkerConfig {
-            port: 18953,
-            worker_type: WorkerType::Regular,
-            health_status: HealthStatus::Healthy,
-            response_delay_ms: 0,
-            fail_rate: 0.0,
-        }])
-        .await;
-
-        let app = ctx.create_app();
-
-        // First create a response to obtain an id
-        let resp_id = "test-cancel-resp-id-456";
-        let payload = json!({
-            "input": "Hello Responses API",
-            "model": "mock-model",
-            "stream": false,
-            "store": true,
-            "background": true,
-            "request_id": resp_id
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/responses")
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        // Cancel the response
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/v1/responses/{resp_id}/cancel"))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let cancel_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(cancel_json["status"], "cancelled");
-
-        ctx.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn test_v1_responses_delete() {
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18954,

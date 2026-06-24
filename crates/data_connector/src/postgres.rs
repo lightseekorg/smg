@@ -1,10 +1,4 @@
 //! Postgres storage implementation using PostgresStore helper
-//!
-//! Structure:
-//! 1. PostgresStore helper and common utilities
-//! 2. PostgresConversationStorage
-//! 3. PostgresConversationItemStorage
-//! 4. PostgresResponseStorage
 
 use std::{str::FromStr, sync::Arc};
 

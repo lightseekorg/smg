@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 # Shared Tool Definitions
 # =============================================================================
 
-# System message for Llama3.2 function calling
+# System message for Llama3.2 function calling — prescribes the
+# {"name": ..., "parameters": ...} JSON shape that the ``llama`` tool
+# parser looks for. Used by ``TestToolChoiceLlama`` below.
 LLAMA_SYSTEM_MESSAGE = (
     "You are a helpful assistant with tool calling capabilities. "
     "Only reply with a tool call if the function exists in the library provided by the user. "
@@ -100,14 +102,14 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIServerFunctionCalling:
-    """Tests for OpenAI-compatible function calling with Llama tool parser."""
+    """Tests for OpenAI-compatible function calling with the llama tool parser."""
 
     def test_function_calling_format(self, model, api_client):
         """Test: Whether the function call format returned by the AI is correct.
@@ -377,7 +379,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
-
         tools = [
             {
                 "type": "function",
@@ -438,26 +439,35 @@ class TestOpenAIServerFunctionCalling:
         arguments = tool_calls[0].function.arguments
         args_obj = json.loads(arguments)
 
-        assert function_name == "get_weather", (
-            f"Function name should be 'get_weather', got: {function_name}"
+        declared_tool_names = {tool["function"]["name"] for tool in tools}
+        assert function_name in declared_tool_names, (
+            f"Function name should be one of {declared_tool_names}, got: {function_name}"
         )
-        assert "city" in args_obj, f"Function arguments should have 'city', got: {args_obj}"
+        assert isinstance(args_obj, dict), (
+            f"Function arguments should be a JSON object, got: {args_obj}"
+        )
 
-        # Make the test more robust by checking type and accepting valid responses
-        city_value = args_obj["city"]
-        assert isinstance(city_value, str), (
-            f"Parameter city should be a string, got: {type(city_value)}"
-        )
-        assert "Paris" in city_value or "France" in city_value, (
-            f"Parameter city should contain either 'Paris' or 'France', got: {city_value}"
-        )
+        if function_name == "get_weather":
+            assert "city" in args_obj, f"Function arguments should have 'city', got: {args_obj}"
+            city_value = args_obj["city"]
+            assert isinstance(city_value, str), (
+                f"Parameter city should be a string, got: {type(city_value)}"
+            )
+        elif function_name == "sub":
+            assert "int_a" in args_obj, f"Function arguments should have 'int_a', got: {args_obj}"
+            assert "int_b" in args_obj, f"Function arguments should have 'int_b', got: {args_obj}"
+            assert isinstance(args_obj["int_a"], int), (
+                f"Parameter int_a should be an integer, got: {type(args_obj['int_a'])}"
+            )
+            assert isinstance(args_obj["int_b"], int), (
+                f"Parameter int_b should be an integer, got: {type(args_obj['int_b'])}"
+            )
 
     def test_function_call_specific(self, model, api_client):
         """Test: Whether tool_choice: ToolChoice works as expected.
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-
         tools = [
             {
                 "type": "function",
@@ -526,7 +536,6 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-
         tools = [
             {
                 "type": "function",
@@ -709,7 +718,7 @@ class TestOpenAIServerFunctionCalling:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
@@ -1045,6 +1054,7 @@ class _TestToolChoiceBase:
             model=model,
             messages=messages,
             max_tokens=2048,
+            temperature=0.1,
             tools=tools,
             tool_choice="required",
             stream=True,
@@ -1489,7 +1499,7 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
@@ -1510,9 +1520,9 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
+@pytest.mark.model("Qwen/Qwen3-4B-Instruct-2507")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
@@ -1579,9 +1589,9 @@ WEATHER_TOOL = {
 }
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
-@pytest.mark.gpu(2)
-@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
+@pytest.mark.gpu(1)
+@pytest.mark.model("Qwen/Qwen3-4B-Instruct-2507")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)

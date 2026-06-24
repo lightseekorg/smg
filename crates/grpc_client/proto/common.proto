@@ -56,3 +56,39 @@ message KvBlocksRemoved {
 }
 
 message KvCacheCleared {}
+
+// =====================
+// Admin Operations
+// =====================
+
+message FlushCacheRequest {
+  // Seconds to wait for the scheduler to go idle before flushing.
+  // 0 = flush immediately (fails if requests are in flight).
+  float timeout_s = 1;
+}
+
+message FlushCacheResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StartProfileRequest {
+  // Directory where profiler traces are written (backend default if unset).
+  optional string output_dir = 1;
+  // Forward step at which profiling starts (immediately if unset).
+  optional int32 start_step = 2;
+  // Number of forward steps to profile (until StopProfile if unset).
+  optional int32 num_steps = 3;
+  // Profiler activities, e.g. "CPU", "GPU", "MEM". Backend default if empty.
+  repeated string activities = 4;
+  optional bool with_stack = 5;
+  optional bool record_shapes = 6;
+  bool profile_by_stage = 7;
+}
+
+message StopProfileRequest {}
+
+message ProfileResponse {
+  bool success = 1;
+  string message = 2;
+}

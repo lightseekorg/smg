@@ -12,12 +12,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 // Re-export protocol types as the canonical types for the gateway
-pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
+pub use openai_protocol::worker::{ConnectionMode, ProfileOptions, RuntimeType, WorkerType};
 use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
     worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec, WorkerStatus},
 };
+use smg_grpc_client::common_proto;
 use tokio::{sync::OnceCell, time};
 
 use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
@@ -29,11 +30,94 @@ use crate::{
 /// Default HTTP client timeout for worker requests (in seconds)
 pub const DEFAULT_WORKER_HTTP_TIMEOUT_SECS: u64 = 30;
 
+/// Timeout for worker HTTP `flush_cache` requests. Matches the gRPC
+/// client's local flush deadline.
+const FLUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Timeout for worker HTTP profile requests. Stopping a profile can take
+/// a long time while the backend serializes large traces. Matches the
+/// gRPC client's profile deadline.
+const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
+
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 
 /// vLLM Mooncake KV connector name
 pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
+
+/// vLLM NIXL KV connector name
+pub const NIXL_CONNECTOR: &str = "NixlConnector";
+
+/// POST an admin endpoint on an HTTP worker and map the outcome to a
+/// [`WorkerResult`].
+async fn admin_http_post(
+    client: &reqwest::Client,
+    url: String,
+    api_key: Option<&String>,
+    body: Option<serde_json::Value>,
+    operation: &str,
+    timeout: Duration,
+) -> WorkerResult<()> {
+    let mut req = client.post(&url).timeout(timeout);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => Err(WorkerError::OperationFailed {
+            url,
+            operation: operation.to_string(),
+            reason: format!("HTTP {}", resp.status()),
+        }),
+        Err(e) => Err(WorkerError::OperationFailed {
+            url,
+            operation: operation.to_string(),
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// Unwrap the optional gRPC client for an admin op, erroring when absent.
+fn require_grpc_client(
+    url: &str,
+    operation: &str,
+    client: Option<Arc<GrpcClient>>,
+) -> WorkerResult<Arc<GrpcClient>> {
+    client.ok_or_else(|| WorkerError::OperationFailed {
+        url: url.to_string(),
+        operation: operation.to_string(),
+        reason: "no gRPC client available".to_string(),
+    })
+}
+
+/// Map a gRPC admin-op outcome (`success` flag plus message) to a
+/// [`WorkerResult`].
+fn admin_grpc_result(
+    url: &str,
+    operation: &str,
+    result: Result<(bool, String), tonic::Status>,
+) -> WorkerResult<()> {
+    match result {
+        Ok((true, _)) => Ok(()),
+        Ok((false, message)) => Err(WorkerError::OperationFailed {
+            url: url.to_string(),
+            operation: operation.to_string(),
+            reason: if message.is_empty() {
+                "backend reported failure".to_string()
+            } else {
+                message
+            },
+        }),
+        Err(status) => Err(WorkerError::OperationFailed {
+            url: url.to_string(),
+            operation: operation.to_string(),
+            reason: status.to_string(),
+        }),
+    }
+}
 
 pub struct WorkerRoutingKeyLoad {
     url: String,
@@ -210,6 +294,25 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
+    /// Worker-reported in-flight capacity, if available.
+    ///
+    /// Reads the `max_running_requests` label populated by the metadata
+    /// discovery pipeline (Step 4 of the worker lifecycle). Returns
+    /// `None` when the worker hasn't reported a value or reports zero
+    /// (zero is meaningless for capacity accounting).
+    ///
+    /// `WorkerCapacity` uses this to derive total fleet capacity when
+    /// every worker reports; falls back to a configured per-worker
+    /// estimate otherwise.
+    fn max_running_requests(&self) -> Option<u16> {
+        self.metadata()
+            .spec
+            .labels
+            .get("max_running_requests")
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|n| *n > 0)
+    }
+
     /// Get the current circuit breaker state for observability/debugging.
     fn circuit_breaker_state(&self) -> super::circuit_breaker::CircuitState;
 
@@ -222,6 +325,20 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Check if the worker is available (healthy + circuit closed/half-open)
     fn is_available(&self) -> bool {
         self.is_healthy() && self.circuit_breaker_can_execute()
+    }
+
+    /// One-shot routing snapshot for the per-request O(workers) selection loops:
+    /// reads status, load and processed together so the hot path takes one
+    /// `ArcSwap` guard per backing cell per worker instead of one per accessor
+    /// (that guard traffic is a large share of routing CPU at scale). `BasicWorker`
+    /// overrides this to share the runtime guard.
+    fn routing_state(&self) -> RoutingState {
+        RoutingState {
+            healthy: self.is_healthy(),
+            can_execute: self.circuit_breaker_can_execute(),
+            load: self.load(),
+            processed: self.processed_requests(),
+        }
     }
 
     /// Record the outcome of a request based on the HTTP status code.
@@ -370,6 +487,114 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     }
     async fn grpc_health_check(&self) -> WorkerResult<bool>;
     async fn http_health_check(&self) -> WorkerResult<bool>;
+
+    // ── Admin operations ────────────────────────────────────────────
+    //
+    // Dual-path dispatch on connection mode, mirroring
+    // `check_health_async`: HTTP workers receive a POST to the engine's
+    // native admin endpoint, gRPC workers receive the corresponding RPC.
+    // Backends without the RPC surface the dispatcher's `Unimplemented`
+    // status as an `OperationFailed` error.
+
+    /// Flush the KV cache on this worker's backend.
+    async fn flush_cache(&self) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/flush_cache"),
+                    self.api_key(),
+                    None,
+                    "flush_cache",
+                    FLUSH_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client =
+                    require_grpc_client(self.url(), "flush_cache", self.get_grpc_client().await?)?;
+                let result = client.flush_cache(0.0).await;
+                admin_grpc_result(
+                    self.url(),
+                    "flush_cache",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
+
+    /// Start a profiling run on this worker's backend.
+    async fn start_profile(&self, options: &ProfileOptions) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                let body =
+                    serde_json::to_value(options).map_err(|e| WorkerError::OperationFailed {
+                        url: self.url().to_string(),
+                        operation: "start_profile".to_string(),
+                        reason: format!("failed to serialize profile options: {e}"),
+                    })?;
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/start_profile"),
+                    self.api_key(),
+                    Some(body),
+                    "start_profile",
+                    PROFILE_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client = require_grpc_client(
+                    self.url(),
+                    "start_profile",
+                    self.get_grpc_client().await?,
+                )?;
+                let req = common_proto::StartProfileRequest {
+                    output_dir: options.output_dir.clone(),
+                    start_step: options.start_step,
+                    num_steps: options.num_steps,
+                    activities: options.activities.clone().unwrap_or_default(),
+                    with_stack: options.with_stack,
+                    record_shapes: options.record_shapes,
+                    profile_by_stage: options.profile_by_stage,
+                };
+                let result = client.start_profile(req).await;
+                admin_grpc_result(
+                    self.url(),
+                    "start_profile",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
+
+    /// Stop the in-flight profiling run on this worker's backend and
+    /// export traces.
+    async fn stop_profile(&self) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/stop_profile"),
+                    self.api_key(),
+                    None,
+                    "stop_profile",
+                    PROFILE_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client =
+                    require_grpc_client(self.url(), "stop_profile", self.get_grpc_client().await?)?;
+                let result = client.stop_profile().await;
+                admin_grpc_result(
+                    self.url(),
+                    "stop_profile",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
 }
 
 /// Extension trait for model_gateway-specific ConnectionMode methods.
@@ -409,7 +634,11 @@ impl WorkerTypeExt for WorkerType {
 #[derive(Debug, Clone)]
 pub struct WorkerMetadata {
     /// Protocol-level worker identity and configuration.
-    pub spec: WorkerSpec,
+    ///
+    /// Behind an `Arc` so it can be shared into response `WorkerInfo`s (e.g.
+    /// `GET /workers`) without a per-worker deep clone. Set once at construction
+    /// and not mutated afterwards.
+    pub spec: Arc<WorkerSpec>,
     /// Resolved health check config (router defaults + per-worker overrides).
     /// This is the concrete config used at runtime; `spec.health` only stores
     /// the partial overrides from the API layer.
@@ -556,6 +785,19 @@ impl WorkerMetadata {
     pub fn is_wildcard(&self) -> bool {
         self.spec.models.is_wildcard()
     }
+}
+
+/// One-shot routing snapshot — see [`Worker::routing_state`].
+#[derive(Clone, Copy, Debug)]
+pub struct RoutingState {
+    /// `status == Ready`.
+    pub healthy: bool,
+    /// Circuit breaker permits execution (closed or half-open).
+    pub can_execute: bool,
+    /// Active in-flight request count.
+    pub load: usize,
+    /// Lifetime processed-request count (min-load tie-break).
+    pub processed: usize,
 }
 
 /// Shared mutable worker state preserved across same-URL replacements.
@@ -890,6 +1132,19 @@ impl Worker for BasicWorker {
         self.circuit_breaker.load().can_execute()
     }
 
+    fn routing_state(&self) -> RoutingState {
+        // One runtime guard covers status + load + processed (all live in
+        // `self.runtime`); the circuit breaker is a separate ArcSwap, so it needs
+        // its own guard.
+        let rt = self.runtime.load();
+        RoutingState {
+            healthy: rt.status() == WorkerStatus::Ready,
+            can_execute: self.circuit_breaker.load().can_execute(),
+            load: rt.load(),
+            processed: rt.processed_requests(),
+        }
+    }
+
     fn record_circuit_breaker_outcome(&self, success: bool) {
         self.circuit_breaker.load().record_outcome(success);
     }
@@ -949,7 +1204,8 @@ impl Worker for BasicWorker {
                             runtime_str,
                             self.metadata.spec.url
                         );
-                        match GrpcClient::connect(&self.metadata.spec.url, &runtime_str).await {
+                        // DP-expanded workers carry a `{base}@{rank}` URL; connect to the base
+                        match GrpcClient::connect(self.metadata.base_url(), &runtime_str).await {
                             Ok(client) => {
                                 tracing::info!(
                                     "Successfully connected gRPC client ({}) for worker: {}",
@@ -1225,6 +1481,7 @@ mod tests {
             failure_threshold: 5,
             success_threshold: 3,
             disable_health_check: true,
+            drain_settle_secs: 5,
         };
         assert_eq!(config.timeout_secs, 10);
         assert_eq!(config.check_interval_secs, 60);
@@ -1262,6 +1519,50 @@ mod tests {
     }
 
     #[test]
+    fn test_max_running_requests_parses_from_label() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("max_running_requests".to_string(), "256".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        assert_eq!(worker.max_running_requests(), Some(256));
+    }
+
+    #[test]
+    fn test_max_running_requests_returns_none_when_label_missing() {
+        use crate::worker::BasicWorkerBuilder;
+        let worker = BasicWorkerBuilder::new("http://w:9000").build();
+        assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
+    fn test_max_running_requests_returns_none_on_bad_value() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(
+            "max_running_requests".to_string(),
+            "not-a-number".to_string(),
+        );
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
+    fn test_max_running_requests_zero_treated_as_none() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("max_running_requests".to_string(), "0".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        // Zero is meaningless for capacity; treat as "not reported".
+        assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
     fn test_worker_with_health_config() {
         use openai_protocol::worker::HealthCheckConfig;
         let custom_config = HealthCheckConfig {
@@ -1270,6 +1571,7 @@ mod tests {
             failure_threshold: 4,
             success_threshold: 2,
             disable_health_check: false,
+            drain_settle_secs: 5,
         };
 
         use crate::worker::BasicWorkerBuilder;
@@ -1844,7 +2146,7 @@ mod tests {
     #[test]
     fn test_worker_metadata_empty_models_accepts_all() {
         let metadata = WorkerMetadata {
-            spec: WorkerSpec::new("http://test:8080"),
+            spec: Arc::new(WorkerSpec::new("http://test:8080")),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
         };
@@ -1867,7 +2169,7 @@ mod tests {
         let mut spec = WorkerSpec::new("http://test:8080");
         spec.models = WorkerModels::from(vec![model1, model2]);
         let metadata = WorkerMetadata {
-            spec,
+            spec: Arc::new(spec),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
         };

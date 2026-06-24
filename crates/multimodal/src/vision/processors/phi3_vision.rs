@@ -23,8 +23,8 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage}
 use ndarray::{s, Array3, Array4, IxDyn};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{self, TransformError},
 };
 
@@ -287,12 +287,12 @@ impl Phi3VisionProcessor {
         // Calculate token count
         let num_tokens = self.calculate_num_tokens(hd_h as usize, hd_w as usize);
 
-        // image_sizes is the HD-transformed size
+        // The returned size is the HD-transformed image size.
         (output, (hd_h as usize, hd_w as usize), num_tokens)
     }
 }
 
-impl ImagePreProcessor for Phi3VisionProcessor {
+impl VisionPreProcessor for Phi3VisionProcessor {
     fn default_mean(&self) -> [f64; 3] {
         self.mean
     }
@@ -305,7 +305,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::InvalidShape {
                 expected: "at least one image".to_string(),
@@ -318,8 +318,8 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         let mut all_num_tokens = Vec::with_capacity(images.len());
 
         for image in images {
-            let (pixel_values, image_size, num_tokens) = self.process_single_image(image, config);
-            all_pixel_values.push(pixel_values);
+            let (encoder_input, image_size, num_tokens) = self.process_single_image(image, config);
+            all_pixel_values.push(encoder_input);
             all_image_sizes.push((image_size.1 as u32, image_size.0 as u32)); // (width, height)
             all_num_tokens.push(num_tokens);
         }
@@ -343,7 +343,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         let shape = batch_tensor.shape().to_vec();
         let (flat_data, _offset) = batch_tensor.into_raw_vec_and_offset();
 
-        // Store image_sizes as model-specific data
+        // Store model-specific image_sizes data.
         let mut model_specific = std::collections::HashMap::new();
 
         // image_sizes as [batch, 2] tensor (h, w for each image)
@@ -359,7 +359,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
             },
         );
 
-        // num_img_tokens as list
+        // feature_token_counts as list
         model_specific.insert(
             "num_img_tokens".to_string(),
             ModelSpecificValue::IntVec(all_num_tokens.iter().map(|&t| t as i64).collect()),
@@ -367,16 +367,16 @@ impl ImagePreProcessor for Phi3VisionProcessor {
 
         // Convert 5D tensor to appropriate format
         // Phi3-Vision expects [B, num_crops+1, C, H, W]
-        let pixel_values = ndarray::ArrayD::<f32>::from_shape_vec(IxDyn(&shape), flat_data)
+        let encoder_input = ndarray::ArrayD::<f32>::from_shape_vec(IxDyn(&shape), flat_data)
             .map_err(|e| TransformError::InvalidShape {
                 expected: format!("valid 5D shape, but failed with error: {e}"),
                 actual: shape.clone(),
             })?;
 
-        Ok(PreprocessedImages {
-            pixel_values,
-            num_img_tokens: all_num_tokens,
-            image_sizes: all_image_sizes,
+        Ok(PreprocessedEncoderInputs {
+            encoder_input,
+            feature_token_counts: all_num_tokens,
+            item_sizes: all_image_sizes,
             model_specific,
         })
     }
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(result.batch_size(), 1);
 
         // Check output shape is [1, num_crops+1, 3, 336, 336]
-        let shape = result.pixel_values.shape();
+        let shape = result.encoder_input.shape();
         assert_eq!(shape.len(), 5);
         assert_eq!(shape[0], 1); // batch
         assert_eq!(shape[1], 17); // num_crops + 1
@@ -516,8 +516,8 @@ mod tests {
         let result = processor.preprocess(&images, &config).unwrap();
 
         assert_eq!(result.batch_size(), 2);
-        assert_eq!(result.image_sizes.len(), 2);
-        assert_eq!(result.num_img_tokens.len(), 2);
+        assert_eq!(result.item_sizes.len(), 2);
+        assert_eq!(result.feature_token_counts.len(), 2);
     }
 
     #[test]

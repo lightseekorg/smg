@@ -16,21 +16,6 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
-/// Simple partial tool call for streaming
-#[derive(Debug, Clone)]
-pub struct PartialToolCall {
-    /// Tool name (if parsed)
-    pub name: Option<String>,
-    /// Buffer for accumulating arguments
-    pub arguments_buffer: String,
-    /// Start position in the input buffer
-    pub start_position: usize,
-    /// Whether the name has been sent (for streaming)
-    pub name_sent: bool,
-    /// Arguments already streamed
-    pub streamed_args: String,
-}
-
 /// Result of streaming parse operation (matches Python StreamingParseResult)
 #[derive(Debug, Clone, Default)]
 pub struct StreamingParseResult {

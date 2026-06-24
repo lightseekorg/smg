@@ -1,6 +1,7 @@
 //! Worker domain — identity, registry, health, resilience, monitoring, service.
 
 pub mod builder;
+pub mod capacity;
 pub mod circuit_breaker;
 pub mod error;
 pub mod event;
@@ -12,6 +13,7 @@ pub mod metrics_aggregator;
 pub mod monitor;
 pub mod registry;
 pub mod resilience;
+pub mod sampling_defaults;
 pub mod service;
 // FIXME: worker.rs is a 1800-line monolith containing the Worker trait,
 // BasicWorker impl, HealthChecker, WorkerType, ConnectionMode, and more.
@@ -24,6 +26,7 @@ pub mod worker;
 
 // Re-export commonly used types for convenience
 pub use builder::BasicWorkerBuilder;
+pub use capacity::{CapacitySource, CapacityTrackerSettings, WorkerCapacity};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use error::{WorkerError, WorkerResult};
 pub use hash_ring::HashRing;
@@ -38,10 +41,11 @@ pub use openai_protocol::{
     model_type::{Endpoint, ModelType},
     worker::{ProviderType, WorkerGroupKey},
 };
-pub use registry::WorkerRegistry;
+pub use registry::{WorkerOrigin, WorkerRegistry};
 pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
+pub use sampling_defaults::DEFAULT_SAMPLING_PARAMS_LABEL;
 pub use service::WorkerService;
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,
-    DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR,
+    DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR, NIXL_CONNECTOR,
 };

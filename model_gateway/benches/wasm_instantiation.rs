@@ -68,7 +68,6 @@ fn make_pooling_engine() -> Engine {
     let mut config = Config::new();
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool_config));
     config.async_stack_size(1024 * 1024); // 1MB (default)
-    config.async_support(true);
     config.wasm_component_model(true);
     config.epoch_interruption(true);
     Engine::new(&config).expect("Failed to create pooling engine")
@@ -76,7 +75,6 @@ fn make_pooling_engine() -> Engine {
 
 fn make_standard_engine() -> Engine {
     let mut config = Config::new();
-    config.async_support(true);
     config.wasm_component_model(true);
     config.epoch_interruption(true);
     Engine::new(&config).expect("Failed to create standard engine")

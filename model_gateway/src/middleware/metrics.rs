@@ -2,8 +2,8 @@
 //!
 //! `HttpMetricsLayer` wraps the inner service to record per-request
 //! duration plus the in-flight connection count via
-//! `InFlightRequestTracker`. The path is normalized to bound metric
-//! cardinality.
+//! `InFlightRequestTracker`. The path label is the matched axum route
+//! template (or `"other"` when unmatched) to bound metric cardinality.
 
 use std::{
     pin::Pin,
@@ -12,7 +12,10 @@ use std::{
     time::Instant,
 };
 
-use axum::{extract::Request, response::Response};
+use axum::{
+    extract::{MatchedPath, Request},
+    response::Response,
+};
 use tower::{Layer, Service};
 
 use crate::{
@@ -68,9 +71,8 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        // Convert method to static string to avoid allocation
         let method = method_to_static_str(req.method().as_str());
-        let path = normalize_path_for_metrics(req.uri().path());
+        let path = matched_path_label(req.extensions()).to_owned();
         let start = Instant::now();
 
         let mut inner = self.inner.clone();
@@ -101,129 +103,118 @@ where
     }
 }
 
-/// Normalize path for metrics to avoid high cardinality.
-/// Replaces dynamic segments (IDs, UUIDs) with `{id}` placeholder.
-/// Only allocates when normalization is needed; uses single-pass with byte offsets.
-pub(super) fn normalize_path_for_metrics(path: &str) -> String {
-    let bytes = path.as_bytes();
-    let mut segment_start = 0;
-    let mut segment_idx = 0;
-    let mut result: Option<String> = None;
-
-    for (pos, &b) in bytes.iter().enumerate() {
-        if b == b'/' || pos == bytes.len() - 1 {
-            // Determine segment end (include last char if not a slash)
-            let segment_end = if b == b'/' { pos } else { pos + 1 };
-            let segment = &path[segment_start..segment_end];
-
-            // Check segments after index 2 for dynamic IDs
-            if segment_idx > 2 && !segment.is_empty() && is_dynamic_id(segment) {
-                // Initialize result with everything before this segment
-                let result = result.get_or_insert_with(|| {
-                    let mut s = String::with_capacity(path.len());
-                    s.push_str(&path[..segment_start]);
-                    s
-                });
-                result.push_str("{id}");
-            } else if let Some(ref mut r) = result {
-                // Already normalizing, append this segment as-is
-                r.push_str(segment);
-            }
-
-            // Add slash after segment (except at end)
-            if b == b'/' {
-                if let Some(ref mut r) = result {
-                    r.push('/');
-                }
-                segment_start = pos + 1;
-                segment_idx += 1;
-            }
-        }
-    }
-
-    result.unwrap_or_else(|| path.to_owned())
-}
-
-/// Check if segment looks like a dynamic ID (prefixed ID, UUID, or numeric).
-#[inline]
-fn is_dynamic_id(s: &str) -> bool {
-    // Prefixed IDs: resp_xxx, chatcmpl_xxx (len > 10 with underscore)
-    if s.len() > 10 && s.contains('_') {
-        return true;
-    }
-    // UUIDs: 32+ hex chars with dashes
-    if s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
-        return true;
-    }
-    // Numeric IDs
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+/// Bounded path label for HTTP metrics: the matched axum route template, or
+/// `"other"` when no route matched. Labeling by raw request path would let
+/// attacker-controlled URIs create unbounded distinct labels.
+pub(super) fn matched_path_label(extensions: &http::Extensions) -> &str {
+    extensions
+        .get::<MatchedPath>()
+        .map_or("other", MatchedPath::as_str)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request, routing::get, Router};
+    use tower::{ServiceBuilder, ServiceExt};
+
     use super::*;
+    use crate::observability::metrics::interner_size;
 
     #[test]
-    fn test_normalize_path_no_ids() {
-        // Common API paths should pass through unchanged
-        assert_eq!(
-            normalize_path_for_metrics("/v1/chat/completions"),
-            "/v1/chat/completions"
-        );
-        assert_eq!(
-            normalize_path_for_metrics("/v1/completions"),
-            "/v1/completions"
-        );
-        assert_eq!(normalize_path_for_metrics("/v1/models"), "/v1/models");
-        assert_eq!(normalize_path_for_metrics("/health"), "/health");
+    fn matched_path_label_defaults_to_other_when_absent() {
+        // No routing has run, so there is no MatchedPath extension.
+        let extensions = http::Extensions::new();
+        assert_eq!(matched_path_label(&extensions), "other");
     }
 
-    #[test]
-    fn test_normalize_path_with_prefixed_id() {
-        // Prefixed IDs (resp_xxx, chatcmpl_xxx) should be normalized
+    /// Drive `request_uri` through a router that has one dynamic route and a
+    /// fallback, returning the label `matched_path_label` observes at a
+    /// `Router::layer`-applied middleware. The layer is the outermost wrap (it
+    /// also covers the fallback) so both the matched and unmatched branches are
+    /// exercised at the same layer the production metrics middleware uses.
+    async fn label_at_layer(request_uri: &str) -> String {
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sink = captured.clone();
+
+        let app = Router::new()
+            .route("/v1/responses/{response_id}", get(|| async { "ok" }))
+            .fallback(|| async { "fallback" })
+            .layer(
+                ServiceBuilder::new().map_request(move |req: Request<Body>| {
+                    *sink.lock().unwrap() = Some(matched_path_label(req.extensions()).to_owned());
+                    req
+                }),
+            );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(request_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        let label = captured.lock().unwrap().clone();
+        label.expect("label-capturing layer ran")
+    }
+
+    #[tokio::test]
+    async fn matched_route_uses_template_label() {
+        // A matched dynamic route is labeled by its template, never the raw id.
         assert_eq!(
-            normalize_path_for_metrics("/v1/responses/resp_abc123def456"),
-            "/v1/responses/{id}"
-        );
-        assert_eq!(
-            normalize_path_for_metrics("/v1/chat/completions/chatcmpl_abc123xyz"),
-            "/v1/chat/completions/{id}"
+            label_at_layer("/v1/responses/resp_abc123").await,
+            "/v1/responses/{response_id}"
         );
     }
 
-    #[test]
-    fn test_normalize_path_with_uuid() {
-        assert_eq!(
-            normalize_path_for_metrics("/v1/responses/550e8400-e29b-41d4-a716-446655440000"),
-            "/v1/responses/{id}"
-        );
+    #[tokio::test]
+    async fn unmatched_path_collapses_to_other() {
+        // An unmatched path must collapse to "other", not echo the raw URI.
+        assert_eq!(label_at_layer("/totally/unregistered/aaaa").await, "other");
     }
 
-    #[test]
-    fn test_normalize_path_with_numeric_id() {
-        assert_eq!(
-            normalize_path_for_metrics("/v1/workers/12345"),
-            "/v1/workers/{id}"
+    #[tokio::test]
+    async fn distinct_ids_on_matched_route_do_not_grow_interner() {
+        use crate::observability::inflight_tracker::InFlightRequestTracker;
+
+        // Drive the real `HttpMetricsLayer`. Every request matches the dynamic
+        // route `/v1/responses/{response_id}`, so each distinct id must record
+        // the bounded template label and leave the never-evicted interner flat.
+        let app = Router::new()
+            .route("/v1/responses/{response_id}", get(|| async { "ok" }))
+            .layer(HttpMetricsLayer::new(InFlightRequestTracker::new()));
+
+        let send = |uri: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+            }
+        };
+
+        // Warm up so the template label and the empty error_code are interned.
+        send("/v1/responses/resp_warmup".to_owned()).await;
+        let size_before = interner_size();
+
+        const ITERS: usize = 1000;
+        for i in 0..ITERS {
+            send(format!("/v1/responses/resp_{i}")).await;
+        }
+
+        // Slack tolerates strings unrelated parallel tests may intern; an
+        // unbounded label would instead grow the interner by ~ITERS.
+        let growth = interner_size().saturating_sub(size_before);
+        assert!(
+            growth < 100,
+            "interner grew by {growth} for {ITERS} distinct request ids"
         );
-    }
-
-    #[test]
-    fn test_is_dynamic_id() {
-        // Prefixed IDs
-        assert!(is_dynamic_id("resp_abc123def"));
-        assert!(is_dynamic_id("chatcmpl_xyz789"));
-        assert!(!is_dynamic_id("short_id")); // Too short
-
-        // UUIDs
-        assert!(is_dynamic_id("550e8400-e29b-41d4-a716-446655440000"));
-        assert!(is_dynamic_id("550e8400e29b41d4a716446655440000")); // No dashes
-
-        // Numeric
-        assert!(is_dynamic_id("12345"));
-        assert!(!is_dynamic_id("")); // Empty
-
-        // Regular words
-        assert!(!is_dynamic_id("completions"));
-        assert!(!is_dynamic_id("chat"));
     }
 }

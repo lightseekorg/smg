@@ -1,19 +1,18 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
-    thread,
     time::{Duration, SystemTime},
 };
 
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use rand::Rng;
+use rand::RngExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::{
-    get_healthy_worker_indices, normalize_model_key, BucketConfig, LoadBalancingPolicy,
-    SelectWorkerInfo,
+    get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, BucketConfig,
+    LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::worker::Worker;
 
@@ -21,20 +20,12 @@ use crate::worker::Worker;
 pub struct BucketPolicy {
     config: BucketConfig,
     buckets: Arc<DashMap<String, Arc<RwLock<Bucket>>>>,
-    adjustment_handle: Option<thread::JoinHandle<()>>,
+    _adjustment_task: Option<PeriodicTask>,
 }
 
 impl Default for BucketPolicy {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Drop for BucketPolicy {
-    fn drop(&mut self) {
-        if let Some(handle) = self.adjustment_handle.take() {
-            drop(handle);
-        }
     }
 }
 
@@ -46,26 +37,26 @@ impl BucketPolicy {
     pub fn with_config(config: BucketConfig) -> Self {
         let buckets = Arc::new(DashMap::<String, Arc<RwLock<Bucket>>>::new());
 
-        let adjustment_handle = {
+        let adjustment_task = {
             let buckets_clone = Arc::clone(&buckets);
 
-            let interval_secs = config.bucket_adjust_interval_secs;
-
-            Some(thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(interval_secs as u64));
-
-                for bucket_ref in buckets_clone.iter() {
-                    let bucket = bucket_ref.value();
-                    let mut bucket_guard = bucket.write();
-                    bucket_guard.adjust_boundary();
-                }
-            }))
+            Some(PeriodicTask::spawn(
+                config.bucket_adjust_interval_secs as u64,
+                "BucketAdjustment",
+                move || {
+                    for bucket_ref in buckets_clone.iter() {
+                        let bucket = bucket_ref.value();
+                        let mut bucket_guard = bucket.write();
+                        bucket_guard.adjust_boundary();
+                    }
+                },
+            ))
         };
 
         Self {
             config,
             buckets,
-            adjustment_handle,
+            _adjustment_task: adjustment_task,
         }
     }
 
@@ -572,6 +563,30 @@ mod tests {
             disable_health_check: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_drop_stops_adjustment_thread() {
+        let config = BucketConfig {
+            // Long interval so the thread is parked in its sleep loop at drop time.
+            bucket_adjust_interval_secs: 3600,
+            ..Default::default()
+        };
+        let policy = BucketPolicy::with_config(config);
+
+        // Clones alive here: the policy's own, the adjustment thread's, and this
+        // one. If the thread leaks on drop, its clone outlives the policy and the
+        // count stays above 1.
+        let buckets = Arc::clone(&policy.buckets);
+        assert_eq!(Arc::strong_count(&buckets), 3);
+
+        drop(policy);
+
+        assert_eq!(
+            Arc::strong_count(&buckets),
+            1,
+            "adjustment thread should be joined on drop, releasing its Arc clone"
+        );
     }
 
     #[tokio::test]

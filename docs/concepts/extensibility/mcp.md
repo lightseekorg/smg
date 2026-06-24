@@ -52,8 +52,10 @@ Automatic tool discovery with caching, TTL-based refresh, and qualified names to
 
 SMG's MCP Orchestrator manages all interactions between LLM workers and external MCP servers.
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/mcp-architecture.svg" alt="MCP Integration Architecture">
+<div class="architecture-diagram" markdown>
+
+![MCP Integration Architecture](../../assets/images/mcp-architecture.svg)
+
 </div>
 
 ### Request Flow

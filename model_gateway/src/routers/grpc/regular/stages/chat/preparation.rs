@@ -53,8 +53,16 @@ impl ChatPreparationStage {
         // The placeholder is passed to process_chat_messages so that string-format chat
         // templates insert it per image instead of stripping image parts.  The remaining
         // fields are reused by process_multimodal to avoid duplicate lookups.
-        let is_multimodal = multimodal::has_multimodal_content(&request.messages);
-        let (image_placeholder, mm_context) = if is_multimodal {
+        let modalities = multimodal::chat_modalities(&request.messages);
+        if modalities.len() > 1 {
+            // TODO: Support mixed multimodal requests
+            return Err(error::bad_request(
+                "mixed_multimodal_not_supported",
+                "Mixed image and video requests are not supported yet".to_string(),
+            ));
+        }
+        let request_modality = modalities.first().copied();
+        let (image_placeholder, mm_context) = if let Some(request_modality) = request_modality {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_str();
                 let entry = ctx
@@ -84,6 +92,7 @@ impl ChatPreparationStage {
                     mm_components,
                     &tokenizer_id,
                     &tokenizer_source,
+                    request_modality,
                 )
                 .await
                 .map_err(|e| {
@@ -131,7 +140,13 @@ impl ChatPreparationStage {
         };
 
         // Step 3: Tokenize the processed text (no special tokens - chat template already handles them)
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+        let encoding = match utils::encode_blocking(
+            tokenizer.clone(),
+            processed_messages.text.clone(),
+            false,
+        )
+        .await
+        {
             Ok(encoding) => encoding,
             Err(e) => {
                 error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");

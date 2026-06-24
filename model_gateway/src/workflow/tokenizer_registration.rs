@@ -26,8 +26,12 @@ use wfaas::{
 
 use super::data::TokenizerWorkflowData;
 use crate::{
-    app_context::AppContext, config::TokenizerCacheConfig,
-    routers::grpc::multimodal::MultimodalModelConfig, worker::ConnectionMode,
+    app_context::AppContext,
+    config::TokenizerCacheConfig,
+    routers::grpc::multimodal::{
+        load_preprocessor_config_file, load_video_preprocessor_config, MultimodalModelConfig,
+    },
+    worker::ConnectionMode,
 };
 
 /// Configuration for adding a tokenizer
@@ -264,33 +268,18 @@ fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<Multimo
     };
 
     let preprocessor_config = if pp_config_path.exists() {
-        match std::fs::read_to_string(&pp_config_path) {
-            Ok(pp_str) => match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        "Failed to parse preprocessor_config.json from bundle: {e}; \
-                         falling back to defaults"
-                    );
-                    llm_multimodal::PreProcessorConfig::default()
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to read preprocessor_config.json from bundle: {e}; \
-                     falling back to defaults"
-                );
-                llm_multimodal::PreProcessorConfig::default()
-            }
-        }
+        load_preprocessor_config_file(&pp_config_path, "preprocessor_config.json")
+            .unwrap_or_default()
     } else {
         debug!("No preprocessor_config.json in bundle; using PreProcessorConfig defaults");
         llm_multimodal::PreProcessorConfig::default()
     };
+    let video_preprocessor_config = load_video_preprocessor_config(tokenizer_dir);
 
     Some(MultimodalModelConfig {
         config,
         preprocessor_config,
+        video_preprocessor_config,
     })
 }
 

@@ -16,8 +16,8 @@ use image::{DynamicImage, GenericImageView};
 use ndarray::Array3;
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{self, TransformError},
 };
 
@@ -233,7 +233,7 @@ impl KimiK25Processor {
     }
 }
 
-impl ImagePreProcessor for KimiK25Processor {
+impl VisionPreProcessor for KimiK25Processor {
     fn default_mean(&self) -> [f64; 3] {
         KIMI_K25_MEAN
     }
@@ -246,19 +246,19 @@ impl ImagePreProcessor for KimiK25Processor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
 
-        let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
+        let item_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
         let mean = config.get_image_mean();
         let std = config.get_image_std();
 
         let mut all_patches: Vec<f32> = Vec::new();
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
-        let mut num_img_tokens = Vec::with_capacity(images.len());
+        let mut feature_token_counts = Vec::with_capacity(images.len());
 
         for image in images {
             let (w, h) = image.dimensions();
@@ -278,7 +278,7 @@ impl ImagePreProcessor for KimiK25Processor {
             grid_thw_data.push(grid_w as i64);
 
             let num_patches = grid_h * grid_w;
-            num_img_tokens.push(cfg.num_tokens);
+            feature_token_counts.push(cfg.num_tokens);
 
             let patches = Self::extract_patches(&tensor, self.patch_size);
             all_patches.extend(patches);
@@ -286,27 +286,30 @@ impl ImagePreProcessor for KimiK25Processor {
         }
 
         let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
-        let pixel_values = ndarray::Array4::from_shape_vec(
+        let encoder_input = ndarray::Array4::from_shape_vec(
             (total_patches, 3, self.patch_size, self.patch_size),
             all_patches,
         )
         .map_err(|e| {
             TransformError::ShapeError(format!(
-                "Failed to create pixel_values [{total_patches}, 3, {}, {}]: {e}",
+                "Failed to create encoder_input [{total_patches}, 3, {}, {}]: {e}",
                 self.patch_size, self.patch_size
             ))
         })?;
 
-        let result =
-            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes)
-                .with_extra(
-                    "grid_thws",
-                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
-                )
-                .with_extra(
-                    "patches_per_image",
-                    ModelSpecificValue::int_1d(patches_per_image),
-                );
+        let result = PreprocessedEncoderInputs::new_dynamic(
+            encoder_input.into_dyn(),
+            feature_token_counts,
+            item_sizes,
+        )
+        .with_extra(
+            "grid_thws",
+            ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
+        )
+        .with_extra(
+            "patches_per_image",
+            ModelSpecificValue::int_1d(patches_per_image),
+        );
 
         Ok(result)
     }
@@ -413,14 +416,14 @@ mod tests {
         let result = p.preprocess(&[image], &config).unwrap();
 
         // 4D output: [total_patches, 3, 14, 14]
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert_eq!(result.pixel_values.shape()[1], 3);
-        assert_eq!(result.pixel_values.shape()[2], 14);
-        assert_eq!(result.pixel_values.shape()[3], 14);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert_eq!(result.encoder_input.shape()[1], 3);
+        assert_eq!(result.encoder_input.shape()[2], 14);
+        assert_eq!(result.encoder_input.shape()[3], 14);
 
         assert!(result.model_specific.contains_key("grid_thws"));
         assert!(result.model_specific.contains_key("patches_per_image"));
-        assert!(result.num_img_tokens[0] > 0);
+        assert!(result.feature_token_counts[0] > 0);
     }
 
     #[test]
@@ -434,10 +437,10 @@ mod tests {
 
         let result = p.preprocess(&images, &config).unwrap();
 
-        assert_eq!(result.image_sizes.len(), 2);
-        assert_eq!(result.num_img_tokens.len(), 2);
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert_eq!(result.pixel_values.shape()[1], 3);
+        assert_eq!(result.item_sizes.len(), 2);
+        assert_eq!(result.feature_token_counts.len(), 2);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert_eq!(result.encoder_input.shape()[1], 3);
 
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
             result.model_specific.get("grid_thws")
@@ -452,7 +455,7 @@ mod tests {
             result.model_specific.get("patches_per_image")
         {
             let total: i64 = data.iter().sum();
-            assert_eq!(total as usize, result.pixel_values.shape()[0]);
+            assert_eq!(total as usize, result.encoder_input.shape()[0]);
         }
     }
 
@@ -493,7 +496,7 @@ mod tests {
         let image = create_test_image(100, 100, Rgb([255, 255, 255]));
         let result = p.preprocess(&[image], &config).unwrap();
 
-        let flat = result.pixel_values_flat();
+        let flat = result.encoder_input_flat();
         // Padded region should be normalized black (-1.0)
         let has_neg_ones = flat.iter().any(|&v| (v - (-1.0)).abs() < 1e-6);
         assert!(
@@ -520,9 +523,9 @@ mod tests {
         };
         let image = create_test_image(1, 1, Rgb([128, 128, 128]));
         let result = p.preprocess(&[image], &config).unwrap();
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert!(result.pixel_values.shape()[0] > 0);
-        assert!(result.num_img_tokens[0] > 0);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert!(result.encoder_input.shape()[0] > 0);
+        assert!(result.feature_token_counts[0] > 0);
     }
 
     #[test]

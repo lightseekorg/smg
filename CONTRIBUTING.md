@@ -58,6 +58,10 @@ Every PR must pass these five checks **locally** before requesting review:
 
 "Probably passes" is not passing. Paste the output or re-run.
 
+Check 2's `--all-features` enables the `opencv-video` feature, which links
+system OpenCV. Install it once with `bash scripts/install_opencv.sh`, or lint
+without the feature using `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ---
 
 ## Commits

@@ -1,6 +1,6 @@
 [package]
 name = "tool-parser"
-version = "1.2.0"
+version = "1.3.1"
 edition = "2021"
 description = "Tool/function call parser for LLM model outputs"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
 tracing.workspace = true
 # Only used by tool-parser
-regex = "1.10"
+regex = "1.12"
 rustpython-parser = "0.4.0"
 
 [lints]

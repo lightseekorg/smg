@@ -503,21 +503,17 @@ class TestImageGenerationCloud(_ImageGenerationAssertions):
     _fixture_name = "gateway_with_mock_mcp_cloud"
 
 
-# ``gpu(2)`` on the gRPC classes matches the ``e2e-2gpu-responses`` job in
-# ``.github/workflows/pr-test-rust.yml`` (``gpu_tier: "2"``). Using
-# ``gpu(1)`` would filter these tests out at collection time because
-# ``pytest_collection_modifyitems`` in ``e2e_test/fixtures/hooks.py`` does
-# a strict ``gpu_count == E2E_GPU_TIER`` comparison, and no 1-GPU CI lane
-# currently runs the Responses directory.
+# ``gpu(1)`` on the gRPC classes matches the ``e2e-1gpu-responses`` job in
+# ``.github/workflows/pr-test-rust.yml`` (``gpu_tier: "1"``). Both
+# ``gpt-oss-20b`` and ``Llama-3.1-8B-Instruct`` are tp=1 in MODEL_SPECS.
 #
-# The ``e2e-2gpu-responses`` job runs ``engine=sglang`` only — the vllm
-# class is a workflow-level gap (no current CI job pairs ``engine=vllm``
-# with ``e2e_test/responses`` at tier 2). That's documented in the PR
-# body as a follow-up.
+# The CI job runs ``engine=sglang`` only — the vllm class is a workflow-
+# level gap (no current CI job pairs ``engine=vllm`` with
+# ``e2e_test/responses``). Documented as a follow-up.
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestImageGenerationGrpcSglang(_ImageGenerationAssertions):
@@ -531,7 +527,7 @@ class TestImageGenerationGrpcSglang(_ImageGenerationAssertions):
 
 
 @pytest.mark.engine("vllm")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 class TestImageGenerationGrpcVllm(_ImageGenerationAssertions):

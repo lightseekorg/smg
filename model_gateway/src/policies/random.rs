@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::RngExt;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
 use crate::worker::Worker;

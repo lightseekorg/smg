@@ -76,7 +76,7 @@ impl ToolLoopState {
         let id = call_id.clone();
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
-                id,
+                id: Some(id),
                 call_id,
                 name: tool_name,
                 arguments: args_json_str,
@@ -393,7 +393,6 @@ pub(super) fn build_next_request(
         top_p: current_request.top_p,
         stream: current_request.stream,
         store: Some(false), // Don't store intermediate responses
-        background: Some(false),
         max_tool_calls: current_request.max_tool_calls,
         tool_choice: current_request.tool_choice,
         parallel_tool_calls: current_request.parallel_tool_calls,

@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use validator::Validate;
 
-use crate::{skills::MessagesSkillRef, validated::Normalizable};
+use crate::{common::GenerationRequest, validated::Normalizable};
 
 // ============================================================================
 // Request Types
@@ -73,6 +73,11 @@ pub struct CreateMessageRequest {
 
     /// MCP servers to be utilized in this request (beta).
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+
+    /// Additional fields not explicitly defined above (e.g. beta features like
+    /// context_management, output_config). Captured and forwarded to backends.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl Normalizable for CreateMessageRequest {
@@ -102,6 +107,59 @@ impl CreateMessageRequest {
         self.mcp_servers
             .as_deref()
             .filter(|servers| !servers.is_empty())
+    }
+}
+
+impl GenerationRequest for CreateMessageRequest {
+    fn is_stream(&self) -> bool {
+        self.stream.unwrap_or(false)
+    }
+
+    fn get_model(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
+    fn extract_text_for_routing(&self) -> String {
+        let mut buffer = String::new();
+        let mut has_content = false;
+
+        let push = |s: &str, has_content: &mut bool, buffer: &mut String| {
+            if s.is_empty() {
+                return;
+            }
+            if *has_content {
+                buffer.push(' ');
+            }
+            buffer.push_str(s);
+            *has_content = true;
+        };
+
+        if let Some(system) = &self.system {
+            match system {
+                SystemContent::String(s) => push(s, &mut has_content, &mut buffer),
+                SystemContent::Blocks(blocks) => {
+                    for block in blocks {
+                        let SystemContentBlock::Text(text_block) = block;
+                        push(&text_block.text, &mut has_content, &mut buffer);
+                    }
+                }
+            }
+        }
+
+        for msg in &self.messages {
+            match &msg.content {
+                InputContent::String(s) => push(s, &mut has_content, &mut buffer),
+                InputContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let InputContentBlock::Text(text_block) = block {
+                            push(&text_block.text, &mut has_content, &mut buffer);
+                        }
+                    }
+                }
+            }
+        }
+
+        buffer
     }
 }
 
@@ -194,7 +252,15 @@ pub enum ServiceTier {
 #[serde(untagged)]
 pub enum SystemContent {
     String(String),
-    Blocks(Vec<TextBlock>),
+    Blocks(Vec<SystemContentBlock>),
+}
+
+/// System content block — wraps TextBlock with the required `type` discriminator
+/// so it round-trips correctly through serialization.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SystemContentBlock {
+    Text(TextBlock),
 }
 
 /// A single input message in a conversation
@@ -213,6 +279,17 @@ pub struct InputMessage {
 pub enum Role {
     User,
     Assistant,
+    /// `system` role inside `messages[]`.
+    ///
+    /// The Anthropic Messages API carries the system prompt in the top-level
+    /// `system` field, but some clients (e.g. Claude Code) additionally send a
+    /// `system`-role message *in the array* — often mid-conversation. Accepting
+    /// it (instead of 400ing) lets those requests through; the message is
+    /// forwarded to the chat template **in place**, so backends that render
+    /// `system` inline (e.g. GLM-4.5+/5.x) keep its position, while backends
+    /// that only read a leading system (e.g. MiniMax-M2) handle it per their
+    /// own template. See https://github.com/lightseekorg/smg/issues/1795
+    System,
 }
 
 /// Input content can be a string or an array of content blocks
@@ -727,6 +804,7 @@ pub enum ToolChoice {
 // ============================================================================
 
 /// Configuration for extended thinking
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
@@ -734,9 +812,27 @@ pub enum ThinkingConfig {
     Enabled {
         /// Budget in tokens for thinking (minimum 1024)
         budget_tokens: u32,
+        /// How thinking content is returned in the response.
+        display: Option<ThinkingDisplay>,
     },
     /// Disable extended thinking
     Disabled,
+    /// Let the model decide when and how much to think. Required on Opus 4.7.
+    Adaptive {
+        /// How thinking content is returned in the response.
+        /// Defaults vary by model (Opus 4.7 / Mythos default to `Omitted`; others to `Summarized`).
+        display: Option<ThinkingDisplay>,
+    },
+}
+
+/// How thinking content is returned in API responses
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    /// Thinking blocks contain summarized reasoning text
+    Summarized,
+    /// Thinking blocks return empty text; signature still carries encrypted content
+    Omitted,
 }
 
 // ============================================================================
@@ -1072,9 +1168,6 @@ pub struct ListModelsResponse {
 pub struct ContainerConfig {
     /// Container ID for reuse across requests
     pub id: Option<String>,
-
-    /// Skills to be loaded in the container
-    pub skills: Option<Vec<MessagesSkillRef>>,
 }
 
 /// MCP server configuration (beta)
@@ -1818,9 +1911,90 @@ pub enum ServerToolCaller {
 
 #[cfg(test)]
 mod tests {
-    use serde_json;
+    use serde_json::{self, json};
 
     use super::*;
+
+    #[test]
+    fn test_system_blocks_preserve_type_field() {
+        let input = json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "system": [
+                {"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}
+            ]
+        });
+
+        let req: CreateMessageRequest = serde_json::from_value(input).expect("should deserialize");
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+
+        let system_blocks = reserialized.get("system").unwrap().as_array().unwrap();
+        let first_block = &system_blocks[0];
+        assert_eq!(
+            first_block.get("type").and_then(|v| v.as_str()),
+            Some("text"),
+            "system block must retain 'type' field after round-trip: got {first_block:?}",
+        );
+    }
+
+    #[test]
+    fn test_message_content_blocks_preserve_type_field() {
+        let input = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
+                ]
+            }],
+            "max_tokens": 100
+        });
+
+        let req: CreateMessageRequest = serde_json::from_value(input).expect("should deserialize");
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+
+        let msg = &reserialized["messages"][0];
+        let content_blocks = msg["content"].as_array().unwrap();
+        let first_block = &content_blocks[0];
+        assert_eq!(
+            first_block.get("type").and_then(|v| v.as_str()),
+            Some("text"),
+            "content block must retain 'type' field: got {first_block:?}",
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_preserved_via_flatten() {
+        let input = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 100,
+            "thinking": {"type": "adaptive"},
+            "context_management": {"edits": [{"type": "clear_thinking", "keep": "all"}]},
+            "output_config": {"effort": "high"},
+            "stream": true
+        });
+
+        let req: CreateMessageRequest =
+            serde_json::from_value(input.clone()).expect("should deserialize");
+        assert!(matches!(
+            req.thinking,
+            Some(ThinkingConfig::Adaptive { .. })
+        ));
+
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+        assert_eq!(
+            reserialized.get("context_management"),
+            input.get("context_management"),
+            "context_management must survive round-trip"
+        );
+        assert_eq!(
+            reserialized.get("output_config"),
+            input.get("output_config"),
+            "output_config must survive round-trip"
+        );
+    }
 
     fn base_request() -> CreateMessageRequest {
         CreateMessageRequest {
@@ -1843,6 +2017,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: Map::new(),
         }
     }
 
@@ -2130,6 +2305,87 @@ mod tests {
     }
 
     #[test]
+    fn test_thinking_config_adaptive_minimal() {
+        let cfg: ThinkingConfig = serde_json::from_str(r#"{"type":"adaptive"}"#).unwrap();
+        match cfg {
+            ThinkingConfig::Adaptive { display } => assert_eq!(display, None),
+            other => panic!("expected Adaptive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_config_adaptive_with_display() {
+        let cfg: ThinkingConfig =
+            serde_json::from_str(r#"{"type":"adaptive","display":"omitted"}"#).unwrap();
+        match cfg {
+            ThinkingConfig::Adaptive { display } => {
+                assert_eq!(display, Some(ThinkingDisplay::Omitted));
+            }
+            other => panic!("expected Adaptive, got {other:?}"),
+        }
+
+        let cfg: ThinkingConfig =
+            serde_json::from_str(r#"{"type":"adaptive","display":"summarized"}"#).unwrap();
+        match cfg {
+            ThinkingConfig::Adaptive { display } => {
+                assert_eq!(display, Some(ThinkingDisplay::Summarized));
+            }
+            other => panic!("expected Adaptive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_config_adaptive_round_trip_omits_null_display() {
+        let cfg = ThinkingConfig::Adaptive { display: None };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(json, r#"{"type":"adaptive"}"#);
+    }
+
+    #[test]
+    fn test_thinking_config_existing_variants_still_work() {
+        let cfg: ThinkingConfig =
+            serde_json::from_str(r#"{"type":"enabled","budget_tokens":1024}"#).unwrap();
+        assert!(matches!(
+            cfg,
+            ThinkingConfig::Enabled {
+                budget_tokens: 1024,
+                display: None
+            }
+        ));
+
+        let cfg: ThinkingConfig = serde_json::from_str(r#"{"type":"disabled"}"#).unwrap();
+        assert!(matches!(cfg, ThinkingConfig::Disabled));
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_with_display() {
+        let cfg: ThinkingConfig = serde_json::from_str(
+            r#"{"type":"enabled","budget_tokens":2048,"display":"summarized"}"#,
+        )
+        .unwrap();
+        match cfg {
+            ThinkingConfig::Enabled {
+                budget_tokens,
+                display,
+            } => {
+                assert_eq!(budget_tokens, 2048);
+                assert_eq!(display, Some(ThinkingDisplay::Summarized));
+            }
+            other => panic!("expected Enabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_round_trip_omits_null_display() {
+        let cfg = ThinkingConfig::Enabled {
+            budget_tokens: 1024,
+            display: None,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(json, r#"{"type":"enabled","budget_tokens":1024}"#);
+    }
+
+    #[test]
     fn test_full_message_with_tool_search_flow_deserialization() {
         // Simulates the full response from Anthropic API with tool search flow
         let json = r#"{
@@ -2178,5 +2434,25 @@ mod tests {
             ContentBlock::ToolSearchToolResult { .. }
         ));
         assert!(matches!(msg.content[2], ContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn test_system_role_in_messages_is_accepted_and_preserved() {
+        // Claude Code sends a `system`-role message in `messages[]` (in addition
+        // to the top-level `system`). It must parse (not 400) and stay in place
+        // so inline-`system` templates render it where it was sent.
+        let body = json!({
+            "model": "m",
+            "max_tokens": 16,
+            "system": "main prompt",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "mid-conversation system"}
+            ]
+        });
+        let req: CreateMessageRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.messages[0].role, Role::User);
+        assert_eq!(req.messages[1].role, Role::System); // preserved in place
     }
 }

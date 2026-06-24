@@ -36,9 +36,12 @@ jobs:
   benchmark:
     name: Radix Tree (Cache-Aware Routing)
     if: github.repository == 'lightseekorg/smg'
-    runs-on: k8s-runner-gpu
+    # CPU-only criterion/throughput benchmarks of the kv-index radix tree —
+    # no GPU needed, so it runs on the CPU runner pool rather than competing
+    # for GPU runners.
+    runs-on: k8s-runner-cpu
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 100
 
@@ -48,13 +51,15 @@ jobs:
           sccache-version: 'v0.10.0'
 
       - name: Run criterion benchmark
-        timeout-minutes: 40
+        timeout-minutes: 90
         run: |
           source "$HOME/.cargo/env"
           cargo bench --bench radix_tree_benchmark -- benchmark_summary 2>&1 | tee benchmark_output.txt
 
       - name: Run throughput benchmark (synthetic)
-        timeout-minutes: 10
+        # Heavy throughput sweep OOM-kills the CPU runner on PRs; run on main/nightly only.
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
           cargo bench -p kv-index --bench throughput_bench -- \
@@ -65,6 +70,7 @@ jobs:
             --sweep-steps 20 2>&1 | tee throughput_output.txt
 
       - name: Download Mooncake traces
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p "$GITHUB_WORKSPACE/traces"
           for trace in conversation_trace synthetic_trace toolagent_trace; do
@@ -74,7 +80,8 @@ jobs:
           done
 
       - name: Run throughput benchmark (Mooncake traces)
-        timeout-minutes: 15
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
           for trace in conversation_trace synthetic_trace toolagent_trace; do

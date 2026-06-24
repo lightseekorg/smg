@@ -19,25 +19,63 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
-# Pin vLLM below 0.19.1. vLLM 0.19.1 bundled the transformers v5 upgrade,
-# which breaks intfloat/e5-mistral-7b-instruct embedding quality
-# (self-similarity ~0.33 instead of ~1.0) via an EOS / last-token pooling
-# regression. Last-known-good combo is:
-#   vllm==0.19.0 + transformers==4.57.6   (run 24591985132, 82a3fb1a)
-# Regression first appeared in run 24608587304 (dcede344). Failure signature:
-# https://github.com/lightseekorg/smg/actions/runs/24644816475/job/72068881582
-#
-# We rely on vllm 0.19.0's own wheel metadata (transformers<5,>=4.56.0) to
-# force transformers back to 4.x. Not pinning transformers separately — if
-# we ship vllm we don't want to second-guess the library's own dep range;
-# drop this pin whenever vllm publishes a release that re-verifies embedding
-# correctness post-transformers-v5.
+# Floor 0.22.1: older vllm resolved an early transformers v5 that broke
+# e5-mistral last-token pooling (the old <0.19.1 pin); 0.22.1+ only admits
+# transformers >= 5.5.1. e2e-1gpu-embeddings is the quality gate.
+# FastAPI 0.137 makes vLLM's prometheus-fastapi-instrumentator health route
+# crash on _IncludedRouter entries; keep the last known-good FastAPI line.
+# --torch-backend=auto matches the torch CUDA variant to the pod's driver.
 echo "Installing vLLM..."
-uv pip install "vllm<0.19.1"
+uv pip install "vllm>=0.22.1" "fastapi<0.137" --torch-backend=auto
 
-# Install nixl for vLLM PD disaggregation (NIXL KV transfer)
+# NIXL for vLLM PD disaggregation. The bare metapackage pulls both cu12 and
+# cu13 backends, so install the top-level shim alone, then the backend
+# matching torch's CUDA (same normalization as vLLM's own CI).
 echo "Installing nixl..."
-uv pip install nixl
+CUDA_MAJOR=$(python3 -c "import torch; print(torch.version.cuda.split('.')[0])")
+uv pip install --no-deps "nixl>=1.2.0"
+uv pip install "nixl-cu${CUDA_MAJOR}>=1.2.0"
+
+# Remove nixl_ep (MoE all-to-all, unused in CI): vLLM imports it eagerly when
+# present, tying every worker startup to its extra native deps
+SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")
+rm -rf "${SITE_PACKAGES}/nixl_ep"
+
+# Import canary: fail here (not mid-e2e) if the nixl install is broken
+# (torch first so its bundled CUDA libraries are loaded)
+python3 -c "import torch, nixl"
+echo "nixl import canary OK"
+
+# Mooncake transfer engine, only on the MooncakeConnector PD leg so a broken
+# wheel cannot fail the unrelated vLLM jobs
+if [ "${E2E_VLLM_KV_BACKEND:-nixl}" = "mooncake" ]; then
+    # Mooncake's native extension links libibverbs/libnuma at load time even
+    # when the transfer protocol is tcp — without these the import fails with
+    # "libibverbs.so.1: cannot open shared object file".
+    echo "Installing mooncake system dependencies..."
+    sudo apt-get install -y --no-install-recommends libnuma1 libibverbs1 ibverbs-providers
+
+    # The cuda13 wheel variant matches vLLM's cu130 torch stack, so no
+    # libcudart.so.12 shim is needed (torch's bundled CUDA 13 runtime
+    # satisfies it once torch is imported first). Pinned — floating mooncake
+    # resolves have broken CI before.
+    echo "Installing mooncake-transfer-engine (cuda13)..."
+    uv pip install "mooncake-transfer-engine-cuda13==0.3.11.post1"
+
+    # Import canary: fail here (not mid-e2e) if the mooncake install is broken —
+    # vLLM swallows this ImportError at module load (torch first for CUDA libs)
+    python3 -c "import torch; from mooncake.engine import TransferEngine"
+    echo "mooncake import canary OK"
+fi
+
+# FlashInfer JIT cache: vLLM JIT-compiles flashinfer kernels at engine startup
+# and the pods have no CUDA toolchain — install the precompiled cache instead,
+# same recipe as vLLM's own Dockerfile.
+echo "Installing flashinfer-jit-cache..."
+CUDA_TAG=$(python3 -c "import torch; print(torch.version.cuda.replace('.', ''))")
+FLASHINFER_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('flashinfer-python'))")
+uv pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" \
+    --index-url "https://flashinfer.ai/whl/cu${CUDA_TAG}"
 
 # Install gRPC packages from source (not PyPI) so PR changes are always tested
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."

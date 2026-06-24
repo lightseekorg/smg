@@ -6,7 +6,7 @@ use std::{
 };
 
 use openai_protocol::worker::WorkerLoadResponse;
-use rand::Rng;
+use rand::RngExt;
 use tracing::debug;
 
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
@@ -119,6 +119,12 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         }
     }
 
+    fn remove_worker(&self, url: &str) {
+        if let Ok(mut cached) = self.cached_loads.write() {
+            cached.remove(url);
+        }
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -153,6 +159,7 @@ mod tests {
                 dp_rank: 0,
                 num_running_reqs: 0,
                 num_waiting_reqs: 0,
+                num_waiting_uncached_tokens: 0,
                 num_total_reqs: 0,
                 num_used_tokens: 0,
                 max_total_num_tokens: 0,
@@ -161,6 +168,7 @@ mod tests {
                 cache_hit_rate: 0.0,
                 utilization: 0.0,
                 max_running_requests: 0,
+                ..Default::default()
             }],
         }
     }

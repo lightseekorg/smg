@@ -25,10 +25,7 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
-        common::{
-            header_utils::extract_conversation_memory_config,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
     },
     worker::{Endpoint, ProviderType, WorkerRegistry},
@@ -127,10 +124,6 @@ pub(in crate::routers::openai) async fn route_responses(
         Ok(id) => id,
         Err(response) => return response,
     };
-
-    if let Some(memory_config) = extract_conversation_memory_config(headers) {
-        super::history::inject_memory_context(&memory_config, &mut request_body);
-    }
 
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
@@ -393,5 +386,30 @@ mod tests {
         assert_eq!(annotations[1]["start_index"], json!(10));
         assert_eq!(annotations[2]["type"], json!("file_path"));
         assert_eq!(annotations[2]["index"], json!(2));
+    }
+
+    #[test]
+    fn router_serialization_preserves_empty_annotations_on_output_text() {
+        let req = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_prior".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ResponseContentPart::OutputText {
+                    text: "Prior answer.".to_string(),
+                    annotations: vec![],
+                    logprobs: None,
+                }],
+                status: Some("completed".to_string()),
+                phase: None,
+            }]),
+            ..Default::default()
+        };
+
+        let payload = serialize_like_router(&req);
+        let output_text = &payload["input"][0]["content"][0];
+
+        assert_eq!(output_text["type"], json!("output_text"));
+        assert_eq!(output_text["annotations"], json!([]));
     }
 }

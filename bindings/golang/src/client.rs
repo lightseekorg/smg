@@ -13,7 +13,7 @@ use openai_protocol::{
     common::{ToolChoice, ToolChoiceValue},
 };
 use smg::routers::grpc::utils::process_chat_messages;
-use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
+use smg_grpc_client::sglang_scheduler::{SglangGenerateRequestOptions, SglangSchedulerClient};
 use uuid::Uuid;
 
 use super::{
@@ -22,6 +22,7 @@ use super::{
     runtime::RUNTIME,
     stream::SglangStreamHandle,
     tokenizer::TokenizerHandle,
+    utils::chat_requires_reasoning,
 };
 
 /// Handle for complete client SDK (gRPC client + tokenizer)
@@ -212,13 +213,17 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
 
     // Build GenerateRequest
     let request_id = format!("chatcmpl-{}", Uuid::now_v7());
+    let require_reasoning = chat_requires_reasoning(&chat_request, tokenizer.as_ref());
     let proto_request = match client.build_generate_request_from_chat(
         request_id.clone(),
         &chat_request,
         processed_messages.text,
         token_ids,
-        None, // multimodal not supported in golang bindings
-        tool_constraint,
+        SglangGenerateRequestOptions {
+            multimodal_inputs: None, // multimodal not supported in golang bindings
+            tool_call_constraint: tool_constraint,
+            require_reasoning,
+        },
     ) {
         Ok(req) => req,
         Err(e) => {

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use smg_grpc_client::SglangGenerateRequestOptions;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -108,8 +109,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 token_ids,
-                                None,
-                                tool_constraints,
+                                SglangGenerateRequestOptions {
+                                    multimodal_inputs: None,
+                                    tool_call_constraint: tool_constraints,
+                                    require_reasoning: false,
+                                },
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request");
@@ -277,6 +281,51 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
+            GrpcClient::TokenSpeed(tokenspeed_client) => {
+                let req = match &ctx.input.request_type {
+                    RequestType::Chat(request) => {
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        tokenspeed_client
+                            .build_generate_request_from_chat(
+                                request_id,
+                                body,
+                                placeholder_processed_text,
+                                token_ids,
+                                None, // Harmony path: multimodal not yet wired
+                                tool_constraints,
+                            )
+                            .map_err(|e| {
+                                error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed generate request");
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                            })?
+                    }
+                    RequestType::Responses(request) => tokenspeed_client
+                        .build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            token_ids,
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?,
+                    RequestType::Embedding(_) => {
+                        return Err(error::bad_request(
+                            "harmony_embedding_not_supported",
+                            "Embedding requests are not supported with Harmony models".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
+                };
+                ProtoGenerateRequest::TokenSpeed(Box::new(req))
+            }
         };
 
         // Inject Harmony stop token IDs into sampling params for ALL Harmony requests
@@ -319,6 +368,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         debug!(
                             stop_token_count = harmony_stop_ids.len(),
                             "Injected Harmony stop tokens into MLX sampling params"
+                        );
+                    }
+                }
+                ProtoGenerateRequest::TokenSpeed(req) => {
+                    if let Some(params) = req.sampling_params.as_mut() {
+                        params.stop_token_ids.extend_from_slice(&harmony_stop_ids);
+                        debug!(
+                            stop_token_count = harmony_stop_ids.len(),
+                            "Injected Harmony stop tokens into TokenSpeed sampling params"
                         );
                     }
                 }

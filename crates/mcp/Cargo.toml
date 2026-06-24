@@ -1,6 +1,6 @@
 [package]
 name = "smg-mcp"
-version = "2.2.0"
+version = "2.3.1"
 edition = "2021"
 description = "Model Context Protocol (MCP) client implementation"
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ futures.workspace = true
 dashmap.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -32,9 +32,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
 tracing.workspace = true
 url = "2.5"
-rmcp = { version = "0.8.3", features = ["client", "server",
+# rmcp 1.7 dropped the standalone SSE client transport
+# (`transport-sse-client-reqwest`); the MCP spec superseded HTTP+SSE with
+# Streamable HTTP, which is still here.
+rmcp = { version = "1.7", features = ["client", "server",
     "transport-child-process",
-    "transport-sse-client-reqwest",
     "transport-streamable-http-client-reqwest",
     "transport-streamable-http-server",
     "transport-streamable-http-server-session",
@@ -48,7 +50,7 @@ scopeguard = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-serial_test = "3.0"
+serial_test = "3.5"
 
 [lints]
 workspace = true

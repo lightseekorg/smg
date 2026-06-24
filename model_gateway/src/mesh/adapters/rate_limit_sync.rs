@@ -8,11 +8,15 @@
 //! window resets propagate without undoing the reset via a naive
 //! `max(old, new)`.
 //!
-//! Wire format is the shared 16-byte layout from the mesh crate:
+//! The gateway writes the shared 16-byte application payload:
 //! `u64` big-endian epoch in bytes 0..8, `i64` big-endian count in
-//! bytes 8..16. The helpers [`encode_epoch_count`] /
-//! [`decode_epoch_count`] match what the mesh merge itself reads, so
-//! this adapter never drifts from the merge format.
+//! bytes 8..16. The mesh CRDT normalizes stored `rl:` values into a
+//! rate-limit shard state that also remembers live/tombstone merge
+//! metadata. Subscribers observe the canonical normalized shard
+//! (matching `get`) for both local writes and remote merges.
+//! [`decode_epoch_count`] reads that shard state back into plain
+//! epoch/count; it also still accepts the raw 16-byte payload as a
+//! defensive backstop, so the adapter never handles CRDT internals.
 //!
 //! The caller owns the epoch clock — typically
 //! `now.as_secs() / window.as_secs()`. `sync_counter` writes the
@@ -29,9 +33,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use smg_mesh::{
-    decode_epoch_count, encode_epoch_count, CrdtNamespace, EpochCount, EPOCH_MAX_WINS_ENCODED_LEN,
-};
+use smg_mesh::{decode_epoch_count, encode_epoch_count, CrdtNamespace, EpochCount};
 use tracing::{debug, warn};
 
 const PREFIX: &str = "rl:";
@@ -87,7 +89,7 @@ impl RateLimitSyncAdapter {
     /// Aggregate reads always hit the CRDT store directly, so
     /// subscription is observability-only today: it logs remote
     /// shards at debug and warns when a value doesn't match the
-    /// 16-byte wire format.
+    /// rate-limit shard format.
     pub fn start(self: &Arc<Self>) {
         let mut sub = self.rate_limits.subscribe("");
         #[expect(
@@ -141,7 +143,7 @@ impl RateLimitSyncAdapter {
             None => warn!(
                 shard,
                 len = bytes.len(),
-                "rate-limit value must be exactly {EPOCH_MAX_WINS_ENCODED_LEN} bytes",
+                "rate-limit value must decode as epoch/count or normalized shard state",
             ),
         }
     }
@@ -210,7 +212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_counter_writes_sixteen_byte_big_endian_value() {
+    async fn sync_counter_writes_decodable_epoch_count_value() {
         let mesh = MeshKV::new("node-a".into());
         let ns = rl_namespace(&mesh);
         let adapter = RateLimitSyncAdapter::new(ns.clone(), "node-a".into());
@@ -220,11 +222,6 @@ mod tests {
         let raw = ns
             .get("rl:global:node-a")
             .expect("shard is written under rl:{counter}:{node}");
-        assert_eq!(
-            raw.len(),
-            EPOCH_MAX_WINS_ENCODED_LEN,
-            "wire format is fixed-size"
-        );
         let decoded = decode_epoch_count(&raw).unwrap();
         assert_eq!(
             decoded,

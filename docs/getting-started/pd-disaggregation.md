@@ -79,7 +79,10 @@ smg \
 
 ## vLLM PD
 
-SMG sends to prefill first with `max_tokens=1`, then sends the original request to decode. The KV backend (NIXL or Mooncake) transfers the cache transparently.
+SMG sends to prefill first with `max_tokens=1`, then sends the original request to decode, relaying KV-transfer metadata between the two legs:
+
+- **NIXL**: SMG tags the prefill request with `do_remote_decode=true`, harvests the `kv_transfer_params` the prefill engine returns (engine id, request id, block ids, side-channel address, TP size), and forwards them verbatim with the decode request so decode pulls the KV cache over NIXL.
+- **Mooncake**: the connector is push-based and returns nothing, so SMG mints a shared `transfer_id`, tags the prefill request with it, and synthesizes the decode params (`remote_engine_id` discovered from the worker at registration, `remote_bootstrap_addr` from the worker's bootstrap host/port). With an older servicer that doesn't report `kv_engine_id`, SMG falls back to legacy host/port injection.
 
 ### Start vLLM Workers with NIXL
 
@@ -98,6 +101,18 @@ python -m vllm.entrypoints.grpc_server \
   --port 50052 \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
+
+`VLLM_NIXL_SIDE_CHANNEL_PORT` must be unique per worker on the same host (with
+data parallelism each rank uses `port + dp_rank`). When prefill and decode run
+on different machines, also set `VLLM_NIXL_SIDE_CHANNEL_HOST` to an address
+reachable from the decode worker — prefill embeds this host/port in the
+handoff params that decode uses to fetch the KV cache.
+
+To verify KV transfer is active, send a request and look for `Transfer plan:`
+in the decode worker log (vLLM >= 0.20). If the router logs
+`prefill returned no kv_transfer_params`, upgrade the servicer
+(smg-grpc-servicer >= 0.5.4, smg-grpc-proto >= 0.4.9) or check the
+`--kv-transfer-config` on the workers.
 
 ### Start SMG
 
@@ -123,7 +138,7 @@ VLLM_MOONCAKE_BOOTSTRAP_PORT=8998 \
 python -m vllm.entrypoints.grpc_server \
   --model /path/to/model \
   --port 50051 \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","engine_id":"prefill-0"}'
 
 # Decode worker
 python -m vllm.entrypoints.grpc_server \
@@ -131,6 +146,20 @@ python -m vllm.entrypoints.grpc_server \
   --port 50052 \
   --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
 ```
+
+Set an explicit `engine_id` on each prefill worker in production. SMG discovers
+the id once at worker registration; without a pinned id, vLLM generates a new
+one per process, so a restarted prefill container would invalidate the
+registered id until the worker is re-registered.
+
+With vLLM data parallelism (`data_parallel_size > 1`), run SMG with
+`--dp-aware`: SMG pins each request to a DP rank and mints the decode params
+with the matching `{engine_id}_dp{rank}` engine-core id. Without `--dp-aware`,
+DP>1 prefill workers are not minted for and SMG falls back to legacy host/port
+injection (decode recomputes the prompt locally). External-LB DP
+(`--data-parallel-external-lb`, one pod per rank) is unsupported for Mooncake
+minting: every pod's engine core is `{engine_id}_dp0`, so register pods as
+plain workers and pin a distinct `engine_id` per pod.
 
 ```bash
 smg \
@@ -171,14 +200,14 @@ curl http://localhost:30000/v1/chat/completions \
 
 ---
 
-## SGLang vs vLLM PD at a Glance
+## vLLM vs SGLang PD at a Glance
 
-| | SGLang PD | vLLM PD |
-|---|-----------|---------|
-| **Protocol** | HTTP | gRPC |
-| **Dispatch** | Both workers receive request simultaneously | Prefill first, then decode |
-| **KV Transfer** | Bootstrap-based coordination | NIXL (RDMA) or Mooncake (TCP/RDMA) |
-| **SMG flags** | `--prefill http://... <bootstrap_port>` | `--prefill grpc://...` + `--model-path` |
+| | vLLM PD | SGLang PD |
+|---|---------|-----------|
+| **Protocol** | gRPC | HTTP |
+| **Dispatch** | Prefill first, then decode | Both workers receive request simultaneously |
+| **KV Transfer** | NIXL (RDMA) or Mooncake (TCP/RDMA) | Bootstrap-based coordination |
+| **SMG flags** | `--prefill grpc://...` + `--model-path` | `--prefill http://... <bootstrap_port>` |
 
 ---
 

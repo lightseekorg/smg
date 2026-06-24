@@ -151,6 +151,75 @@ mod pd_routing_tests {
         ctx.shutdown().await;
     }
 
+    /// A non-streaming PD request must emit the SMG-only PD metrics, including
+    /// the honest `smg_pd_ttft_seconds`. Runs on a current-thread runtime so the
+    /// thread-local Prometheus recorder captures emissions from the request path.
+    #[test]
+    fn test_pd_metrics_emitted_on_request() {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut config = RouterConfig::builder()
+                    .prefill_decode_mode(
+                        vec![("http://127.0.0.1:19830".to_string(), None)],
+                        vec!["http://127.0.0.1:19831".to_string()],
+                    )
+                    .round_robin_policy()
+                    .host("127.0.0.1")
+                    .port(3803)
+                    .max_payload_size(256 * 1024 * 1024)
+                    .request_timeout_secs(600)
+                    .worker_startup_timeout_secs(5)
+                    .worker_startup_check_interval_secs(1)
+                    .max_concurrent_requests(64)
+                    .queue_timeout_secs(60)
+                    .build_unchecked();
+                config.health_check.disable_health_check = true;
+
+                let ctx = AppTestContext::new_with_config(
+                    config,
+                    vec![
+                        TestWorkerConfig::prefill(19830),
+                        TestWorkerConfig::decode(19831),
+                    ],
+                )
+                .await;
+
+                let app = ctx.create_app();
+                let payload = json!({ "text": "PD metrics request", "stream": false });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/generate")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "PD request should succeed");
+
+                ctx.shutdown().await;
+            });
+        });
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("smg_pd_prefill_duration_seconds_count"),
+            "smg_pd_prefill_duration_seconds not emitted; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("smg_pd_ttft_seconds_count"),
+            "smg_pd_ttft_seconds not emitted; rendered:\n{rendered}"
+        );
+    }
+
     /// Test PD mode handles worker failures gracefully
     #[tokio::test]
     async fn test_pd_mode_with_failing_decode_worker() {

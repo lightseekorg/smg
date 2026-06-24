@@ -240,6 +240,11 @@ pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_usage: Option<bool>,
 
+    /// Chat Completions / Completions: emit a usage chunk with every streamed
+    /// delta instead of only in the final chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuous_usage_stats: Option<bool>,
+
     /// Responses API: add random chars on `obfuscation` field of delta events
     /// to normalize payload sizes. Defaults to `true` upstream when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -464,42 +469,25 @@ impl<'de> Deserialize<'de> for FunctionCall {
 }
 
 impl schemars::JsonSchema for FunctionCall {
-    fn schema_name() -> String {
-        "FunctionCall".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FunctionCall".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        use schemars::schema::*;
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // FunctionCall is either "none", "auto", or {"name": "..."}
-        let string_schema = SchemaObject {
-            instance_type: Some(InstanceType::String.into()),
-            enum_values: Some(vec!["none".into(), "auto".into()]),
-            ..Default::default()
-        };
-        let object_schema = SchemaObject {
-            instance_type: Some(InstanceType::Object.into()),
-            object: Some(Box::new(ObjectValidation {
-                properties: {
-                    let mut map = schemars::Map::new();
-                    map.insert("name".to_string(), gen.subschema_for::<String>());
-                    map
+        let name_schema = generator.subschema_for::<String>();
+        schemars::json_schema!({
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": ["none", "auto"]
                 },
-                required: {
-                    let mut set = std::collections::BTreeSet::new();
-                    set.insert("name".to_string());
-                    set
-                },
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-        SchemaObject {
-            subschemas: Some(Box::new(SubschemaValidation {
-                any_of: Some(vec![string_schema.into(), object_schema.into()]),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+                {
+                    "type": "object",
+                    "properties": { "name": name_schema },
+                    "required": ["name"]
+                }
+            ]
+        })
     }
 }
 

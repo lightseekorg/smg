@@ -464,6 +464,8 @@ class TestPolicyFromStr:
         assert policy_from_str("round_robin") == PolicyType.RoundRobin
         assert policy_from_str("cache_aware") == PolicyType.CacheAware
         assert policy_from_str("power_of_two") == PolicyType.PowerOfTwo
+        assert policy_from_str("consistent_hashing") == PolicyType.ConsistentHashing
+        assert policy_from_str("prefix_hash") == PolicyType.PrefixHash
 
     def test_invalid_policy(self):
         """Test conversion of invalid policy string."""
@@ -525,6 +527,65 @@ class TestParseRouterArgs:
         assert router_args.decode_urls == ["http://decode1:8001", "http://decode2:8001"]
         assert router_args.prefill_policy == "power_of_two"
         assert router_args.decode_policy == "round_robin"
+
+    def test_parse_pd_args_with_new_policies(self):
+        """Test parsing PD disaggregated mode arguments with new policy options."""
+        # Test consistent_hashing for both prefill and decode
+        args = [
+            "--pd-disaggregation",
+            "--prefill",
+            "http://prefill1:8000",
+            "--decode",
+            "http://decode1:8001",
+            "--prefill-policy",
+            "consistent_hashing",
+            "--decode-policy",
+            "consistent_hashing",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.pd_disaggregation is True
+        assert router_args.prefill_policy == "consistent_hashing"
+        assert router_args.decode_policy == "consistent_hashing"
+
+        # Test prefix_hash for both prefill and decode
+        args = [
+            "--pd-disaggregation",
+            "--prefill",
+            "http://prefill1:8000",
+            "--decode",
+            "http://decode1:8001",
+            "--prefill-policy",
+            "prefix_hash",
+            "--decode-policy",
+            "prefix_hash",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.pd_disaggregation is True
+        assert router_args.prefill_policy == "prefix_hash"
+        assert router_args.decode_policy == "prefix_hash"
+
+        # Test mixed policies
+        args = [
+            "--pd-disaggregation",
+            "--prefill",
+            "http://prefill1:8000",
+            "--decode",
+            "http://decode1:8001",
+            "--prefill-policy",
+            "consistent_hashing",
+            "--decode-policy",
+            "prefix_hash",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.pd_disaggregation is True
+        assert router_args.prefill_policy == "consistent_hashing"
+        assert router_args.decode_policy == "prefix_hash"
 
     def test_parse_service_discovery_args(self):
         """Test parsing service discovery arguments."""
@@ -684,6 +745,30 @@ class TestParseRouterArgs:
         # Note: model-path and tokenizer-path arguments are not available in current implementation
         # This test is skipped until those arguments are added
         pytest.skip("Tokenizer arguments not available in current implementation")
+
+    def test_parse_valid_policies(self):
+        """Test parsing all valid policy arguments."""
+        # Test consistent_hashing policy
+        router_args = parse_router_args(["--policy", "consistent_hashing"])
+        assert router_args.policy == "consistent_hashing"
+
+        # Test prefix_hash policy
+        router_args = parse_router_args(["--policy", "prefix_hash"])
+        assert router_args.policy == "prefix_hash"
+
+        # Test all policies in the choices list
+        valid_policies = [
+            "random",
+            "round_robin",
+            "cache_aware",
+            "power_of_two",
+            "manual",
+            "consistent_hashing",
+            "prefix_hash",
+        ]
+        for policy in valid_policies:
+            router_args = parse_router_args(["--policy", policy])
+            assert router_args.policy == policy
 
     def test_parse_invalid_args(self):
         """Test parsing invalid arguments."""

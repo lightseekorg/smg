@@ -23,7 +23,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::{mcp_utils::DEFAULT_MAX_ITERATIONS, sse::SseEncoder},
         error::{self as router_error, extract_error_code_from_response},
     },
 };
@@ -164,7 +164,8 @@ fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Res
                 return;
             }
             warn!(error = %e, "Streaming tool loop failed");
-            let _ = sse::send_error(&tx, &e).await;
+            let mut enc = SseEncoder::new();
+            let _ = sse::send_error(&tx, &mut enc, &e).await;
         }
     });
 
@@ -200,6 +201,8 @@ async fn run_tool_loop(
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
     let mut is_first_iteration = true;
+    // Reusable SSE encoder shared across every event emitted for this stream.
+    let mut encoder = SseEncoder::new();
 
     for _iteration in 0..DEFAULT_MAX_ITERATIONS {
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
@@ -216,6 +219,7 @@ async fn run_tool_loop(
         // Consume the upstream SSE stream
         let result = sse::consume_and_forward(
             &tx,
+            &mut encoder,
             response,
             &mut global_index,
             is_first_iteration,
@@ -239,6 +243,7 @@ async fn run_tool_loop(
             mcp::ToolLoopAction::Done => {
                 sse::emit_final(
                     &tx,
+                    &mut encoder,
                     consumed.iteration.stop_reason.as_ref(),
                     total_input_tokens,
                     total_output_tokens,
@@ -252,7 +257,8 @@ async fn run_tool_loop(
             mcp::ToolLoopAction::Continue(cont) => {
                 // Emit mcp_tool_result events for each completed tool call
                 for call in &cont.mcp_calls {
-                    if !sse::emit_mcp_tool_result(&tx, call, &mut global_index).await {
+                    if !sse::emit_mcp_tool_result(&tx, &mut encoder, call, &mut global_index).await
+                    {
                         return Ok(());
                     }
                 }
@@ -276,7 +282,7 @@ async fn run_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
     let error_msg = format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})");
-    let _ = sse::send_error(&tx, &error_msg).await;
+    let _ = sse::send_error(&tx, &mut encoder, &error_msg).await;
     Ok(())
 }
 

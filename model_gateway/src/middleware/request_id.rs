@@ -9,7 +9,7 @@ use std::{
 };
 
 use axum::{extract::Request, http::HeaderValue, response::Response};
-use rand::Rng;
+use rand::RngExt;
 // Re-export RequestId from auth crate for backward compatibility
 pub use smg_auth::RequestId;
 use tower::{Layer, Service};

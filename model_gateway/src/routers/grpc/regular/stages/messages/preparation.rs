@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use llm_multimodal::Modality;
 use openai_protocol::{
     common::{StringOrArray, ToolChoice, ToolChoiceValue},
     messages::CreateMessageRequest,
@@ -106,6 +107,7 @@ impl MessagePreparationStage {
                     mm_components,
                     &tokenizer_id,
                     &tokenizer_source,
+                    Modality::Image,
                 )
                 .await
                 .map_err(|e| {
@@ -154,7 +156,13 @@ impl MessagePreparationStage {
         };
 
         // Step 3: Tokenize the processed text
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+        let encoding = match utils::encode_blocking(
+            tokenizer.clone(),
+            processed_messages.text.clone(),
+            false,
+        )
+        .await
+        {
             Ok(encoding) => encoding,
             Err(e) => {
                 error!(function = "MessagePreparationStage::execute", error = %e, "Tokenization failed");

@@ -30,6 +30,15 @@ service SglangScheduler {
   // Get comprehensive load metrics
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 
+  // Flush the KV cache on all scheduler processes
+  rpc FlushCache(smg.grpc.common.FlushCacheRequest) returns (smg.grpc.common.FlushCacheResponse);
+
+  // Start the profiler on all scheduler processes
+  rpc StartProfile(smg.grpc.common.StartProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
+  // Stop the profiler and export traces
+  rpc StopProfile(smg.grpc.common.StopProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
@@ -137,6 +146,10 @@ message GenerateRequest {
 
   // Whether client wants streaming response
   bool stream = 17;
+
+  // Ask SGLang scheduler to count reasoning tokens.
+  // Keep false unless the request explicitly enables reasoning/thinking.
+  bool require_reasoning = 18;
 }
 
 message TokenizedInput {
@@ -207,6 +220,7 @@ message GenerateStreamChunk {
   uint32 prompt_tokens = 2;
   uint32 completion_tokens = 3;
   uint32 cached_tokens = 4;
+  uint32 reasoning_tokens = 9;
 
   // Output logprobs (if requested) - incremental for streaming
   OutputLogProbs output_logprobs = 5;
@@ -232,6 +246,7 @@ message GenerateComplete {
   uint32 prompt_tokens = 3;
   uint32 completion_tokens = 4;
   uint32 cached_tokens = 5;
+  uint32 reasoning_tokens = 12;
 
   // Output logprobs if requested (cumulative)
   OutputLogProbs output_logprobs = 6;
@@ -438,6 +453,10 @@ message GetModelInfoResponse {
   string id2label_json = 16;
   // Number of classification labels (0 if not a classifier)
   int32 num_labels = 17;
+
+  // Resolved sampling defaults from --sampling-defaults + --preferred-sampling-params.
+  // JSON dict, e.g. '{"temperature": 0.6, "top_p": 0.9}'. Empty = no overrides.
+  string default_sampling_params_json = 20;
 }
 
 // Get server information
@@ -513,6 +532,12 @@ message SchedulerLoad {
   double cache_hit_rate = 9;
   double utilization = 10;
   int32 max_running_requests = 11;
+
+  // Queued token-work: waiting-queue tokens not yet served from cache
+  // (SGLang num_waiting_uncached_tokens). Field 17 is intentionally out of
+  // order — appended after the optional-section field numbers to preserve
+  // wire compatibility with existing readers.
+  int32 num_waiting_uncached_tokens = 17;
 
   // Optional sections
   optional MemoryMetrics memory = 12;

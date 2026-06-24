@@ -1,601 +1,294 @@
-use std::{
-    collections::HashSet,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+//! CRDT OR-Map router.
+//!
+//! [`CrdtOrMap`] used to host both LWW and EpochMaxWins logic inline, with a
+//! per-prefix strategy table that branched at every entry point. The bug
+//! pattern in PR #1469 traced back to that shared shape: any strategy-specific
+//! invariant had to be threaded through every shared call site, and missing
+//! one site was how the same bug would resurface in a different form.
+//!
+//! `CrdtOrMap` is now a thin router over per-namespace engines (see
+//! [`engine`](super::engine)). Each registered prefix gets its own engine
+//! with its own state, log, clock, and metadata; the router just matches
+//! keys to engines by longest-prefix-match and delegates. Unregistered keys
+//! fall through to a built-in default LWW engine, preserving today's
+//! "default LWW" semantics for callers that never call
+//! `register_merge_strategy`.
 
-use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
-use parking_lot::{Mutex, RwLock};
-use tracing::{debug, info};
+use std::{cmp::Reverse, collections::BTreeMap, sync::Arc, time::Duration};
+
+use parking_lot::RwLock;
+use tracing::info;
 
 use super::{
-    kv_store::KvStore,
-    operation::{Operation, OperationLog},
+    engine::{EngineHandle, LwwEngine, RateLimitEngine},
+    merge_strategy::MergeStrategy,
+    operation::{CrdtChange, Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
 };
 
-// ============================================================================
-// CRDT OR-Map - Observed-Remove Map Implementation
-// ============================================================================
-
-/// Default tombstone grace period. Tombstones younger than this are not
-/// garbage collected, preventing data resurrection from stale peers.
-/// Gossip converges in seconds for small clusters, so 5 minutes is very
-/// conservative.
+/// Default tombstone grace period for [`CrdtOrMap::gc_tombstones`]. Forwarded
+/// to each engine's GC.
 pub const DEFAULT_TOMBSTONE_GRACE: Duration = Duration::from_secs(300);
 
-/// Value metadata for CRDT OR-Map
-#[derive(Debug, Clone)]
-struct ValueMetadata {
-    timestamp: u64,
-    replica_id: ReplicaId,
-    is_tombstone: bool, // Marks if this version is a tombstone (deletion)
-    /// Monotonic timestamp for tombstone GC. Tombstones younger than
-    /// `tombstone_grace` are not garbage collected to prevent data resurrection.
-    created_at: Instant,
-}
+type EngineTable = Arc<[(String, EngineHandle)]>;
 
-impl PartialEq for ValueMetadata {
-    fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp
-            && self.replica_id == other.replica_id
-            && self.is_tombstone == other.is_tombstone
-    }
-}
-
-impl Eq for ValueMetadata {}
-
-impl ValueMetadata {
-    fn new(timestamp: u64, replica_id: ReplicaId) -> Self {
-        Self {
-            timestamp,
-            replica_id,
-            is_tombstone: false,
-            created_at: Instant::now(),
-        }
-    }
-
-    fn tombstone(timestamp: u64, replica_id: ReplicaId) -> Self {
-        Self {
-            timestamp,
-            replica_id,
-            is_tombstone: true,
-            created_at: Instant::now(),
-        }
-    }
-
-    fn version_key(&self) -> (u64, ReplicaId) {
-        (self.timestamp, self.replica_id)
-    }
-
-    fn matches_version(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
-        self.timestamp == timestamp && self.replica_id == replica_id
-    }
-
-    fn is_newer_than(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
-        self.version_key() > (timestamp, replica_id)
-    }
-}
-
-/// CRDT OR-Map
+/// CRDT OR-Map. Routes operations to per-namespace engines by prefix.
 #[derive(Clone)]
 pub struct CrdtOrMap {
-    store: KvStore,
-    metadata: Arc<DashMap<String, Vec<ValueMetadata>>>, // Key to list of versions
-    key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,    // Per-key critical section lock
+    /// Engines explicitly registered via `register_merge_strategy`, sorted by
+    /// `Reverse(prefix.len())` so longest-prefix-match wins.
+    engines: Arc<RwLock<EngineTable>>,
+    /// Catch-all engine for keys not matching any registered prefix. LWW for
+    /// backward compatibility with callers that never register a prefix
+    /// (notably the in-crate tests).
+    default_engine: EngineHandle,
+    /// Per-node Lamport clock, shared across every engine. Op-id
+    /// `(replica_id, timestamp)` must be unique across this node's operations
+    /// regardless of which engine produced them; otherwise a peer that routes
+    /// two op-id-colliding ops into one engine deduplicates them.
+    clock: Arc<LamportClock>,
     replica_id: ReplicaId,
-    clock: LamportClock,
-    operation_log: Arc<RwLock<OperationLog>>,
+    /// Cached gossip snapshot keyed by the sum of engine op-generations.
+    /// Rounds with no log mutations share one `Arc` instead of deep-cloning
+    /// every op (the log carries full values) once per second.
+    op_snapshot: OpSnapshotCache,
 }
 
+/// `(generation, snapshot)` cache slot for [`CrdtOrMap::operation_log_snapshot`].
+type OpSnapshotCache = Arc<RwLock<Option<(u64, Arc<OperationLog>)>>>;
+
 impl CrdtOrMap {
-    /// Create new CRDT OR-Map
     pub fn new() -> Self {
         Self::with_replica_id(ReplicaId::new())
     }
 
-    /// Create new CRDT OR-Map with specified replica ID
     pub fn with_replica_id(replica_id: ReplicaId) -> Self {
         info!("Creating CRDT OR-Map, Replica ID: {}", replica_id);
+        let clock = Arc::new(LamportClock::new());
         Self {
-            store: KvStore::new(),
-            metadata: Arc::new(DashMap::new()),
-            key_locks: Arc::new(DashMap::new()),
+            engines: Arc::new(RwLock::new(Arc::from(Vec::new()))),
+            default_engine: Arc::new(LwwEngine::new(replica_id, Arc::clone(&clock))),
+            clock,
             replica_id,
-            clock: LamportClock::new(),
-            operation_log: Arc::new(RwLock::new(OperationLog::new())),
+            op_snapshot: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
-        self.key_locks
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    fn key_is_tombstoned_or_unknown(&self, key: &str) -> bool {
-        self.metadata.get(key).is_none_or(|versions| {
-            versions
-                .iter()
-                .max_by_key(|version| version.version_key())
-                .is_none_or(|winner| winner.is_tombstone)
-        })
-    }
-
-    fn try_cleanup_key_lock(&self, key: &str, key_lock: &Arc<Mutex<()>>) {
-        if self.store.contains_key(key) || !self.key_is_tombstoned_or_unknown(key) {
-            return;
-        }
-
-        let _ = self.key_locks.remove_if(key, |_, stored_lock| {
-            Arc::ptr_eq(stored_lock, key_lock)
-                && Arc::strong_count(stored_lock) <= 2
-                && stored_lock.try_lock().is_some()
-        });
-    }
-
-    /// Insert key-value pair (transparent operation)
-    pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
-        let key_lock = self.key_lock_for(&key);
-        let key_guard = key_lock.lock();
-
-        let timestamp = self.clock.tick();
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let mut prev = None;
-            let value_for_operation = value.clone();
-            let _ = self.store.upsert(key.clone(), |current| {
-                prev = current.map(|bytes| bytes.to_vec());
-                value
-            });
-
-            let operation =
-                Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
-            self.operation_log.write().append(operation);
-
-            debug!(
-                "Insert: key={}, timestamp={}, replica={}",
-                key, timestamp, self.replica_id
-            );
-
-            prev
-        } else {
-            self.store.get(&key).map(|bytes| bytes.to_vec())
-        };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(&key, &key_lock);
-        result
-    }
-
-    /// Update a key using the current store value and CRDT insert semantics.
-    pub fn upsert<F>(&self, key: String, updater: F) -> Vec<u8>
-    where
-        F: FnOnce(Option<&[u8]>) -> Vec<u8>,
-    {
-        let key_lock = self.key_lock_for(&key);
-        let key_guard = key_lock.lock();
-
-        let current_value = self.store.get(&key);
-        let updated_value = updater(current_value.as_deref());
-        let timestamp = self.clock.tick();
-
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let operation = Operation::insert(
-                key.clone(),
-                updated_value.clone(),
-                timestamp,
+    /// Register the merge strategy for a key prefix. One-shot: each prefix
+    /// must be registered exactly once over the lifetime of a `CrdtOrMap`.
+    /// `MeshKV::configure_crdt_prefix` enforces this at the public boundary;
+    /// this assert backstops in-crate callers so a re-register attempt fails
+    /// loudly instead of silently orphaning the data already routed under
+    /// that prefix.
+    pub(crate) fn register_merge_strategy(&self, prefix: String, strategy: MergeStrategy) {
+        let engine: EngineHandle = match strategy {
+            MergeStrategy::LastWriterWins => {
+                Arc::new(LwwEngine::new(self.replica_id, Arc::clone(&self.clock)))
+            }
+            MergeStrategy::EpochMaxWins => Arc::new(RateLimitEngine::new(
                 self.replica_id,
-            );
-
-            self.store.insert(key.clone(), updated_value.clone());
-            self.operation_log.write().append(operation);
-
-            updated_value
-        } else {
-            self.store.get(&key).unwrap_or_default()
+                Arc::clone(&self.clock),
+            )),
         };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(&key, &key_lock);
-        result
-    }
-
-    /// Fallible variant of upsert that returns serializer/updater errors.
-    pub fn try_upsert<F, E>(&self, key: String, updater: F) -> Result<Vec<u8>, E>
-    where
-        F: FnOnce(Option<&[u8]>) -> Result<Vec<u8>, E>,
-    {
-        let key_lock = self.key_lock_for(&key);
-        let key_guard = key_lock.lock();
-
-        let current_value = self.store.get(&key);
-        let updated_value = match updater(current_value.as_deref()) {
-            Ok(value) => value,
-            Err(err) => {
-                drop(key_guard);
-                self.try_cleanup_key_lock(&key, &key_lock);
-                return Err(err);
-            }
-        };
-        let timestamp = self.clock.tick();
-
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let operation = Operation::insert(
-                key.clone(),
-                updated_value.clone(),
-                timestamp,
-                self.replica_id,
-            );
-
-            self.store.insert(key.clone(), updated_value.clone());
-            self.operation_log.write().append(operation);
-
-            updated_value
-        } else {
-            self.store.get(&key).unwrap_or_default()
-        };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(&key, &key_lock);
-        Ok(result)
-    }
-
-    /// Fallible atomic upsert with conditional write. Returning `Ok(None)` skips CRDT write.
-    pub fn try_upsert_if<F, E>(&self, key: String, updater: F) -> Result<(Vec<u8>, bool), E>
-    where
-        F: FnOnce(Option<&[u8]>) -> Result<Option<Vec<u8>>, E>,
-    {
-        let key_lock = self.key_lock_for(&key);
-        let key_guard = key_lock.lock();
-
-        let current_value = self.store.get(&key);
-        let maybe_updated_value = match updater(current_value.as_deref()) {
-            Ok(value) => value,
-            Err(err) => {
-                drop(key_guard);
-                self.try_cleanup_key_lock(&key, &key_lock);
-                return Err(err);
-            }
-        };
-
-        let (result, changed) = if let Some(updated_value) = maybe_updated_value {
-            let timestamp = self.clock.tick();
-            if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-                let operation = Operation::insert(
-                    key.clone(),
-                    updated_value.clone(),
-                    timestamp,
-                    self.replica_id,
-                );
-                self.store.insert(key.clone(), updated_value.clone());
-                self.operation_log.write().append(operation);
-                (updated_value, true)
-            } else {
-                (self.store.get(&key).unwrap_or_default(), false)
-            }
-        } else {
-            (self.store.get(&key).unwrap_or_default(), false)
-        };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(&key, &key_lock);
-        Ok((result, changed))
-    }
-
-    /// Remove key (transparent operation)
-    pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
-        let key_lock = self.key_lock_for(key);
-        let key_guard = key_lock.lock();
-
-        let timestamp = self.clock.tick();
-
-        debug!(
-            "Remove: key={}, timestamp={}, replica={}",
-            key, timestamp, self.replica_id
+        let mut guard = self.engines.write();
+        assert!(
+            !guard.iter().any(|(p, _)| p == &prefix),
+            "prefix '{prefix}' is already registered; register_merge_strategy is one-shot",
         );
-
-        let removed = if self.record_remove_metadata(key, timestamp, self.replica_id) {
-            let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
-            self.operation_log.write().append(operation);
-            self.store.remove(key)
-        } else {
-            None
-        };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(key, &key_lock);
-        removed
+        let mut next: Vec<(String, EngineHandle)> = guard.iter().cloned().collect();
+        next.push((prefix, engine));
+        next.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
+        *guard = Arc::from(next);
     }
 
-    /// Get value by key
+    fn engines_snapshot(&self) -> EngineTable {
+        Arc::clone(&self.engines.read())
+    }
+
+    /// Return the engine handle a key routes to. Falls back to the default
+    /// LWW engine if no registered prefix matches.
+    fn engine_for_key(&self, key: &str) -> EngineHandle {
+        let engines = self.engines_snapshot();
+        for (prefix, engine) in engines.iter() {
+            if key.starts_with(prefix.as_str()) {
+                return Arc::clone(engine);
+            }
+        }
+        Arc::clone(&self.default_engine)
+    }
+
+    /// Collect every engine (registered + default) so callers can fan reads
+    /// across all of them.
+    fn all_engines(&self) -> Vec<EngineHandle> {
+        let engines = self.engines_snapshot();
+        let mut out = Vec::with_capacity(engines.len() + 1);
+        for (_, engine) in engines.iter() {
+            out.push(Arc::clone(engine));
+        }
+        out.push(Arc::clone(&self.default_engine));
+        out
+    }
+
+    // ---- Local writes ----
+    //
+    // Crate-private. External callers route through `CrdtNamespace::put` /
+    // `delete`, which assert the key matches the namespace's registered
+    // prefix - making "write before register" structurally unreachable from
+    // outside the crate.
+
+    pub(crate) fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        self.engine_for_key(&key).put_local(&key, value)
+    }
+
+    pub(crate) fn remove(&self, key: &str) -> Option<Vec<u8>> {
+        self.engine_for_key(key).delete_local(key)
+    }
+
+    // ---- Reads ----
+
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.store.get(key)
+        self.engine_for_key(key).get(key)
     }
 
-    /// Check if key exists
     pub fn contains_key(&self, key: &str) -> bool {
-        self.store.contains_key(key)
+        self.engine_for_key(key).contains_key(key)
     }
 
-    /// Mutation generation counter. Increments on every insert/remove/upsert.
+    /// Mutation generation counter. Sums per-engine generations: any change
+    /// in any engine increments the sum monotonically, so callers that key
+    /// off `generation()` to detect "anything changed" still work.
     pub fn generation(&self) -> u64 {
-        self.store.generation()
+        self.all_engines().iter().map(|e| e.generation()).sum()
     }
 
-    /// Get all keys without cloning values.
     pub fn keys(&self) -> Vec<String> {
-        self.store.keys()
+        let mut all = Vec::new();
+        for engine in self.all_engines() {
+            all.extend(engine.keys());
+        }
+        all
     }
 
-    /// Get all key-value pairs
-    pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
-        self.store.all()
+    pub fn all(&self) -> BTreeMap<String, Vec<u8>> {
+        let mut all = BTreeMap::new();
+        for engine in self.all_engines() {
+            for key in engine.keys() {
+                if let Some(value) = engine.get(&key) {
+                    all.insert(key, value);
+                }
+            }
+        }
+        all
     }
 
-    /// Get number of live keys in the local store.
     pub fn len(&self) -> usize {
-        self.store.len()
+        self.all_engines().iter().map(|e| e.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Get the replica ID
     pub fn replica_id(&self) -> ReplicaId {
         self.replica_id
     }
 
-    /// Remove tombstoned keys from the metadata and key_locks maps.
-    /// Keys that are not in the live store and whose latest metadata entry
-    /// is a tombstone are cleaned up to prevent unbounded memory growth.
-    ///
-    /// Tombstones younger than `grace` are NOT removed, preventing data
-    /// resurrection from stale peers that haven't received the tombstone yet
-    /// Default grace period: 5 minutes.
-    ///
-    /// Returns the number of entries removed.
+    // ---- Tombstone GC ----
+
     pub fn gc_tombstones(&self) -> usize {
         self.gc_tombstones_with_grace(DEFAULT_TOMBSTONE_GRACE)
     }
 
-    /// Like `gc_tombstones` but with a custom grace period.
-    /// Useful for testing with shorter durations.
     pub fn gc_tombstones_with_grace(&self, grace: Duration) -> usize {
-        let now = Instant::now();
-        let mut removed = 0;
-        // Collect-then-remove: collect keys to check first (read-only iteration),
-        // then remove individually. This avoids locking all DashMap shards
-        // simultaneously, which would stall concurrent writers.
-        let keys_to_check: Vec<String> = self
-            .metadata
+        self.all_engines()
             .iter()
-            .filter(|entry| !self.store.contains_key(entry.key()))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_check {
-            if !self.key_is_tombstoned_or_unknown(&key) {
-                continue;
-            }
-            // Only remove key_locks if no other task holds the lock.
-            // Uses the same safety pattern as try_cleanup_key_lock:
-            // check strong_count and try_lock before removing.
-            self.key_locks.remove_if(&key, |_, lock| {
-                Arc::strong_count(lock) <= 2 && lock.try_lock().is_some()
-            });
-            // Atomically remove metadata only if the key is still not in the
-            // live store AND still tombstoned AND the tombstone is older than
-            // the grace period. The remove_if closure runs under the DashMap
-            // shard lock, preventing a concurrent insert from racing between
-            // check and remove.
-            let was_removed = self.metadata.remove_if(&key, |_, versions| {
-                !self.store.contains_key(&key)
-                    && versions
-                        .iter()
-                        .max_by_key(|v| v.version_key())
-                        .is_none_or(|winner| {
-                            winner.is_tombstone
-                                && now.saturating_duration_since(winner.created_at) >= grace
-                        })
-            });
-            if was_removed.is_some() {
-                removed += 1;
-            }
-        }
-        removed
+            .map(|e| e.gc_tombstones(grace))
+            .sum()
     }
 
-    /// Get the operation log
+    // ---- Replication ----
+
+    /// Snapshot the operation log seen by gossip. Concatenates each engine's
+    /// log into a single [`OperationLog`].
     pub fn get_operation_log(&self) -> OperationLog {
-        self.operation_log.read().clone()
+        let mut ops = Vec::new();
+        for engine in self.all_engines() {
+            ops.extend(engine.export_ops());
+        }
+        OperationLog::from_operations(ops)
     }
 
-    /// Apply a single operation
-    fn apply_operation(&self, operation: &Operation) {
-        match operation {
-            Operation::Insert {
-                key,
-                value,
-                timestamp,
-                replica_id,
-            } => {
-                self.clock.update(*timestamp);
-                self.apply_insert(key, value.clone(), *timestamp, *replica_id);
-            }
-            Operation::Remove {
-                key,
-                timestamp,
-                replica_id,
-            } => {
-                self.clock.update(*timestamp);
-                let _ = self.apply_remove(key, *timestamp, *replica_id);
+    /// Shared gossip snapshot of the operation log. Rebuilt only when some
+    /// engine's log mutated since the cached build; unchanged rounds return
+    /// the same `Arc` (an idle node's 1 Hz round clones nothing). A racing
+    /// mutation between the generation read and the rebuild can only make
+    /// the cached snapshot newer than its key, forcing one extra rebuild —
+    /// never a stale serve, since every mutation strictly increases the sum.
+    pub fn operation_log_snapshot(&self) -> Arc<OperationLog> {
+        // Sum over the engine table directly: `all_engines` would allocate a
+        // Vec of handles on every 1 Hz round just to read the counters.
+        let engines = self.engines_snapshot();
+        let generation: u64 = engines
+            .iter()
+            .map(|(_, engine)| engine.op_generation())
+            .sum::<u64>()
+            + self.default_engine.op_generation();
+        if let Some((cached_gen, snapshot)) = self.op_snapshot.read().as_ref() {
+            if *cached_gen == generation {
+                return Arc::clone(snapshot);
             }
         }
+        let fresh = Arc::new(self.get_operation_log());
+        *self.op_snapshot.write() = Some((generation, Arc::clone(&fresh)));
+        fresh
     }
 
-    /// Merge operation log from another replica
-    /// This is the core CRDT merge operation - state is derived from log
-    pub fn merge(&self, log: &OperationLog) {
+    /// Merge an incoming operation log. Groups ops by destination engine
+    /// (longest-prefix-match) and hands each engine its slice. Engines
+    /// canonicalise (merge → compact → apply) internally, so dominated ops
+    /// in the incoming batch never reach live state.
+    pub fn merge(&self, log: &OperationLog) -> Vec<CrdtChange> {
         info!(
             "Merging {} operations into replica {}",
             log.len(),
             self.replica_id
         );
 
-        let seen_operations: HashSet<(ReplicaId, u64)> = {
-            let local_log = self.operation_log.read();
-            local_log
-                .operations()
+        let engines = self.engines_snapshot();
+        // Bucket index: 0..engines.len() for registered prefixes,
+        // engines.len() for the default engine.
+        let default_idx = engines.len();
+        let mut buckets: Vec<Vec<Operation>> = (0..=default_idx).map(|_| Vec::new()).collect();
+
+        for op in log.operations() {
+            let idx = engines
                 .iter()
-                .map(|operation| (operation.replica_id(), operation.timestamp()))
-                .collect()
-        };
-
-        let unseen_operations: Vec<Operation> = {
-            let mut local_log = self.operation_log.write();
-            local_log.merge(log);
-            local_log.compact();
-
-            let mut unseen: Vec<Operation> = local_log
-                .operations()
-                .iter()
-                .filter(|operation| {
-                    !seen_operations.contains(&(operation.replica_id(), operation.timestamp()))
-                })
-                .cloned()
-                .collect();
-            unseen.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
-            unseen
-        };
-
-        // Apply only new operations in deterministic order.
-        for operation in &unseen_operations {
-            self.apply_operation(operation);
+                .position(|(prefix, _)| op.key().starts_with(prefix.as_str()))
+                .unwrap_or(default_idx);
+            buckets[idx].push(op.clone());
         }
+
+        // Concatenate each engine's changed-key deltas so the caller can fire
+        // subscribers once for the whole merge.
+        let mut changes = Vec::new();
+        for (idx, ops) in buckets.into_iter().enumerate() {
+            if ops.is_empty() {
+                continue;
+            }
+            let engine = if idx == default_idx {
+                Arc::clone(&self.default_engine)
+            } else {
+                Arc::clone(&engines[idx].1)
+            };
+            changes.extend(engine.apply_remote_ops(ops));
+        }
+        changes
     }
 
-    /// Convenience method: merge from another replica instance
-    /// In distributed systems, prefer using merge(&log) with serialized logs
+    /// Convenience: merge another replica's full log.
     pub fn merge_replica(&self, other: &CrdtOrMap) {
         let other_log = other.get_operation_log();
         self.merge(&other_log);
-    }
-
-    // ========================================================================
-    // Internal methods for applying operations
-    // ========================================================================
-
-    /// Apply insert (LWW semantic; newer tombstones can suppress older inserts).
-    fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
-        let key_lock = self.key_lock_for(key);
-        let key_guard = key_lock.lock();
-
-        if self.record_insert_metadata(key, timestamp, replica_id) {
-            self.store.insert(key.to_string(), value);
-        }
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(key, &key_lock);
-    }
-
-    fn compact_key_metadata(versions: &mut Vec<ValueMetadata>) {
-        if versions.len() <= 1 {
-            return;
-        }
-
-        if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()).cloned() {
-            versions.clear();
-            versions.push(winner);
-        }
-    }
-
-    fn record_insert_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
-        let new_metadata = ValueMetadata::new(timestamp, replica_id);
-
-        match self.metadata.entry(key.to_string()) {
-            MapEntry::Occupied(mut entry) => {
-                let versions = entry.get_mut();
-
-                let has_existing_entry = versions
-                    .iter()
-                    .any(|v| v.matches_version(timestamp, replica_id));
-                if has_existing_entry {
-                    Self::compact_key_metadata(versions);
-                    return false;
-                }
-
-                let current_winner = versions.iter().max_by_key(|v| v.version_key());
-
-                if current_winner.is_some_and(|winner| winner.is_newer_than(timestamp, replica_id))
-                {
-                    Self::compact_key_metadata(versions);
-                    return false;
-                }
-
-                versions.push(new_metadata);
-                Self::compact_key_metadata(versions);
-                true
-            }
-            MapEntry::Vacant(entry) => {
-                entry.insert(vec![new_metadata]);
-                true
-            }
-        }
-    }
-
-    /// Apply remove
-    fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> Option<Vec<u8>> {
-        let key_lock = self.key_lock_for(key);
-        let key_guard = key_lock.lock();
-
-        let removed = if self.record_remove_metadata(key, timestamp, replica_id) {
-            self.store.remove(key)
-        } else {
-            None
-        };
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(key, &key_lock);
-        removed
-    }
-
-    fn record_remove_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
-        let tombstone = ValueMetadata::tombstone(timestamp, replica_id);
-
-        match self.metadata.entry(key.to_string()) {
-            MapEntry::Occupied(mut entry) => {
-                let versions = entry.get_mut();
-                let has_existing_entry = versions
-                    .iter()
-                    .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
-                if has_existing_entry {
-                    Self::compact_key_metadata(versions);
-                    return false;
-                }
-
-                let has_newer_version = versions
-                    .iter()
-                    .any(|v| v.is_newer_than(timestamp, replica_id));
-                if has_newer_version {
-                    Self::compact_key_metadata(versions);
-                    return false;
-                }
-
-                versions.push(tombstone);
-                Self::compact_key_metadata(versions);
-                true
-            }
-            MapEntry::Vacant(entry) => {
-                if self.store.contains_key(key) {
-                    entry.insert(vec![tombstone]);
-                    true
-                } else {
-                    false
-                }
-            }
-        }
     }
 }
 

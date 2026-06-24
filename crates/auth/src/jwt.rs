@@ -156,10 +156,6 @@ pub struct ValidatedToken {
 
     /// Display name if present
     pub name: Option<String>,
-
-    /// Full claims for additional processing
-    #[expect(dead_code)]
-    pub(crate) claims: StandardClaims,
 }
 
 /// JTI (JWT ID) cache entry with expiration tracking.
@@ -211,7 +207,6 @@ impl JwtValidator {
         // Set leeway for clock skew
         validation.leeway = config.leeway_secs;
 
-        // We'll set the algorithm per-token based on the key
         validation.algorithms = vec![
             Algorithm::RS256,
             Algorithm::RS384,
@@ -339,7 +334,6 @@ impl JwtValidator {
             role,
             email: claims.email.clone(),
             name: claims.name.clone(),
-            claims,
         })
     }
 
@@ -355,7 +349,6 @@ impl JwtValidator {
 
         let mut cache = cache.lock();
 
-        // Clean up expired entries first (lazy cleanup)
         let now = Instant::now();
 
         // Check if JTI exists and is still valid

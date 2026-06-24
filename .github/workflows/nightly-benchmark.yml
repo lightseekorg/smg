@@ -2,7 +2,7 @@ name: Nightly Benchmark
 
 on:
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 7 * * 0' # Sundays 00:00 PDT (07:00 UTC = midnight Pacific/PDT)
   workflow_dispatch:
     inputs:
       models:
@@ -39,11 +39,11 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Cache wheel artifacts
         id: cache-wheel
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             bindings/python/dist/*.whl
@@ -145,7 +145,7 @@ jobs:
 
       - name: Checkout code
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup vLLM backend
         if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
@@ -258,7 +258,7 @@ jobs:
 
       - name: Checkout code
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup vLLM backend
         if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
@@ -371,7 +371,7 @@ jobs:
 
       - name: Checkout code
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Python
         if: steps.filter.outputs.skip != 'true'
@@ -484,7 +484,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download all benchmark results
         uses: actions/download-artifact@v8

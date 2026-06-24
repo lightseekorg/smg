@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -69,30 +69,41 @@ impl Operation {
             Self::Remove { replica_id, .. } => *replica_id,
         }
     }
+}
 
-    fn operation_id(&self) -> (ReplicaId, u64) {
-        (self.replica_id(), self.timestamp())
-    }
+/// An observable change to a key's live value produced by a remote merge.
+/// `value` is the canonical post-merge value (matching `get(key)`): `Some` for
+/// a key that is live after the merge, `None` for a key that is now tombstoned.
+/// Engines emit one `CrdtChange` per key whose live value actually changed, so
+/// the merge caller can fire subscribers with the same value shape `get`
+/// returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrdtChange {
+    pub key: String,
+    pub value: Option<Vec<u8>>,
 }
 
 // ============================================================================
 // Operation Log - State Operation Pipeline
 // ============================================================================
 
-/// Operation log, recording all state changes
+/// Strategy-agnostic append-only log of CRDT operations.
+///
+/// Each engine owns one `OperationLog` instance holding only its own
+/// namespace's operations; the log itself carries no merge-strategy knowledge.
+/// Engines drive merge (op-id collision policy) and compaction (per-key fold
+/// rule) themselves via [`Self::operations`], [`Self::append`], and
+/// [`Self::compact_by_key`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationLog {
     operations: Vec<Operation>,
 }
 
 impl OperationLog {
-    fn decode_counter_payload(value: &[u8]) -> Option<i64> {
-        bincode::deserialize::<i64>(value).ok().or_else(|| {
-            bincode::deserialize::<HashMap<String, i64>>(value)
-                .ok()
-                .and_then(|map| map.get("value").copied())
-        })
-    }
+    /// Threshold at which engine-driven auto-compaction triggers. Engines
+    /// check this against `len()` after each append and run their own
+    /// per-key fold to bring the log back down.
+    pub(super) const AUTO_COMPACT_THRESHOLD: usize = 10_000;
 
     /// Create empty operation log
     pub fn new() -> Self {
@@ -101,42 +112,52 @@ impl OperationLog {
         }
     }
 
-    /// Threshold at which auto-compaction triggers. After compaction, the log
-    /// shrinks to at most one entry per unique key, so the next compaction
-    /// won't trigger until enough new operations accumulate again.
-    const AUTO_COMPACT_THRESHOLD: usize = 10_000;
+    /// Build an operation log from a pre-collected vector. Used by the
+    /// engine router to concatenate per-engine ops back into a single log
+    /// for gossip export.
+    pub(super) fn from_operations(operations: Vec<Operation>) -> Self {
+        Self { operations }
+    }
 
-    /// Append operation to log. Auto-compacts when the log exceeds the threshold.
-    /// Compaction keeps only the latest operation per key, providing hysteresis:
-    /// if there are N unique keys, the next compaction triggers after N + (threshold - N)
-    /// new appends, not on every append. If compaction doesn't reduce below
-    /// threshold (very high key cardinality), the oldest entries are truncated.
+    /// Append an operation. Strategy-free: engines call this then run their
+    /// own compaction policy on whatever threshold they want.
     pub fn append(&mut self, operation: Operation) {
         self.operations.push(operation);
-        if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
-            self.compact();
-            // If still over threshold after dedup (extremely high key cardinality
-            // >10K unique keys), truncate oldest entries. This drops state for the
-            // oldest keys, which will be re-synced from peers on the next merge.
-            // This is a safety valve — in practice mesh stores have hundreds
-            // of keys, not tens of thousands.
-            if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
-                let keep = Self::AUTO_COMPACT_THRESHOLD * 3 / 4;
-                let drain_count = self.operations.len() - keep;
-                tracing::warn!(
-                    total = self.operations.len(),
-                    draining = drain_count,
-                    keeping = keep,
-                    "Operation log still over threshold after compaction, truncating oldest entries"
-                );
-                self.operations.drain(..drain_count);
-            }
-        }
     }
 
     /// Get all operations
     pub fn operations(&self) -> &[Operation] {
         &self.operations
+    }
+
+    /// Memory backstop: if the log is still over `AUTO_COMPACT_THRESHOLD`
+    /// after the caller has compacted it, drop the oldest entries down to 75%
+    /// of the threshold. Returns the number of entries dropped (0 if under
+    /// threshold) so the caller can log with its own context.
+    ///
+    /// This only fires when distinct live keys exceed the threshold - far
+    /// beyond the design's expected key count. It trades convergence for the
+    /// dropped keys against unbounded log growth; that trade is only
+    /// acceptable because reaching it signals an out-of-spec key count in the
+    /// first place.
+    ///
+    /// Callers MUST invoke this only on the local-write path. Dropping on a
+    /// remote-merge path would shed remotely-learned keys that are live in
+    /// state, breaking downstream sync from this node.
+    pub(super) fn truncate_oldest_over_threshold(&mut self) -> usize {
+        if self.operations.len() <= Self::AUTO_COMPACT_THRESHOLD {
+            return 0;
+        }
+        let keep = Self::AUTO_COMPACT_THRESHOLD * 3 / 4;
+        let drain_count = self.operations.len() - keep;
+        self.operations.drain(..drain_count);
+        drain_count
+    }
+
+    /// Drop every operation for which `keep` returns `false`. Used by
+    /// tombstone GC to purge collected keys' dominated ops from the log.
+    pub(super) fn retain_ops(&mut self, keep: impl FnMut(&Operation) -> bool) {
+        self.operations.retain(keep);
     }
 
     /// Serialize to bincode bytes.
@@ -159,51 +180,42 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn latest_operations_by_key(&self) -> HashMap<String, Operation> {
-        let mut latest_by_key: HashMap<String, Operation> = HashMap::new();
-
-        for operation in &self.operations {
-            let key = operation.key().to_string();
-            match latest_by_key.get(&key) {
-                Some(current)
-                    if (current.timestamp(), current.replica_id())
-                        >= (operation.timestamp(), operation.replica_id()) => {}
-                _ => {
-                    latest_by_key.insert(key, operation.clone());
-                }
-            }
-        }
-
-        latest_by_key
-    }
-
-    /// Keep only latest operation per key to bound log growth.
-    ///
-    /// This uses `latest_operations_by_key` LWW tie-breaking by `(timestamp, ReplicaId)`.
-    /// As a result, concurrent operations may be compacted away deterministically, so
-    /// `compact()` + `merge()` can be non-idempotent in raw log contents even though
-    /// `apply_operation` and `operation_id` guards keep state semantics safe.
-    /// Stronger concurrency retention would require vector-clock/version-vector metadata.
-    pub fn compact(&mut self) {
-        self.operations = self
-            .latest_operations_by_key()
-            .into_values()
-            .collect::<Vec<_>>();
-        self.operations
-            .sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
-    }
-
     /// Drop operations with timestamp <= watermark.
     pub fn compact_up_to(&mut self, watermark: u64) {
         self.operations
             .retain(|operation| operation.timestamp() > watermark);
     }
 
-    /// Build a latest-state snapshot and clear the operation log.
-    pub fn snapshot_and_truncate(&mut self) -> HashMap<String, Operation> {
-        let snapshot = self.latest_operations_by_key();
-        self.operations.clear();
-        snapshot
+    /// Group operations by key, fold each group via `fold`, and replace the
+    /// log with the resulting per-key winners sorted by `(timestamp,
+    /// replica_id)`. Strategy-agnostic - the caller's `fold` decides what
+    /// "winner" means (LWW: max by version; EpochMaxWins:
+    /// `epoch_max_wins::compact_operations`).
+    ///
+    /// Grouping is done by sorting in-place and scanning contiguous runs,
+    /// avoiding the `String` allocation per op that a `HashMap<String, _>`
+    /// grouping would require.
+    pub(super) fn compact_by_key<F>(&mut self, fold: F)
+    where
+        F: Fn(&[Operation]) -> Option<Operation>,
+    {
+        self.operations
+            .sort_unstable_by(|a, b| a.key().cmp(b.key()));
+        let mut folded: Vec<Operation> = Vec::with_capacity(self.operations.len());
+        let mut start = 0;
+        while start < self.operations.len() {
+            let key = self.operations[start].key();
+            let mut end = start + 1;
+            while end < self.operations.len() && self.operations[end].key() == key {
+                end += 1;
+            }
+            if let Some(winner) = fold(&self.operations[start..end]) {
+                folded.push(winner);
+            }
+            start = end;
+        }
+        folded.sort_by_key(|op| (op.timestamp(), op.replica_id()));
+        self.operations = folded;
     }
 
     /// Decode the latest known counter value for a key from log payloads.
@@ -215,7 +227,7 @@ impl OperationLog {
             .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))?;
 
         match latest {
-            Operation::Insert { value, .. } => Self::decode_counter_payload(value),
+            Operation::Insert { value, .. } => decode_counter_payload(value),
             Operation::Remove { .. } => None,
         }
     }
@@ -228,26 +240,8 @@ impl OperationLog {
             .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))?;
 
         match latest {
-            Operation::Insert { value, .. } => Self::decode_counter_payload(value),
+            Operation::Insert { value, .. } => decode_counter_payload(value),
             Operation::Remove { .. } => None,
-        }
-    }
-
-    /// Merge another operation log.
-    ///
-    /// INVARIANT: `Operation::operation_id()` (`ReplicaId`, `timestamp`) is unique per operation
-    /// because each replica's `LamportClock::tick()` is monotonic and never repeats a timestamp.
-    pub fn merge(&mut self, other: &OperationLog) {
-        let mut seen_ids: HashSet<(ReplicaId, u64)> = self
-            .operations
-            .iter()
-            .map(Operation::operation_id)
-            .collect();
-
-        for operation in &other.operations {
-            if seen_ids.insert(operation.operation_id()) {
-                self.operations.push(operation.clone());
-            }
         }
     }
 }
@@ -256,4 +250,12 @@ impl Default for OperationLog {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn decode_counter_payload(value: &[u8]) -> Option<i64> {
+    bincode::deserialize::<i64>(value).ok().or_else(|| {
+        bincode::deserialize::<HashMap<String, i64>>(value)
+            .ok()
+            .and_then(|map| map.get("value").copied())
+    })
 }

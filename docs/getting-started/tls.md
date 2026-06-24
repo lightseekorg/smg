@@ -26,8 +26,10 @@ SMG supports TLS configurations for securing communications:
 | **Server TLS** | HTTPS for client → gateway communication | Available |
 | **Client mTLS** | Mutual TLS for gateway → worker communication | Planned |
 
-<div class="architecture-diagram">
-  <img src="../assets/images/tls-architecture.svg" alt="TLS Configuration Architecture">
+<div class="architecture-diagram" markdown>
+
+![TLS Configuration Architecture](../assets/images/tls-architecture.svg)
+
 </div>
 
 !!! info "Client mTLS"

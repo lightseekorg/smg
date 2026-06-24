@@ -6,7 +6,6 @@
 use std::{fmt::Debug, sync::Arc};
 
 use openai_protocol::worker::WorkerLoadResponse;
-use smg_mesh::OptionalMeshSyncManager;
 
 use crate::worker::{HashRing, Worker};
 
@@ -15,7 +14,9 @@ mod cache_aware;
 mod consistent_hashing;
 mod dp_min_token;
 mod factory;
+mod least_load;
 mod manual;
+mod passthrough;
 mod power_of_two;
 mod prefix_hash;
 mod random;
@@ -30,7 +31,9 @@ pub use dp_min_token::MinimumTokensPolicy;
 pub use factory::PolicyFactory;
 // Re-export PrefixMatchResult from kv_index for production use
 pub use kv_index::PrefixMatchResult;
+pub use least_load::LeastLoadPolicy;
 pub use manual::{ManualConfig, ManualPolicy};
+pub use passthrough::PassthroughPolicy;
 pub use power_of_two::PowerOfTwoPolicy;
 pub use prefix_hash::{PrefixHashConfig, PrefixHashPolicy};
 pub use random::RandomPolicy;
@@ -75,9 +78,13 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
         // Default: no-op for policies that don't use load information
     }
 
-    /// Set mesh sync manager
-    fn set_mesh_sync(&mut self, _mesh_sync: OptionalMeshSyncManager) {
-        // Default: no-op for policies that don't use mesh sync
+    /// Drop any cached per-worker state for a removed worker.
+    ///
+    /// Called when a worker leaves the registry so load-aware policies don't
+    /// accumulate stale load reports under worker churn (autoscaling, rolling
+    /// updates). Default is a no-op for stateless policies.
+    fn remove_worker(&self, _url: &str) {
+        // Default: no-op for policies that don't cache per-worker state
     }
 
     /// Reset any internal state
@@ -107,6 +114,20 @@ pub struct CacheAwareConfig {
     /// Used by `compute_request_content_hashes` to chunk request tokens into blocks.
     /// Must match the backend's block size. Default: 16 (SGLang page size).
     pub block_size: usize,
+    /// KV-usage **spread** (hottest minus coldest backend, 0.0–1.0) above which
+    /// the pool is treated as imbalanced and cache affinity is abandoned for
+    /// shortest-queue. This is the balance signal for long-context workloads
+    /// where a few requests saturate one engine's KV without tripping the
+    /// request-count thresholds; being backend-reported, it is invariant to the
+    /// number of gateway replicas. Requires the backend to report `token_usage`
+    /// (gRPC/`GetLoads`); falls back to the count spread when unavailable.
+    /// `>= 1.0` disables it (default).
+    pub balance_token_usage_threshold: f32,
+    /// Backend KV-cache utilization **ceiling** (0.0–1.0): when the hottest
+    /// engine exceeds it the pool is treated as imbalanced regardless of spread,
+    /// shedding load off a critically-saturated engine. A safety valve, best set
+    /// high (e.g. 0.9). Requires `token_usage`; `>= 1.0` disables it (default).
+    pub overload_token_usage_threshold: f32,
 }
 
 impl Default for CacheAwareConfig {
@@ -118,6 +139,10 @@ impl Default for CacheAwareConfig {
             eviction_interval_secs: 30,
             max_tree_size: 10000,
             block_size: 16,
+            // Both KV triggers disabled by default (>= 1.0 never trips). Set
+            // balance e.g. 0.5 (spread) and/or overload e.g. 0.9 (ceiling).
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         }
     }
 }
@@ -228,5 +253,42 @@ mod tests {
         workers[1].set_status(WorkerStatus::NotReady);
         let indices = get_healthy_worker_indices(&workers);
         assert_eq!(indices, vec![0, 2]);
+    }
+
+    /// Only `Ready` workers may be selected. Pending, NotReady, Failed, and
+    /// Draining are all excluded. Draining specifically guards against
+    /// routing new traffic to a worker that is being torn down.
+    #[test]
+    fn test_get_healthy_worker_indices_excludes_each_non_ready_status() {
+        let cases = [
+            (WorkerStatus::Pending, false),
+            (WorkerStatus::Ready, true),
+            (WorkerStatus::NotReady, false),
+            (WorkerStatus::Failed, false),
+            (WorkerStatus::Draining, false),
+        ];
+
+        for (status, expected_included) in cases {
+            let worker: Arc<dyn Worker> = Arc::new(
+                BasicWorkerBuilder::new("http://w:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("k")
+                    .health_config(no_health_check())
+                    .build(),
+            );
+            worker.set_status(status);
+            let workers = vec![worker];
+            let indices = get_healthy_worker_indices(&workers);
+            assert_eq!(
+                indices == vec![0],
+                expected_included,
+                "status {status:?} should be {}",
+                if expected_included {
+                    "included"
+                } else {
+                    "excluded"
+                }
+            );
+        }
     }
 }

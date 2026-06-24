@@ -303,34 +303,104 @@ Tools: {{ message.tool_calls|tojson(ensure_ascii=False) }}
 fn test_tojson_with_all_huggingface_kwargs() {
     // Template using all the kwargs that HuggingFace's custom tojson accepts
     let template = r#"
-{%- set data = {"z_key": 1, "a_key": 2, "m_key": 3} -%}
 Unsorted: {{ data|tojson }}
 Sorted: {{ data|tojson(sort_keys=True) }}
+Compact: {{ data|tojson(separators=(',', ':')) }}
 Indented: {{ data|tojson(indent=2) }}
-All: {{ data|tojson(ensure_ascii=False, sort_keys=True, indent=2) }}
+IndentedCompact: {{ data|tojson(indent=2, separators=(',', ':')) }}
+Ascii: {{ "日本語"|tojson(ensure_ascii=True) }}
+All: {{ data|tojson(ensure_ascii=False, sort_keys=True, indent=2, separators=(',', ': ')) }}
 "#;
 
     let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
     let messages: Vec<serde_json::Value> = vec![];
+    let mut template_kwargs = std::collections::HashMap::new();
+    template_kwargs.insert(
+        "data".to_string(),
+        serde_json::json!({"z_key": 1, "a_key": 2, "m_key": 3}),
+    );
 
     // This should NOT fail - all kwargs should be accepted
     let result = processor
-        .apply_chat_template(&messages, ChatTemplateParams::default())
+        .apply_chat_template(
+            &messages,
+            ChatTemplateParams {
+                template_kwargs: Some(&template_kwargs),
+                ..Default::default()
+            },
+        )
         .unwrap();
 
     // Verify sorted output contains keys in alphabetical order
     assert!(result.contains("Sorted:"));
+    // By default, HuggingFace delegates to Python json.dumps, which preserves
+    // insertion order and uses spaces after ',' and ':'.
+    assert!(
+        result.contains(r#"Unsorted: {"z_key": 1, "a_key": 2, "m_key": 3}"#),
+        "default JSON should preserve insertion order and Python separators: {result}"
+    );
     // The sorted output should have a_key before m_key before z_key
     let sorted_line = result.lines().find(|l| l.starts_with("Sorted:")).unwrap();
     let a_pos = sorted_line.find("a_key").unwrap();
     let m_pos = sorted_line.find("m_key").unwrap();
     let z_pos = sorted_line.find("z_key").unwrap();
     assert!(a_pos < m_pos && m_pos < z_pos, "Keys should be sorted");
+    assert!(
+        result.contains(r#"Compact: {"z_key":1,"a_key":2,"m_key":3}"#),
+        "explicit separators should be honored: {result}"
+    );
 
     // Verify indented output is pretty-printed with newlines
     assert!(
         result.contains("Indented: {\n"),
         "Indented JSON should be pretty-printed with newlines"
+    );
+    assert!(
+        result.contains("IndentedCompact: {\n  \"z_key\":1,\n"),
+        "custom separators should apply to indented JSON: {result}"
+    );
+    assert!(
+        result.contains(r#"Ascii: "\u65e5\u672c\u8a9e""#),
+        "ensure_ascii=True should escape non-ASCII text: {result}"
+    );
+}
+
+#[test]
+fn test_tojson_invalid_kwargs_rejected() {
+    fn render_invalid_template(template: &str) -> String {
+        let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
+        let messages: Vec<serde_json::Value> = vec![];
+        let mut template_kwargs = std::collections::HashMap::new();
+        template_kwargs.insert("data".to_string(), serde_json::json!({"k": 1}));
+
+        processor
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    template_kwargs: Some(&template_kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string()
+    }
+
+    let err = render_invalid_template(r"{{ data|tojson(separators=',') }}");
+    assert!(
+        err.contains("separators must be a two-item sequence"),
+        "unexpected separators error: {err}"
+    );
+
+    let err = render_invalid_template(r"{{ data|tojson(indent=-1) }}");
+    assert!(
+        err.contains("indent cannot be negative"),
+        "unexpected indent error: {err}"
+    );
+
+    let err = render_invalid_template(r"{{ data|tojson(ensure_ascii='yes') }}");
+    assert!(
+        err.contains("ensure_ascii") || err.contains("bool"),
+        "unexpected ensure_ascii error: {err}"
     );
 }
 

@@ -63,8 +63,10 @@ Circuit breakers **fail fast**—they detect failing workers and stop sending tr
 
 ## How It Works
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/circuit-breaker.svg" alt="Circuit Breaker State Machine">
+<div class="architecture-diagram" markdown>
+
+![Circuit Breaker State Machine](../../assets/images/circuit-breaker.svg)
+
 </div>
 
 Each worker has its own circuit breaker with three states:
@@ -212,20 +214,26 @@ smg \
 
 ### Normal Operation
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/circuit-breaker-normal.svg" alt="Circuit Breaker Normal Operation">
+<div class="architecture-diagram" markdown>
+
+![Circuit Breaker Normal Operation](../../assets/images/circuit-breaker-normal.svg)
+
 </div>
 
 ### Worker Fails
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/circuit-breaker-failure.svg" alt="Circuit Breaker Worker Failure">
+<div class="architecture-diagram" markdown>
+
+![Circuit Breaker Worker Failure](../../assets/images/circuit-breaker-failure.svg)
+
 </div>
 
 ### Recovery
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/circuit-breaker-recovery.svg" alt="Circuit Breaker Recovery">
+<div class="architecture-diagram" markdown>
+
+![Circuit Breaker Recovery](../../assets/images/circuit-breaker-recovery.svg)
+
 </div>
 
 ---

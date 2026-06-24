@@ -5,18 +5,25 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
+import asyncio
 import hashlib
 import itertools
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 
 import grpc
+import msgspec
 import torch
+import zmq
+import zmq.asyncio
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
+from vllm.distributed.kv_events import KVEventBatch
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.engine import MultiModalInput as VllmMultiModalInput
 from vllm.inputs.engine import mm_input, tokens_input
@@ -31,8 +38,32 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
+from smg_grpc_servicer.vllm.kv_events import (
+    endpoint_for_rank,
+    resolve_kv_events_config,
+    stream_kv_events,
+)
+from smg_grpc_servicer.vllm.kv_transfer import params_from_request, params_to_response_fields
 
 logger = init_logger(__name__)
+SAMPLING_DEFAULT_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+)
+
+
+def _filtered_sampling_defaults(params: dict | None) -> dict:
+    if not params:
+        return {}
+    return {
+        key: params[key]
+        for key in SAMPLING_DEFAULT_KEYS
+        if key in params and params[key] is not None
+    }
+
 
 # Proto dtype string → torch dtype
 _PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
@@ -50,17 +81,58 @@ def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
     return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(*td.shape)
 
 
+try:
+    from vllm.version import __version__ as VLLM_VERSION
+except Exception:  # pragma: no cover - version lookup is best-effort
+    VLLM_VERSION = ""
+
+
+def _latest_scheduler_stats(engine, engine_idx: int = 0):
+    """Best-effort read of the most recent ``SchedulerStats`` snapshot.
+
+    vLLM has no synchronous "current stats" accessor on ``AsyncLLM``/``EngineClient``;
+    ``SchedulerStats`` arrive asynchronously and are cached on the stat loggers. This
+    reaches into ``engine.logger_manager.stat_loggers`` and returns the freshest
+    snapshot, handling the logger-shape variants:
+
+    - ``LoggingStatLogger``                  -> ``.last_scheduler_stats``
+    - ``AggregatedLoggingStatLogger`` (DP)   -> ``.last_scheduler_stats_dict[idx]``
+    - ``PerEngineStatLoggerAdapter``         -> ``.per_engine_stat_loggers[idx]``
+    - ``PrometheusStatLogger``               -> skipped (no cached snapshot)
+
+    Returns ``None`` when stats logging is disabled (``--disable-log-stats``) or no
+    engine step has produced outputs yet.
+    """
+    logger_manager = getattr(engine, "logger_manager", None)
+    if logger_manager is None:
+        return None
+    for sl in getattr(logger_manager, "stat_loggers", None) or []:
+        per = getattr(sl, "last_scheduler_stats_dict", None)
+        if isinstance(per, dict) and engine_idx in per:
+            return per[engine_idx]
+        stats = getattr(sl, "last_scheduler_stats", None)
+        if stats is not None:
+            return stats
+        per_engine = getattr(sl, "per_engine_stat_loggers", None)
+        if isinstance(per_engine, dict) and engine_idx in per_engine:
+            nested = getattr(per_engine[engine_idx], "last_scheduler_stats", None)
+            if nested is not None:
+                return nested
+    return None
+
+
 class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     """
     gRPC servicer implementing the VllmEngine service.
 
-    Handles 7 RPCs:
+    Handles 8 RPCs:
     - Generate: Streaming text generation
     - Embed: Embeddings
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
+    - GetLoads: Scheduler load metrics
     - GetTokenizer: Stream tokenizer artifacts
     """
 
@@ -74,6 +146,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.engine = async_llm
         self.start_time = start_time
+        # Resolve KV-event publishing config from the engine. Non-None only when
+        # vLLM was started with --kv-events-config enabling the ZMQ publisher.
+        self._kv_events_config = resolve_kv_events_config(async_llm)
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -100,15 +175,19 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             "pixel_values"
         )
         logger.info(
-            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s",
+            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s, dp_rank=%s",
             request_id,
             input_type,
             request.stream,
             has_preprocessed_mm,
+            request.data_parallel_rank if request.HasField("data_parallel_rank") else None,
         )
 
+        kv_transfer_params: dict | None = None
+        engine_started = False
         try:
             arrival_time = time.time()
+            kv_transfer_params = params_from_request(request)
 
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
@@ -128,9 +207,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params,
                 stream=request.stream,
-                kv_transfer_params=request.kv_transfer_params
-                if request.HasField("kv_transfer_params")
-                else None,
+                kv_transfer_params=kv_transfer_params,
             )
             tokenization_kwargs = self._tokenization_kwargs_from_proto(request.sampling_params)
 
@@ -146,7 +223,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 sampling_params=sampling_params,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
+                data_parallel_rank=(
+                    request.data_parallel_rank if request.HasField("data_parallel_rank") else None
+                ),
             ):
+                engine_started = True
                 # For streaming, send chunks for EACH completion output (n outputs)
                 if request.stream:
                     for completion in output.outputs:
@@ -184,10 +265,40 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         except ValueError as e:
             # Invalid request error (equiv to 400).
+            await self._notify_kv_transfer_rejected(request_id, kv_transfer_params, engine_started)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             logger.exception("Error in Generate for request %s", request_id)
+            await self._notify_kv_transfer_rejected(request_id, kv_transfer_params, engine_started)
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    async def _notify_kv_transfer_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict | None,
+        engine_started: bool,
+    ) -> None:
+        """Free remote prefill blocks early when a decode request dies pre-admission.
+
+        Without this, the prefill engine keeps the blocks pinned until the NIXL
+        lease expires (30s default).
+        """
+        if engine_started or not kv_transfer_params:
+            return
+        if not kv_transfer_params.get("do_remote_prefill"):
+            return
+        # Older vLLM releases lack this hook; the lease expiry covers them
+        notify = getattr(self.engine, "notify_kv_transfer_request_rejected", None)
+        if notify is None:
+            return
+        try:
+            await notify(request_id, kv_transfer_params)
+        except Exception:
+            logger.warning(
+                "Failed to notify KV connector about rejected request %s",
+                request_id,
+                exc_info=True,
+            )
 
     async def Embed(
         self,
@@ -321,6 +432,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         else:
             eos_token_ids = []
 
+        sampling_defaults = _filtered_sampling_defaults(
+            model_config.get_diff_sampling_param() or {}
+        )
+
         return vllm_engine_pb2.GetModelInfoResponse(
             model_path=model_config.model,
             is_generation=model_config.runner_type == "generate",
@@ -335,6 +450,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             pad_token_id=getattr(hf_config, "pad_token_id", None) or 0,
             bos_token_id=getattr(hf_config, "bos_token_id", None) or 0,
             max_req_input_len=model_config.max_model_len,
+            default_sampling_params_json=(
+                json.dumps(sampling_defaults, separators=(",", ":")) if sampling_defaults else ""
+            ),
         )
 
     async def GetServerInfo(
@@ -354,14 +472,76 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         kv_connector = ""
         kv_role = ""
+        kv_engine_id = ""
+        parallel = self.engine.vllm_config.parallel_config
         kv_transfer_config = self.engine.vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             kv_connector = kv_transfer_config.kv_connector or ""
             kv_role = kv_transfer_config.kv_role or ""
+            # Base engine_id; with DP the engine cores serve `{id}_dp{rank}` and
+            # the router derives the suffix from the rank it pins per request
+            kv_engine_id = getattr(kv_transfer_config, "engine_id", "") or ""
 
         return vllm_engine_pb2.GetServerInfoResponse(
             kv_connector=kv_connector,
             kv_role=kv_role,
+            kv_engine_id=kv_engine_id,
+            data_parallel_size=parallel.data_parallel_size,
+        )
+
+    async def GetLoads(
+        self,
+        request: vllm_engine_pb2.GetLoadsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> vllm_engine_pb2.GetLoadsResponse:
+        """
+        Handle load-metric requests.
+
+        Reads the latest SchedulerStats snapshot cached on the engine's stat
+        loggers and maps it onto a single-DP-rank SchedulerLoad: ``token_usage``
+        carries KV-cache utilization ([0,1)) and ``num_running_reqs`` /
+        ``num_waiting_reqs`` report queue depth.
+
+        Always returns exactly one SchedulerLoad entry (zero-filled when no
+        snapshot is available yet, e.g. with --disable-log-stats or before the
+        first engine step) so callers treat the worker as responsive rather than
+        dropping the poll.
+
+        Note: ``request.dp_rank`` and ``request.include`` are accepted but not yet
+        applied — vLLM reports a single DP rank (``dp_rank_count=1``) with only
+        core metrics, so there is nothing to filter. They are reserved for future
+        multi-DP / sectioned-metrics support.
+
+        Args:
+            request: The GetLoadsRequest protobuf
+            context: gRPC context
+
+        Returns:
+            GetLoadsResponse protobuf
+        """
+        stats = _latest_scheduler_stats(self.engine)
+        if stats is not None:
+            num_running = int(getattr(stats, "num_running_reqs", 0) or 0)
+            num_waiting = int(getattr(stats, "num_waiting_reqs", 0) or 0)
+            kv_usage = float(getattr(stats, "kv_cache_usage", 0.0) or 0.0)
+        else:
+            num_running = 0
+            num_waiting = 0
+            kv_usage = 0.0
+
+        load = vllm_engine_pb2.SchedulerLoad(
+            dp_rank=0,
+            num_running_reqs=num_running,
+            num_waiting_reqs=num_waiting,
+            num_total_reqs=num_running + num_waiting,
+            token_usage=max(0.0, kv_usage),
+        )
+
+        return vllm_engine_pb2.GetLoadsResponse(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            version=VLLM_VERSION,
+            dp_rank_count=1,
+            loads=[load],
         )
 
     async def GetTokenizer(
@@ -517,7 +697,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     def _sampling_params_from_proto(
         params: vllm_engine_pb2.SamplingParams,
         stream: bool = True,
-        kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
+        kv_transfer_params: dict | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -525,7 +705,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
-            kv_transfer_params: KV transfer params proto for Mooncake PD
+            kv_transfer_params: Connector KV-transfer params dict (PD disaggregation)
 
         Returns:
             vLLM SamplingParams with detokenize=False and structured_outputs
@@ -551,26 +731,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             elif constraint_field == "choice":
                 structured_outputs = StructuredOutputsParams(choice=list(params.choice.choices))
 
-        # Build extra_args for kv_transfer_params (Mooncake PD)
-        extra_args = None
-        if kv_transfer_params:
-            remote_host = kv_transfer_params.remote_host
-            remote_port = kv_transfer_params.remote_port
-            if not remote_host or not (1 <= remote_port <= 65535):
-                raise ValueError(
-                    "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535]."
-                )
-            logger.debug(
-                "kv_transfer_params={remote_host=%s, remote_port=%d}",
-                remote_host,
-                remote_port,
-            )
-            extra_args = {
-                "kv_transfer_params": {
-                    "remote_host": remote_host,
-                    "remote_port": remote_port,
-                }
-            }
+        # Opaque connector params, passed to the engine verbatim (NIXL/Mooncake)
+        extra_args = {"kv_transfer_params": kv_transfer_params} if kv_transfer_params else None
 
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
@@ -823,13 +985,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             num_prompt_logprobs,
         )
 
-        # Build kv_transfer_params if present (Mooncake PD)
-        kv_transfer_params = None
-        if output.kv_transfer_params:
-            kv_transfer_params = vllm_engine_pb2.KvTransferParams(
-                remote_host=output.kv_transfer_params.get("remote_host", ""),
-                remote_port=output.kv_transfer_params.get("remote_port", 0),
-            )
+        # Connector KV-transfer params returned by the engine (PD prefill leg)
+        kv_transfer_params, kv_transfer_params_json = params_to_response_fields(
+            output.kv_transfer_params
+        )
 
         # Build matched_stop kwargs from stop_reason (int token ID or str stop sequence)
         stop_kwargs = {}
@@ -854,6 +1013,58 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 input_logprobs=input_logprobs,
                 index=completion.index,
                 kv_transfer_params=kv_transfer_params,
+                kv_transfer_params_json=kv_transfer_params_json,
                 **stop_kwargs,
             ),
         )
+
+    async def SubscribeKvEvents(
+        self,
+        request: common_pb2.SubscribeKvEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.KvEventBatch]:
+        """Bridge vLLM's in-process ZMQ KV cache events to a gRPC stream.
+
+        The ZMQ publisher's sequence numbers are used directly as the gRPC
+        batch sequence numbers.
+        """
+        if self._kv_events_config is None:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV cache events not enabled. Start vLLM with "
+                "--kv-events-config "
+                '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
+            )
+
+        config = self._kv_events_config
+
+        # For DP attention each rank publishes on port + rank with independent
+        # sequence counters; subscribing to several on one socket interleaves
+        # them and breaks gap detection. Subscribe to rank 0 only for now.
+        # TODO(phase3): per-rank virtual workers or merged renumbering.
+        pub_endpoint = endpoint_for_rank(config.endpoint, 0)
+
+        zmq_ctx = zmq.asyncio.Context.instance()
+        sub_socket = zmq_ctx.socket(zmq.SUB)
+        sub_socket.subscribe(config.topic.encode("utf-8"))
+        sub_socket.connect(pub_endpoint)
+        logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
+
+        decoder = msgspec.msgpack.Decoder(KVEventBatch)
+
+        try:
+            async for proto_batch in stream_kv_events(
+                sub_socket,
+                decoder.decode,
+                lambda: context.send_initial_metadata(()),
+                context.cancelled,
+            ):
+                yield proto_batch
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("SubscribeKvEvents failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+        finally:
+            sub_socket.close(linger=0)
+            logger.info("SubscribeKvEvents: stream closed")

@@ -6,7 +6,7 @@ on:
       engine:
         required: true
         type: string
-        description: "Engine to test: sglang, vllm, or trtllm"
+        description: "Engine to test: sglang, vllm, trtllm, or tokenspeed"
       gpu_tier:
         required: true
         type: string
@@ -19,6 +19,11 @@ on:
         required: true
         type: number
         description: "Job timeout in minutes"
+      test_timeout:
+        required: false
+        type: number
+        default: 25
+        description: "pytest step timeout in minutes (must be < job timeout)"
       extra_deps:
         required: false
         type: string
@@ -39,6 +44,11 @@ on:
         type: boolean
         default: false
         description: "Set up Oracle DB and Brave MCP for agentic tests"
+      vllm_kv_backend:
+        required: false
+        type: string
+        default: "nixl"
+        description: "KV transfer backend for vLLM PD workers: nixl or mooncake"
 
 jobs:
   run:
@@ -50,10 +60,11 @@ jobs:
       E2E_ENGINE: ${{ inputs.engine }}
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
+      E2E_VLLM_KV_BACKEND: ${{ inputs.vllm_kv_backend }}
       ROUTER_LOCAL_MODEL_PATH: /models
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Engine-specific setup
       - name: Setup SGLang backend
@@ -67,6 +78,10 @@ jobs:
       - name: Setup TRT-LLM backend
         if: inputs.engine == 'trtllm'
         uses: ./.github/actions/setup-trtllm
+
+      - name: Setup TokenSpeed backend
+        if: inputs.engine == 'tokenspeed'
+        uses: ./.github/actions/setup-tokenspeed
 
       # Artifact downloads
       - name: Download wheel artifact
@@ -113,7 +128,7 @@ jobs:
 
       # Run tests
       - name: Run E2E tests
-        timeout-minutes: 25
+        timeout-minutes: ${{ inputs.test_timeout }}
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
@@ -132,16 +147,21 @@ jobs:
         if: failure() || cancelled()
         run: |
           LABEL=$(echo '${{ inputs.test_dirs }}' | tr '/' '-')
-          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${LABEL}"
+          # vLLM legs can differ only by KV backend; disambiguate the artifact
+          SUFFIX=""
+          if [ "${{ inputs.engine }}" = "vllm" ]; then
+            SUFFIX="-${{ inputs.vllm_kv_backend }}"
+          fi
+          ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${LABEL}${SUFFIX}"
           bash scripts/ci_dump_worker_logs.sh e2e-logs "$ARTIFACT"
-          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
         id: log-snapshot
 
       - name: Upload worker logs
         if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${{ steps.log-snapshot.outputs.label }}
+          name: ${{ steps.log-snapshot.outputs.artifact }}
           path: e2e-logs/
           retention-days: 7
           if-no-files-found: ignore

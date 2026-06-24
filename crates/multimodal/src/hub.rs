@@ -2,7 +2,8 @@
 //!
 //! When the model source is a HuggingFace model ID (e.g. `Qwen/Qwen3-VL-8B-Instruct`)
 //! rather than a local directory, this module downloads `config.json` and
-//! `preprocessor_config.json` to the local HF cache and returns the resolved path.
+//! `preprocessor_config.json` / video processor config files to the local HF
+//! cache and returns the resolved path.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,7 @@ const HF_TOKEN_ENV: &str = "HF_TOKEN";
 ///
 /// If the source is already a local directory with `config.json`, returns it as-is.
 /// Otherwise, treats the source as a HuggingFace model ID and downloads
-/// `config.json` (and `preprocessor_config.json` if available) to the local HF cache.
+/// `config.json` plus optional processor configs to the local HF cache.
 pub async fn resolve_model_config_dir(source: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(source);
     if path.join("config.json").exists() {
@@ -38,8 +39,10 @@ pub async fn resolve_model_config_dir(source: &str) -> anyhow::Result<PathBuf> {
         .await
         .with_context(|| format!("Failed to download config.json for model '{source}'"))?;
 
-    // Best-effort download of preprocessor_config.json (not all models have it)
+    // Best-effort download of processor configs (not all models have them).
     let _ = repo.get("preprocessor_config.json").await;
+    let _ = repo.get("video_preprocessor_config.json").await;
+    let _ = repo.get("processor_config.json").await;
 
     config_path
         .parent()

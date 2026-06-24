@@ -63,6 +63,12 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdatePoliciesForWorkerStep {
             app_context.policy_registry.on_worker_added(model_id, None);
         }
 
+        let prefill_workers = app_context.worker_registry.get_prefill_workers();
+        let decode_workers = app_context.worker_registry.get_decode_workers();
+        app_context
+            .policy_registry
+            .init_pd_cache_aware_policies(&prefill_workers, &decode_workers);
+
         Ok(StepResult::Success)
     }
 

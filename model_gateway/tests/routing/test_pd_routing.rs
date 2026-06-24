@@ -166,6 +166,8 @@ mod pd_routing_unit_tests {
                     eviction_interval_secs: 60,
                     max_tree_size: 1000000,
                     block_size: 16,
+                    balance_token_usage_threshold: 1.0,
+                    overload_token_usage_threshold: 1.0,
                 },
             ),
             (
@@ -217,8 +219,7 @@ mod pd_routing_unit_tests {
                     worker::{WorkerMonitor, WorkerRegistry},
                 };
                 use smg_data_connector::{
-                    MemoryConversationItemStorage, MemoryConversationStorage,
-                    MemoryResponseStorage, NoOpConversationMemoryWriter,
+                    MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
                 };
 
                 let client = reqwest::Client::new();
@@ -234,7 +235,6 @@ mod pd_routing_unit_tests {
                 let response_storage = Arc::new(MemoryResponseStorage::new());
                 let conversation_storage = Arc::new(MemoryConversationStorage::new());
                 let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-                let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
                 // Initialize the worker monitor with the same interval
                 // the production builder uses so tests exercise the
@@ -244,6 +244,7 @@ mod pd_routing_unit_tests {
                     policy_registry.clone(),
                     client.clone(),
                     config.load_monitor_interval_secs,
+                    config.engine_metrics,
                 )));
 
                 // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -264,7 +265,6 @@ mod pd_routing_unit_tests {
                         .response_storage(response_storage)
                         .conversation_storage(conversation_storage)
                         .conversation_item_storage(conversation_item_storage)
-                        .conversation_memory_writer(conversation_memory_writer)
                         .worker_monitor(worker_monitor)
                         .worker_job_queue(worker_job_queue)
                         .workflow_engines(workflow_engines)

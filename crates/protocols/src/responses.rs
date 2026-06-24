@@ -16,9 +16,7 @@ use super::{
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
-use crate::{
-    builders::ResponsesResponseBuilder, skills::ResponsesSkillEntry, validated::Normalizable,
-};
+use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 
 // ============================================================================
 // Responses API Tool Choice
@@ -421,8 +419,7 @@ pub enum ResponseTool {
     /// `shell_call` items use the narrower call-side unions
     /// [`ShellCallEnvironment`] (input path) and
     /// [`ResponseShellCallEnvironment`] (response path), which drop the
-    /// `container_auto` variant and (on the response path) the tool-side
-    /// `skills` attachment.
+    /// `container_auto` variant.
     ///
     /// Spec (openai-responses-api-spec.md §tools, L463-470):
     /// `Shell { type: "shell", environment? }`.
@@ -443,7 +440,7 @@ pub enum ResponseTool {
     /// Built-in host-execute shell tool — `{ type: "local_shell" }`.
     ///
     /// Spec (openai-responses-api-spec.md §tools L462): `LocalShell { type:
-    /// "local_shell" }` — carries no payload. Distinct from `shell` (T6),
+    /// "local_shell" }` — carries no payload. Distinct from `shell`,
     /// which carries a containerized `environment`. The model emits
     /// `local_shell_call` output items carrying a `LocalShellExec` action;
     /// the client executes the command on the host and replies with a
@@ -772,9 +769,9 @@ pub struct ShellTool {
 ///
 /// Distinct from the call-side environment unions
 /// [`ShellCallEnvironment`] (input-side call form, reuses
-/// [`LocalShellEnvironment`] with `skills?`) and
+/// [`LocalShellEnvironment`]) and
 /// [`ResponseShellCallEnvironment`] (response-side call form, carries the
-/// narrower [`ResponseLocalShellEnvironment`] with no `skills`): the tool
+/// narrower [`ResponseLocalShellEnvironment`]): the tool
 /// form permits the `container_auto` variant, which asks the platform to
 /// provision a new container; both call forms only carry the resolved
 /// `local` / `container_reference` shape that the model echoes back.
@@ -783,13 +780,10 @@ pub struct ShellTool {
 pub enum ShellEnvironment {
     /// `type: "container_auto"` — spec L465-468. Requests a
     /// platform-provisioned container with optional `file_ids`,
-    /// `memory_limit`, `network_policy`, and `skills`.
+    /// `memory_limit`, and `network_policy`.
     #[serde(rename = "container_auto")]
     ContainerAuto(ContainerAutoEnvironment),
-    /// `type: "local"` — spec L469. Runs in the caller-owned environment,
-    /// optionally carrying a `skills` attachment list
-    /// ([`ResponsesSkillEntry`] already accepts both the typed and opaque
-    /// skill object shapes).
+    /// `type: "local"` — spec L469. Runs in the caller-owned environment.
     #[serde(rename = "local")]
     Local(LocalShellEnvironment),
     /// `type: "container_reference"` — spec L470. Pins execution to an
@@ -811,22 +805,13 @@ pub struct ContainerAutoEnvironment {
     pub memory_limit: Option<String>,
     /// Network isolation policy.
     pub network_policy: Option<ContainerNetworkPolicy>,
-    /// Skill attachments. Reuses [`ResponsesSkillEntry`] — the same union
-    /// the `/v1/responses` tool surfaces accept for CodeInterpreter, which
-    /// covers both typed `skill_reference` / `local` shapes and opaque
-    /// provider-owned objects.
-    pub skills: Option<Vec<ResponsesSkillEntry>>,
 }
 
-/// Payload for [`ShellEnvironment::Local`]. Only `skills` is permitted per
-/// spec.
+/// Payload for [`ShellEnvironment::Local`]. Carries no fields.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct LocalShellEnvironment {
-    /// Optional skill attachments carried into the local environment.
-    pub skills: Option<Vec<ResponsesSkillEntry>>,
-}
+pub struct LocalShellEnvironment {}
 
 /// Payload for [`ShellEnvironment::ContainerReference`]. Pins the tool to
 /// an existing container id.
@@ -886,25 +871,21 @@ pub struct ContainerDomainSecret {
 /// [`ResponseInputOutputItem::ShellCall`].
 ///
 /// Spec (openai-responses-api-spec.md §ShellCall, L228-230): the input-side
-/// call form carries `environment: optional LocalEnvironment { type: "local",
-/// skills? } | ContainerReference { container_id, type: "container_reference"
+/// call form carries `environment: optional LocalEnvironment { type: "local"
+/// } | ContainerReference { container_id, type: "container_reference"
 /// }`. `container_auto` is rejected here — it is a request-side *tool*
 /// hint (§tools L465) that the platform resolves into `local` /
 /// `container_reference` before a call is surfaced, not a call-form value.
 ///
 /// The tool-side [`LocalShellEnvironment`] is intentionally reused so
-/// spec-compliant replay flows that echo back input call items with their
-/// original `skills` attachment continue to round-trip losslessly.
-/// Response-side emissions use the narrower [`ResponseShellCallEnvironment`]
-/// instead.
+/// spec-compliant replay flows that echo back input call items round-trip
+/// losslessly. Response-side emissions use the narrower
+/// [`ResponseShellCallEnvironment`] instead.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ShellCallEnvironment {
-    /// `type: "local"` — input-side local environment. Spec L230 allows
-    /// `skills?`, so this variant reuses the tool-form
-    /// [`LocalShellEnvironment`] verbatim. Preserves round-trip fidelity
-    /// for clients that replay prior input items carrying skill
-    /// attachments.
+    /// `type: "local"` — input-side local environment. Reuses the tool-form
+    /// [`LocalShellEnvironment`] verbatim.
     #[serde(rename = "local")]
     Local(LocalShellEnvironment),
     /// `type: "container_reference"` — resolved container binding.
@@ -918,17 +899,14 @@ pub enum ShellCallEnvironment {
 /// Spec (openai-responses-api-spec.md §returns L512-513): the ShellCall
 /// response form has `environment: ResponseLocalEnvironment { type: "local"
 /// } | ResponseContainerReference { container_id, type: "container_reference"
-/// }`. Unlike the input-side [`ShellCallEnvironment`], the response-side
-/// local arm is `ResponseLocalEnvironment { type: "local" }` with no
-/// `skills` field — skills is a tool/input-side attachment that is not
-/// echoed back on the resolved call.
+/// }`. The response-side local arm is
+/// `ResponseLocalEnvironment { type: "local" }`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ResponseShellCallEnvironment {
     /// `type: "local"` — resolved local environment on the response-side
     /// call form. Per spec L513 this is `ResponseLocalEnvironment { type:
-    /// "local" }`, without the `skills` attachment carried on the
-    /// input-side [`ShellCallEnvironment::Local`].
+    /// "local" }`.
     #[serde(rename = "local")]
     Local(ResponseLocalShellEnvironment),
     /// `type: "container_reference"` — resolved container binding.
@@ -941,10 +919,7 @@ pub enum ResponseShellCallEnvironment {
 ///
 /// Spec (openai-responses-api-spec.md §returns L513): response-side local
 /// environment is `ResponseLocalEnvironment { type: "local" }` — the
-/// discriminator is the only field the model echoes back. `skills` is a
-/// request/input-side attachment on [`LocalShellEnvironment`] and is not
-/// part of the response-side envelope; modelling it here would let
-/// request-only fields leak through the response union unchecked.
+/// discriminator is the only field the model echoes back.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseLocalShellEnvironment {}
@@ -1200,16 +1175,19 @@ pub struct WebSearchPreviewTool {
 /// Non-preview hosted web search tool configuration.
 ///
 /// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
-/// search_context_size?: "low"|"medium"|"high", user_location? }`.
+/// return_token_budget?: "default"|"unlimited", search_context_size?: "low"|"medium"|"high",
+/// user_location? }`.
 ///
 /// Distinct from `WebSearchPreviewTool`: adds `filters.allowed_domains` (domain
-/// allowlist) and pins `search_context_size` to the spec-listed enum.
+/// allowlist), `return_token_budget`, and pins `search_context_size` to the spec-listed enum.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchTool {
     /// Optional domain allowlist applied to candidate sources.
     pub filters: Option<WebSearchFilters>,
+    /// Search-result context token budget. Spec enum: `"default" | "unlimited"`.
+    pub return_token_budget: Option<WebSearchReturnTokenBudget>,
     /// Search context budget. Spec enum: `"low" | "medium" | "high"`.
     pub search_context_size: Option<WebSearchContextSize>,
     /// Approximate user location used to bias results.
@@ -1236,6 +1214,16 @@ pub enum WebSearchContextSize {
     Low,
     Medium,
     High,
+}
+
+/// Search-result token budget for the non-preview `web_search` tool.
+///
+/// Spec: `return_token_budget?: "default" | "unlimited"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchReturnTokenBudget {
+    Default,
+    Unlimited,
 }
 
 /// Approximate user location for the non-preview `web_search` tool.
@@ -1269,9 +1257,7 @@ pub struct CodeInterpreterTool {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ResponseToolEnvironment {
-    pub skills: Option<Vec<ResponsesSkillEntry>>,
-}
+pub struct ResponseToolEnvironment {}
 
 /// Configuration payload for the `image_generation` built-in tool.
 ///
@@ -1365,7 +1351,7 @@ pub struct RequireApprovalFilter {
 }
 
 // ============================================================================
-// Computer Tool (T2)
+// Computer Tool
 // ============================================================================
 
 /// Computer-use preview tool payload.
@@ -1605,7 +1591,7 @@ pub enum ResponseInputOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         summary: Vec<SummaryTextContent>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
@@ -1620,7 +1606,8 @@ pub enum ResponseInputOutputItem {
     },
     #[serde(rename = "function_call")]
     FunctionToolCall {
-        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
@@ -1631,6 +1618,7 @@ pub enum ResponseInputOutputItem {
     },
     #[serde(rename = "function_call_output")]
     FunctionCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         call_id: String,
         output: String,
@@ -1787,7 +1775,7 @@ pub enum ResponseInputOutputItem {
     },
     /// `type: "custom_tool_call_output"` — client's response to a
     /// `custom_tool_call`. Spec: `{ call_id, output, type, id? }` (no
-    /// `status` field per spec — see Drift Log entry for T8). `id` is
+    /// `status` field per spec). `id` is
     /// `Option<String>` for the same reason as `CustomToolCall.id` above.
     /// `output` is either a plain string or an array of input-typed content
     /// parts (`input_text` / `input_image` / `input_file`).
@@ -2074,7 +2062,6 @@ pub enum ResponseContentPart {
     OutputText {
         text: String,
         #[serde(default)]
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         annotations: Vec<Annotation>,
         #[serde(skip_serializing_if = "Option::is_none")]
         logprobs: Option<ChatLogProbs>,
@@ -2167,7 +2154,7 @@ pub enum ResponseOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
@@ -2179,10 +2166,12 @@ pub enum ResponseOutputItem {
     },
     #[serde(rename = "function_call")]
     FunctionToolCall {
-        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         status: String,
     },
@@ -2348,10 +2337,9 @@ pub enum ResponseOutputItem {
     /// L512-513) + OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall`:
     /// emitted when the model issues a containerized shell action. The
     /// environment echoed back is restricted to `local` /
-    /// `container_reference` via [`ResponseShellCallEnvironment`], which
-    /// narrows the input-side [`ShellCallEnvironment`] by dropping the
-    /// `skills` attachment on the `local` arm — per spec L513 the response
-    /// form uses `ResponseLocalEnvironment { type: "local" }` only.
+    /// `container_reference` via [`ResponseShellCallEnvironment`] — per spec
+    /// L513 the response form uses `ResponseLocalEnvironment { type: "local" }`
+    /// only.
     ///
     /// `id` and `status` are required on the output wire — the SDK types
     /// them as non-`Optional` on `ResponseFunctionShellToolCall`, mirroring
@@ -2631,6 +2619,31 @@ pub enum ResponseStatus {
     Cancelled,
 }
 
+/// Why a response stopped before producing complete output.
+///
+/// Mirrors OpenAI's `incomplete_details.reason`: reserved strictly for the two
+/// truncation semantics. Any other stop condition (wall-clock timeout,
+/// `max_tool_calls` exhaustion, provider errors) is surfaced as a `failed`
+/// status with an `error` payload instead.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IncompleteReason {
+    /// Output was truncated because it hit `max_output_tokens`.
+    MaxOutputTokens,
+    /// Output was truncated by the content filter.
+    ContentFilter,
+}
+
+/// Structured detail attached to a response whose status is `incomplete`.
+///
+/// Wire shape: `{ "reason": "max_output_tokens" | "content_filter" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct IncompleteDetails {
+    /// The reason the response is incomplete.
+    pub reason: IncompleteReason,
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReasoningInfo {
@@ -2817,10 +2830,6 @@ fn default_temperature() -> Option<f32> {
 #[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_responses_cross_parameters"))]
 pub struct ResponsesRequest {
-    /// Run the request in the background
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background: Option<bool>,
-
     /// Fields to include in the response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<IncludeField>>,
@@ -3005,7 +3014,6 @@ pub enum ResponseInput {
 impl Default for ResponsesRequest {
     fn default() -> Self {
         Self {
-            background: None,
             include: None,
             input: ResponseInput::Text(String::new()),
             instructions: None,
@@ -3341,21 +3349,14 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         }
     }
 
-    // 3. Validate background/stream conflict
-    if request.background == Some(true) && request.stream == Some(true) {
-        let mut e = ValidationError::new("background_conflicts_with_stream");
-        e.message = Some("Cannot use background mode with streaming".into());
-        return Err(e);
-    }
-
-    // 4. Validate conversation and previous_response_id are mutually exclusive
+    // 3. Validate conversation and previous_response_id are mutually exclusive
     if request.conversation.is_some() && request.previous_response_id.is_some() {
         let mut e = ValidationError::new("mutually_exclusive_parameters");
         e.message = Some("Mutually exclusive parameters. Ensure you are only providing one of: 'previous_response_id' or 'conversation'.".into());
         return Err(e);
     }
 
-    // 5. Validate input items structure
+    // 4. Validate input items structure
     if let ResponseInput::Items(items) = &request.input {
         // Check for at least one valid input message
         let has_valid_input = items.iter().any(|item| {
@@ -3373,7 +3374,7 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         }
     }
 
-    // 6. Validate text format conflicts (for future structured output constraints)
+    // 5. Validate text format conflicts (for future structured output constraints)
     // Currently, Responses API doesn't have regex/ebnf like Chat API,
     // but this is here for completeness and future-proofing
 
@@ -3472,16 +3473,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // parameterless shell call can round-trip cleanly.
         ResponseInputOutputItem::ShellCall { .. } => {}
         ResponseInputOutputItem::ShellCallOutput { .. } => {
-            // Backend execution is out of scope for T6 (schema-only); the
-            // router returns 501 for shell calls, so SMG never synthesises
+            // The router returns 501 for shell calls, so SMG never synthesises
             // a ShellCallOutput itself. Skip content validation here so
             // round-tripping a previously-recorded response (even with an
             // empty chunk list) stays lossless — the cross-turn replay
             // contract is the motivating use case for keeping this arm
             // content-agnostic.
         }
-        // I2: schema-only; backend resolution (history lookup +
-        // substitution) is deferred to a future R task.
+        // A bare reference to a prior item; no content to validate.
         ResponseInputOutputItem::ItemReference { .. } => {}
         // ApplyPatchCall is model-generated and echoed back on multi-turn
         // replay; matches the FunctionToolCall / CustomToolCall arms with no
@@ -3496,15 +3495,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // output, or a `failed` where the executor had nothing to log) so
         // no emptiness check applies here.
         ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
-        // Schema-only pass-through: T5 adds the protocol variants for the
-        // `local_shell` built-in tool. Validation mirrors `ComputerCall` /
-        // `ImageGenerationCall` above (no payload-level content checks).
+        // Validation mirrors `ComputerCall` / `ImageGenerationCall` above
+        // (no payload-level content checks).
         ResponseInputOutputItem::LocalShellCall { .. } => {}
         ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
-        // T11 schema-only: MCP call/list-tools input items replayed for
-        // stateless multi-turn. Matches `McpApprovalRequest` above with no
-        // content validation so an abridged or in-flight call (output /
-        // error absent) can round-trip cleanly.
+        // MCP call/list-tools input items replayed for stateless multi-turn.
+        // Matches `McpApprovalRequest` above with no content validation so an
+        // abridged or in-flight call (output / error absent) can round-trip
+        // cleanly.
         ResponseInputOutputItem::McpCall { .. } => {}
         ResponseInputOutputItem::McpListTools { .. } => {}
     }
@@ -3554,10 +3552,9 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                 return Err(e);
             }
 
-            // T11 spec contract (openai-responses-api-spec.md L441, L445): one
-            // of `server_url` or `connector_id` is required, and the two are
-            // mutually exclusive. Reject payloads that set both so downstream
-            // target resolution is unambiguous.
+            // One of `server_url` or `connector_id` is required, and the two
+            // are mutually exclusive. Reject payloads that set both so
+            // downstream target resolution is unambiguous.
             if mcp.server_url.is_some() && mcp.connector_id.is_some() {
                 let mut e = ValidationError::new("mcp_tool_conflicting_targets");
                 e.message = Some(
@@ -3626,7 +3623,7 @@ pub fn normalize_input_item(item: &ResponseInputOutputItem) -> ResponseInputOutp
 }
 
 pub fn generate_id(prefix: &str) -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut rng = rand::rng();
     // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
     let mut bytes = [0u8; 25];
@@ -3668,8 +3665,8 @@ pub struct ResponsesResponse {
     /// Error information if status is failed
     pub error: Option<Value>,
 
-    /// Incomplete details if response was truncated
-    pub incomplete_details: Option<Value>,
+    /// Incomplete details if the response was truncated (`incomplete` status).
+    pub incomplete_details: Option<IncompleteDetails>,
 
     /// System instructions used
     pub instructions: Option<String>,
@@ -3876,7 +3873,7 @@ impl ResponseOutputItem {
         status: String,
     ) -> Self {
         Self::FunctionToolCall {
-            id,
+            id: Some(id),
             call_id,
             name,
             arguments,

@@ -214,7 +214,7 @@ fn bench_cache_size_impact(c: &mut Criterion) {
 }
 
 fn bench_comparison_baseline(c: &mut Criterion) {
-    use rand::Rng;
+    use rand::RngExt;
 
     let mut group = c.benchmark_group("manual_policy/vs_baseline");
     let workers = create_workers(16);

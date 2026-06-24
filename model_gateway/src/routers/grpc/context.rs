@@ -707,11 +707,23 @@ pub(crate) enum ExecutionResult {
     Dual {
         prefill: ProtoStream,
         decode: Box<ProtoStream>,
+        /// PD timing context, for honest PD TTFT (prefill start to first decode token).
+        pd_timing: PdTiming,
     },
     /// Embedding requests return a single response, not a stream
     Embedding {
         response: ProtoEmbedComplete,
     },
+}
+
+/// Timing context threaded from PD execution into the streaming layer so the
+/// first decode token can be measured against prefill start.
+#[derive(Clone)]
+pub(crate) struct PdTiming {
+    /// Monotonic instant the prefill RPC was dispatched.
+    pub prefill_start: std::time::Instant,
+    /// Backend runtime label (e.g. "sglang", "vllm") for the PD metric set.
+    pub runtime: &'static str,
 }
 
 /// Final processed response

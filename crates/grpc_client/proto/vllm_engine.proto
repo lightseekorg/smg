@@ -26,6 +26,9 @@ service VllmEngine {
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
+  // Get scheduler load metrics
+  rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
@@ -160,13 +163,23 @@ message GenerateRequest {
 
   // KV transfer parameters for PD disaggregation (Mooncake)
   // Decode worker uses this to fetch KV cache from prefill worker
+  // Deprecated: use kv_transfer_params_json instead
   KvTransferParams kv_transfer_params = 6;
 
   // Optional multimodal data (images for vision models)
   MultimodalInputs mm_inputs = 7;
+
+  // Connector KV-transfer params as a JSON object, passed verbatim to the
+  // engine (e.g. NIXL's do_remote_prefill/remote_block_ids/remote_host/...).
+  // Preferred over the legacy typed kv_transfer_params field.
+  optional string kv_transfer_params_json = 8;
+
+  // DP rank to pin this request to; unset lets the engine balance internally
+  optional int32 data_parallel_rank = 9;
 }
 
 // KV cache transfer parameters for Mooncake PD disaggregation
+// Deprecated: use kv_transfer_params_json on GenerateRequest/GenerateComplete
 message KvTransferParams {
   string remote_host = 1;  // Prefill worker's side-channel host
   uint32 remote_port = 2;  // Prefill worker's side-channel port
@@ -241,6 +254,7 @@ message GenerateComplete {
 
   // KV transfer parameters returned by prefill worker (Mooncake PD)
   // Contains prefill's side-channel address for decode to fetch KV cache
+  // Deprecated: use kv_transfer_params_json instead
   KvTransferParams kv_transfer_params = 9;
 
   // Matched stop information (for stop sequences)
@@ -248,6 +262,10 @@ message GenerateComplete {
     uint32 matched_token_id = 10;
     string matched_stop_str = 11;
   }
+
+  // Connector KV-transfer params returned by the engine, as a JSON object
+  // (e.g. NIXL's handoff for the decode worker). Forwarded verbatim by the router.
+  optional string kv_transfer_params_json = 12;
 }
 
 // =====================
@@ -303,6 +321,7 @@ message GetModelInfoResponse {
   int32 pad_token_id = 11;
   int32 bos_token_id = 12;
   int32 max_req_input_len = 13;
+  string default_sampling_params_json = 14;
 }
 
 message GetServerInfoRequest {}
@@ -317,4 +336,50 @@ message GetServerInfoResponse {
   // KV transfer config (for PD disaggregation)
   string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
   string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
+  string kv_engine_id = 8;  // kv_transfer_config.engine_id, "" if not configured
+
+  int32 data_parallel_size = 9;  // parallel_config.data_parallel_size (1 when DP is off)
+}
+
+// =====================
+// Load Metrics
+// =====================
+
+message GetLoadsRequest {
+  // Optional: filter to a specific DP rank.
+  optional int32 dp_rank = 1;
+
+  // Sections to include (e.g. "core"). vLLM currently emits only core metrics.
+  repeated string include = 2;
+}
+
+message GetLoadsResponse {
+  // ISO 8601 timestamp.
+  string timestamp = 1;
+
+  // vLLM version.
+  string version = 2;
+
+  // Number of DP ranks reported.
+  int32 dp_rank_count = 3;
+
+  // Per-DP-rank load metrics.
+  repeated SchedulerLoad loads = 4;
+}
+
+// Per-DP-rank scheduler load snapshot. vLLM populates the fields it can read
+// cheaply from the engine's scheduler stats; unset fields are 0.
+message SchedulerLoad {
+  int32 dp_rank = 1;
+  int32 num_running_reqs = 2;
+  int32 num_waiting_reqs = 3;
+  int32 num_total_reqs = 4;
+  int32 num_used_tokens = 5;
+  int32 max_total_num_tokens = 6;
+  // KV-cache utilization in [0,1) (vLLM SchedulerStats.kv_cache_usage).
+  double token_usage = 7;
+  double gen_throughput = 8;
+  double cache_hit_rate = 9;
+  double utilization = 10;
+  int32 max_running_requests = 11;
 }

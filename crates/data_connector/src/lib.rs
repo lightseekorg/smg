@@ -12,7 +12,6 @@
 //! - Postgres
 //! - Redis
 
-pub mod background;
 mod common;
 pub mod config;
 pub mod context;
@@ -21,7 +20,6 @@ mod factory;
 mod hooked;
 pub mod hooks;
 mod memory;
-mod memory_background;
 mod noop;
 mod oracle;
 mod oracle_migrations;
@@ -35,17 +33,10 @@ pub(crate) mod versioning;
 // Re-export core types and traits
 pub use core::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
-    ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStatus,
-    ConversationMemoryStorageError, ConversationMemoryType, ConversationMemoryWriter,
-    ConversationStorage, ListParams, NewConversation, NewConversationItem, NewConversationMemory,
-    ResponseId, ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
+    ConversationStorage, ListParams, NewConversation, NewConversationItem, ResponseId,
+    ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
 };
 
-pub use background::{
-    BackgroundRepositoryError, BackgroundRepositoryResult, BackgroundResponseRepository,
-    DeleteResult, EnqueueRequest, FinalizeRequest, FinalizeResult, FinalizeStatus, LeasedJob,
-    QueuedResponse, ResumeEventBatch, StoredCancelResult, StoredStreamEvent,
-};
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 // Re-export hook infrastructure
 pub use context::{
@@ -53,13 +44,9 @@ pub use context::{
     RequestContext,
 };
 // Re-export factory
-pub use factory::{
-    backend_supports_memory_writer, create_storage, StorageBundle, StorageFactoryConfig,
-};
+pub use factory::{create_storage, StorageBundle, StorageFactoryConfig};
 pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
-pub use memory_background::MemoryBackgroundRepository;
-pub use noop::NoOpConversationMemoryWriter;
 // Re-export schema config types
 pub use schema::{ColumnDef, SchemaConfig, TableConfig};

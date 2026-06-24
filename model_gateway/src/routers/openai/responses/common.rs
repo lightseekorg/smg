@@ -6,6 +6,8 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
+use crate::routers::common::sse::parse_block;
+
 /// Extract output_index from a JSON value
 #[inline]
 pub(crate) fn extract_output_index(value: &Value) -> Option<usize> {
@@ -70,27 +72,71 @@ impl ChunkProcessor {
     }
 }
 
-/// Parse an SSE block into event name and data
+/// Parse an SSE block into event name and data.
 ///
-/// Returns borrowed strings when possible to avoid allocations in hot paths.
-/// Only allocates when multiple data lines need to be joined.
+/// Delegates field parsing to the shared [`parse_block`] codec. Returns
+/// borrowed strings for the common single-line `data:` case (zero
+/// allocation); multi-line `data:` joins into an owned `String`.
+///
+/// All callers treat an empty `data` as "skip", so the shared codec's
+/// behavior of dropping data-less control blocks (returning no frame) is
+/// equivalent to the previous `(event_name, "")` result.
 pub(super) fn parse_sse_block(block: &str) -> (Option<&str>, Cow<'_, str>) {
-    let mut event_name: Option<&str> = None;
-    let mut data_lines: Vec<&str> = Vec::new();
-
-    for line in block.lines() {
-        if let Some(rest) = line.strip_prefix("event:") {
-            event_name = Some(rest.trim());
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            data_lines.push(rest.trim_start());
+    match parse_block(block) {
+        Some(frame) => {
+            let event_name = frame.event_type.and_then(|e| match e {
+                Cow::Borrowed(s) => Some(s.trim()),
+                Cow::Owned(_) => {
+                    debug_assert!(false, "parse_block returned Cow::Owned for event_type");
+                    None
+                }
+            });
+            (event_name, frame.data)
         }
+        None => (None, Cow::Borrowed("")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_sse_block_event_and_data() {
+        let (event, data) =
+            parse_sse_block("event: response.created\ndata: {\"type\":\"response.created\"}");
+        assert_eq!(event, Some("response.created"));
+        assert_eq!(data, "{\"type\":\"response.created\"}");
     }
 
-    let data = if data_lines.len() == 1 {
-        Cow::Borrowed(data_lines[0])
-    } else {
-        Cow::Owned(data_lines.join("\n"))
-    };
+    #[test]
+    fn test_parse_sse_block_data_only() {
+        let (event, data) = parse_sse_block("data: {\"type\":\"response.output_text.delta\"}");
+        assert_eq!(event, None);
+        assert_eq!(data, "{\"type\":\"response.output_text.delta\"}");
+    }
 
-    (event_name, data)
+    #[test]
+    fn test_parse_sse_block_multiline_data() {
+        let (event, data) = parse_sse_block("event: x\ndata: line1\ndata: line2");
+        assert_eq!(event, Some("x"));
+        assert_eq!(data, "line1\nline2");
+    }
+
+    #[test]
+    fn test_parse_sse_block_control_only_has_empty_data() {
+        // A block with no `data:` line yields empty data; all callers skip it.
+        let (_event, data) = parse_sse_block(": keep-alive");
+        assert!(data.is_empty());
+
+        let (_event, data) = parse_sse_block("event: ping");
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_block_empty_input() {
+        let (event, data) = parse_sse_block("");
+        assert_eq!(event, None);
+        assert!(data.is_empty());
+    }
 }

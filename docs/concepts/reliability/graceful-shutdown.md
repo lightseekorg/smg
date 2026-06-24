@@ -68,14 +68,16 @@ With graceful shutdown:
 
 ## How It Works
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/graceful-shutdown.svg" alt="Graceful Shutdown Sequence">
+<div class="architecture-diagram" markdown>
+
+![Graceful Shutdown Sequence](../../assets/images/graceful-shutdown.svg)
+
 </div>
 
 ### Shutdown Sequence
 
 1. **Shutdown signal received** (SIGTERM or SIGINT). The mesh-only `/ha/shutdown` API triggers a separate mesh-level broadcast path and is not part of this signal-driven sequence.
-2. **Stop accepting new connections** — `axum_server`'s handle stops the TCP accept loop and marks the in-flight tracker as draining; new connections are refused at the socket level rather than receiving a 503 response.
+2. **Stop accepting new connections** — `axum_server`'s handle stops the TCP accept loop and marks the in-flight tracker as draining; new connections are refused at the socket level rather than receiving a 503 response. From this moment `/readiness` reports `503` (reason `"draining"`) while `/health` and `/liveness` stay `200`, so load balancers de-list the pod without restarting it.
 3. **Drain in-flight requests** — existing requests continue processing while the server waits on the in-flight tracker.
 4. **Grace period timer starts** — after `--shutdown-grace-period-secs`, the drain wait times out and the server forces shutdown with any remaining requests still in-flight.
 5. **Clean exit** — once all requests complete (or the grace period expires), background components (MCP orchestrator, etc.) are cleaned up and the process exits.
@@ -262,14 +264,34 @@ The sleep allows the load balancer to stop sending new traffic before SMG begins
 
 ### Health Check Coordination
 
-SMG's `/health` (liveness) endpoint always returns `200 OK` — it does not switch to an unhealthy response during shutdown. To drain traffic cleanly, remove the pod from the load balancer before SMG begins its own drain (for example, with the Kubernetes `preStop` hook above, or an external control-plane deregister step).
+As soon as SMG receives the shutdown signal and begins draining, `/readiness` flips to `503 Service Unavailable` with reason `"draining"`, while `/health` and `/liveness` keep returning `200 OK` throughout the drain. Kubernetes therefore removes the pod from Service endpoints (stopping new connections) without restarting it:
 
 ```bash
 curl http://gateway:30000/health
 # Returns 200 OK both during normal operation and throughout the drain
+
+curl http://gateway:30000/readiness
+# 200 while serving; 503 {"status":"not ready","reason":"draining"} once shutdown begins
 ```
 
-`/readiness` can still return `503 Service Unavailable` when no healthy workers remain, but it reacts to worker state rather than to the shutdown signal itself.
+`/readiness` also returns `503` when no healthy workers remain (or, in prefill/decode mode, when either side has no healthy worker), independent of the shutdown signal. The readiness decision is maintained event-driven from worker registry state and served from cached memory, so probes stay O(1) regardless of fleet size.
+
+### Dedicated Probe Port
+
+Under heavy load the main listener's probe routes share the request runtime, so probe responses can lag behind request traffic. Pass the `--health-check-port` flag (Python: `health_check_port`) to additionally serve `/liveness`, `/readiness`, and `/health` on a dedicated plain-HTTP port, handled by a small isolated runtime on its own OS thread — probe latency then stays flat even when the request runtime is saturated, and the port keeps answering through the entire drain window:
+
+```yaml
+spec:
+  containers:
+    - name: smg
+      args: ["--health-check-port", "30001"]
+      livenessProbe:
+        httpGet: { path: /liveness, port: 30001 }
+      readinessProbe:
+        httpGet: { path: /readiness, port: 30001 }
+```
+
+When `--health-check-port` is unset no extra listener is started. The probe routes always remain available on the main port as well.
 
 ---
 

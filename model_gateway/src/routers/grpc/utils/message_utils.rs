@@ -50,7 +50,10 @@ pub fn process_messages(
             SystemContent::String(s) => s.clone(),
             SystemContent::Blocks(blocks) => blocks
                 .iter()
-                .map(|b| b.text.as_str())
+                .map(|b| {
+                    let messages::SystemContentBlock::Text(tb) = b;
+                    tb.text.as_str()
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         };
@@ -76,8 +79,9 @@ pub fn process_messages(
 
     // Pass both `enable_thinking` (Qwen3) and `thinking` (Kimi-K2.5) since
     // different model templates use different kwarg names for the same concept.
+    // Adaptive mode is treated as "thinking on"; the model decides whether to actually emit it.
     match &request.thinking {
-        Some(ThinkingConfig::Enabled { .. }) => {
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => {
             combined_template_kwargs.insert("enable_thinking".to_string(), json!(true));
             combined_template_kwargs.insert("thinking".to_string(), json!(true));
         }
@@ -151,9 +155,34 @@ pub(crate) fn process_message_content_format(
             messages::Role::Assistant => {
                 result.push(convert_assistant_message(&message.content, content_format));
             }
+            // A `system`-role message in `messages[]` (e.g. from Claude Code) is
+            // forwarded in place, preserving its position in the conversation so
+            // inline-`system` chat templates render it where it was sent.
+            // See https://github.com/lightseekorg/smg/issues/1795
+            messages::Role::System => {
+                result.push(convert_system_message(&message.content));
+            }
         }
         Ok(result)
     })
+}
+
+/// Convert a `system`-role message's content to a chat-template JSON value,
+/// preserving its position in `messages[]`. System content is text; text blocks
+/// are concatenated.
+fn convert_system_message(content: &InputContent) -> Value {
+    let text = match content {
+        InputContent::String(text) => text.clone(),
+        InputContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                InputContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    json!({"role": "system", "content": text})
 }
 
 /// Convert a user message content to JSON values.
@@ -648,6 +677,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: serde_json::Map::new(),
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 0);
 
@@ -696,6 +726,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: serde_json::Map::new(),
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 2);
     }

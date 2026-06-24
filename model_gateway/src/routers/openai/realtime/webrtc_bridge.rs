@@ -16,7 +16,7 @@ use str0m::{
     channel::{ChannelData, ChannelId},
     media::{Direction, MediaKind, Mid},
     net::{Protocol, Receive},
-    rtp::RtpPacket,
+    rtp::{RtpPacket, RtpWrite},
     Candidate, Event, Input, Output, Rtc, RtcConfig,
 };
 use tokio::net::UdpSocket;
@@ -685,15 +685,20 @@ impl WebRtcBridge {
         };
         let Some(mid) = mid else { return };
         if let Some(tx) = rtc.direct_api().stream_tx_by_mid(mid, None) {
-            let _ = tx.write_rtp(
-                pkt.header.payload_type,
-                pkt.seq_no,
-                pkt.header.timestamp,
-                pkt.timestamp,
-                pkt.header.marker,
-                pkt.header.ext_vals.clone(),
-                true,
-                pkt.payload.clone(),
+            // str0m 0.20 replaced the positional write_rtp args with an
+            // RtpWrite builder; optional fields default off, so marker/
+            // ext_vals/nackable must be set explicitly to preserve behavior.
+            tx.write_rtp(
+                RtpWrite::new(
+                    pkt.header.payload_type,
+                    pkt.seq_no,
+                    pkt.header.timestamp,
+                    pkt.timestamp,
+                    pkt.payload.clone(),
+                )
+                .marker(pkt.header.marker)
+                .ext_vals(pkt.header.ext_vals.clone())
+                .nackable(true),
             );
         }
     }

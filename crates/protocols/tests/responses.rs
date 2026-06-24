@@ -42,6 +42,31 @@ fn summary_text_content_round_trips_spec_shape() {
 }
 
 #[test]
+fn reasoning_items_preserve_empty_summary_arrays() {
+    let output_payload = json!({
+        "type": "reasoning",
+        "id": "r_empty",
+        "summary": [],
+        "content": [],
+        "status": "completed",
+    });
+    let output_item: ResponseOutputItem = serde_json::from_value(output_payload.clone())
+        .expect("output reasoning item with empty summary should deserialize");
+    let serialized = serde_json::to_value(&output_item).expect("serialize output reasoning");
+    assert_eq!(serialized, output_payload);
+
+    let input_payload = json!({
+        "type": "reasoning",
+        "id": "r_input_empty",
+        "summary": []
+    });
+    let input_item: ResponseInputOutputItem = serde_json::from_value(input_payload.clone())
+        .expect("input reasoning item with empty summary should deserialize");
+    let serialized = serde_json::to_value(&input_item).expect("serialize input reasoning");
+    assert_eq!(serialized, input_payload);
+}
+
+#[test]
 fn legacy_vec_string_summary_fails_to_deserialize() {
     let legacy = r#"{"type":"reasoning","id":"r_x","summary":["text"]}"#;
     let result: Result<ResponseInputOutputItem, _> = serde_json::from_str(legacy);
@@ -243,13 +268,14 @@ fn test_file_search_tool_round_trip_hybrid_weights_omitted() {
 
 /// Spec fixture (openai-responses-api-spec.md §tools line 439):
 /// `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
-/// search_context_size?: "low"|"medium"|"high", user_location? }`. Covers the
-/// canonical tag, the versioned alias, and full-field nested shape.
+/// return_token_budget?: "default"|"unlimited", search_context_size?: "low"|"medium"|"high",
+/// user_location? }`. Covers the canonical tag, the versioned alias, and full-field nested shape.
 #[test]
 fn test_web_search_tool_round_trip() {
     let payload = json!({
         "type": "web_search",
         "filters": {"allowed_domains": ["example.com", "rust-lang.org"]},
+        "return_token_budget": "default",
         "search_context_size": "high",
         "user_location": {
             "type": "approximate",
@@ -271,6 +297,54 @@ fn test_web_search_tool_round_trip() {
     let alias: ResponseTool = serde_json::from_value(json!({"type": "web_search_2025_08_26"}))
         .expect("web_search_2025_08_26 alias should deserialize");
     assert!(matches!(alias, ResponseTool::WebSearch(_)));
+}
+
+#[test]
+fn test_web_search_response_tool_echo_accepts_return_token_budget() {
+    let payload = json!({
+        "id": "resp_web_echo",
+        "object": "response",
+        "created_at": 1,
+        "status": "completed",
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": null,
+        "model": "gpt-5.4",
+        "output": [],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": null,
+        "store": true,
+        "temperature": 1.0,
+        "text": {"format": {"type": "text"}},
+        "tool_choice": "auto",
+        "tools": [{
+            "type": "web_search",
+            "return_token_budget": "default",
+            "search_context_size": "low",
+            "user_location": {
+                "type": "approximate",
+                "city": null,
+                "country": null,
+                "region": null,
+                "timezone": null
+            }
+        }],
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "metadata": {}
+    });
+
+    let response: ResponsesResponse = serde_json::from_value(payload.clone())
+        .expect("upstream web_search echo with return_token_budget should deserialize");
+    let serialized = serde_json::to_value(&response).expect("serialize response");
+    assert_eq!(
+        serialized["tools"][0]["return_token_budget"],
+        json!("default")
+    );
 }
 
 /// Acceptance: `web_search_call` output item carries an optional typed
@@ -586,6 +660,86 @@ fn content_part_output_text_with_typed_annotations() {
     }
     let roundtripped = serde_json::to_value(&part).unwrap();
     assert_eq!(roundtripped, raw);
+}
+
+#[test]
+fn content_part_output_text_preserves_empty_annotations() {
+    let raw = json!({
+        "type": "output_text",
+        "text": "No citations here.",
+        "annotations": []
+    });
+
+    let part: ResponseContentPart =
+        serde_json::from_value(raw.clone()).expect("output_text should deserialize");
+    match &part {
+        ResponseContentPart::OutputText { annotations, .. } => {
+            assert!(annotations.is_empty());
+        }
+        other => panic!("expected OutputText, got {other:?}"),
+    }
+
+    let roundtripped = serde_json::to_value(&part).expect("output_text should serialize");
+    assert_eq!(roundtripped, raw);
+    assert_eq!(roundtripped["annotations"], json!([]));
+}
+
+#[test]
+fn function_call_items_accept_missing_optional_id() {
+    let input_payload = json!({
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "lookup",
+        "arguments": "{\"q\":\"rust\"}"
+    });
+    let input_item: ResponseInputOutputItem = serde_json::from_value(input_payload.clone())
+        .expect("function_call input item without id should deserialize");
+    match &input_item {
+        ResponseInputOutputItem::FunctionToolCall { id, .. } => assert!(id.is_none()),
+        other => panic!("expected FunctionToolCall, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&input_item).expect("serialize input function_call"),
+        input_payload
+    );
+
+    let output_payload = json!({
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "lookup",
+        "arguments": "{\"q\":\"rust\"}",
+        "status": "completed"
+    });
+    let output_item: ResponseOutputItem = serde_json::from_value(output_payload.clone())
+        .expect("function_call output item without id should deserialize");
+    match &output_item {
+        ResponseOutputItem::FunctionToolCall { id, output, .. } => {
+            assert!(id.is_none());
+            assert!(output.is_none());
+        }
+        other => panic!("expected FunctionToolCall, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&output_item).expect("serialize output function_call"),
+        output_payload
+    );
+
+    let function_output_payload = json!({
+        "type": "function_call_output",
+        "call_id": "call_123",
+        "output": "done"
+    });
+    let function_output_item: ResponseInputOutputItem =
+        serde_json::from_value(function_output_payload.clone())
+            .expect("function_call_output input item without id should deserialize");
+    match &function_output_item {
+        ResponseInputOutputItem::FunctionCallOutput { id, .. } => assert!(id.is_none()),
+        other => panic!("expected FunctionCallOutput, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&function_output_item).expect("serialize input function_call_output"),
+        function_output_payload
+    );
 }
 
 #[test]
@@ -2243,7 +2397,7 @@ fn shell_tool_no_environment_round_trip() {
 fn shell_tool_container_auto_environment_round_trip() {
     // Spec (openai-responses-api-spec.md §tools, L465-468):
     // `ContainerAuto { type: "container_auto", file_ids?, memory_limit?,
-    //  network_policy?, skills? }`.
+    //  network_policy? }`.
     let payload = json!({
         "type": "shell",
         "environment": {
@@ -2256,10 +2410,7 @@ fn shell_tool_container_auto_environment_round_trip() {
                 "domain_secrets": [
                     {"domain": "api.github.com", "name": "GH_TOKEN", "value": "sk-abc"}
                 ]
-            },
-            "skills": [
-                {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"}
-            ]
+            }
         }
     });
 
@@ -2290,8 +2441,6 @@ fn shell_tool_container_auto_environment_round_trip() {
                         panic!("expected Allowlist policy, got Disabled")
                     }
                 }
-                let skills = auto.skills.as_ref().expect("skills present");
-                assert_eq!(skills.len(), 1);
             }
             other => panic!("expected ContainerAuto, got {other:?}"),
         },
@@ -2332,20 +2481,11 @@ fn shell_tool_container_auto_disabled_network_policy_round_trip() {
 #[test]
 fn shell_tool_local_environment_round_trip() {
     // Spec (openai-responses-api-spec.md §tools, L469):
-    // `LocalEnvironment { type: "local", skills? }` with `LocalSkill`
-    // members `{ description, name, path }`.
+    // `LocalEnvironment { type: "local" }`.
     let payload = json!({
         "type": "shell",
         "environment": {
-            "type": "local",
-            "skills": [
-                {
-                    "type": "local",
-                    "name": "fmt",
-                    "description": "Run rustfmt",
-                    "path": "/usr/local/bin/rustfmt"
-                }
-            ]
+            "type": "local"
         }
     });
 
@@ -2353,10 +2493,7 @@ fn shell_tool_local_environment_round_trip() {
         .expect("shell tool w/ local env should deserialize");
     match &tool {
         ResponseTool::Shell(s) => match &s.environment {
-            Some(ShellEnvironment::Local(local)) => {
-                let skills = local.skills.as_ref().expect("skills present");
-                assert_eq!(skills.len(), 1);
-            }
+            Some(ShellEnvironment::Local(_)) => {}
             other => panic!("expected Local env, got {other:?}"),
         },
         other => panic!("expected ResponseTool::Shell, got {other:?}"),
@@ -2969,37 +3106,25 @@ fn shell_call_environment_rejects_container_auto_on_response_side() {
 }
 
 #[test]
-fn shell_call_environment_local_accepts_skills_on_input_side() {
+fn shell_call_environment_local_round_trips_on_input_side() {
     // Spec (openai-responses-api-spec.md §ShellCall L228-230): the
     // input-side `shell_call.environment.local` arm accepts the tool-side
-    // `LocalEnvironment { type: "local", skills? }` shape verbatim.
-    // Clients that replay prior input items with skill attachments must
-    // round-trip losslessly through [`ResponseInputOutputItem`].
+    // `LocalEnvironment { type: "local" }` shape verbatim, round-tripping
+    // losslessly through [`ResponseInputOutputItem`].
     let payload = json!({
         "type": "shell_call",
-        "call_id": "call_shell_skills",
+        "call_id": "call_shell_local",
         "action": {"commands": ["ls"]},
         "environment": {
-            "type": "local",
-            "skills": [
-                {
-                    "type": "local",
-                    "name": "fmt",
-                    "description": "Run rustfmt",
-                    "path": "/usr/local/bin/rustfmt"
-                }
-            ]
+            "type": "local"
         }
     });
     let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
-        .expect("input-side shell_call with local skills should deserialize");
+        .expect("input-side shell_call with local env should deserialize");
     match &item {
         ResponseInputOutputItem::ShellCall { environment, .. } => {
             match environment.as_ref().expect("env present") {
-                ShellCallEnvironment::Local(local) => {
-                    let skills = local.skills.as_ref().expect("skills present");
-                    assert_eq!(skills.len(), 1);
-                }
+                ShellCallEnvironment::Local(_) => {}
                 ShellCallEnvironment::ContainerReference(_) => {
                     panic!("expected Local env, got ContainerReference")
                 }
@@ -3008,33 +3133,6 @@ fn shell_call_environment_local_accepts_skills_on_input_side() {
         other => panic!("expected ShellCall, got {other:?}"),
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
-}
-
-#[test]
-fn shell_call_environment_local_rejects_skills_on_response_side() {
-    // Spec (openai-responses-api-spec.md §returns L512-513): the
-    // response-side `local` environment is `ResponseLocalEnvironment {
-    // type: "local" }` — `skills` is an input/tool-side attachment and is
-    // not echoed back on the resolved call. `deny_unknown_fields` on
-    // [`ResponseLocalShellEnvironment`] (carried by
-    // [`ResponseShellCallEnvironment::Local`]) must reject a payload that
-    // tries to carry `skills` across the boundary so the input-only field
-    // cannot silently round-trip on the response union.
-    let payload = json!({
-        "type": "shell_call",
-        "id": "sc_reject",
-        "call_id": "call_shell_reject",
-        "action": {"commands": ["ls"]},
-        "environment": {
-            "type": "local",
-            "skills": []
-        },
-        "status": "completed"
-    });
-    assert!(
-        serde_json::from_value::<ResponseOutputItem>(payload).is_err(),
-        "skills must be rejected on response-side shell_call.environment.local"
-    );
 }
 
 #[test]

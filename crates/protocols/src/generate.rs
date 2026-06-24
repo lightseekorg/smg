@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use validator::Validate;
 
 use super::{
@@ -168,6 +168,10 @@ pub struct GenerateRequest {
     /// Request ID for tracking (inherited from BaseReq in Python)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rid: Option<String>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl Normalizable for GenerateRequest {
@@ -274,6 +278,7 @@ pub struct GenerateMetaInfo {
     pub output_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
     pub completion_tokens: u32,
     pub cached_tokens: u32,
+    pub reasoning_tokens: Option<u32>,
     pub e2e_latency: f64,
     pub matched_stop: Option<Value>,
 }

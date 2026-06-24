@@ -85,14 +85,6 @@ impl WasmModuleManager {
         Ok(())
     }
 
-    pub fn get_all_modules(&self) -> Result<Vec<WasmModule>> {
-        let modules = self
-            .modules
-            .read()
-            .map_err(|e| WasmManagerError::LockFailed(e.to_string()))?;
-        Ok(modules.values().cloned().collect())
-    }
-
     pub fn get_module(&self, module_uuid: Uuid) -> Result<Option<WasmModule>> {
         let modules = self
             .modules
@@ -125,10 +117,6 @@ impl WasmModuleManager {
             .collect())
     }
 
-    pub fn get_runtime(&self) -> &Arc<WasmRuntime> {
-        &self.runtime
-    }
-
     /// Get the configured maximum body size for HTTP request/response processing
     pub fn get_max_body_size(&self) -> usize {
         self.runtime.get_config().max_body_size
@@ -143,8 +131,7 @@ impl WasmModuleManager {
     ) -> Result<WasmComponentOutput> {
         let start_time = std::time::Instant::now();
 
-        // Get the SHA256 hash and Arc-wrapped WASM bytes with a read lock.
-        // The Arc clone is ~1ns (atomic increment) instead of cloning the full bytes.
+        // Get the SHA256 hash and Arc-wrapped WASM bytes under a read lock.
         let (sha256_hash, wasm_bytes) = {
             let modules = self
                 .modules
@@ -156,7 +143,7 @@ impl WasmModuleManager {
 
             (
                 module.module_meta.sha256_hash,
-                module.module_meta.wasm_bytes.clone(), // Arc clone (cheap)
+                module.module_meta.wasm_bytes.clone(),
             )
         };
 
@@ -166,15 +153,9 @@ impl WasmModuleManager {
                 .write()
                 .map_err(|e| WasmManagerError::LockFailed(e.to_string()))?;
             if let Some(module) = modules.get_mut(&module_uuid) {
-                // SystemTime::duration_since only fails if the system time is before UNIX_EPOCH,
-                // which should never happen in normal operation. If it does, use current time as fallback.
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_else(|_| {
-                        // Fallback to a reasonable timestamp if system time is invalid
-                        // This should never occur in practice, but provides a safe fallback
-                        std::time::Duration::from_nanos(0)
-                    })
+                    .unwrap_or(std::time::Duration::ZERO)
                     .as_nanos() as u64;
                 module.module_meta.last_accessed_at = now;
                 module.module_meta.access_count += 1;
@@ -204,17 +185,6 @@ impl WasmModuleManager {
         result
     }
 
-    /// Execute WASM module using WebAssembly component model (sync version)
-    pub fn execute_module_interface_sync(
-        &self,
-        module_uuid: Uuid,
-        attach_point: WasmModuleAttachPoint,
-        input: WasmComponentInput,
-    ) -> Result<WasmComponentOutput> {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(self.execute_module_interface(module_uuid, attach_point, input))
-    }
-
     /// Get current metrics
     pub fn get_metrics(&self) -> (u64, u64, u64, u64, u64) {
         (
@@ -228,9 +198,6 @@ impl WasmModuleManager {
 
     /// Execute a WASM module for a given attach point
     /// Returns the Action if successful, or None if execution failed
-    ///
-    /// This is a convenience method that wraps execute_module_interface and handles
-    /// error logging automatically.
     pub async fn execute_module_for_attach_point(
         &self,
         module: &WasmModule,

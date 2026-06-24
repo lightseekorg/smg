@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @pytest.mark.engine("sglang", "vllm")
 @pytest.mark.gpu(1)
-@pytest.mark.model("intfloat/e5-mistral-7b-instruct")
+@pytest.mark.model("Qwen/Qwen3-Embedding-0.6B")
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)

@@ -61,6 +61,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
+    observability::metrics::Metrics,
     policies::PolicyRegistry,
     worker::{event::WorkerEvent, ConnectionMode, Worker, WorkerRegistry},
 };
@@ -141,6 +142,9 @@ pub struct WorkerMonitor {
     pub worker_load_manager: Arc<WorkerLoadManager>,
     client: reqwest::Client,
     default_interval: Duration,
+    /// When set, poll loads and re-export `smg_engine_*` gauges even if no
+    /// load-aware routing policy is active (`--engine-metrics`).
+    engine_metrics: bool,
     load_tx: watch::Sender<HashMap<String, WorkerLoadResponse>>,
     load_rx: watch::Receiver<HashMap<String, WorkerLoadResponse>>,
     group_handles: Mutex<HashMap<WorkerGroupKey, GroupState>>,
@@ -166,6 +170,7 @@ impl WorkerMonitor {
         policy_registry: Arc<PolicyRegistry>,
         client: reqwest::Client,
         default_interval_secs: u64,
+        engine_metrics: bool,
     ) -> Self {
         let (load_tx, load_rx) = watch::channel(HashMap::new());
         Self {
@@ -174,6 +179,7 @@ impl WorkerMonitor {
             worker_load_manager: Arc::new(WorkerLoadManager::new()),
             client,
             default_interval: Duration::from_secs(default_interval_secs.max(1)),
+            engine_metrics,
             load_tx,
             load_rx,
             group_handles: Mutex::new(HashMap::new()),
@@ -350,11 +356,23 @@ impl WorkerMonitor {
     /// Evict a single worker's cached loads from both the watch
     /// channel snapshot and the DP cache. Used by the event loop on
     /// `Removed`, `Replaced`, and `StatusChanged` away from `Ready`.
-    fn evict_worker_loads(&self, url: &str) {
+    ///
+    /// Also sentinels the worker's `smg_engine_*` series when engine-metrics
+    /// re-export is on, since metrics-rs cannot delete series.
+    fn evict_worker_loads(&self, worker: &Arc<dyn Worker>) {
+        let url = worker.url();
         self.load_tx.send_modify(|map| {
             map.remove(url);
         });
         self.worker_load_manager.remove_worker(url);
+        if self.engine_metrics {
+            // A worker can serve multiple models (one load group per model),
+            // so sentinel every model's series — not just the primary.
+            let dp_size = worker.dp_size().unwrap_or(1);
+            for model_id in WorkerRegistry::worker_model_ids(worker) {
+                Metrics::remove_engine_load_metrics(url, &model_id, dp_size);
+            }
+        }
     }
 
     /// Spawn the polling loop for a single group.
@@ -379,7 +397,10 @@ impl WorkerMonitor {
         handles.insert(key, GroupState { handle, interval });
     }
 
-    /// Fetch load via HTTP `GET /v1/loads?include=core`.
+    /// Fetch load via HTTP `GET /v1/loads?include=core,disagg,queues,memory`.
+    ///
+    /// Extra sections beyond `core` degrade gracefully: engines that do not
+    /// report them simply omit the fields, which deserialize to `None`.
     ///
     /// Returns `None` on transport failure, non-success status, JSON
     /// parse failure, or an empty `loads` array.
@@ -388,7 +409,7 @@ impl WorkerMonitor {
         worker: &Arc<dyn Worker>,
     ) -> Option<WorkerLoadResponse> {
         let url = worker.url();
-        let load_url = format!("{url}/v1/loads?include=core");
+        let load_url = format!("{url}/v1/loads?include=core,disagg,queues,memory");
         let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
         if let Some(key) = worker.api_key() {
             req = req.bearer_auth(key);
@@ -510,7 +531,7 @@ async fn run_event_loop(
                 // `reconcile_group` will stop the polling loop, and a
                 // stopped loop cannot prune the stale entry on a later
                 // tick — it would persist forever otherwise.
-                monitor.evict_worker_loads(worker.url());
+                monitor.evict_worker_loads(&worker);
                 for key in group_keys_for_worker(&worker) {
                     monitor.reconcile_group(&key);
                 }
@@ -522,7 +543,7 @@ async fn run_event_loop(
                 // from caches before reconciling so the disappearing
                 // groups do not leak the entry; the surviving / new
                 // groups will repopulate it on their next poll tick.
-                monitor.evict_worker_loads(old.url());
+                monitor.evict_worker_loads(&old);
                 let mut keys = group_keys_for_worker(&old);
                 keys.extend(group_keys_for_worker(&new));
                 keys.sort_by(|a, b| {
@@ -543,7 +564,7 @@ async fn run_event_loop(
                 ..
             }) => {
                 if new_status != WorkerStatus::Ready {
-                    monitor.evict_worker_loads(worker.url());
+                    monitor.evict_worker_loads(&worker);
                 }
                 // No action needed when transitioning *into* Ready: the
                 // group's polling loop reads from the registry on every
@@ -588,11 +609,13 @@ async fn group_monitor_loop(
             return;
         };
 
-        let power_of_two_policies = monitor.policy_registry.get_all_power_of_two_policies();
-        if power_of_two_policies.is_empty()
-            && monitor.policy_registry.get_dp_rank_policy().is_none()
-        {
-            debug!("No load-aware policies, skipping load fetch for group {group_key}");
+        // Poll when a load-aware policy needs the data OR engine-metrics
+        // re-export is on; the latter decouples observability from routing.
+        let load_aware_policies = monitor.policy_registry.get_all_load_aware_policies();
+        let routing_needs_load = !load_aware_policies.is_empty()
+            || monitor.policy_registry.get_dp_rank_policy().is_some();
+        if !routing_needs_load && !monitor.engine_metrics {
+            debug!("No load-aware policies and engine metrics off, skipping load fetch for group {group_key}");
             drop(monitor);
             continue;
         }
@@ -675,10 +698,18 @@ async fn group_monitor_loop(
             workers.len()
         );
 
-        for policy in &power_of_two_policies {
+        for policy in &load_aware_policies {
             policy.update_loads(&group_loads);
         }
         monitor.worker_load_manager.update_dp_loads(&group_dp_loads);
+
+        // Re-export the freshly fetched loads as `smg_engine_*` gauges. Reuses
+        // this poll's data; no extra fetch. Model label comes from the group.
+        if monitor.engine_metrics {
+            for (url, load) in &group_loads {
+                Metrics::record_engine_load(url, &group_key.model_id, load);
+            }
+        }
 
         // Atomically merge into the shared watch channel: clear stale
         // entries for *this group's* URLs first, then insert the fresh
@@ -806,6 +837,7 @@ mod worker_monitor_tests {
             policy_registry,
             reqwest::Client::new(),
             5,
+            false,
         ));
         (registry, monitor)
     }

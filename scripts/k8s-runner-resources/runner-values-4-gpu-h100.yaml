@@ -6,7 +6,7 @@ githubConfigUrl: "https://github.com/lightseekorg/smg"
 githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
-minRunners: 4
+minRunners: 2
 maxRunners: 8
 
 ## name of the runner scale set to create.  Defaults to the helm release name
@@ -20,6 +20,15 @@ template:
   spec:
     terminationGracePeriodSeconds: 600
 
+    # Volcano binpack packs GPU runners onto fewer nodes
+    # (weights: volcano-scheduler-configmap.yaml).
+    schedulerName: volcano
+
+    # hostNetwork: RDMA KV transfer (NIXL/Mooncake) needs the host's RoCE GID
+    # tables; an overlay netns has empty GIDs and RDMA init fails.
+    hostNetwork: true
+    dnsPolicy: ClusterFirstWithHostNet
+
     nodeSelector:
       nvidia.com/gpu: "true"
       node.kubernetes.io/instance-type: BM.GPU.H100.8
@@ -30,25 +39,16 @@ template:
         value: "true"
         effect: "NoSchedule"
 
-    affinity:
-      podAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                  - key: actions.github.com/scale-set-name
-                    operator: In
-                    values:
-                      - 4-gpu-h100
-              topologyKey: kubernetes.io/hostname
+    # No affinity: placement left to binpack. e2e servers bind OS-assigned
+    # ports on 127.0.0.1, so co-located hostNetwork runners don't collide.
 
     volumes:
       - name: work
         emptyDir: {}
       - name: model-cache
-        persistentVolumeClaim:
-          claimName: model-cache
+        hostPath:
+          path: /raid/models
+          type: Directory
       - name: dshm
         emptyDir:
           medium: Memory
@@ -59,23 +59,47 @@ template:
         emptyDir: {}
       - name: docker-storage
         emptyDir: {}
+      - name: infiniband
+        hostPath:
+          path: /dev/infiniband
+          type: Directory
 
     containers:
       - name: runner
-        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.3
         command:
           - /home/runner/run.sh
+        securityContext:
+          # Non-root runner (uid 1001) + IPC_LOCK lets RDMA pin completion-queue
+          # memory (ibv_create_cq) without granting full privileged.
+          privileged: false
+          capabilities:
+            add:
+              - IPC_LOCK
         env:
           - name: DOCKER_HOST
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: '120'
+          - name: HF_HOME
+            value: /models
+          - name: HF_TOKEN  # required: ci_download_model.sh runs `hf download` for the gated Llama model
+            valueFrom:
+              secretKeyRef:
+                key: HUGGINGFACE_API_KEY
+                name: huggingface-secret
+          - name: NODE_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
         resources:
           requests:
-            cpu: "32"
-            memory: "128Gi"
+            cpu: '32'
+            memory: 128Gi
+            rdma/hca_shared_devices_a: '1'
           limits:
             nvidia.com/gpu: 4
+            rdma/hca_shared_devices_a: '1'
         volumeMounts:
           - name: model-cache
             mountPath: /models
@@ -87,6 +111,8 @@ template:
             mountPath: /var/run
           - name: docker-storage
             mountPath: /var/lib/docker
+          - name: infiniband
+            mountPath: /dev/infiniband
 
     initContainers:
       - name: init-dind-externals
@@ -96,7 +122,7 @@ template:
           - /home/runner/tmpDir/
         command:
           - cp
-        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.3
         volumeMounts:
           - mountPath: /home/runner/tmpDir
             name: dind-externals
@@ -108,10 +134,28 @@ template:
         env:
           - name: DOCKER_GROUP_GID
             value: '123'
+          # Suppress dind's default TLS TCP listener (:2376). dockerd only needs
+          # the unix socket here; under hostNetwork a TCP listener would bind a
+          # node port unnecessarily.
+          - name: DOCKER_TLS_CERTDIR
+            value: ""
         image: fra.ocir.io/idqj093njucb/docker:dind
         restartPolicy: Always
         securityContext:
           privileged: true
+        resources:
+          # genai-bench (and any `docker run` workload) executes inside this dind
+          # cgroup, whose memory limit also caps the page cache for reading the
+          # multi-GB CUDA/torch image. At 4Gi a cold image read thrashes (constant
+          # reclaim + re-read), ballooning container startup to minutes and
+          # tripping the benchmark suite's 480s watchdog. Size for driver RSS +
+          # image page cache; the H100 nodes have ample RAM.
+          limits:
+            cpu: '8'
+            memory: 32Gi
+          requests:
+            cpu: '4'
+            memory: 8Gi
         startupProbe:
           exec:
             command:

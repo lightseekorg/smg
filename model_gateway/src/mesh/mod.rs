@@ -3,5 +3,7 @@
 //! and shutdown wiring added in later steps.
 
 pub mod adapters;
+pub mod wiring;
 
 pub use adapters::{RateLimitSyncAdapter, TreeDelta, TreeSyncAdapter, WorkerSyncAdapter};
+pub use wiring::MeshAdapters;

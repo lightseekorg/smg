@@ -239,19 +239,6 @@ impl McpConnectionPool {
             .find(|(key, _)| key.url == url)
             .map(|(_, cached)| Arc::clone(&cached.client))
     }
-
-    /// Check whether a connection with the given URL exists (backward
-    /// compatibility).
-    ///
-    /// **O(n)** — performs a linear scan of all pooled connections under the
-    /// lock. Callers on hot paths should prefer [`contains()`](Self::contains)
-    /// with a full [`PoolKey`] for O(1) lookup.
-    pub fn contains_url(&self, url: &str) -> bool {
-        self.connections
-            .lock()
-            .iter()
-            .any(|(key, _)| key.url == url)
-    }
 }
 
 impl Default for McpConnectionPool {

@@ -11,10 +11,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use image::{imageops::FilterType, DynamicImage, RgbImage};
 use llm_multimodal::vision::{
-    image_processor::ImagePreProcessor,
     preprocessor_config::PreProcessorConfig,
     processors::{Llama4VisionProcessor, Qwen2VLProcessor, Qwen3VLProcessor},
-    transforms,
+    transforms, VisionPreProcessor,
 };
 
 /// Create a synthetic RGB image with some variation (not all zeros).

@@ -10,12 +10,31 @@ from smg.smg_rs import get_available_reasoning_parsers, get_available_tool_call_
 logger = logging.getLogger(__name__)
 
 
+COMMON_POLICY_CHOICES = [
+    "random",
+    "round_robin",
+    "passthrough",
+    "cache_aware",
+    "power_of_two",
+    "least_load",
+    "manual",
+    "consistent_hashing",
+    "prefix_hash",
+]
+
+PREFILL_POLICY_CHOICES = [*COMMON_POLICY_CHOICES, "bucket"]
+
+
 @dataclasses.dataclass
 class RouterArgs:
     # Worker configuration
     worker_urls: list[str] = dataclasses.field(default_factory=list)
     host: str = "0.0.0.0"
     port: int = 30000
+    # Dedicated port for liveness/readiness/health probes (k8s, load balancers, monitors), served from an
+    # isolated runtime so probes are not starved by the request runtime.
+    # None = dedicated probe listener off (routes stay on the main port).
+    health_check_port: int | None = None
 
     # PD-specific configuration
     pd_disaggregation: bool = False  # Enable PD disaggregated mode
@@ -34,9 +53,14 @@ class RouterArgs:
     cache_threshold: float = 0.3
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
+    balance_token_usage_threshold: float = 1.0
+    overload_token_usage_threshold: float = 1.0
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
     block_size: int = 16
+    least_load_kv_pressure_weight: float = 0.15
+    least_load_default_throughput: float = 2000.0
+    least_load_mean_prefill_tokens: int = 1024
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
@@ -119,6 +143,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # WASM support
+    enable_wasm: bool = False
     # Storage hooks (WASM)
     storage_hook_wasm_path: str | None = None
     # History backend configuration
@@ -280,13 +306,26 @@ class RouterArgs:
                 " (use brackets for IPv6, e.g., http://[::1]:8000 http://192.168.1.1:8000)"
             ),
         )
+        worker_group.add_argument(
+            f"--{prefix}health-check-port",
+            type=int,
+            default=RouterArgs.health_check_port,
+            help=(
+                "Dedicated port for liveness/readiness/health probes (Kubernetes, load"
+                " balancers, uptime monitors)."
+                " When set, those routes are also served on this port by an"
+                " isolated runtime so probes are not starved by the request"
+                " runtime. Unset = dedicated probe listener off (routes remain"
+                " available on the main port)."
+            ),
+        )
 
         # Routing policy configuration
         routing_group.add_argument(
             f"--{prefix}policy",
             type=str,
             default=RouterArgs.policy,
-            choices=["random", "round_robin", "cache_aware", "power_of_two", "manual"],
+            choices=COMMON_POLICY_CHOICES,
             help=(
                 "Load balancing policy to use. In PD mode, this is used for both prefill and decode"
                 " unless overridden"
@@ -296,14 +335,7 @@ class RouterArgs:
             f"--{prefix}prefill-policy",
             type=str,
             default=None,
-            choices=[
-                "random",
-                "round_robin",
-                "cache_aware",
-                "power_of_two",
-                "manual",
-                "bucket",
-            ],
+            choices=PREFILL_POLICY_CHOICES,
             help=(
                 "Specific policy for prefill nodes in PD mode."
                 " If not specified, uses the main policy"
@@ -313,7 +345,7 @@ class RouterArgs:
             f"--{prefix}decode-policy",
             type=str,
             default=None,
-            choices=["random", "round_robin", "cache_aware", "power_of_two", "manual"],
+            choices=COMMON_POLICY_CHOICES,
             help=(
                 "Specific policy for decode nodes in PD mode."
                 " If not specified, uses the main policy"
@@ -324,6 +356,30 @@ class RouterArgs:
             type=float,
             default=RouterArgs.cache_threshold,
             help="Cache threshold (0.0-1.0) for cache-aware routing",
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-kv-pressure-weight",
+            type=float,
+            default=RouterArgs.least_load_kv_pressure_weight,
+            help="KV-pressure weight (seconds) for the least_load policy",
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-default-throughput",
+            type=float,
+            default=RouterArgs.least_load_default_throughput,
+            help=(
+                "Fallback generation throughput (tokens/s) for least_load when a"
+                " backend reports no live throughput"
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-mean-prefill-tokens",
+            type=int,
+            default=RouterArgs.least_load_mean_prefill_tokens,
+            help=(
+                "Mean prefill tokens for least_load's in-flight estimate when a"
+                " request's token count is unknown at routing"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}balance-abs-threshold",
@@ -341,6 +397,29 @@ class RouterArgs:
             help=(
                 "Relative threshold for load difference. Balancing is triggered if"
                 " `max_load > min_load * rel_threshold` and the absolute threshold is also met."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}balance-token-usage-threshold",
+            type=float,
+            default=RouterArgs.balance_token_usage_threshold,
+            help=(
+                "Cache-aware KV-usage SPREAD threshold (0.0-1.0): the hottest minus"
+                " coldest backend KV utilization above which cache affinity is"
+                " abandoned for shortest-queue. Catches long-context KV imbalance that"
+                " in-flight request counts miss, and is invariant to gateway replica"
+                " count. Backend must report token_usage. Defaults to 1.0 (disabled)."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}overload-token-usage-threshold",
+            type=float,
+            default=RouterArgs.overload_token_usage_threshold,
+            help=(
+                "Cache-aware KV-utilization CEILING (0.0-1.0): when the hottest backend"
+                " exceeds it, shed load off that engine regardless of spread. A safety"
+                " valve for critically-saturated engines, best set high (e.g. 0.9)."
+                " Backend must report token_usage. Defaults to 1.0 (disabled)."
             ),
         )
         routing_group.add_argument(
@@ -832,6 +911,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}enable-wasm",
+            action="store_true",
+            default=None,
+            help="Enable WebAssembly (WASM) module support",
         )
         backend_group.add_argument(
             f"--{prefix}storage-hook-wasm-path",

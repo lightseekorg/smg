@@ -10,7 +10,6 @@ fn default_rerank_object() -> String {
     "rerank".to_string()
 }
 
-/// TODO: Create timestamp should not be in protocol layer
 fn current_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -102,7 +101,6 @@ fn validate_rerank_request(req: &RerankRequest) -> Result<(), validator::Validat
     // Validate top_k if specified
     if let Some(k) = req.top_k {
         if k > req.documents.len() {
-            // This is allowed but we log a warning
             tracing::warn!(
                 "top_k ({}) is greater than number of documents ({})",
                 k,

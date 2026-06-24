@@ -1,12 +1,5 @@
-// core.rs
-//
 // Core types for the data connector module.
 // Contains all traits, data types, error types, and IDs for all storage backends.
-//
-// Structure:
-// 1. Conversation types + trait
-// 2. ConversationItem types + trait
-// 3. Response types + trait
 
 use std::{
     collections::{HashMap, HashSet},
@@ -15,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
@@ -412,36 +405,9 @@ impl ResponseChain {
         }
     }
 
-    /// Get the ID of the most recent response in the chain
-    pub fn latest_response_id(&self) -> Option<&ResponseId> {
-        self.responses.last().map(|r| &r.id)
-    }
-
     /// Add a response to the chain
     pub fn add_response(&mut self, response: StoredResponse) {
         self.responses.push(response);
-    }
-
-    /// Build context from the chain for the next request
-    pub fn build_context(&self, max_responses: Option<usize>) -> Vec<(Value, Value)> {
-        let responses = if let Some(max) = max_responses {
-            let start = self.responses.len().saturating_sub(max);
-            &self.responses[start..]
-        } else {
-            &self.responses[..]
-        };
-
-        responses
-            .iter()
-            .map(|r| {
-                let output = r
-                    .raw_response
-                    .get("output")
-                    .cloned()
-                    .unwrap_or(Value::Array(vec![]));
-                (r.input.clone(), output)
-            })
-            .collect()
     }
 }
 
@@ -535,96 +501,6 @@ pub trait ResponseStorage: Send + Sync {
 
     /// Delete all responses for a safety identifier
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize>;
-}
-
-// ============================================================================
-// PART 4: ConversationMemory Insert Seam
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ConversationMemoryId(pub String);
-
-impl From<String> for ConversationMemoryId {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for ConversationMemoryId {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
-    }
-}
-
-impl Display for ConversationMemoryId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConversationMemoryType {
-    #[serde(rename = "ONDEMAND")]
-    OnDemand,
-    #[serde(rename = "LTM")]
-    Ltm,
-    #[serde(rename = "STMO")]
-    Stmo,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConversationMemoryStatus {
-    #[serde(rename = "READY")]
-    Ready,
-    #[serde(rename = "RUNNING")]
-    Running,
-    #[serde(rename = "SUCCESS")]
-    Success,
-    #[serde(rename = "FAILED")]
-    Failed,
-}
-
-/// Insert-only payload for creating a new conversation memory row.
-///
-/// `NewConversationMemory` intentionally omits database-managed fields such as
-/// `memory_id`, `created_at`, and `updated_at`. Callers should not set those
-/// values directly; they are created or maintained by the database/write path.
-/// When changing an existing record, use the appropriate update path rather
-/// than reusing this struct.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NewConversationMemory {
-    pub conversation_id: ConversationId,
-    pub conversation_version: Option<i64>,
-    pub response_id: Option<ResponseId>,
-    pub memory_type: ConversationMemoryType,
-    pub status: ConversationMemoryStatus,
-    pub attempt: i64,
-    pub owner_id: Option<String>,
-    pub next_run_at: DateTime<Utc>,
-    pub lease_until: Option<DateTime<Utc>>,
-    pub content: Option<String>,
-    pub memory_config: Option<String>,
-    pub scope_id: Option<String>,
-    pub error_msg: Option<String>,
-}
-
-pub type ConversationMemoryResult<T> = Result<T, ConversationMemoryStorageError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum ConversationMemoryStorageError {
-    #[error("Storage error: {0}")]
-    StorageError(String),
-
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
-}
-
-#[async_trait]
-pub trait ConversationMemoryWriter: Send + Sync + 'static {
-    async fn create_memory(
-        &self,
-        input: NewConversationMemory,
-    ) -> ConversationMemoryResult<ConversationMemoryId>;
 }
 
 impl Default for StoredResponse {
@@ -992,143 +868,5 @@ mod tests {
         assert_eq!(chain.responses.len(), 2, "chain should have 2 responses");
         assert_eq!(chain.responses[0].id, r1_id, "first response should be r1");
         assert_eq!(chain.responses[1].id, r2_id, "second response should be r2");
-    }
-
-    #[test]
-    fn response_chain_latest_response_id_returns_last() {
-        let mut chain = ResponseChain::new();
-        let r1 = StoredResponse::new(None);
-        let r2 = StoredResponse::new(None);
-        let r2_id = r2.id.clone();
-
-        chain.add_response(r1);
-        chain.add_response(r2);
-
-        assert_eq!(
-            chain.latest_response_id(),
-            Some(&r2_id),
-            "latest_response_id should return the last response's ID"
-        );
-    }
-
-    #[test]
-    fn response_chain_latest_response_id_returns_none_for_empty() {
-        let chain = ResponseChain::new();
-        assert_eq!(
-            chain.latest_response_id(),
-            None,
-            "latest_response_id should return None for empty chain"
-        );
-    }
-
-    #[test]
-    fn response_chain_build_context_returns_input_output_pairs() {
-        use serde_json::json;
-
-        let mut chain = ResponseChain::new();
-
-        let mut r1 = StoredResponse::new(None);
-        r1.input = Value::String("input1".to_string());
-        r1.raw_response = json!({"output": "output1"});
-
-        let mut r2 = StoredResponse::new(None);
-        r2.input = Value::String("input2".to_string());
-        r2.raw_response = json!({"output": "output2"});
-
-        chain.add_response(r1);
-        chain.add_response(r2);
-
-        let context = chain.build_context(None);
-        assert_eq!(context.len(), 2, "should return 2 pairs");
-        assert_eq!(context[0].0, Value::String("input1".to_string()));
-        assert_eq!(context[0].1, Value::String("output1".to_string()));
-        assert_eq!(context[1].0, Value::String("input2".to_string()));
-        assert_eq!(context[1].1, Value::String("output2".to_string()));
-    }
-
-    #[test]
-    fn response_chain_build_context_with_max_responses_limits_output() {
-        use serde_json::json;
-
-        let mut chain = ResponseChain::new();
-
-        for i in 0..5 {
-            let mut resp = StoredResponse::new(None);
-            resp.input = Value::String(format!("input{i}"));
-            resp.raw_response = json!({"output": format!("output{i}")});
-            chain.add_response(resp);
-        }
-
-        let context = chain.build_context(Some(2));
-        assert_eq!(context.len(), 2, "should return only 2 most recent pairs");
-        // Should be the last 2 responses (index 3 and 4)
-        assert_eq!(context[0].0, Value::String("input3".to_string()));
-        assert_eq!(context[0].1, Value::String("output3".to_string()));
-        assert_eq!(context[1].0, Value::String("input4".to_string()));
-        assert_eq!(context[1].1, Value::String("output4".to_string()));
-    }
-
-    // ========================================================================
-    // ConversationMemory seam tests
-    // ========================================================================
-
-    #[test]
-    fn conversation_memory_status_serializes_to_expected_uppercase_values() {
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryStatus::Ready).unwrap(),
-            "\"READY\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryStatus::Running).unwrap(),
-            "\"RUNNING\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryStatus::Success).unwrap(),
-            "\"SUCCESS\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryStatus::Failed).unwrap(),
-            "\"FAILED\""
-        );
-    }
-
-    #[test]
-    fn conversation_memory_type_serializes_to_expected_uppercase_values() {
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryType::OnDemand).unwrap(),
-            "\"ONDEMAND\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryType::Ltm).unwrap(),
-            "\"LTM\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConversationMemoryType::Stmo).unwrap(),
-            "\"STMO\""
-        );
-    }
-
-    #[test]
-    fn new_conversation_memory_keeps_insert_only_fields() {
-        let input = NewConversationMemory {
-            conversation_id: ConversationId::from("conv_123"),
-            conversation_version: Some(7),
-            response_id: Some(ResponseId::from("resp_123")),
-            memory_type: ConversationMemoryType::Ltm,
-            status: ConversationMemoryStatus::Ready,
-            attempt: 0,
-            owner_id: None,
-            next_run_at: Utc::now(),
-            lease_until: None,
-            content: None,
-            memory_config: None,
-            scope_id: None,
-            error_msg: None,
-        };
-
-        assert_eq!(input.attempt, 0);
-        assert_eq!(input.conversation_id, ConversationId::from("conv_123"));
-        assert_eq!(input.response_id, Some(ResponseId::from("resp_123")));
-        assert!(input.lease_until.is_none());
     }
 }

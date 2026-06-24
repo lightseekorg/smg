@@ -7,12 +7,17 @@ use openai_protocol::{
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
-    tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient, SglangSchedulerClient,
+    common_proto, tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient,
+    SglangGenerateRequestOptions, SglangSchedulerClient, TokenSpeedSchedulerClient,
     TrtllmServiceClient, VllmEngineClient,
 };
 
 use crate::routers::grpc::{
-    proto_wrapper::{ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream},
+    proto_wrapper::{
+        cleanup_tokenspeed_shm_handles, collect_tokenspeed_generate_request_shm_handles,
+        finish_tokenspeed_request, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
+        ProtoStream,
+    },
     MultimodalData,
 };
 
@@ -23,13 +28,29 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
-/// Polymorphic gRPC client that wraps SGLang, vLLM, TensorRT-LLM, or MLX
+/// TRT-LLM reports liveness via a free-form status string whose only healthy
+/// value is `"OK"` (per `trtllm_service.proto`); anything else is an error
+/// description and must be treated as unhealthy.
+fn trtllm_status_healthy(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("ok")
+}
+
+/// Wraps the per-backend gRPC clients. RPCs absent on a backend's wire
+/// return `Status::unimplemented`.
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
     Vllm(VllmEngineClient),
     Trtllm(TrtllmServiceClient),
     Mlx(MlxEngineClient),
+    TokenSpeed(TokenSpeedSchedulerClient),
+}
+
+#[derive(Default)]
+pub struct GenerateRequestBuildOptions {
+    pub multimodal_inputs: Option<MultimodalData>,
+    pub tool_constraints: Option<(String, String)>,
+    pub require_reasoning: bool,
 }
 
 impl GrpcClient {
@@ -137,6 +158,32 @@ impl GrpcClient {
         matches!(self, Self::Mlx(_))
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_tokenspeed() check"
+    )]
+    pub fn as_tokenspeed(&self) -> &TokenSpeedSchedulerClient {
+        match self {
+            Self::TokenSpeed(client) => client,
+            _ => panic!("Expected TokenSpeed client"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_tokenspeed() check"
+    )]
+    pub fn as_tokenspeed_mut(&mut self) -> &mut TokenSpeedSchedulerClient {
+        match self {
+            Self::TokenSpeed(client) => client,
+            _ => panic!("Expected TokenSpeed client"),
+        }
+    }
+
+    pub fn is_tokenspeed(&self) -> bool {
+        matches!(self, Self::TokenSpeed(_))
+    }
+
     pub async fn connect(
         url: &str,
         runtime_type: &str,
@@ -146,6 +193,9 @@ impl GrpcClient {
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
             "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
             "mlx" => Ok(Self::Mlx(MlxEngineClient::connect(url).await?)),
+            "tokenspeed" => Ok(Self::TokenSpeed(
+                TokenSpeedSchedulerClient::connect(url).await?,
+            )),
             _ => Err(format!("Unknown runtime type: {runtime_type}").into()),
         }
     }
@@ -168,14 +218,20 @@ impl GrpcClient {
             }
             Self::Trtllm(client) => {
                 let resp = client.health_check().await?;
-                let healthy = resp.status.to_lowercase().contains("ok")
-                    || resp.status.to_lowercase().contains("healthy");
+                let healthy = trtllm_status_healthy(&resp.status);
                 Ok(HealthCheckResponse {
                     healthy,
                     message: resp.status,
                 })
             }
             Self::Mlx(client) => {
+                let resp = client.health_check().await?;
+                Ok(HealthCheckResponse {
+                    healthy: resp.healthy,
+                    message: resp.message,
+                })
+            }
+            Self::TokenSpeed(client) => {
                 let resp = client.health_check().await?;
                 Ok(HealthCheckResponse {
                     healthy: resp.healthy,
@@ -191,15 +247,35 @@ impl GrpcClient {
             Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
             Self::Trtllm(client) => Ok(ModelInfo::Trtllm(client.get_model_info().await?)),
             Self::Mlx(client) => Ok(ModelInfo::Mlx(client.get_model_info().await?)),
+            Self::TokenSpeed(client) => Ok(ModelInfo::TokenSpeed(Box::new(
+                client.get_model_info().await?,
+            ))),
         }
     }
 
     /// Get the full load response from the backend.
-    /// Only supported for SGLang backends. Returns per-DP-rank load metrics.
+    /// Returns `Unimplemented` for backends without scheduler load metrics.
     pub async fn get_loads(&self) -> Result<WorkerLoadResponse, tonic::Status> {
+        // Optional sections beyond `core` (disagg/queues/memory) are dropped by
+        // engines that do not report them, so requesting them is always safe and
+        // leaves routing consumers, which only read `core`, unaffected.
+        let include = || {
+            ["core", "disagg", "queues", "memory"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
         match self {
             Self::Sglang(client) => {
-                let resp = client.get_loads(vec!["core".to_string()]).await?;
+                let resp = client.get_loads(include()).await?;
+                Ok(WorkerLoadResponse::from(resp))
+            }
+            Self::TokenSpeed(client) => {
+                let resp = client.get_loads(include()).await?;
+                Ok(WorkerLoadResponse::from(resp))
+            }
+            Self::Vllm(client) => {
+                let resp = client.get_loads(include()).await?;
                 Ok(WorkerLoadResponse::from(resp))
             }
             _ => Err(tonic::Status::unimplemented(
@@ -208,15 +284,59 @@ impl GrpcClient {
         }
     }
 
-    /// Subscribe to KV cache events (all backends).
+    /// Flush the KV cache on the backend. Returns `Unimplemented` for
+    /// backends without the FlushCache RPC.
+    pub async fn flush_cache(
+        &self,
+        timeout_s: f32,
+    ) -> Result<common_proto::FlushCacheResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.flush_cache(timeout_s).await,
+            Self::TokenSpeed(client) => client.flush_cache(timeout_s).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "FlushCache RPC not supported for this backend",
+            )),
+        }
+    }
+
+    /// Start the profiler on the backend. Returns `Unimplemented` for
+    /// backends without the StartProfile RPC.
+    pub async fn start_profile(
+        &self,
+        req: common_proto::StartProfileRequest,
+    ) -> Result<common_proto::ProfileResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.start_profile(req).await,
+            Self::TokenSpeed(client) => client.start_profile(req).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "StartProfile RPC not supported for this backend",
+            )),
+        }
+    }
+
+    /// Stop the profiler on the backend. Returns `Unimplemented` for
+    /// backends without the StopProfile RPC.
+    pub async fn stop_profile(&self) -> Result<common_proto::ProfileResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.stop_profile().await,
+            Self::TokenSpeed(client) => client.stop_profile().await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "StopProfile RPC not supported for this backend",
+            )),
+        }
+    }
+
+    /// Subscribe to KV cache events. Returns `Unimplemented` on backends
+    /// without KV-event streaming.
     pub async fn subscribe_kv_events(
         &self,
         start_seq: u64,
-    ) -> Result<tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>, tonic::Status> {
+    ) -> Result<tonic::Streaming<common_proto::KvEventBatch>, tonic::Status> {
         match self {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
             Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::TokenSpeed(client) => client.subscribe_kv_events(start_seq).await,
             Self::Mlx(_) => Err(tonic::Status::unimplemented(
                 "SubscribeKvEvents RPC not supported for MLX backend",
             )),
@@ -231,6 +351,9 @@ impl GrpcClient {
             Self::Vllm(client) => Ok(ServerInfo::Vllm(client.get_server_info().await?)),
             Self::Trtllm(client) => Ok(ServerInfo::Trtllm(client.get_server_info().await?)),
             Self::Mlx(client) => Ok(ServerInfo::Mlx(client.get_server_info().await?)),
+            Self::TokenSpeed(client) => Ok(ServerInfo::TokenSpeed(Box::new(
+                client.get_server_info().await?,
+            ))),
         }
     }
 
@@ -243,6 +366,11 @@ impl GrpcClient {
             Self::Vllm(client) => client.get_tokenizer().await,
             Self::Trtllm(client) => client.get_tokenizer().await,
             Self::Mlx(client) => client.get_tokenizer().await,
+            Self::TokenSpeed(_) => {
+                return Err(Box::new(tonic::Status::unimplemented(
+                    "TokenSpeed backend does not support GetTokenizer RPC",
+                )));
+            }
         }?;
 
         tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
@@ -280,6 +408,16 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Mlx(stream))
             }
+            (Self::TokenSpeed(client), ProtoGenerateRequest::TokenSpeed(boxed_req)) => {
+                let shm_handles = collect_tokenspeed_generate_request_shm_handles(&boxed_req);
+                match client.generate(*boxed_req).await {
+                    Ok(stream) => Ok(ProtoStream::TokenSpeed(stream)),
+                    Err(error) => {
+                        cleanup_tokenspeed_shm_handles(&shm_handles);
+                        Err(error)
+                    }
+                }
+            }
             #[expect(
                 clippy::panic,
                 reason = "client and request types are always matched by construction in the pipeline"
@@ -301,6 +439,9 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedComplete::Vllm(resp))
             }
+            (Self::TokenSpeed(_), _) => Err(tonic::Status::unimplemented(
+                "TokenSpeed backend does not support embedding",
+            )),
             (Self::Mlx(_), _) => Err(tonic::Status::unimplemented(
                 "MLX backend does not support embedding",
             )),
@@ -322,12 +463,11 @@ impl GrpcClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        multimodal_inputs: Option<MultimodalData>,
-        tool_constraints: Option<(String, String)>,
+        options: GenerateRequestBuildOptions,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                let sglang_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Sglang(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -336,13 +476,16 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
-                    sglang_mm,
-                    tool_constraints,
+                    SglangGenerateRequestOptions {
+                        multimodal_inputs: sglang_mm,
+                        tool_call_constraint: options.tool_constraints,
+                        require_reasoning: options.require_reasoning,
+                    },
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
-                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -352,12 +495,12 @@ impl GrpcClient {
                     processed_text,
                     token_ids,
                     vllm_mm,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
-                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                let trtllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Trtllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -367,7 +510,7 @@ impl GrpcClient {
                     processed_text,
                     token_ids,
                     trtllm_mm,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
@@ -378,9 +521,25 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
+            }
+            Self::TokenSpeed(client) => {
+                let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                    client.build_generate_request_from_chat(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
         }
     }
@@ -395,12 +554,11 @@ impl GrpcClient {
         body: &CreateMessageRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        multimodal_inputs: Option<MultimodalData>,
-        tool_constraints: Option<(String, String)>,
+        options: GenerateRequestBuildOptions,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                let sglang_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Sglang(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -409,13 +567,16 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
-                    sglang_mm,
-                    tool_constraints,
+                    SglangGenerateRequestOptions {
+                        multimodal_inputs: sglang_mm,
+                        tool_call_constraint: options.tool_constraints,
+                        require_reasoning: options.require_reasoning,
+                    },
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
-                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -425,12 +586,12 @@ impl GrpcClient {
                     processed_text,
                     token_ids,
                     vllm_mm,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
-                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                let trtllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Trtllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
@@ -440,7 +601,7 @@ impl GrpcClient {
                     processed_text,
                     token_ids,
                     trtllm_mm,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
@@ -451,9 +612,25 @@ impl GrpcClient {
                     body,
                     processed_text,
                     token_ids,
-                    tool_constraints,
+                    options.tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
+            }
+            Self::TokenSpeed(client) => {
+                let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                    client.build_generate_request_from_messages(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
         }
     }
@@ -502,6 +679,15 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
+            Self::TokenSpeed(client) => {
+                let req = client.build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+            }
         }
     }
 
@@ -549,6 +735,15 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
+            Self::TokenSpeed(client) => {
+                let req = client.build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+            }
         }
     }
 }
@@ -562,6 +757,7 @@ pub enum ModelInfo {
     Vllm(smg_grpc_client::vllm_proto::GetModelInfoResponse),
     Trtllm(smg_grpc_client::trtllm_proto::GetModelInfoResponse),
     Mlx(smg_grpc_client::mlx_proto::GetModelInfoResponse),
+    TokenSpeed(Box<smg_grpc_client::tokenspeed_proto::GetModelInfoResponse>),
 }
 
 pub enum ServerInfo {
@@ -569,6 +765,7 @@ pub enum ServerInfo {
     Vllm(smg_grpc_client::vllm_proto::GetServerInfoResponse),
     Trtllm(smg_grpc_client::trtllm_proto::GetServerInfoResponse),
     Mlx(smg_grpc_client::mlx_proto::GetServerInfoResponse),
+    TokenSpeed(Box<smg_grpc_client::tokenspeed_proto::GetServerInfoResponse>),
 }
 
 impl ModelInfo {
@@ -578,6 +775,7 @@ impl ModelInfo {
             ModelInfo::Vllm(info) => flat_labels(info),
             ModelInfo::Trtllm(info) => flat_labels(info),
             ModelInfo::Mlx(info) => flat_labels(info),
+            ModelInfo::TokenSpeed(info) => flat_labels(info),
         }
     }
 }
@@ -600,6 +798,23 @@ impl ServerInfo {
             ServerInfo::Vllm(info) => flat_labels(info),
             ServerInfo::Trtllm(info) => flat_labels(info),
             ServerInfo::Mlx(info) => flat_labels(info),
+            ServerInfo::TokenSpeed(info) => {
+                let mut labels = HashMap::new();
+                if let Some(ref args) = info.server_args {
+                    pick_prost_fields(&mut labels, args, TOKENSPEED_GRPC_KEYS);
+                }
+                if !info.tokenspeed_version.is_empty() {
+                    labels.insert("version".to_string(), info.tokenspeed_version.clone());
+                }
+                // Carry the worker's /dev/shm namespace identity (advertised in
+                // scheduler_info). The router compares it to its own to decide the
+                // SHM tensor transport by *verifying* a shared /dev/shm rather than
+                // inferring it from the worker URL. See `worker_shares_dev_shm`.
+                if let Some(ref sched) = info.scheduler_info {
+                    pick_prost_fields(&mut labels, sched, &["shm_namespace_id"]);
+                }
+                labels
+            }
         }
     }
 }
@@ -617,6 +832,24 @@ const SGLANG_GRPC_KEYS: &[&str] = &[
     "max_running_requests",
     "load_balance_method",
     "disaggregation_mode",
+    "is_embedding",
+    "vocab_size",
+    "weight_version",
+];
+
+/// Keys worth extracting from TokenSpeed gRPC `server_args` (post-rename: bare
+/// names, not `_path` variants — TokenSpeed dropped the legacy suffixes).
+const TOKENSPEED_GRPC_KEYS: &[&str] = &[
+    "model",
+    "served_model_name",
+    "tokenizer",
+    "tp_size",
+    "dp_size",
+    "pp_size",
+    "context_length",
+    "max_total_tokens",
+    "max_running_requests",
+    "load_balance_method",
     "is_embedding",
     "vocab_size",
     "weight_version",
@@ -685,5 +918,169 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use smg_grpc_client::{sglang_proto, tokenspeed_proto};
+
+    use super::{trtllm_status_healthy, ModelInfo, ServerInfo};
+
+    #[test]
+    fn trtllm_status_healthy_matches_ok_exactly() {
+        assert!(trtllm_status_healthy("ok"));
+        assert!(trtllm_status_healthy("OK"));
+        assert!(trtllm_status_healthy("  OK  "));
+
+        assert!(!trtllm_status_healthy("not ok"));
+        assert!(!trtllm_status_healthy("checking"));
+        assert!(!trtllm_status_healthy("degraded"));
+        assert!(!trtllm_status_healthy(""));
+    }
+
+    fn string_value(s: &str) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(s.to_string())),
+        }
+    }
+
+    fn number_value(n: f64) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(n)),
+        }
+    }
+
+    /// The `/workers` metadata path for TokenSpeed: curated `server_args` keys
+    /// become labels, everything else (unlisted keys, scheduler_info, runtime
+    /// state) stays out.
+    #[test]
+    fn server_info_to_labels_tokenspeed_picks_curated_keys_and_version() {
+        let info = ServerInfo::TokenSpeed(Box::new(tokenspeed_proto::GetServerInfoResponse {
+            server_args: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("model".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("tokenizer".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("tp_size".to_string(), number_value(2.0)),
+                    ("max_total_tokens".to_string(), number_value(8192.0)),
+                    // Not in TOKENSPEED_GRPC_KEYS — must not become a label.
+                    ("host".to_string(), string_value("127.0.0.1")),
+                ]),
+            }),
+            scheduler_info: Some(prost_types::Struct {
+                fields: BTreeMap::from([("status".to_string(), string_value("ready"))]),
+            }),
+            active_requests: 3,
+            uptime_seconds: 12.5,
+            max_total_num_tokens: 8192,
+            tokenspeed_version: "0.1.0".to_string(),
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(
+            labels.get("tokenizer").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        // Integral numbers are formatted without a decimal point.
+        assert_eq!(labels.get("tp_size").map(String::as_str), Some("2"));
+        assert_eq!(
+            labels.get("max_total_tokens").map(String::as_str),
+            Some("8192")
+        );
+        assert_eq!(labels.get("version").map(String::as_str), Some("0.1.0"));
+        assert!(!labels.contains_key("host"));
+        // scheduler_info and transient runtime state never become labels.
+        assert!(!labels.contains_key("status"));
+        assert!(!labels.contains_key("active_requests"));
+        assert!(!labels.contains_key("uptime_seconds"));
+    }
+
+    #[test]
+    fn server_info_to_labels_sglang_picks_curated_keys_and_version() {
+        let info = ServerInfo::Sglang(Box::new(sglang_proto::GetServerInfoResponse {
+            server_args: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("model_path".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("dp_size".to_string(), number_value(4.0)),
+                    (
+                        "is_embedding".to_string(),
+                        prost_types::Value {
+                            kind: Some(prost_types::value::Kind::BoolValue(false)),
+                        },
+                    ),
+                    // Not in SGLANG_GRPC_KEYS — must not become a label.
+                    ("api_key".to_string(), string_value("secret")),
+                ]),
+            }),
+            sglang_version: "0.4.0".to_string(),
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model_path").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(labels.get("dp_size").map(String::as_str), Some("4"));
+        // Booleans are kept even when false (embedding detection relies on it).
+        assert_eq!(
+            labels.get("is_embedding").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(labels.get("version").map(String::as_str), Some("0.4.0"));
+        assert!(!labels.contains_key("api_key"));
+    }
+
+    /// `GetModelInfoResponse` is flat for every backend, so it serializes via
+    /// `flat_labels`: empty strings and zero numbers are skipped, booleans are
+    /// kept, arrays are JSON-encoded.
+    #[test]
+    fn model_info_to_labels_tokenspeed_flat_serializes_skipping_empty_and_zero() {
+        let info = ModelInfo::TokenSpeed(Box::new(tokenspeed_proto::GetModelInfoResponse {
+            model_path: "Qwen/Qwen3-8B".to_string(),
+            tokenizer_path: String::new(), // empty — skipped
+            served_model_name: "qwen3-8b".to_string(),
+            architectures: vec!["Qwen3ForCausalLM".to_string()],
+            max_context_length: 32768,
+            vocab_size: 151_936,
+            pad_token_id: 0, // zero — skipped
+            supports_vision: false,
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model_path").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(
+            labels.get("served_model_name").map(String::as_str),
+            Some("qwen3-8b")
+        );
+        assert_eq!(
+            labels.get("max_context_length").map(String::as_str),
+            Some("32768")
+        );
+        assert_eq!(labels.get("vocab_size").map(String::as_str), Some("151936"));
+        assert_eq!(
+            labels.get("architectures").map(String::as_str),
+            Some(r#"["Qwen3ForCausalLM"]"#)
+        );
+        assert_eq!(
+            labels.get("supports_vision").map(String::as_str),
+            Some("false")
+        );
+        assert!(!labels.contains_key("tokenizer_path"));
+        assert!(!labels.contains_key("pad_token_id"));
     }
 }

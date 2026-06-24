@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use smg::{
     config::{
-        CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-        HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,
+        DiscoveryConfig, HealthCheckConfig, HistoryBackend, ManualAssignmentMode, MetricsConfig,
+        OracleConfig, PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig,
+        RoutingMode, SchemaConfig, TokenizerCacheConfig, TraceConfig,
     },
     observability::{
         metrics::PrometheusConfig,
@@ -20,6 +20,8 @@ use smg::{
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
+use tracing::info;
+
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -143,13 +145,26 @@ struct CliArgs {
     #[arg(long, default_value_t = 30000, help_heading = "Worker Configuration")]
     port: u16,
 
+    /// Dedicated port for liveness/readiness/health probes (Kubernetes,
+    /// load balancers, uptime monitors, etc.).
+    ///
+    /// When set, `/liveness`, `/readiness`, and `/health` are additionally
+    /// served on this port by a middleware-free router running on its own
+    /// single-worker runtime and OS thread, isolated from the request
+    /// runtime so a saturated gateway cannot starve probes (and trigger the
+    /// failed-probe restarts or depooling that follow) under load. The same
+    /// probe routes always remain available on the main `--port` too.
+    /// Unset = dedicated probe listener off.
+    #[arg(long, help_heading = "Worker Configuration")]
+    health_check_port: Option<u16>,
+
     /// List of worker URLs (supports IPv4 and IPv6)
     #[arg(long, num_args = 0.., help_heading = "Worker Configuration")]
     worker_urls: Vec<String>,
 
     // ==================== Routing Policy ====================
     /// Load balancing policy to use
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "Routing Policy")]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "passthrough", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "Routing Policy")]
     policy: String,
 
     /// Cache threshold (0.0-1.0) for cache-aware routing
@@ -163,6 +178,20 @@ struct CliArgs {
     /// Relative threshold for load balancing trigger
     #[arg(long, default_value_t = 1.5, help_heading = "Routing Policy")]
     balance_rel_threshold: f32,
+
+    /// Cache-aware KV-usage spread (hottest minus coldest backend, 0.0-1.0)
+    /// above which cache affinity is abandoned for shortest-queue, even if
+    /// request counts look balanced (catches long-context KV imbalance). Backend
+    /// must report token_usage. >= 1.0 disables it.
+    #[arg(long, default_value_t = 1.0, help_heading = "Routing Policy")]
+    balance_token_usage_threshold: f32,
+
+    /// Cache-aware KV-utilization ceiling (0.0-1.0): when the hottest backend
+    /// exceeds it, shed load off that engine regardless of spread. A safety
+    /// valve for critically-saturated engines, best set high (e.g. 0.9).
+    /// >= 1.0 disables it.
+    #[arg(long, default_value_t = 1.0, help_heading = "Routing Policy")]
+    overload_token_usage_threshold: f32,
 
     /// Interval in seconds between cache eviction operations
     #[arg(long, default_value_t = 120, help_heading = "Routing Policy")]
@@ -192,6 +221,20 @@ struct CliArgs {
     #[arg(long, default_value_t = 1.25, help_heading = "Routing Policy")]
     prefix_hash_load_factor: f64,
 
+    /// KV-pressure weight (seconds) for the least_load policy
+    #[arg(long, default_value_t = 0.15, help_heading = "Routing Policy")]
+    least_load_kv_pressure_weight: f64,
+
+    /// Fallback generation throughput (tokens/s) for least_load when a backend
+    /// reports no live throughput
+    #[arg(long, default_value_t = 2000.0, help_heading = "Routing Policy")]
+    least_load_default_throughput: f64,
+
+    /// Mean prefill tokens for least_load's in-flight estimate when a request's
+    /// token count is unknown at routing
+    #[arg(long, default_value_t = 1024, help_heading = "Routing Policy")]
+    least_load_mean_prefill_tokens: u32,
+
     /// Enable data parallelism aware scheduling
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
     dp_aware: bool,
@@ -214,11 +257,11 @@ struct CliArgs {
     decode: Vec<String>,
 
     /// Specific policy for prefill nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
     prefill_policy: Option<String>,
 
     /// Specific policy for decode nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
     decode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup and registration
@@ -232,6 +275,11 @@ struct CliArgs {
     /// Interval in seconds between load monitor checks for PowerOfTwo routing
     #[arg(long, default_value_t = 10, help_heading = "Load Monitoring")]
     load_monitor_interval: u64,
+
+    /// Re-export engine GetLoads signals (incl. PD) as smg_engine_* Prometheus
+    /// gauges, polling even without a load-aware routing policy.
+    #[arg(long, default_value_t = false, help_heading = "Load Monitoring")]
+    engine_metrics: bool,
 
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
@@ -351,6 +399,25 @@ struct CliArgs {
     #[arg(long, default_value_t = 60, help_heading = "Rate Limiting")]
     queue_timeout_secs: u64,
 
+    // ==================== Priority Scheduler ====================
+    /// Enable the priority-aware admission scheduler. When unset (default),
+    /// the legacy concurrency-limit middleware stays wired.
+    #[arg(long, help_heading = "Priority Scheduler")]
+    priority_scheduler_enabled: bool,
+
+    /// Max priority class for tenants not listed in the scheduler YAML
+    /// (system | interactive | default | bulk).
+    #[arg(long, default_value = "default", help_heading = "Priority Scheduler")]
+    priority_scheduler_default_max_class: String,
+
+    /// Optional path to the priority-scheduler YAML config.
+    #[arg(long, help_heading = "Priority Scheduler")]
+    priority_scheduler_config: Option<String>,
+
+    /// Cap on per-tenant scheduler metric label cardinality (top-N + "other").
+    #[arg(long, default_value_t = 32, help_heading = "Priority Scheduler")]
+    priority_scheduler_tenant_metric_top_n: u32,
+
     /// Token bucket refill rate (tokens per second)
     #[arg(long, help_heading = "Rate Limiting")]
     rate_limit_tokens_per_second: Option<i32>,
@@ -446,6 +513,14 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     remove_unhealthy_workers: bool,
 
+    /// Seconds to keep a Ready worker in `Draining` before removing it from
+    /// the registry. Applies to all RemoveWorker submissions (K8s deletion,
+    /// `--remove-unhealthy-workers`, manual API). Per-worker overrides are
+    /// supported via `WorkerSpec::health.drain_settle_secs`. Set to `0` to
+    /// remove immediately without draining.
+    #[arg(long, default_value_t = 5, help_heading = "Health Checks")]
+    drain_settle_secs: u64,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -491,21 +566,6 @@ struct CliArgs {
     /// Path to MCP server configuration file
     #[arg(long, help_heading = "Parsers")]
     mcp_config_path: Option<String>,
-
-    // ==================== Skills ====================
-    /// Enable the skills subsystem scaffolding.
-    #[arg(
-        long,
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = clap::value_parser!(bool),
-        help_heading = "Skills"
-    )]
-    skills_enabled: Option<bool>,
-
-    /// Path to a YAML file with the nested skills configuration.
-    #[arg(long, help_heading = "Skills")]
-    skills_config_path: Option<String>,
 
     // ==================== Backend ====================
     /// Backend runtime to use (auto-detected if not specified)
@@ -706,6 +766,13 @@ struct CliArgs {
     /// Defaults to `stun.l.google.com:19302`. Set to "none" to disable.
     #[arg(long, help_heading = "WebRTC")]
     webrtc_stun_server: Option<String>,
+
+    // ==================== Runtime ====================
+    /// Explicit async runtime worker-thread count. Leave unset to use tokio's
+    /// default (`available_parallelism()`), which already honors the cgroup CPU
+    /// quota on Rust 1.95+ and is therefore container-aware.
+    #[arg(long, help_heading = "Runtime")]
+    runtime_worker_threads: Option<usize>,
 }
 
 enum OracleConnectSource {
@@ -865,6 +932,7 @@ impl CliArgs {
         }
 
         let self_name = if let Some(name) = &self.mesh_server_name {
+            validate_mesh_server_name(name)?;
             name.to_string()
         } else {
             let mut rng = rand::rng();
@@ -921,6 +989,7 @@ impl CliArgs {
         match policy_str {
             "random" => PolicyConfig::Random,
             "round_robin" => PolicyConfig::RoundRobin,
+            "passthrough" => PolicyConfig::Passthrough,
             "cache_aware" => PolicyConfig::CacheAware {
                 cache_threshold: self.cache_threshold,
                 balance_abs_threshold: self.balance_abs_threshold,
@@ -928,9 +997,17 @@ impl CliArgs {
                 eviction_interval_secs: self.eviction_interval,
                 max_tree_size: self.max_tree_size,
                 block_size: self.block_size,
+                balance_token_usage_threshold: self.balance_token_usage_threshold,
+                overload_token_usage_threshold: self.overload_token_usage_threshold,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 5,
+            },
+            "least_load" => PolicyConfig::LeastLoad {
+                load_check_interval_secs: 5,
+                kv_pressure_weight: self.least_load_kv_pressure_weight,
+                mean_prefill_tokens: self.least_load_mean_prefill_tokens,
+                default_throughput: self.least_load_default_throughput,
             },
             "prefix_hash" => PolicyConfig::PrefixHash {
                 prefix_token_count: self.prefix_token_count,
@@ -1200,24 +1277,27 @@ impl CliArgs {
             _ => (None, None, None),
         };
 
-        let skills_enabled = self
-            .skills_enabled
-            .unwrap_or_else(|| self.skills_config_path.is_some());
-
         let builder = RouterConfig::builder()
             .mode(mode)
             .policy(policy)
             .connection_mode(connection_mode)
             .host(&self.host)
             .port(self.port)
+            .health_check_port(self.health_check_port)
+            .runtime_worker_threads(self.runtime_worker_threads)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
+            .engine_metrics(self.engine_metrics)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
+            .priority_scheduler_enabled(self.priority_scheduler_enabled)
+            .priority_scheduler_default_max_class(self.priority_scheduler_default_max_class.clone())
+            .priority_scheduler_config(self.priority_scheduler_config.clone())
+            .priority_scheduler_tenant_metric_top_n(self.priority_scheduler_tenant_metric_top_n)
             .cors_allowed_origins(self.cors_allowed_origins.clone())
             .retry_config(RetryConfig {
                 max_retries: self.retry_max_retries,
@@ -1240,6 +1320,7 @@ impl CliArgs {
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
+                drain_settle_secs: self.drain_settle_secs,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -1277,8 +1358,6 @@ impl CliArgs {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
-            .skills_enabled(skills_enabled)
-            .maybe_skills_config_path(self.skills_config_path.as_ref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -1391,6 +1470,8 @@ impl CliArgs {
         Ok(ServerConfig {
             host: self.host.clone(),
             port: self.port,
+            health_check_port: self.health_check_port,
+            runtime_worker_threads: self.runtime_worker_threads,
             router_config,
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
@@ -1495,10 +1576,154 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;
-    let runtime = tokio::runtime::Runtime::new()?;
+    // tokio's default worker-thread count is `available_parallelism()`, which on
+    // Rust 1.95+ already honors the cgroup CPU quota, so the default is
+    // container-aware. Only build the runtime explicitly when an operator pins a
+    // worker-thread count.
+    let runtime = match server_config.runtime_worker_threads {
+        Some(n) => {
+            info!(
+                worker_threads = n,
+                "Sizing tokio runtime (explicit override)"
+            );
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(n)
+                .enable_all()
+                .build()?
+        }
+        None => {
+            info!("Sizing tokio runtime (default, container-aware)");
+            tokio::runtime::Runtime::new()?
+        }
+    };
     runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse top-level CLI args into the flattened `CliArgs` the binary uses.
+    fn cli_args_from(args: &[&str]) -> CliArgs {
+        let argv: Vec<String> = std::iter::once("smg".to_string())
+            .chain(args.iter().map(|s| (*s).to_string()))
+            .collect();
+        Cli::parse_from(argv).router_args
+    }
+
+    /// `--health-check-port` must flow into BOTH conversion paths
+    /// (`to_router_config` and `to_server_config`), mirroring the main
+    /// listener `--port` field exactly. This is the two-path config-plumbing
+    /// guard: wiring only one path would let the flag be silently ignored on
+    /// the other.
+    #[test]
+    fn health_check_port_flows_into_both_configs() {
+        let cli = cli_args_from(&["--health-check-port", "8081"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(
+            router_config.health_check_port,
+            Some(8081),
+            "health_check_port must reach RouterConfig via to_router_config"
+        );
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.health_check_port,
+            Some(8081),
+            "health_check_port must reach ServerConfig via to_server_config"
+        );
+    }
+
+    /// Unset `--health-check-port` means the dedicated probe listener is off:
+    /// `None` propagates through both conversions (backward-compatible default).
+    #[test]
+    fn health_check_port_defaults_to_none_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.health_check_port, None);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(server_config.health_check_port, None);
+    }
+
+    /// `--engine-metrics` must flow into `RouterConfig` and survive nesting
+    /// into `ServerConfig.router_config` — the consumer (load monitor) reads it
+    /// off `RouterConfig`. Two-path config-plumbing guard.
+    #[test]
+    fn engine_metrics_flows_into_both_configs() {
+        let cli = cli_args_from(&["--engine-metrics"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert!(
+            router_config.engine_metrics,
+            "engine_metrics must reach RouterConfig via to_router_config"
+        );
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert!(
+            server_config.router_config.engine_metrics,
+            "engine_metrics must survive into ServerConfig via to_server_config"
+        );
+    }
+
+    /// Default is off: the flag stays false through both conversions so
+    /// existing deployments keep the routing-gated polling behavior.
+    #[test]
+    fn engine_metrics_defaults_to_false_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert!(!router_config.engine_metrics);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert!(!server_config.router_config.engine_metrics);
+    }
+
+    /// clap rejects out-of-range probe ports at parse time (the `u16`
+    /// value_parser), matching `--port` validation — no runtime crash.
+    #[test]
+    fn health_check_port_out_of_range_is_rejected_at_parse_time() {
+        let argv = ["smg", "--health-check-port", "70000"];
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "a port above u16::MAX must fail clap parsing"
+        );
+    }
+
+    /// The `--runtime-worker-threads` override must flow into BOTH conversion
+    /// paths (`to_router_config` and `to_server_config`); wiring only one path
+    /// would let the flag be silently ignored on the other (the two-path footgun).
+    #[test]
+    fn runtime_worker_threads_flows_into_both_configs() {
+        let cli = cli_args_from(&["--runtime-worker-threads", "3"]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.runtime_worker_threads, Some(3));
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.runtime_worker_threads,
+            Some(3),
+            "runtime_worker_threads must reach ServerConfig via to_server_config"
+        );
+    }
+
+    /// Unset, the flag propagates as `None` through both conversions, so the
+    /// runtime uses tokio's container-aware default.
+    #[test]
+    fn runtime_worker_threads_default_to_none_in_both_configs() {
+        let cli = cli_args_from(&[]);
+
+        let router_config = cli.to_router_config(vec![]).unwrap();
+        assert_eq!(router_config.runtime_worker_threads, None);
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(server_config.runtime_worker_threads, None);
+    }
 }

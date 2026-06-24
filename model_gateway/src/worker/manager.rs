@@ -17,7 +17,8 @@ use futures::{
 };
 use http::StatusCode;
 use openai_protocol::worker::{
-    FlushCacheResult, HealthCheckConfig, WorkerLoadInfo, WorkerLoadsResult, WorkerStatus,
+    FlushCacheResult, HealthCheckConfig, ProfileOptions, ProfileResult, WorkerLoadInfo,
+    WorkerLoadsResult, WorkerStatus,
 };
 use tokio::{
     sync::{broadcast, Notify},
@@ -33,7 +34,7 @@ use crate::{
         monitor::WorkerMonitor,
         registry::{WorkerDescriptor, WorkerId},
         worker::WorkerTypeExt,
-        ConnectionMode, Worker, WorkerRegistry, WorkerType,
+        ConnectionMode, Worker, WorkerOrigin, WorkerRegistry, WorkerResult, WorkerType,
     },
     workflow::{Job, JobQueue},
 };
@@ -218,7 +219,7 @@ struct ProbeCompletion {
     expected_revision: u64,
     launched_status: WorkerStatus,
     health_config: HealthCheckConfig,
-    probe_result: crate::worker::WorkerResult<()>,
+    probe_result: WorkerResult<()>,
 }
 
 struct RemovalCandidate {
@@ -270,6 +271,7 @@ async fn run_health_loop(
         for removal in removals {
             if let Some(jq) = job_queue.as_ref() {
                 submit_removal_job(
+                    &registry,
                     &removal.worker_id,
                     &removal.url,
                     removal.expected_revision,
@@ -401,10 +403,18 @@ fn queue_due_probes(
             if config.remove_unhealthy {
                 removals.push(RemovalCandidate {
                     worker_id: worker_id.clone(),
-                    url: worker.url().to_string(),
+                    url: worker.base_url().to_string(),
                     expected_revision,
                 });
             }
+            continue;
+        }
+        if launched_status == WorkerStatus::Draining {
+            // Drain is owned by the worker_removal workflow's
+            // DrainWorkersStep — probing here would only churn metrics
+            // and `compute_next_status` is a no-op for Draining anyway.
+            // Don't push a removal: the workflow already has one in flight.
+            next_check.remove(&worker_id);
             continue;
         }
 
@@ -493,7 +503,14 @@ async fn apply_probe_completion(
         );
         if new == WorkerStatus::Failed {
             if let Some(jq) = job_queue {
-                submit_removal_job(&worker_id, worker.url(), expected_revision, jq).await;
+                submit_removal_job(
+                    registry,
+                    &worker_id,
+                    worker.base_url(),
+                    expected_revision,
+                    jq,
+                )
+                .await;
             }
         }
     }
@@ -635,8 +652,10 @@ fn compute_next_status(
                     return Some(WorkerStatus::Failed);
                 }
             }
-            WorkerStatus::Failed => {
-                // Terminal — handled outside.
+            WorkerStatus::Failed | WorkerStatus::Draining => {
+                // Terminal for the health-state machine. Failed is removed
+                // by `--remove-unhealthy-workers`; Draining is removed by
+                // the discovery drain timer once in-flight requests settle.
             }
         }
 
@@ -644,12 +663,28 @@ fn compute_next_status(
     }
 }
 
+/// Failed mesh-imported workers stay registered (demoted, unroutable):
+/// they are owner-managed, and a local removal only desynchronizes this
+/// node — the live CRDT key re-imports the worker on the next reconcile,
+/// probes fail again, and the remove/re-import loop churns forever.
+fn should_remove_failed(registry: &Arc<WorkerRegistry>, worker_id: &WorkerId) -> bool {
+    registry.origin_of(worker_id) != Some(WorkerOrigin::Mesh)
+}
+
 async fn submit_removal_job(
+    registry: &Arc<WorkerRegistry>,
     worker_id: &WorkerId,
     worker_url: &str,
     expected_revision: u64,
     job_queue: &Arc<JobQueue>,
 ) {
+    if !should_remove_failed(registry, worker_id) {
+        debug!(
+            worker_id = %worker_id.as_str(),
+            "skipping removal of failed mesh-imported worker (owner-managed)"
+        );
+        return;
+    }
     let url = worker_url.to_string();
     warn!(
         worker_id = %worker_id.as_str(),
@@ -681,50 +716,88 @@ impl WorkerManager {
             .collect()
     }
 
-    pub async fn flush_cache_all(
-        worker_registry: &WorkerRegistry,
-        client: &reqwest::Client,
-    ) -> FlushCacheResult {
-        let workers = worker_registry.get_all();
-        let total_workers = workers.len();
-
-        let http_workers: Vec<_> = workers
+    /// Fan an admin operation out to workers in parallel, collecting
+    /// successful worker URLs and per-worker failure messages.
+    ///
+    /// The connection-mode dispatch (HTTP endpoint vs gRPC RPC) lives in
+    /// the [`Worker`] admin methods, so the fan-out is uniform.
+    async fn admin_fan_out<F, Fut>(
+        workers: Vec<Arc<dyn Worker>>,
+        op: F,
+    ) -> (Vec<String>, Vec<(String, String)>)
+    where
+        F: Fn(Arc<dyn Worker>) -> Fut,
+        Fut: Future<Output = WorkerResult<()>>,
+    {
+        let futures: Vec<_> = workers
             .into_iter()
-            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Http))
+            .map(|worker| {
+                let url = worker.url().to_string();
+                let fut = op(worker);
+                async move { (url, fut.await) }
+            })
             .collect();
 
-        if http_workers.is_empty() {
+        let results: Vec<(String, WorkerResult<()>)> = stream::iter(futures)
+            .buffer_unordered(MAX_CONCURRENT)
+            .collect()
+            .await;
+
+        let mut successful = Vec::new();
+        let mut failed = Vec::new();
+        for (url, result) in results {
+            match result {
+                Ok(()) => successful.push(url),
+                Err(e) => failed.push((url, e.to_string())),
+            }
+        }
+        (successful, failed)
+    }
+
+    /// Workers targeted by an admin op: all registered workers, or only
+    /// the worker(s) whose URL matches the filter.
+    fn admin_target_workers(
+        worker_registry: &WorkerRegistry,
+        url_filter: Option<&str>,
+    ) -> Vec<Arc<dyn Worker>> {
+        let workers = worker_registry.get_all();
+        match url_filter {
+            Some(url) => workers.into_iter().filter(|w| w.url() == url).collect(),
+            None => workers,
+        }
+    }
+
+    pub async fn flush_cache_all(worker_registry: &WorkerRegistry) -> FlushCacheResult {
+        let workers = worker_registry.get_all();
+        let total_workers = workers.len();
+        let http_workers = workers
+            .iter()
+            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Http))
+            .count();
+        let grpc_workers = total_workers - http_workers;
+
+        if workers.is_empty() {
             return FlushCacheResult {
                 successful: vec![],
                 failed: vec![],
                 total_workers,
-                http_workers: 0,
-                message: "No HTTP workers available for cache flush".to_string(),
+                http_workers,
+                grpc_workers,
+                message: "No workers available for cache flush".to_string(),
             };
         }
 
         info!(
-            "Flushing cache on {} HTTP workers (out of {} total)",
-            http_workers.len(),
-            total_workers
+            "Flushing cache on {} workers ({} HTTP, {} gRPC)",
+            total_workers, http_workers, grpc_workers
         );
 
-        let responses = fan_out(&http_workers, client, "flush_cache", reqwest::Method::POST).await;
-
-        let mut successful = Vec::new();
-        let mut failed = Vec::new();
-
-        for resp in responses {
-            match resp.result {
-                Ok(r) if r.status().is_success() => successful.push(resp.url),
-                Ok(r) => failed.push((resp.url, format!("HTTP {}", r.status()))),
-                Err(e) => failed.push((resp.url, e.to_string())),
-            }
-        }
+        let (successful, failed) =
+            Self::admin_fan_out(workers, |w| async move { w.flush_cache().await }).await;
 
         let message = if failed.is_empty() {
             format!(
-                "Successfully flushed cache on all {} HTTP workers",
+                "Successfully flushed cache on all {} workers",
                 successful.len()
             )
         } else {
@@ -741,7 +814,111 @@ impl WorkerManager {
             successful,
             failed,
             total_workers,
-            http_workers: http_workers.len(),
+            http_workers,
+            grpc_workers,
+            message,
+        }
+    }
+
+    /// Start a profiling run on all workers, or on the single worker
+    /// matching `worker_url`.
+    pub async fn start_profile_all(
+        worker_registry: &WorkerRegistry,
+        options: &ProfileOptions,
+        worker_url: Option<&str>,
+    ) -> ProfileResult {
+        let workers = Self::admin_target_workers(worker_registry, worker_url);
+        let total_workers = workers.len();
+
+        if workers.is_empty() {
+            return ProfileResult {
+                successful: vec![],
+                failed: vec![],
+                total_workers,
+                message: match worker_url {
+                    Some(url) => format!("No worker matching url '{url}'"),
+                    None => "No workers available for profiling".to_string(),
+                },
+            };
+        }
+
+        info!("Starting profiling on {} workers", total_workers);
+
+        let options = options.clone();
+        let (successful, failed) = Self::admin_fan_out(workers, move |w| {
+            let options = options.clone();
+            async move { w.start_profile(&options).await }
+        })
+        .await;
+
+        let message = if failed.is_empty() {
+            format!(
+                "Successfully started profiling on all {} workers",
+                successful.len()
+            )
+        } else {
+            format!(
+                "Profile start: {} succeeded, {} failed",
+                successful.len(),
+                failed.len()
+            )
+        };
+
+        info!("{}", message);
+
+        ProfileResult {
+            successful,
+            failed,
+            total_workers,
+            message,
+        }
+    }
+
+    /// Stop the in-flight profiling run on all workers, or on the single
+    /// worker matching `worker_url`.
+    pub async fn stop_profile_all(
+        worker_registry: &WorkerRegistry,
+        worker_url: Option<&str>,
+    ) -> ProfileResult {
+        let workers = Self::admin_target_workers(worker_registry, worker_url);
+        let total_workers = workers.len();
+
+        if workers.is_empty() {
+            return ProfileResult {
+                successful: vec![],
+                failed: vec![],
+                total_workers,
+                message: match worker_url {
+                    Some(url) => format!("No worker matching url '{url}'"),
+                    None => "No workers available for profiling".to_string(),
+                },
+            };
+        }
+
+        info!("Stopping profiling on {} workers", total_workers);
+
+        let (successful, failed) =
+            Self::admin_fan_out(workers, |w| async move { w.stop_profile().await }).await;
+
+        let message = if failed.is_empty() {
+            format!(
+                "Successfully stopped profiling on all {} workers",
+                successful.len()
+            )
+        } else {
+            format!(
+                "Profile stop: {} succeeded, {} failed",
+                successful.len(),
+                failed.len()
+            )
+        };
+
+        info!("{}", message);
+
+        ProfileResult {
+            successful,
+            failed,
+            total_workers,
             message,
         }
     }
@@ -854,6 +1031,7 @@ mod tests {
                     timeout_secs: 1,
                     check_interval_secs: 1,
                     disable_health_check: false,
+                    drain_settle_secs: 0,
                 })
                 .build(),
         )
@@ -866,7 +1044,36 @@ mod tests {
             timeout_secs: 1,
             check_interval_secs: 1,
             disable_health_check: false,
+            drain_settle_secs: 0,
         }
+    }
+
+    #[test]
+    fn failed_mesh_imported_workers_are_not_removed() {
+        let registry = Arc::new(WorkerRegistry::new());
+
+        let local_id = registry
+            .register(make_worker("http://local:1", 1, 1))
+            .unwrap();
+        assert!(
+            should_remove_failed(&registry, &local_id),
+            "failed local workers are removable"
+        );
+
+        registry.on_remote_worker_state(&smg_mesh::WorkerState {
+            worker_id: "peer-w1".to_string(),
+            model_id: "m".to_string(),
+            url: "http://remote:1".to_string(),
+            health: true,
+            load: 0.0,
+            version: 1,
+            spec: vec![],
+        });
+        let mesh_id = registry.get_id_by_url("http://remote:1").unwrap();
+        assert!(
+            !should_remove_failed(&registry, &mesh_id),
+            "failed mesh-imported workers stay registered (owner-managed)"
+        );
     }
 
     #[test]
@@ -1007,6 +1214,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_removal_candidate_strips_dp_rank_suffix() {
+        // Regression test: a DP-aware worker is registered under
+        // "{base}@{rank}", but the removal workflow prefix-matches
+        // "{url}@" in dp_aware mode. Submitting the registered (suffixed)
+        // URL made the prefix "{base}@{rank}@", which matched nothing, so
+        // unhealthy DP workers were never removed.
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://10.130.99.80:30000")
+                .worker_type(WorkerType::Regular)
+                .health_config(cfg(2, 3))
+                .dp_config(1, 4)
+                .build(),
+        );
+        assert_eq!(worker.url(), "http://10.130.99.80:30000@1");
+        worker.set_status(WorkerStatus::Failed);
+        let worker_id = registry.register(worker).unwrap();
+
+        let mut next_check = HashMap::new();
+        next_check.insert(worker_id, tokio::time::Instant::now());
+        let mut in_flight = HashSet::new();
+        let mut probes: ProbeFutures = FuturesUnordered::new();
+
+        let removals = queue_due_probes(
+            &registry,
+            &WorkerManagerConfig {
+                default_check_interval_secs: 5,
+                remove_unhealthy: true,
+            },
+            &mut next_check,
+            &mut in_flight,
+            &mut probes,
+            tokio::time::Instant::now(),
+        );
+
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].url, "http://10.130.99.80:30000");
+    }
+
     #[test]
     fn test_reconcile_from_registry_skips_failed_workers_on_bootstrap() {
         let registry = Arc::new(WorkerRegistry::new());
@@ -1128,5 +1375,102 @@ mod tests {
             registry.get(&worker_id).unwrap().status(),
             WorkerStatus::Ready
         );
+    }
+
+    /// Spawn a loopback HTTP server stubbing the engine admin endpoints,
+    /// answering every admin POST with the given status.
+    async fn spawn_admin_stub(status: StatusCode) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/flush_cache",
+                axum::routing::post(move || async move { status }),
+            )
+            .route(
+                "/start_profile",
+                axum::routing::post(move || async move { status }),
+            )
+            .route(
+                "/stop_profile",
+                axum::routing::post(move || async move { status }),
+            );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test stub server lives for the duration of the test process"
+        )]
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_all_aggregates_mixed_results() {
+        let ok_url = spawn_admin_stub(StatusCode::OK).await;
+        let fail_url = spawn_admin_stub(StatusCode::INTERNAL_SERVER_ERROR).await;
+
+        let registry = WorkerRegistry::new();
+        registry.register(make_worker(&ok_url, 1, 1)).unwrap();
+        registry.register(make_worker(&fail_url, 1, 1)).unwrap();
+
+        let result = WorkerManager::flush_cache_all(&registry).await;
+
+        assert_eq!(result.total_workers, 2);
+        assert_eq!(result.http_workers, 2);
+        assert_eq!(result.grpc_workers, 0);
+        assert_eq!(result.successful, vec![ok_url]);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, fail_url);
+        assert!(
+            result.failed[0].1.contains("500"),
+            "failure reason should carry the HTTP status: {}",
+            result.failed[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_all_no_workers() {
+        let registry = WorkerRegistry::new();
+        let result = WorkerManager::flush_cache_all(&registry).await;
+        assert_eq!(result.total_workers, 0);
+        assert!(result.successful.is_empty());
+        assert!(result.failed.is_empty());
+        assert_eq!(result.message, "No workers available for cache flush");
+    }
+
+    #[tokio::test]
+    async fn test_profile_all_targets_single_worker_via_url_filter() {
+        let url_a = spawn_admin_stub(StatusCode::OK).await;
+        let url_b = spawn_admin_stub(StatusCode::OK).await;
+
+        let registry = WorkerRegistry::new();
+        registry.register(make_worker(&url_a, 1, 1)).unwrap();
+        registry.register(make_worker(&url_b, 1, 1)).unwrap();
+
+        let options = ProfileOptions::default();
+        let result =
+            WorkerManager::start_profile_all(&registry, &options, Some(url_a.as_str())).await;
+        assert_eq!(result.total_workers, 1);
+        assert_eq!(result.successful, vec![url_a.clone()]);
+        assert!(result.failed.is_empty());
+
+        let result = WorkerManager::stop_profile_all(&registry, Some(url_a.as_str())).await;
+        assert_eq!(result.total_workers, 1);
+        assert_eq!(result.successful, vec![url_a]);
+    }
+
+    #[tokio::test]
+    async fn test_profile_all_url_filter_without_match() {
+        let registry = WorkerRegistry::new();
+        registry.register(make_worker("http://w:1", 1, 1)).unwrap();
+
+        let options = ProfileOptions::default();
+        let result =
+            WorkerManager::start_profile_all(&registry, &options, Some("http://absent:1")).await;
+        assert_eq!(result.total_workers, 0);
+        assert!(result.successful.is_empty());
+        assert!(result.failed.is_empty());
+        assert!(result.message.contains("No worker matching"));
     }
 }

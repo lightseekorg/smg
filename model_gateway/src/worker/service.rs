@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::{
     config::RouterConfig,
-    worker::{registry::WorkerId, worker::worker_to_info, WorkerRegistry},
+    worker::{registry::WorkerId, worker::worker_to_info, WorkerRegistry, WorkerType},
     workflow::{Job, JobQueue},
 };
 
@@ -161,7 +161,7 @@ impl IntoResponse for UpdateWorkerResult {
     }
 }
 
-/// Result of listing workers
+/// Result of listing workers.
 #[derive(Debug)]
 pub struct ListWorkersResult {
     pub workers: Vec<WorkerInfo>,
@@ -173,16 +173,31 @@ pub struct ListWorkersResult {
 
 impl IntoResponse for ListWorkersResult {
     fn into_response(self) -> Response {
-        let response = json!({
-            "workers": self.workers,
-            "total": self.total,
-            "stats": {
-                "prefill_count": self.prefill_count,
-                "decode_count": self.decode_count,
-                "regular_count": self.regular_count,
-            }
-        });
-        Json(response).into_response()
+        // Serialize the typed response directly with `Json` (a single
+        // `serde_json::to_vec` pass) instead of building an intermediate
+        // `serde_json::Value` via `json!`.
+        #[derive(serde::Serialize)]
+        struct Body {
+            workers: Vec<WorkerInfo>,
+            total: usize,
+            stats: Stats,
+        }
+        #[derive(serde::Serialize)]
+        struct Stats {
+            prefill_count: usize,
+            decode_count: usize,
+            regular_count: usize,
+        }
+        Json(Body {
+            workers: self.workers,
+            total: self.total,
+            stats: Stats {
+                prefill_count: self.prefill_count,
+                decode_count: self.decode_count,
+                regular_count: self.regular_count,
+            },
+        })
+        .into_response()
     }
 }
 
@@ -322,26 +337,40 @@ impl WorkerService {
         Ok(UpdateWorkerResult { worker_id, url })
     }
 
-    /// List all workers with their info
-    pub fn list_workers(&self) -> ListWorkersResult {
-        let workers = self.worker_registry.get_all_with_ids();
-        let worker_infos: Vec<WorkerInfo> = workers
-            .iter()
-            .map(|(worker_id, worker)| {
-                let mut info = worker_to_info(worker);
-                info.id = worker_id.as_str().to_string();
-                info
-            })
-            .collect();
+    /// List all workers with their info, optionally filtered to workers
+    /// serving `model`. Building each `WorkerInfo` is cheap: `WorkerSpec`
+    /// is shared via `Arc`, so there is no per-worker spec deep clone.
+    ///
+    /// The counts reflect the returned (filtered) list, not the whole
+    /// registry.
+    pub fn list_workers(&self, model: Option<&str>) -> ListWorkersResult {
+        let mut worker_infos = Vec::new();
+        let mut prefill_count = 0;
+        let mut decode_count = 0;
+        let mut regular_count = 0;
 
-        let stats = self.worker_registry.stats();
+        for (worker_id, worker) in self.worker_registry.get_all_with_ids() {
+            if let Some(model) = model {
+                if !worker.supports_model(model) {
+                    continue;
+                }
+            }
+            match worker.worker_type() {
+                WorkerType::Prefill => prefill_count += 1,
+                WorkerType::Decode => decode_count += 1,
+                WorkerType::Regular => regular_count += 1,
+            }
+            let mut info = worker_to_info(&worker);
+            info.id = worker_id.as_str().to_string();
+            worker_infos.push(info);
+        }
 
         ListWorkersResult {
+            total: worker_infos.len(),
             workers: worker_infos,
-            total: stats.total_workers,
-            prefill_count: stats.prefill_workers,
-            decode_count: stats.decode_workers,
-            regular_count: stats.regular_workers,
+            prefill_count,
+            decode_count,
+            regular_count,
         }
     }
 
@@ -429,5 +458,83 @@ impl WorkerService {
             .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
 
         Ok(UpdateWorkerResult { worker_id, url })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::model_card::ModelCard;
+
+    use super::*;
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+    fn make_service(registry: Arc<WorkerRegistry>) -> WorkerService {
+        WorkerService::new(
+            registry,
+            Arc::new(std::sync::OnceLock::new()),
+            RouterConfig::default(),
+        )
+    }
+
+    fn register_worker(registry: &WorkerRegistry, url: &str, model: Option<&str>) {
+        let mut builder = BasicWorkerBuilder::new(url).worker_type(WorkerType::Regular);
+        if let Some(model) = model {
+            builder = builder.model(ModelCard::new(model));
+        }
+        registry.register(Arc::new(builder.build())).unwrap();
+    }
+
+    #[test]
+    fn test_list_workers_unfiltered_returns_all() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://kimi:30000", Some("moonshotai/Kimi-K2.5"));
+        register_worker(
+            &registry,
+            "http://llama:30000",
+            Some("meta-llama/Llama-3.1-8B"),
+        );
+        let service = make_service(registry);
+
+        let result = service.list_workers(None);
+        assert_eq!(result.workers.len(), 2);
+        assert_eq!(result.total, 2);
+        assert_eq!(result.regular_count, 2);
+    }
+
+    #[test]
+    fn test_list_workers_filters_by_model() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://kimi:30000", Some("moonshotai/Kimi-K2.5"));
+        register_worker(
+            &registry,
+            "http://llama:30000",
+            Some("meta-llama/Llama-3.1-8B"),
+        );
+        let service = make_service(registry);
+
+        let result = service.list_workers(Some("moonshotai/Kimi-K2.5"));
+        assert_eq!(result.workers.len(), 1);
+        assert_eq!(
+            result.workers[0].model_id.as_deref(),
+            Some("moonshotai/Kimi-K2.5")
+        );
+        assert_eq!(result.total, 1);
+        assert_eq!(result.regular_count, 1);
+
+        let result = service.list_workers(Some("no-such-model"));
+        assert!(result.workers.is_empty());
+        assert_eq!(result.total, 0);
+        assert_eq!(result.regular_count, 0);
+    }
+
+    #[test]
+    fn test_list_workers_wildcard_worker_matches_any_model() {
+        let registry = Arc::new(WorkerRegistry::new());
+        register_worker(&registry, "http://wildcard:30000", None);
+        let service = make_service(registry);
+
+        let result = service.list_workers(Some("moonshotai/Kimi-K2.5"));
+        assert_eq!(result.workers.len(), 1);
+        assert_eq!(result.total, 1);
     }
 }

@@ -52,8 +52,10 @@ Pre-compiled components with LRU caching. Typical overhead: <1ms per invocation.
 
 WASM plugins execute in SMG's **middleware layer**, intercepting requests before they reach workers and responses before they return to clients.
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/wasm-plugins.svg" alt="WASM Plugin Pipeline Architecture">
+<div class="architecture-diagram" markdown>
+
+![WASM Plugin Pipeline Architecture](../../assets/images/wasm-plugins.svg)
+
 </div>
 
 ### Plugin Chain Execution

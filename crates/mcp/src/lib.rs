@@ -4,7 +4,7 @@
 //! `model_gateway::routers::common::openai_bridge`.
 //!
 //! Modules:
-//! - [`core`] — orchestrator, sessions, transports, oauth, config
+//! - [`core`] — orchestrator, sessions, transports, config
 //! - [`inventory`] — tool registry + qualified naming
 //! - [`approval`] — interactive/policy approval engine
 //! - [`annotations`], [`tenant`], [`error`] — shared cross-module types

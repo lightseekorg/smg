@@ -12,6 +12,7 @@ import os
 import signal
 import threading
 import time
+from collections.abc import Callable
 from concurrent import futures
 
 import grpc
@@ -36,8 +37,20 @@ logger = logging.getLogger(__name__)
 async def serve_grpc(
     server_args: ServerArgs,
     model_info: dict | None = None,
+    on_request_manager_ready: Callable | None = None,
 ):
-    """Start the standalone gRPC server with integrated scheduler."""
+    """Start the standalone gRPC server with integrated scheduler.
+
+    Args:
+        server_args: Server configuration.
+        model_info: Optional model metadata override.
+        on_request_manager_ready: Optional async callback invoked with
+            ``(request_manager, server_args, scheduler_info)`` once the
+            ``GrpcRequestManager`` has been created but before the gRPC
+            server starts accepting requests. sglang's HTTP sidecar uses
+            this to wire its admin endpoints to the scheduler, so the
+            callback signature is a public contract.
+    """
 
     # Start bootstrap server BEFORE launching scheduler processes (only in PREFILL mode)
     # This ensures the bootstrap server is ready when prefill schedulers try to register
@@ -104,6 +117,22 @@ async def serve_grpc(
         bootstrap_server=bootstrap_server,
     )
 
+    if on_request_manager_ready is not None:
+        try:
+            await on_request_manager_ready(request_manager, server_args, scheduler_info)
+        except Exception:
+            # The shutdown guard below only covers the post-start path, so
+            # clean up the scheduler processes and sockets before re-raising.
+            logger.exception("on_request_manager_ready callback failed, shutting down")
+            await request_manager.shutdown()
+            for proc in scheduler_procs:
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=2.0)
+                    if proc.is_alive():
+                        proc.kill()
+            raise
+
     # Create gRPC server
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
@@ -130,6 +159,7 @@ async def serve_grpc(
     servicer = SGLangSchedulerServicer(
         request_manager=request_manager,
         server_args=server_args,
+        model_config=model_config,
         model_info=model_info,
         scheduler_info=scheduler_info,
         health_servicer=health_servicer,
@@ -286,11 +316,16 @@ async def serve_grpc(
     finally:
         logger.info("Shutting down gRPC server")
 
-        # Shutdown request manager first - this closes ZMQ sockets and stops background tasks
-        await servicer.shutdown()
+        # Mark unhealthy first so probes and load balancers stop routing new
+        # requests before we drain.
+        health_servicer.set_not_serving()
 
-        # Stop the gRPC server
+        # Drain in-flight RPCs with the request manager's ZMQ sockets still
+        # open, then tear it down. Closing ZMQ before server.stop() drops the
+        # backing channel out from under streams that are still draining, so
+        # they error instead of completing.
         await server.stop(5.0)
+        await servicer.shutdown()
 
         # Wait for warmup thread to finish
         if warmup_thread.is_alive():

@@ -44,14 +44,14 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
     Engine images bundle SMG with a specific inference engine (x86_64/CUDA only). Use these when you want a single container that can both route and serve.
 
     ```bash
-    # SGLang
-    docker pull ghcr.io/lightseekorg/smg:1.4.1-sglang-v0.5.10
-
     # vLLM
     docker pull ghcr.io/lightseekorg/smg:1.4.1-vllm-v0.19.0
 
     # TensorRT-LLM
     docker pull ghcr.io/lightseekorg/smg:1.4.1-trtllm-1.3.0rc10
+
+    # SGLang
+    docker pull ghcr.io/lightseekorg/smg:1.4.1-sglang-v0.5.10
     ```
 
     Tag format: `{smg_version}-{engine}-{engine_version}`. Browse all tags at [ghcr.io/lightseekorg/smg](https://github.com/lightseekorg/smg/pkgs/container/smg).
@@ -79,18 +79,6 @@ Choose one of these startup paths.
 
 `smg serve` launches backend worker process(es) and then starts SMG with generated worker URLs.
 
-=== "SGLang"
-
-    ```bash
-    smg serve \
-      --backend sglang \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
-      --data-parallel-size 2 \
-      --connection-mode grpc \
-      --host 0.0.0.0 \
-      --port 30000
-    ```
-
 === "vLLM"
 
     ```bash
@@ -113,11 +101,23 @@ Choose one of these startup paths.
       --port 30000
     ```
 
+=== "SGLang"
+
+    ```bash
+    smg serve \
+      --backend sglang \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      --data-parallel-size 2 \
+      --connection-mode grpc \
+      --host 0.0.0.0 \
+      --port 30000
+    ```
+
 This starts `--data-parallel-size` worker replicas, waits for readiness, then starts the gateway.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--backend` | `sglang` | Inference backend: `sglang`, `vllm`, or `trtllm` |
+| `--backend` | `sglang` | Inference backend: `vllm`, `trtllm`, or `sglang` |
 | `--connection-mode` | `grpc` | Worker connection mode: `grpc` or `http` (TensorRT-LLM only supports gRPC) |
 | `--data-parallel-size` | `1` | Number of worker replicas (one per GPU) |
 | `--worker-base-port` | `31000` | Base port for worker processes |
@@ -215,25 +215,6 @@ curl http://localhost:30000/v1/responses \
 
 Use these when workers are not started via `smg serve`.
 
-=== "SGLang (gRPC)"
-
-    ```bash
-    python -m sglang.launch_server \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
-      --host 0.0.0.0 \
-      --port 50051 \
-      --grpc-mode
-    ```
-
-=== "SGLang (HTTP)"
-
-    ```bash
-    python -m sglang.launch_server \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
-      --host 0.0.0.0 \
-      --port 8000
-    ```
-
 === "vLLM (gRPC)"
 
     ```bash
@@ -254,6 +235,34 @@ Use these when workers are not started via `smg serve`.
       --port 50051 \
       --backend pytorch \
       --tp_size 1
+    ```
+
+=== "TokenSpeed (gRPC)"
+
+    ```bash
+    python -m smg_grpc_servicer.tokenspeed \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 50051
+    ```
+
+=== "SGLang (gRPC)"
+
+    ```bash
+    python -m sglang.launch_server \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 50051 \
+      --grpc-mode
+    ```
+
+=== "SGLang (HTTP)"
+
+    ```bash
+    python -m sglang.launch_server \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 8000
     ```
 
 ### PD Disaggregation Workers

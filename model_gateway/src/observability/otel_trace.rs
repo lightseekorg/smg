@@ -14,8 +14,7 @@ use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,
-    runtime,
-    trace::{BatchConfigBuilder, BatchSpanProcessor, Tracer as SdkTracer, TracerProvider},
+    trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracer, SdkTracerProvider},
     Resource,
 };
 use tokio::task::spawn_blocking;
@@ -36,7 +35,7 @@ use super::events::get_module_path as events_module_path;
 /// happen-before the Release store, and Acquire loads happen-before reads.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACER: OnceLock<SdkTracer> = OnceLock::new();
-static PROVIDER: OnceLock<TracerProvider> = OnceLock::new();
+static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static ALLOWED_TARGETS: OnceLock<[&'static str; 3]> = OnceLock::new();
 
 #[inline]
@@ -122,14 +121,15 @@ pub fn otel_tracing_init(enable: bool, otlp_endpoint: Option<&str>) -> Result<()
         .with_max_export_batch_size(64)
         .build();
 
-    let span_processor = BatchSpanProcessor::builder(exporter, runtime::Tokio)
+    let span_processor = BatchSpanProcessor::builder(exporter)
         .with_batch_config(batch_config)
         .build();
 
-    let resource =
-        Resource::default().merge(&Resource::new(vec![KeyValue::new("service.name", "smg")]));
+    let resource = Resource::builder()
+        .with_attribute(KeyValue::new("service.name", "smg"))
+        .build();
 
-    let provider = TracerProvider::builder()
+    let provider = SdkTracerProvider::builder()
         .with_span_processor(span_processor)
         .with_resource(resource)
         .build();
@@ -144,7 +144,7 @@ pub fn otel_tracing_init(enable: bool, otlp_endpoint: Option<&str>) -> Result<()
         .set(tracer)
         .map_err(|_| anyhow::anyhow!("Tracer already initialized"))?;
 
-    let _ = global::set_tracer_provider(provider);
+    global::set_tracer_provider(provider);
 
     // Use Release ordering: all writes to TRACER/PROVIDER happen-before this store,
     // so any thread that loads ENABLED with Acquire will see the initialized state.
@@ -200,6 +200,7 @@ pub async fn flush_spans_async() -> Result<()> {
 
     spawn_blocking(move || provider.force_flush())
         .await
+        .map_err(|e| anyhow::anyhow!("Failed to join flush task: {e}"))?
         .map_err(|e| anyhow::anyhow!("Failed to flush spans: {e}"))?;
 
     Ok(())
@@ -208,7 +209,16 @@ pub async fn flush_spans_async() -> Result<()> {
 pub fn shutdown_otel() {
     // Use Acquire to ensure we see any prior OTEL operations
     if ENABLED.load(Ordering::Acquire) {
-        global::shutdown_tracer_provider();
+        // 0.32 removed `global::shutdown_tracer_provider`; shut down the stored
+        // provider directly (its inner state is shared with the global provider).
+        if let Some(provider) = PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                #[expect(clippy::print_stderr)]
+                {
+                    eprintln!("[tracing] Failed to shut down OpenTelemetry: {e}");
+                }
+            }
+        }
         // Use Release to ensure shutdown completes before flag is cleared
         ENABLED.store(false, Ordering::Release);
         // Logger may already be shut down during process teardown; use stderr

@@ -1,0 +1,43 @@
+# Volcano scheduler config for the moirai-dev cluster.
+#
+# This is the cluster-side half of GPU bin-packing for the CI runners. The
+# runner pods opt in via `schedulerName: volcano` in their values files; this
+# configmap tells Volcano's binpack plugin to pack by GPU.
+#
+# binpack.weight    raised to 10 so packing dominates nodeorder's spreading.
+# binpack.resources adds nvidia.com/gpu (default only weights cpu+memory) so
+#                   runners consolidate onto already-utilized H100 nodes.
+#
+# Apply: kubectl apply -f volcano-scheduler-configmap.yaml
+#        kubectl -n volcano-system rollout restart deploy/volcano-scheduler
+#
+# NOTE: cluster-wide — affects every workload scheduled by Volcano, not just
+# the CI runners.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: volcano-scheduler-configmap
+  namespace: volcano-system
+data:
+  volcano-scheduler.conf: |
+    actions: "enqueue, allocate, backfill"
+    tiers:
+    - plugins:
+      - name: priority
+      - name: gang
+        enablePreemptable: false
+      - name: conformance
+    - plugins:
+      - name: overcommit
+      - name: drf
+        enablePreemptable: false
+      - name: predicates
+      - name: proportion
+      - name: nodeorder
+      - name: binpack
+        arguments:
+          binpack.weight: 10
+          binpack.cpu: 1
+          binpack.memory: 1
+          binpack.resources: nvidia.com/gpu
+          binpack.resources.nvidia.com/gpu: 10

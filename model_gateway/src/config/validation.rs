@@ -2,6 +2,21 @@ use axum::http::HeaderName;
 
 use super::*;
 
+/// Validate a user-supplied mesh server name. The name keys rate-limit
+/// shards as `rl:{counter}:{name}`, so an empty name or one containing the
+/// separator would corrupt shard keys; rejecting at config time avoids a
+/// panic at mesh adapter construction during startup.
+pub fn validate_mesh_server_name(name: &str) -> ConfigResult<()> {
+    if name.is_empty() || name.contains(':') {
+        return Err(ConfigError::InvalidValue {
+            field: "mesh_server_name".to_string(),
+            value: name.to_string(),
+            reason: "must be non-empty and must not contain ':'".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Configuration validator
 pub(crate) struct ConfigValidator;
 
@@ -43,139 +58,6 @@ impl ConfigValidator {
         }
 
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
-        Self::validate_skills(config)?;
-        Self::validate_background(&config.background)?;
-
-        Ok(())
-    }
-
-    fn validate_background(bg: &BackgroundConfig) -> ConfigResult<()> {
-        let zero_checks = [
-            (
-                "background.worker_concurrency",
-                u64::from(bg.worker_concurrency),
-            ),
-            ("background.max_queue_depth", u64::from(bg.max_queue_depth)),
-            ("background.lease_duration_secs", bg.lease_duration_secs),
-            ("background.max_retries", u64::from(bg.max_retries)),
-            ("background.retry_base_delay_secs", bg.retry_base_delay_secs),
-            ("background.retry_max_delay_secs", bg.retry_max_delay_secs),
-            ("background.sweep_interval_secs", bg.sweep_interval_secs),
-            ("background.poll_interval_ms", bg.poll_interval_ms),
-            ("background.stream_retention_secs", bg.stream_retention_secs),
-        ];
-        for (field, value) in zero_checks {
-            if value == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: field.to_string(),
-                    value: value.to_string(),
-                    reason: "Must be > 0".to_string(),
-                });
-            }
-        }
-        if bg.retry_base_delay_secs > bg.retry_max_delay_secs {
-            return Err(ConfigError::InvalidValue {
-                field: "background.retry_base_delay_secs".to_string(),
-                value: bg.retry_base_delay_secs.to_string(),
-                reason: format!(
-                    "Must be <= retry_max_delay_secs ({})",
-                    bg.retry_max_delay_secs
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    fn validate_skills(config: &RouterConfig) -> ConfigResult<()> {
-        if !config.skills_enabled {
-            return Ok(());
-        }
-
-        let skills = config.skills.as_ref().ok_or_else(|| ConfigError::ValidationFailed {
-            reason: "skills are enabled but no skills config was provided; set --skills-config-path or preload RouterConfig.skills"
-                .to_string(),
-        })?;
-
-        Self::validate_skills_config(skills)
-    }
-
-    fn validate_skills_config(skills: &SkillsConfig) -> ConfigResult<()> {
-        if skills.blob_store.path.trim().is_empty() {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.blob_store.path".to_string(),
-                value: skills.blob_store.path.clone(),
-                reason: "filesystem blob-store path must not be empty".to_string(),
-            });
-        }
-
-        if skills.cache.enabled() && skills.cache.path.trim().is_empty() {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.cache.path".to_string(),
-                value: skills.cache.path.clone(),
-                reason: "enabled blob cache path must not be empty".to_string(),
-            });
-        }
-
-        if skills.max_upload_size_mb == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.max_upload_size_mb".to_string(),
-                value: skills.max_upload_size_mb.to_string(),
-                reason: "Must be > 0".to_string(),
-            });
-        }
-        validate_mebibyte_limit("skills.max_upload_size_mb", skills.max_upload_size_mb)?;
-
-        if skills.max_file_size_mb == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.max_file_size_mb".to_string(),
-                value: skills.max_file_size_mb.to_string(),
-                reason: "Must be > 0".to_string(),
-            });
-        }
-        validate_mebibyte_limit("skills.max_file_size_mb", skills.max_file_size_mb)?;
-
-        if skills.max_file_size_mb > skills.max_upload_size_mb {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.max_file_size_mb".to_string(),
-                value: skills.max_file_size_mb.to_string(),
-                reason: "Must be <= skills.max_upload_size_mb".to_string(),
-            });
-        }
-
-        if skills.max_files_per_version == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.max_files_per_version".to_string(),
-                value: skills.max_files_per_version.to_string(),
-                reason: "Must be > 0".to_string(),
-            });
-        }
-
-        if skills.max_skills_per_request == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "skills.max_skills_per_request".to_string(),
-                value: skills.max_skills_per_request.to_string(),
-                reason: "Must be > 0".to_string(),
-            });
-        }
-
-        let has_executor_url = skills
-            .execution
-            .executor_url
-            .as_deref()
-            .is_some_and(|url| !url.trim().is_empty());
-        let has_executor_api_key = skills
-            .execution
-            .executor_api_key
-            .as_deref()
-            .is_some_and(|key| !key.trim().is_empty());
-
-        if has_executor_url && !has_executor_api_key {
-            return Err(ConfigError::ValidationFailed {
-                reason:
-                    "skills execution is enabled but skills.execution.executor_api_key is missing"
-                        .to_string(),
-            });
-        }
 
         Ok(())
     }
@@ -357,6 +239,7 @@ impl ConfigValidator {
         match policy {
             PolicyConfig::Random
             | PolicyConfig::RoundRobin
+            | PolicyConfig::Passthrough
             | PolicyConfig::Manual { .. }
             | PolicyConfig::ConsistentHashing => {}
             PolicyConfig::CacheAware {
@@ -366,12 +249,30 @@ impl ConfigValidator {
                 eviction_interval_secs,
                 max_tree_size,
                 block_size,
+                balance_token_usage_threshold,
+                overload_token_usage_threshold,
             } => {
                 if *block_size == 0 {
                     return Err(ConfigError::InvalidValue {
                         field: "block_size".to_string(),
                         value: block_size.to_string(),
                         reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if *balance_token_usage_threshold <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "balance_token_usage_threshold".to_string(),
+                        value: balance_token_usage_threshold.to_string(),
+                        reason: "Must be > 0.0 (use >= 1.0 to disable)".to_string(),
+                    });
+                }
+
+                if *overload_token_usage_threshold <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "overload_token_usage_threshold".to_string(),
+                        value: overload_token_usage_threshold.to_string(),
+                        reason: "Must be > 0.0 (use >= 1.0 to disable)".to_string(),
                     });
                 }
 
@@ -415,6 +316,44 @@ impl ConfigValidator {
                         field: "load_check_interval_secs".to_string(),
                         value: load_check_interval_secs.to_string(),
                         reason: "Must be > 0".to_string(),
+                    });
+                }
+            }
+            PolicyConfig::LeastLoad {
+                load_check_interval_secs,
+                kv_pressure_weight,
+                mean_prefill_tokens,
+                default_throughput,
+            } => {
+                if *load_check_interval_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "load_check_interval_secs".to_string(),
+                        value: load_check_interval_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if !kv_pressure_weight.is_finite() || *kv_pressure_weight < 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "kv_pressure_weight".to_string(),
+                        value: kv_pressure_weight.to_string(),
+                        reason: "Must be finite and >= 0.0".to_string(),
+                    });
+                }
+
+                if *mean_prefill_tokens == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "mean_prefill_tokens".to_string(),
+                        value: mean_prefill_tokens.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if !default_throughput.is_finite() || *default_throughput <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "default_throughput".to_string(),
+                        value: default_throughput.to_string(),
+                        reason: "Must be finite and > 0.0".to_string(),
                     });
                 }
             }
@@ -476,6 +415,20 @@ impl ConfigValidator {
                 field: "port".to_string(),
                 value: config.port.to_string(),
                 reason: "Port must be > 0".to_string(),
+            });
+        }
+
+        // Reject a configured dedicated probe port of 0: 0 means "OS-assigned
+        // ephemeral port", which breaks the fail-fast contract that probes
+        // live on a stable operator-configured port. (`start_probe_listener`
+        // itself still accepts 0 so the ephemeral-port unit tests can bind;
+        // only the config-sourced value is rejected here.)
+        if config.health_check_port == Some(0) {
+            return Err(ConfigError::InvalidValue {
+                field: "health_check_port".to_string(),
+                value: "0".to_string(),
+                reason: "Port must be > 0 (0 would request an unstable OS-ephemeral port)"
+                    .to_string(),
             });
         }
 
@@ -835,14 +788,19 @@ impl ConfigValidator {
                 });
             }
 
-            if !url.starts_with("http://")
-                && !url.starts_with("https://")
-                && !url.starts_with("grpc://")
+            // Case-insensitive scheme allow-list. Compare just the scheme
+            // segment so we don't allocate a lowercased copy of the full URL.
+            const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
+            let scheme = url.split_once("://").map_or("", |(s, _)| s);
+            if !ALLOWED_SCHEMES
+                .iter()
+                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
             {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
                     value: url.clone(),
-                    reason: "URL must start with http://, https://, or grpc://".to_string(),
+                    reason: "URL must start with http://, https://, grpc://, or grpcs://"
+                        .to_string(),
                 });
             }
 
@@ -869,24 +827,31 @@ impl ConfigValidator {
     }
 }
 
-fn validate_mebibyte_limit(field: &str, value_mb: usize) -> ConfigResult<()> {
-    const MEBIBYTE: usize = 1024 * 1024;
-
-    if value_mb.checked_mul(MEBIBYTE).is_none() {
-        return Err(ConfigError::InvalidValue {
-            field: field.to_string(),
-            value: value_mb.to_string(),
-            reason: "Must fit into usize bytes".to_string(),
-        });
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::worker::ConnectionMode;
+
+    #[test]
+    fn mesh_server_name_with_colon_is_rejected() {
+        assert!(matches!(
+            validate_mesh_server_name("node:a"),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
+        ));
+    }
+
+    #[test]
+    fn empty_mesh_server_name_is_rejected() {
+        assert!(matches!(
+            validate_mesh_server_name(""),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
+        ));
+    }
+
+    #[test]
+    fn valid_mesh_server_name_is_accepted() {
+        assert!(validate_mesh_server_name("node-a").is_ok());
+    }
 
     #[test]
     fn test_validate_regular_mode() {
@@ -963,6 +928,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -983,6 +950,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -1038,6 +1007,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -1083,6 +1054,8 @@ mod tests {
                     eviction_interval_secs: 60,
                     max_tree_size: 1000,
                     block_size: 16,
+                    balance_token_usage_threshold: 1.0,
+                    overload_token_usage_threshold: 1.0,
                 }),
                 decode_policy: Some(PolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 60,
@@ -1236,6 +1209,22 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_grpcs_worker_url() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["grpcs://worker:50051".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.connection_mode = ConnectionMode::Grpc;
+        config.model_path = Some("meta-llama/Llama-3-8B".to_string());
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_validate_grpc_with_tokenizer_path() {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
@@ -1302,54 +1291,25 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_skills_enabled_requires_nested_config() {
+    fn test_reject_health_check_port_zero() {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
                 worker_urls: vec!["http://worker1:8000".to_string()],
             },
             PolicyConfig::Random,
         );
-        config.skills_enabled = true;
 
-        let error = ConfigValidator::validate(&config).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("skills are enabled but no skills config was provided"));
-    }
+        // 0 = OS-ephemeral; breaks the stable-probe-port contract.
+        config.health_check_port = Some(0);
+        assert!(matches!(
+            ConfigValidator::validate(&config),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "health_check_port"
+        ));
 
-    #[test]
-    fn test_validate_skills_execution_requires_api_key() {
-        let mut config = RouterConfig::new(
-            RoutingMode::Regular {
-                worker_urls: vec!["http://worker1:8000".to_string()],
-            },
-            PolicyConfig::Random,
-        );
-        config.skills_enabled = true;
-        let mut skills = SkillsConfig::default();
-        skills.execution.executor_url = Some("http://executor.internal".to_string());
-        config.skills = Some(skills);
-
-        let error = ConfigValidator::validate(&config).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("skills.execution.executor_api_key is missing"));
-    }
-
-    #[test]
-    fn test_validate_skills_blob_store_path_must_not_be_empty() {
-        let mut config = RouterConfig::new(
-            RoutingMode::Regular {
-                worker_urls: vec!["http://worker1:8000".to_string()],
-            },
-            PolicyConfig::Random,
-        );
-        config.skills_enabled = true;
-        let mut skills = SkillsConfig::default();
-        skills.blob_store.path.clear();
-        config.skills = Some(skills);
-
-        let error = ConfigValidator::validate(&config).unwrap_err();
-        assert!(error.to_string().contains("skills.blob_store.path"));
+        // A real port and the unset (None) default both validate.
+        config.health_check_port = Some(8081);
+        assert!(ConfigValidator::validate(&config).is_ok());
+        config.health_check_port = None;
+        assert!(ConfigValidator::validate(&config).is_ok());
     }
 }

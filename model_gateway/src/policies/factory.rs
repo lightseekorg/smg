@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use super::{
     BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, ConsistentHashingPolicy,
-    LoadBalancingPolicy, ManualConfig, ManualPolicy, PowerOfTwoPolicy, PrefixHashConfig,
-    PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
+    LeastLoadPolicy, LoadBalancingPolicy, ManualConfig, ManualPolicy, PassthroughPolicy,
+    PowerOfTwoPolicy, PrefixHashConfig, PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
 };
 use crate::config::PolicyConfig;
 
@@ -18,7 +18,18 @@ impl PolicyFactory {
         match config {
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
+            PolicyConfig::Passthrough => Arc::new(PassthroughPolicy::new()),
             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
+            PolicyConfig::LeastLoad {
+                kv_pressure_weight,
+                mean_prefill_tokens,
+                default_throughput,
+                ..
+            } => Arc::new(LeastLoadPolicy::with_params(
+                *kv_pressure_weight,
+                *mean_prefill_tokens,
+                *default_throughput,
+            )),
             PolicyConfig::CacheAware {
                 cache_threshold,
                 balance_abs_threshold,
@@ -26,6 +37,8 @@ impl PolicyFactory {
                 eviction_interval_secs,
                 max_tree_size,
                 block_size,
+                balance_token_usage_threshold,
+                overload_token_usage_threshold,
             } => {
                 let config = CacheAwareConfig {
                     cache_threshold: *cache_threshold,
@@ -34,6 +47,8 @@ impl PolicyFactory {
                     eviction_interval_secs: *eviction_interval_secs,
                     max_tree_size: *max_tree_size,
                     block_size: *block_size,
+                    balance_token_usage_threshold: *balance_token_usage_threshold,
+                    overload_token_usage_threshold: *overload_token_usage_threshold,
                 };
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
@@ -80,7 +95,9 @@ impl PolicyFactory {
         match name.to_lowercase().as_str() {
             "random" => Some(Arc::new(RandomPolicy::new())),
             "round_robin" | "roundrobin" => Some(Arc::new(RoundRobinPolicy::new())),
+            "passthrough" => Some(Arc::new(PassthroughPolicy::new())),
             "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),
+            "least_load" | "leastload" => Some(Arc::new(LeastLoadPolicy::new())),
             "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
             "bucket" => Some(Arc::new(BucketPolicy::new())),
             "manual" => Some(Arc::new(ManualPolicy::new())),
@@ -105,6 +122,9 @@ mod tests {
         let policy = PolicyFactory::create_from_config(&PolicyConfig::RoundRobin);
         assert_eq!(policy.name(), "round_robin");
 
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::Passthrough);
+        assert_eq!(policy.name(), "passthrough");
+
         let policy = PolicyFactory::create_from_config(&PolicyConfig::PowerOfTwo {
             load_check_interval_secs: 60,
         });
@@ -117,6 +137,8 @@ mod tests {
             eviction_interval_secs: 30,
             max_tree_size: 1000,
             block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         });
         assert_eq!(policy.name(), "cache_aware");
 
@@ -136,6 +158,12 @@ mod tests {
 
         let policy = PolicyFactory::create_from_config(&PolicyConfig::ConsistentHashing);
         assert_eq!(policy.name(), "consistent_hashing");
+
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::PrefixHash {
+            prefix_token_count: 100,
+            load_factor: 0.8,
+        });
+        assert_eq!(policy.name(), "prefix_hash");
     }
 
     #[tokio::test]
@@ -144,6 +172,11 @@ mod tests {
         assert!(PolicyFactory::create_by_name("RANDOM").is_some());
         assert!(PolicyFactory::create_by_name("round_robin").is_some());
         assert!(PolicyFactory::create_by_name("RoundRobin").is_some());
+        assert_eq!(
+            PolicyFactory::create_by_name("passthrough").unwrap().name(),
+            "passthrough"
+        );
+        assert!(PolicyFactory::create_by_name("PASSTHROUGH").is_some());
         assert!(PolicyFactory::create_by_name("power_of_two").is_some());
         assert!(PolicyFactory::create_by_name("PowerOfTwo").is_some());
         assert!(PolicyFactory::create_by_name("cache_aware").is_some());
@@ -154,6 +187,8 @@ mod tests {
         assert!(PolicyFactory::create_by_name("Manual").is_some());
         assert!(PolicyFactory::create_by_name("consistent_hashing").is_some());
         assert!(PolicyFactory::create_by_name("ConsistentHashing").is_some());
+        assert!(PolicyFactory::create_by_name("prefix_hash").is_some());
+        assert!(PolicyFactory::create_by_name("PrefixHash").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
     }
 }

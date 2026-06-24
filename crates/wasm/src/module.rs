@@ -112,7 +112,6 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmModule {
-    // unique identifier for the module
     pub module_uuid: Uuid,
     pub module_meta: WasmModuleMeta,
 }
@@ -134,35 +133,28 @@ pub struct WasmModuleDescriptor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmModuleMeta {
-    // module name provided by the user
     pub name: String,
-    // path to the module file
     pub file_path: String,
-    // sha256 hash of the module file
     #[serde(
         serialize_with = "serialize_sha256_hash",
         deserialize_with = "deserialize_sha256_hash"
     )]
     pub sha256_hash: [u8; 32],
-    // size of the module file in bytes
     pub size_bytes: u64,
-    // timestamp of when the module was created (nanoseconds since epoch)
+    // nanoseconds since epoch
     #[serde(
         serialize_with = "serialize_timestamp",
         deserialize_with = "deserialize_timestamp"
     )]
     pub created_at: u64,
-    // timestamp of when the module was last accessed (nanoseconds since epoch)
+    // nanoseconds since epoch
     #[serde(
         serialize_with = "serialize_timestamp",
         deserialize_with = "deserialize_timestamp"
     )]
     pub last_accessed_at: u64,
-    // number of times the module was accessed
     pub access_count: u64,
-    // attach points for the module
     pub attach_points: Vec<WasmModuleAttachPoint>,
-    // Pre-loaded WASM component bytes (loaded into memory for faster execution)
     // Wrapped in Arc to avoid cloning full bytes on every execution request.
     #[serde(skip)]
     pub wasm_bytes: Arc<Vec<u8>>,

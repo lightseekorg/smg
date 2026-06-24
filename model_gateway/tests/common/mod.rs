@@ -38,7 +38,6 @@ use smg::{
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
-    NoOpConversationMemoryWriter,
 };
 #[allow(unused_imports)]
 pub use test_config::{TestRouterConfig, TestWorkerConfig};
@@ -340,11 +339,10 @@ pub fn create_test_context(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests)
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -352,6 +350,7 @@ pub fn create_test_context(
             policy_registry.clone(),
             client.clone(),
             config.load_monitor_interval_secs,
+            config.engine_metrics,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -372,7 +371,6 @@ pub fn create_test_context(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .conversation_memory_writer(conversation_memory_writer)
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
@@ -484,11 +482,10 @@ pub fn create_test_context_with_parsers(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests)
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -496,6 +493,7 @@ pub fn create_test_context_with_parsers(
             policy_registry.clone(),
             client.clone(),
             config.load_monitor_interval_secs,
+            config.engine_metrics,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -520,7 +518,6 @@ pub fn create_test_context_with_parsers(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .conversation_memory_writer(conversation_memory_writer)
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
@@ -635,11 +632,10 @@ pub fn create_test_context_with_mcp_config(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests)
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -647,6 +643,7 @@ pub fn create_test_context_with_mcp_config(
             policy_registry.clone(),
             client.clone(),
             config.load_monitor_interval_secs,
+            config.engine_metrics,
         )));
 
         // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
@@ -667,7 +664,6 @@ pub fn create_test_context_with_mcp_config(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .conversation_memory_writer(conversation_memory_writer)
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)

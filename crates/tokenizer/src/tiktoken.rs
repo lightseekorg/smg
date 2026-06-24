@@ -6,25 +6,33 @@ use std::{
 use anyhow::{Error, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rustc_hash::FxHashMap;
-use tiktoken_rs::{cl100k_base, p50k_base, p50k_edit, r50k_base, CoreBPE};
+use tiktoken_rs::{
+    cl100k_base, o200k_base, p50k_base, p50k_edit, r50k_base,
+    tokenizer::{get_tokenizer, Tokenizer},
+    CoreBPE, DecodeKeyError,
+};
 
 use crate::{
     chat_template::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
+    encoders::kimi_k25_tools::apply_kimi_k25_tools,
     factory::discover_chat_template_in_dir,
+    kimi_k2_tokenizer,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
 
+#[derive(Debug, Clone, Copy)]
+enum Renderer {
+    Jinja,
+    KimiK25Tools,
+}
+
 /// Regex pattern for cl100k_base tokenization.
 ///
-/// This pattern is correct for OpenAI models and most open-source tiktoken models (e.g.
-/// DeepSeek, Kimi K2). Some models use a different regex — for example, Kimi K2's native
-/// regex includes `\p{Han}` for Chinese character splitting — but encode/decode roundtrips
-/// still work correctly because BPE vocab handles tokenization; the regex only affects exact
-/// token boundary placement. A future enhancement could parse the regex from HuggingFace's
-/// `generation_config.json` or similar metadata.
+/// This pattern is correct for OpenAI models and most open-source tiktoken models. Models
+/// with a tokenizer-specific regex specialize the pattern inside `load_from_path`.
 const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 type Rank = u32;
@@ -42,24 +50,32 @@ struct TiktokenConfig {
     chat_template: Option<String>,
 }
 
-/// Parse `tokenizer_config.json` for tiktoken-based models.
-fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
-    let content = std::fs::read_to_string(config_path)?;
-    let config: serde_json::Value = serde_json::from_str(&content)?;
+/// Parse an already-loaded `tokenizer_config.json` value into a `TiktokenConfig`.
+fn parse_tiktoken_config(value: &serde_json::Value) -> TiktokenConfig {
+    TiktokenConfig {
+        special_tokens: parse_special_tokens(value),
+        added_tokens: parse_added_tokens_decoder(value),
+        chat_template: value
+            .get("chat_template")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    }
+}
 
-    let added_tokens = parse_added_tokens_decoder(&config);
-    let special_tokens = parse_special_tokens(&config);
-
-    let chat_template = config
-        .get("chat_template")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    Ok(TiktokenConfig {
-        special_tokens,
-        added_tokens,
-        chat_template,
-    })
+/// Load `tokenizer_config.json` from `dir`, returning both the parsed
+/// `TiktokenConfig` and the raw JSON value (so callers like Kimi detection
+/// can inspect the same parse without re-reading the file).
+fn load_tiktoken_config_from_dir(
+    dir: &Path,
+) -> Result<(TiktokenConfig, Option<serde_json::Value>)> {
+    let config_path = dir.join("tokenizer_config.json");
+    if !config_path.exists() {
+        return Ok((TiktokenConfig::default(), None));
+    }
+    let content = std::fs::read_to_string(&config_path)?;
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    let config = parse_tiktoken_config(&value);
+    Ok((config, Some(value)))
 }
 
 /// Parse `added_tokens_decoder` from config JSON.
@@ -131,11 +147,14 @@ pub struct TiktokenTokenizer {
     vocab_size: usize,
     chat_template: ChatTemplateState,
     eos_token_ids: Vec<TokenIdType>,
+    renderer: Renderer,
 }
 
 /// Supported Tiktoken models
 #[derive(Debug, Clone, Copy)]
 pub enum TiktokenModel {
+    /// GPT-4o, o1, o3, o4, GPT-4.5, GPT-5 — all 200k-vocab models
+    O200kBase,
     /// GPT-4, GPT-3.5-turbo, text-embedding-ada-002
     Cl100kBase,
     /// Codex models, text-davinci-002, text-davinci-003
@@ -149,24 +168,27 @@ pub enum TiktokenModel {
 impl TiktokenTokenizer {
     /// Create a new Tiktoken tokenizer for the specified built-in model
     pub fn new(model: TiktokenModel) -> Result<Self> {
-        let tokenizer = match model {
-            TiktokenModel::Cl100kBase => {
-                cl100k_base().map_err(|e| Error::msg(format!("Failed to load cl100k_base: {e}")))?
-            }
-            TiktokenModel::P50kBase => {
-                p50k_base().map_err(|e| Error::msg(format!("Failed to load p50k_base: {e}")))?
-            }
-            TiktokenModel::P50kEdit => {
-                p50k_edit().map_err(|e| Error::msg(format!("Failed to load p50k_edit: {e}")))?
-            }
-            TiktokenModel::R50kBase => {
-                r50k_base().map_err(|e| Error::msg(format!("Failed to load r50k_base: {e}")))?
-            }
-        };
+        let tokenizer =
+            match model {
+                TiktokenModel::O200kBase => o200k_base()
+                    .map_err(|e| Error::msg(format!("Failed to load o200k_base: {e}")))?,
+                TiktokenModel::Cl100kBase => cl100k_base()
+                    .map_err(|e| Error::msg(format!("Failed to load cl100k_base: {e}")))?,
+                TiktokenModel::P50kBase => {
+                    p50k_base().map_err(|e| Error::msg(format!("Failed to load p50k_base: {e}")))?
+                }
+                TiktokenModel::P50kEdit => {
+                    p50k_edit().map_err(|e| Error::msg(format!("Failed to load p50k_edit: {e}")))?
+                }
+                TiktokenModel::R50kBase => {
+                    r50k_base().map_err(|e| Error::msg(format!("Failed to load r50k_base: {e}")))?
+                }
+            };
 
         let special_tokens = Self::get_special_tokens_for_model(model);
 
         let vocab_size = match model {
+            TiktokenModel::O200kBase => 200019,
             TiktokenModel::Cl100kBase => 100256,
             TiktokenModel::P50kBase | TiktokenModel::P50kEdit => 50281,
             TiktokenModel::R50kBase => 50257,
@@ -180,6 +202,7 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::empty(),
             eos_token_ids: Vec::new(), // No directory path in from_model
+            renderer: Renderer::Jinja,
         })
     }
 
@@ -224,11 +247,20 @@ impl TiktokenTokenizer {
         let dir = tiktoken_path
             .parent()
             .ok_or_else(|| Error::msg("Cannot determine parent directory of tiktoken file"))?;
-        let config_path = dir.join("tokenizer_config.json");
-        let config = if config_path.exists() {
-            load_tiktoken_config(&config_path)?
+        let (mut config, tokenizer_config_value) = load_tiktoken_config_from_dir(dir)?;
+
+        // Kimi-K2/K2.5/K2.6 specialize the regex and pre-fill 256 reserved
+        // special-token slots starting at `len(mergeable_ranks)`; all other
+        // tiktoken models use the cl100k pattern unchanged. Reuse the
+        // already-parsed tokenizer_config.json so we don't re-read it.
+        let pattern = if kimi_k2_tokenizer::matches(tokenizer_config_value.as_ref(), dir) {
+            kimi_k2_tokenizer::apply_reserved_special_tokens(
+                &mut config.added_tokens,
+                encoder.len(),
+            );
+            kimi_k2_tokenizer::KIMI_K2_PATTERN
         } else {
-            TiktokenConfig::default()
+            CL100K_BASE_PATTERN
         };
 
         // 3. Build special tokens encoder for CoreBPE (needs FxHashMap)
@@ -248,7 +280,7 @@ impl TiktokenTokenizer {
             .map(|id| id as usize + 1)
             .unwrap_or(0);
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
-        let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
+        let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, pattern)?;
 
         // 5. Load chat template — propagate errors for explicit paths,
         //    silently fall back for auto-discovery
@@ -264,6 +296,9 @@ impl TiktokenTokenizer {
         // Load merged EOS token IDs from config.json + generation_config.json
         let eos_token_ids = crate::eos::load_eos_token_ids(dir);
 
+        // Detect which chat-template renderer to use based on config.json::architectures
+        let renderer = detect_renderer_from_config(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
             special_tokens: config.special_tokens,
@@ -272,40 +307,24 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
             eos_token_ids,
+            renderer,
         })
     }
 
     /// Create a tokenizer from a model string (e.g., "gpt-4", "gpt-3.5-turbo")
     pub fn from_model_name(model_name: &str) -> Result<Self> {
-        let model = Self::model_from_name(model_name)?;
+        let bare = model_name.rsplit('/').next().unwrap_or(model_name);
+        let model = match get_tokenizer(bare) {
+            Some(Tokenizer::O200kBase) => TiktokenModel::O200kBase,
+            Some(Tokenizer::Cl100kBase) => TiktokenModel::Cl100kBase,
+            Some(Tokenizer::P50kBase) => TiktokenModel::P50kBase,
+            Some(Tokenizer::P50kEdit) => TiktokenModel::P50kEdit,
+            Some(Tokenizer::R50kBase) => TiktokenModel::R50kBase,
+            _ => return Err(anyhow::anyhow!(
+                "Unrecognized OpenAI model name: '{model_name}'. Expected GPT-3, GPT-3.5, GPT-4, GPT-4o, GPT-4.5, GPT-5, o1, o3, o4, or related model names"
+            )),
+        };
         Self::new(model)
-    }
-
-    /// Determine the appropriate model from a model name
-    fn model_from_name(model_name: &str) -> Result<TiktokenModel> {
-        if model_name.contains("gpt-4")
-            || model_name.contains("gpt-3.5")
-            || model_name.contains("turbo")
-        {
-            Ok(TiktokenModel::Cl100kBase)
-        } else if model_name.contains("davinci-002")
-            || model_name.contains("davinci-003")
-            || model_name.contains("codex")
-        {
-            Ok(TiktokenModel::P50kBase)
-        } else if model_name.contains("edit") {
-            Ok(TiktokenModel::P50kEdit)
-        } else if model_name.contains("davinci")
-            || model_name.contains("curie")
-            || model_name.contains("babbage")
-            || model_name.contains("ada")
-        {
-            Ok(TiktokenModel::R50kBase)
-        } else {
-            Err(anyhow::anyhow!(
-                "Unrecognized OpenAI model name: '{model_name}'. Expected GPT-3, GPT-3.5, GPT-4, or related model names"
-            ))
-        }
     }
 
     /// Get special tokens for a specific model
@@ -443,20 +462,10 @@ pub fn is_tiktoken_file(path: &Path) -> bool {
 
 impl Encoder for TiktokenTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
-        // Always use encode_with_special_tokens so that special token strings
-        // in the input (e.g., <|media_pad|> from chat templates) are recognized
-        // as single tokens rather than split into BPE sub-tokens.
-        //
-        // NOTE: We intentionally ignore `add_special_tokens` here because the
-        // flag has different semantics across backends. For HuggingFace it
-        // controls BOS/EOS prepend/append (tiktoken has no such concept).
-        // For tiktoken, encode_ordinary vs encode_with_special_tokens controls
-        // whether special-token *patterns* in the input are recognized.
-        // All callers that encode chat-template-rendered text pass `false`
-        // (meaning "don't add BOS/EOS"), but tiktoken must still recognize
-        // the special tokens the template inserted. A proper fix requires
-        // redesigning the Encoder trait to separate "add wrapper tokens" from
-        // "recognize special-token patterns".
+        // tiktoken ignores `add_special_tokens` (it means BOS/EOS prepend on HF
+        // backends, which tiktoken has no concept of) and always recognizes
+        // special-token patterns, so chat-template tokens like <|media_pad|> stay
+        // atomic instead of splitting into BPE sub-tokens.
         let tokens = self.tokenizer.encode_with_special_tokens(input);
         Ok(Encoding::Tiktoken(tokens))
     }
@@ -471,8 +480,11 @@ impl Encoder for TiktokenTokenizer {
 
 impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
-        match self.tokenizer.decode(token_ids.to_vec()) {
+        match self.tokenizer.decode(token_ids) {
             Ok(text) => Ok(text),
+            Err(err) if is_unknown_tiktoken_decode_error(&err) => Err(Error::msg(format!(
+                "tiktoken decode failed for unknown token id: {err}"
+            ))),
             Err(err) => {
                 // Fallback to lossy decoding for incomplete UTF-8 sequences
                 let bytes: Vec<u8> = self
@@ -489,6 +501,16 @@ impl Decoder for TiktokenTokenizer {
             }
         }
     }
+}
+
+/// Detect tiktoken's "unknown token id" error so we can surface a clean error
+/// instead of letting the lossy-decode fallback panic on a missing key.
+///
+/// `CoreBPE::decode` surfaces a missing-token id as a `DecodeKeyError` (now
+/// re-exported as of tiktoken-rs 0.12), while UTF-8 failures arrive as a plain
+/// string error — so a typed `downcast_ref` cleanly separates the two cases.
+fn is_unknown_tiktoken_decode_error(err: &Error) -> bool {
+    err.downcast_ref::<DecodeKeyError>().is_some()
 }
 
 impl TokenizerTrait for TiktokenTokenizer {
@@ -518,14 +540,18 @@ impl TokenizerTrait for TiktokenTokenizer {
         params: ChatTemplateParams,
     ) -> Result<String> {
         // Inject special tokens if the caller didn't provide them
-        if params.special_tokens.is_some() {
-            return self.chat_template.apply(messages, params);
-        }
-        let params = ChatTemplateParams {
-            special_tokens: Some(&self.special_tokens),
-            ..params
+        let params = if params.special_tokens.is_some() {
+            params
+        } else {
+            ChatTemplateParams {
+                special_tokens: Some(&self.special_tokens),
+                ..params
+            }
         };
-        self.chat_template.apply(messages, params)
+        match self.renderer {
+            Renderer::Jinja => self.chat_template.apply(messages, params),
+            Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
+        }
     }
 
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
@@ -552,39 +578,69 @@ impl TokenizerTrait for TiktokenTokenizer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Renderer detection (config.json::architectures)
+// ---------------------------------------------------------------------------
+/// Inspect the sibling `config.json` to decide which chat-template renderer to
+/// use. Missing / unreadable / malformed config falls back to `Renderer::Jinja`
+/// silently with a debug log, mirroring `huggingface.rs::detect_renderer_from_config`.
+fn detect_renderer_from_config(dir: &Path) -> Renderer {
+    let path = dir.join("config.json");
+    if !path.exists() {
+        return Renderer::Jinja;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json unreadable; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json malformed; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let is_kimi = value
+        .get("architectures")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str() == Some("KimiK25ForConditionalGeneration"))
+        });
+    if is_kimi {
+        tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
+        return Renderer::KimiK25Tools;
+    }
+    Renderer::Jinja
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::traits::{Decoder, Encoder, Tokenizer};
 
+    const MINIMAL_TIKTOKEN_MODEL: &str = "YQ== 0\nYg== 1\n";
+
+    fn write_minimal_tiktoken_dir(
+        tokenizer_config: &str,
+        model_config: Option<&str>,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiktoken.model"), MINIMAL_TIKTOKEN_MODEL).unwrap();
+        std::fs::write(dir.path().join("tokenizer_config.json"), tokenizer_config).unwrap();
+        if let Some(model_config) = model_config {
+            std::fs::write(dir.path().join("config.json"), model_config).unwrap();
+        }
+        dir
+    }
+
     #[test]
     fn test_tiktoken_creation() {
         let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
         assert_eq!(tokenizer.vocab_size(), 100256);
-    }
-
-    #[test]
-    fn test_model_from_name() {
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("gpt-4").unwrap(),
-            TiktokenModel::Cl100kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("gpt-3.5-turbo").unwrap(),
-            TiktokenModel::Cl100kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("text-davinci-003").unwrap(),
-            TiktokenModel::P50kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("text-davinci-edit-001").unwrap(),
-            TiktokenModel::P50kEdit
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("davinci").unwrap(),
-            TiktokenModel::R50kBase
-        ));
     }
 
     #[test]
@@ -619,38 +675,6 @@ mod tests {
 
         assert!(special_tokens.eos_token.is_some());
         assert_eq!(special_tokens.eos_token.as_ref().unwrap(), "<|endoftext|>");
-    }
-
-    #[test]
-    fn test_unrecognized_model_name_returns_error() {
-        let result = TiktokenTokenizer::from_model_name("distilgpt-2");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-
-        let result = TiktokenTokenizer::from_model_name("bert-base-uncased");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-
-        let result = TiktokenTokenizer::from_model_name("llama-7b");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-    }
-
-    #[test]
-    fn test_recognized_model_names() {
-        assert!(TiktokenTokenizer::from_model_name("gpt-4").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("gpt-3.5-turbo").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-davinci-003").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("code-davinci-002").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-curie-001").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-babbage-001").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-ada-001").is_ok());
     }
 
     #[test]
@@ -755,6 +779,26 @@ mod tests {
     }
 
     #[test]
+    fn test_tiktoken_unknown_token_decode_returns_error() {
+        let dir = write_minimal_tiktoken_dir(
+            r#"{
+                "added_tokens_decoder": {
+                    "2": { "content": "[BOS]", "special": true }
+                }
+            }"#,
+            None,
+        );
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let err = tokenizer.decode(&[4], false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("tiktoken decode failed for unknown token id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_parse_special_tokens() {
         let config: serde_json::Value = serde_json::json!({
             "bos_token": "[BOS]",
@@ -790,6 +834,14 @@ mod tests {
         assert!(config.special_tokens.bos_token.is_none());
         assert!(config.added_tokens.is_empty());
         assert!(config.chat_template.is_none());
+    }
+
+    #[test]
+    fn test_load_tiktoken_config_from_dir_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, value) = load_tiktoken_config_from_dir(dir.path()).unwrap();
+        assert!(value.is_none());
+        assert!(config.added_tokens.is_empty());
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub(crate) struct GeneratePreparationStage;
 impl PipelineStage for GeneratePreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         let request = ctx.generate_request_arc();
-        self.prepare_generate(ctx, &request)?;
+        self.prepare_generate(ctx, &request).await?;
         Ok(None)
     }
 
@@ -37,11 +37,7 @@ impl PipelineStage for GeneratePreparationStage {
 }
 
 impl GeneratePreparationStage {
-    #[expect(
-        clippy::result_large_err,
-        reason = "Response is the standard error type in the pipeline stage pattern"
-    )]
-    fn prepare_generate(
+    async fn prepare_generate(
         &self,
         ctx: &mut RequestContext,
         request: &GenerateRequest,
@@ -50,7 +46,10 @@ impl GeneratePreparationStage {
         let tokenizer = utils::resolve_tokenizer(ctx, "GeneratePreparationStage::prepare_generate")
             .map_err(|e| *e)?;
 
-        let (original_text, token_ids) = match self.resolve_generate_input(request, &tokenizer) {
+        let (original_text, token_ids) = match self
+            .resolve_generate_input(request, &tokenizer)
+            .await
+        {
             Ok(res) => res,
             Err(msg) => {
                 error!(function = "GeneratePreparationStage::execute", error = %msg, "Failed to resolve generate input");
@@ -80,7 +79,7 @@ impl GeneratePreparationStage {
         Ok(())
     }
 
-    fn resolve_generate_input(
+    async fn resolve_generate_input(
         &self,
         request: &GenerateRequest,
         tokenizer: &Arc<dyn Tokenizer>,
@@ -88,6 +87,7 @@ impl GeneratePreparationStage {
         if let Some(text) = &request.text {
             return self
                 .tokenize_single_text(tokenizer, text)
+                .await
                 .map(|(original, ids)| (Some(original), ids));
         }
 
@@ -109,18 +109,14 @@ impl GeneratePreparationStage {
         Err("Either `text` or `input_ids` must be provided".to_string())
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "method on stage struct for consistency with resolve_generate_input"
-    )]
-    fn tokenize_single_text(
+    async fn tokenize_single_text(
         &self,
         tokenizer: &Arc<dyn Tokenizer>,
         text: &str,
     ) -> Result<(String, Vec<u32>), String> {
         // Don't add special tokens - raw text generation uses text as-is
-        let encoding = tokenizer
-            .encode(text, false)
+        let encoding = utils::encode_blocking(tokenizer.clone(), text.to_string(), false)
+            .await
             .map_err(|e| format!("Tokenization failed: {e}"))?;
         Ok((text.to_string(), encoding.token_ids().to_vec()))
     }

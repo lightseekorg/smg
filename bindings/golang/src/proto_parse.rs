@@ -60,10 +60,15 @@ fn parse_chunk(json: &Value) -> proto::GenerateStreamChunk {
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(0),
-        output_logprobs: None,
-        hidden_states: vec![],
-        input_logprobs: None,
-        index: 0,
+        reasoning_tokens: json
+            .get("reasoning_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        // The Go bindings only surface token data over FFI; everything else
+        // defaults. Using `..Default::default()` keeps new proto fields from
+        // breaking this builder until they are explicitly wired.
+        ..Default::default()
     }
 }
 
@@ -98,10 +103,11 @@ fn parse_complete(json: &Value) -> proto::GenerateComplete {
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .unwrap_or(0),
-        output_logprobs: None,
-        all_hidden_states: vec![],
-        input_logprobs: None,
-        matched_stop: None,
-        index: 0,
+        reasoning_tokens: json
+            .get("reasoning_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        ..Default::default()
     }
 }

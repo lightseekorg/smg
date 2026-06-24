@@ -3,7 +3,7 @@
 //! Provides SSE frame parsing, event formatting, stream wrappers,
 //! and the core stream consumption logic used by the streaming processor.
 
-use std::io;
+use std::{borrow::Cow, io};
 
 use axum::{
     body::Body,
@@ -18,7 +18,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
-use crate::routers::error::internal_error;
+use crate::routers::{
+    common::sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+    error::internal_error,
+};
 
 // ============================================================================
 // Constants
@@ -94,21 +97,29 @@ pub(crate) fn build_sse_response(
 /// Returns `true` if the send succeeded, `false` if the receiver was dropped.
 pub(crate) async fn send_event(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     event_type: &str,
     data: &Value,
 ) -> bool {
-    let bytes = format_sse_event(event_type, data);
+    let bytes = format_sse_event(enc, event_type, data);
     tx.send(Ok(bytes)).await.is_ok()
 }
 
 /// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
-fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
-    let json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("event: {event_type}\ndata: {json}\n\n"))
+fn format_sse_event(enc: &mut SseEncoder, event_type: &str, data: &Value) -> Bytes {
+    enc.encode_event(event_type, data)
+        .unwrap_or_else(|e| match e {
+            SseEncodeError::InvalidEventType => Bytes::from_static(b"event: error\ndata: {}\n\n"),
+            SseEncodeError::Json(_) => Bytes::from(format!("event: {event_type}\ndata: {{}}\n\n")),
+        })
 }
 
 /// Send an SSE error event.
-pub(crate) async fn send_error(tx: &mpsc::Sender<Result<Bytes, io::Error>>, message: &str) -> bool {
+pub(crate) async fn send_error(
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
+    message: &str,
+) -> bool {
     let data = serde_json::json!({
         "type": "error",
         "error": {
@@ -116,13 +127,14 @@ pub(crate) async fn send_error(tx: &mpsc::Sender<Result<Bytes, io::Error>>, mess
             "message": message
         }
     });
-    send_event(tx, "error", &data).await
+    send_event(tx, enc, "error", &data).await
 }
 
 /// Emit `content_block_start` + `content_block_stop` events for an
 /// `mcp_tool_result` block.
 pub(crate) async fn emit_mcp_tool_result(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     call: &McpToolCall,
     global_index: &mut u32,
 ) -> bool {
@@ -143,7 +155,7 @@ pub(crate) async fn emit_mcp_tool_result(
         }
     });
 
-    if !send_event(tx, "content_block_start", &block_start).await {
+    if !send_event(tx, enc, "content_block_start", &block_start).await {
         return false;
     }
 
@@ -153,7 +165,7 @@ pub(crate) async fn emit_mcp_tool_result(
         "index": index
     });
 
-    if !send_event(tx, "content_block_stop", &block_stop).await {
+    if !send_event(tx, enc, "content_block_stop", &block_stop).await {
         return false;
     }
 
@@ -164,6 +176,7 @@ pub(crate) async fn emit_mcp_tool_result(
 /// Emit the final `message_delta` and `message_stop` events.
 pub(crate) async fn emit_final(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     stop_reason: Option<&StopReason>,
     total_input_tokens: u32,
     total_output_tokens: u32,
@@ -184,14 +197,14 @@ pub(crate) async fn emit_final(
         }
     });
 
-    if !send_event(tx, "message_delta", &message_delta).await {
+    if !send_event(tx, enc, "message_delta", &message_delta).await {
         debug!("Failed to send final message_delta — channel closed");
     }
 
     let message_stop = serde_json::json!({
         "type": "message_stop"
     });
-    if !send_event(tx, "message_stop", &message_stop).await {
+    if !send_event(tx, enc, "message_stop", &message_stop).await {
         debug!("Failed to send message_stop — channel closed");
     }
 }
@@ -207,6 +220,7 @@ pub(crate) async fn emit_final(
 /// decoupling this function from `McpToolSession`.
 pub(crate) async fn consume_and_forward<F>(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
@@ -216,47 +230,42 @@ where
     F: Fn(&str) -> String,
 {
     let mut stream = response.bytes_stream();
-    let mut buffer = Vec::<u8>::new();
-    let mut processor =
-        EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
+    let mut decoder = SseDecoder::with_max_size(MAX_SSE_BUFFER_SIZE);
+    let mut processor = EventProcessor::new(
+        tx,
+        enc,
+        global_index,
+        is_first_iteration,
+        resolve_server_name,
+    );
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
-        // Guard against unbounded buffer growth (DoS protection).
-        // Check *before* extending so a single oversized chunk never
-        // causes an allocation beyond the cap.
-        if buffer.len() + chunk.len() > MAX_SSE_BUFFER_SIZE {
-            return Err(format!(
+        decoder.push(&chunk).map_err(|e| match e {
+            SseDecodeError::BufferOverflow => format!(
                 "SSE buffer exceeded maximum size ({MAX_SSE_BUFFER_SIZE} bytes) — possible malformed upstream stream"
-            ));
-        }
+            ),
+            other => format!("SSE decode error: {other}"),
+        })?;
 
-        buffer.extend_from_slice(&chunk);
-
-        // Process complete SSE frames (delimited by double newline).
-        // UTF-8 validation is deferred to complete frames so that multi-byte
-        // characters split across network chunks don't cause spurious errors.
-        while let Some(pos) = find_double_newline(&buffer) {
-            let frame_bytes = &buffer[..pos];
-            let frame = std::str::from_utf8(frame_bytes)
-                .map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
-            if let Some((event_type, data)) = parse_sse_frame(frame) {
+        while let Some(frame) = decoder.next_frame() {
+            let frame = frame.map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
+            if let Some((event_type, data)) = resolve_event(frame) {
                 processor.process(&event_type, &data).await?;
             }
-            buffer.drain(..pos + 2);
         }
+        decoder.compact();
     }
 
-    // Process any remaining data in buffer
-    if !buffer.is_empty() {
-        let remaining = std::str::from_utf8(&buffer)
-            .map_err(|e| format!("Invalid UTF-8 in final SSE data: {e}"))?;
-        let trimmed = remaining.trim();
-        if !trimmed.is_empty() {
-            if let Some((event_type, data)) = parse_sse_frame(trimmed) {
-                processor.process(&event_type, &data).await?;
-            }
+    // Process any trailing data not terminated by a blank line.
+    if let Some(frame) = decoder.flush() {
+        let frame = frame.map_err(|e| match e {
+            SseDecodeError::InvalidUtf8(u) => format!("Invalid UTF-8 in final SSE data: {u}"),
+            other => format!("SSE decode error on flush: {other}"),
+        })?;
+        if let Some((event_type, data)) = resolve_event(frame) {
+            processor.process(&event_type, &data).await?;
         }
     }
 
@@ -431,6 +440,7 @@ impl BlockAccumulator {
 /// tool names to MCP server labels.
 struct EventProcessor<'a, F> {
     tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &'a mut SseEncoder,
     global_index: &'a mut u32,
     index_base: u32,
     is_first_iteration: bool,
@@ -446,6 +456,7 @@ where
 {
     fn new(
         tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
+        enc: &'a mut SseEncoder,
         global_index: &'a mut u32,
         is_first_iteration: bool,
         resolve_server_name: F,
@@ -453,6 +464,7 @@ where
         let index_base = *global_index;
         Self {
             tx,
+            enc,
             global_index,
             index_base,
             is_first_iteration,
@@ -476,8 +488,8 @@ where
     }
 
     /// Send an SSE event to the client, returning `Err` on disconnect.
-    async fn send(&self, event_type: &str, data: &Value) -> Result<(), String> {
-        if !send_event(self.tx, event_type, data).await {
+    async fn send(&mut self, event_type: &str, data: &Value) -> Result<(), String> {
+        if !send_event(self.tx, self.enc, event_type, data).await {
             return Err(CLIENT_DISCONNECTED_ERROR.into());
         }
         Ok(())
@@ -653,57 +665,24 @@ where
 }
 
 // ============================================================================
-// SSE frame parsing
+// SSE frame resolution
 // ============================================================================
 
-/// Find the position of `\n\n` in a byte buffer.
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n")
-}
-
-/// Parse a raw SSE frame into `(event_type, data)`.
-///
-/// SSE frames look like:
-/// ```text
-/// event: content_block_start
-/// data: {"type":"content_block_start",...}
-/// ```
-fn parse_sse_frame(frame: &str) -> Option<(String, String)> {
-    let mut event_type = String::new();
-    let mut data_lines = Vec::new();
-
-    for line in frame.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+/// Resolve a decoded [`SseFrame`] into `(event_type, data)` pair.
+fn resolve_event(frame: SseFrame<'_>) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
+    let event_type = match frame.event_type {
+        Some(e) if !e.is_empty() => e,
+        _ => {
+            let parsed: Value = serde_json::from_str(&frame.data).ok()?;
+            Cow::Owned(parsed.get("type")?.as_str()?.to_string())
         }
-        if let Some(value) = line.strip_prefix("event:") {
-            event_type = value.trim().to_string();
-        } else if let Some(value) = line.strip_prefix("data:") {
-            data_lines.push(value.trim().to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
-        return None;
-    }
-
-    let data = data_lines.join("\n");
-
-    // If no event type specified, try to infer from data
-    if event_type.is_empty() {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
-            if let Some(t) = parsed.get("type").and_then(|v| v.as_str()) {
-                event_type = t.to_string();
-            }
-        }
-    }
+    };
 
     if event_type.is_empty() {
         return None;
     }
 
-    Some((event_type, data))
+    Some((event_type, frame.data))
 }
 
 // ============================================================================
@@ -714,40 +693,86 @@ fn parse_sse_frame(frame: &str) -> Option<(String, String)> {
 mod tests {
     use super::*;
 
+    /// Decode `bytes` through the shared `SseDecoder` and resolve each frame
+    /// to `(event_type, data)` the way `consume_and_forward` does.
+    fn decode_events(bytes: &[u8]) -> Vec<(String, String)> {
+        let mut decoder = SseDecoder::new();
+        decoder.push(bytes).unwrap();
+        let mut out = Vec::new();
+        while let Some(frame) = decoder.next_frame() {
+            if let Some((event_type, data)) = resolve_event(frame.unwrap()) {
+                out.push((event_type.into_owned(), data.into_owned()));
+            }
+        }
+        out
+    }
+
     #[test]
-    fn test_parse_sse_frame_basic() {
-        let frame = "event: message_start\ndata: {\"type\":\"message_start\"}";
-        let (event_type, data) = parse_sse_frame(frame).unwrap();
-        assert_eq!(event_type, "message_start");
+    fn test_resolve_event_basic() {
+        let frame = SseFrame {
+            event_type: Some(Cow::Borrowed("message_start")),
+            data: Cow::Borrowed("{\"type\":\"message_start\"}"),
+        };
+        let (event_type, data) = resolve_event(frame).unwrap();
+        assert_eq!(event_type.as_ref(), "message_start");
         assert_eq!(data, "{\"type\":\"message_start\"}");
     }
 
     #[test]
-    fn test_parse_sse_frame_content_block() {
-        let frame = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}";
-        let (event_type, data) = parse_sse_frame(frame).unwrap();
-        assert_eq!(event_type, "content_block_start");
-        let parsed: Value = serde_json::from_str(&data).unwrap();
+    fn test_resolve_event_no_event_type_infers() {
+        // No `event:` line -> infer the type from the payload's "type" field.
+        let frame = SseFrame {
+            event_type: None,
+            data: Cow::Borrowed("{\"type\":\"ping\"}"),
+        };
+        let (event_type, _data) = resolve_event(frame).unwrap();
+        assert_eq!(event_type.as_ref(), "ping");
+    }
+
+    #[test]
+    fn test_resolve_event_uninferable_is_none() {
+        // No event type and no "type" field in the payload -> skipped.
+        let frame = SseFrame {
+            event_type: None,
+            data: Cow::Borrowed("{\"foo\":1}"),
+        };
+        assert!(resolve_event(frame).is_none());
+    }
+
+    #[test]
+    fn test_decode_events_basic() {
+        let events = decode_events(
+            b"event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\n",
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "message_start");
+        assert_eq!(events[1].0, "ping");
+    }
+
+    #[test]
+    fn test_decode_events_content_block() {
+        let events = decode_events(b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "content_block_start");
+        let parsed: Value = serde_json::from_str(&events[0].1).unwrap();
         assert_eq!(parsed["index"], 0);
     }
 
     #[test]
-    fn test_parse_sse_frame_no_event_type_infers() {
-        let frame = "data: {\"type\":\"ping\"}";
-        let (event_type, _data) = parse_sse_frame(frame).unwrap();
-        assert_eq!(event_type, "ping");
-    }
-
-    #[test]
-    fn test_parse_sse_frame_empty() {
-        assert!(parse_sse_frame("").is_none());
-        assert!(parse_sse_frame("event: foo").is_none());
+    fn test_decode_events_infers_event_type() {
+        // A `data:`-only frame (no `event:` line) infers its type from the payload.
+        let events = decode_events(b"data: {\"type\":\"ping\"}\n\n");
+        assert_eq!(
+            events,
+            vec![("ping".to_string(), "{\"type\":\"ping\"}".to_string())]
+        );
     }
 
     #[test]
     fn test_format_sse_event() {
         let data = serde_json::json!({"type": "ping"});
-        let bytes = format_sse_event("ping", &data);
+        let mut enc = SseEncoder::new();
+        let bytes = format_sse_event(&mut enc, "ping", &data);
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(text.starts_with("event: ping\n"));
         assert!(text.contains("data: "));
@@ -755,10 +780,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sse_frame_with_extra_whitespace() {
-        let frame = "  event: content_block_delta  \n  data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}  ";
-        let (event_type, data) = parse_sse_frame(frame).unwrap();
-        assert_eq!(event_type, "content_block_delta");
+    fn test_decode_events_split_across_chunks() {
+        // A multi-byte-safe decoder must reassemble frames split mid-stream.
+        let mut decoder = SseDecoder::new();
+        decoder
+            .push(b"event: content_block_delta\ndata: {\"type\":\"content_block_de")
+            .unwrap();
+        assert!(decoder.next_frame().is_none()); // incomplete
+        decoder
+            .push(b"lta\",\"index\":1,\"delta\":{\"partial_json\":\"{}\"}}\n\n")
+            .unwrap();
+        let frame = decoder.next_frame().unwrap().unwrap();
+        let (event_type, data) = resolve_event(frame).unwrap();
+        assert_eq!(event_type.as_ref(), "content_block_delta");
         let parsed: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(parsed["index"], 1);
     }

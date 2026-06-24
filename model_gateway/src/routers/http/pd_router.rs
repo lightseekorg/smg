@@ -23,7 +23,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
-use super::pd_types::api_path;
 use crate::{
     config::types::RetryConfig,
     middleware::TenantRequestMeta,
@@ -38,6 +37,7 @@ use crate::{
         common::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
+            sse::SseEncoder,
             token_count::count_tokens,
         },
         error,
@@ -271,7 +271,6 @@ impl PDRouter {
                 ports.push(prefill_worker.bootstrap_port());
                 rooms.push(super::pd_types::generate_room_id());
             }
-            // Use static string keys to avoid per-request allocations
             obj.insert(
                 Self::BOOTSTRAP_HOST_KEY.to_string(),
                 Value::Array(hosts.into_iter().map(Value::from).collect()),
@@ -293,7 +292,6 @@ impl PDRouter {
                 Value::Array(rooms.into_iter().map(Value::from).collect()),
             );
         } else {
-            // Use static string keys to avoid per-request allocations
             obj.insert(
                 Self::BOOTSTRAP_HOST_KEY.to_string(),
                 Value::from(prefill_worker.bootstrap_host()),
@@ -390,11 +388,17 @@ impl PDRouter {
                             context.batch_size,
                         ) {
                             Ok(v) => v,
-                            Err(e) => return Self::handle_serialization_error(e),
+                            Err(e) => {
+                                Metrics::record_pd_bootstrap_failure();
+                                return Self::handle_serialization_error(e);
+                            }
                         };
 
                         let mut prefill_json_request = json_request.clone();
                         let mut decode_json_request = json_request;
+
+                        let mut prefill_rank = prefill.dp_rank().map(|rank| rank as isize);
+                        let mut decode_rank = decode.dp_rank().map(|rank| rank as isize);
 
                         let dp_rank_policy_opt = self.policy_registry.get_dp_rank_policy();
                         if let Some(dp_rank_policy) = dp_rank_policy_opt.as_ref() {
@@ -410,28 +414,42 @@ impl PDRouter {
                                 }
                                 None => 1, // Use at least 1 to avoid no-op
                             };
-                            let prefill_rank =
+                            let policy_prefill_rank =
                                 dp_rank_policy.select_dp_rank(prefill.as_ref(), estimated_cost);
-                            let decode_rank =
+                            let policy_decode_rank =
                                 dp_rank_policy.select_dp_rank(decode.as_ref(), estimated_cost);
-                            if let (Some(p_rank), Some(d_rank)) = (prefill_rank, decode_rank) {
-                                debug!("prefill_rank is {}, decode_rank {}", p_rank, d_rank);
-                                Self::inject_dp_rank_to_json(
-                                    &mut prefill_json_request,
-                                    p_rank,
-                                    "routed_dp_rank",
-                                );
-                                Self::inject_dp_rank_to_json(
-                                    &mut decode_json_request,
-                                    d_rank,
-                                    "routed_dp_rank",
-                                );
-                                Self::inject_dp_rank_to_json(
-                                    &mut decode_json_request,
-                                    p_rank,
-                                    "disagg_prefill_dp_rank",
-                                );
+                            if let Some(rank) = policy_prefill_rank {
+                                prefill_rank = Some(rank);
                             }
+                            if let Some(rank) = policy_decode_rank {
+                                decode_rank = Some(rank);
+                            }
+                        }
+
+                        if let Some(p_rank) = prefill_rank {
+                            Self::inject_dp_rank_to_json(
+                                &mut prefill_json_request,
+                                p_rank,
+                                "routed_dp_rank",
+                            );
+                            Self::inject_dp_rank_to_json(
+                                &mut decode_json_request,
+                                p_rank,
+                                "disagg_prefill_dp_rank",
+                            );
+                        }
+                        if let Some(d_rank) = decode_rank {
+                            Self::inject_dp_rank_to_json(
+                                &mut decode_json_request,
+                                d_rank,
+                                "routed_dp_rank",
+                            );
+                        }
+                        if prefill_rank.is_some() || decode_rank.is_some() {
+                            debug!(
+                                "PD selected DP ranks prefill={:?} decode={:?}",
+                                prefill_rank, decode_rank
+                            );
                         }
 
                         let response = self
@@ -442,7 +460,6 @@ impl PDRouter {
                                 context,
                                 Arc::clone(&prefill),
                                 Arc::clone(&decode),
-                                start_time,
                             )
                             .await;
 
@@ -512,8 +529,8 @@ impl PDRouter {
         &self,
         res: reqwest::Response,
         context: &PDRequestContext<'_>,
-        prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
+        load_guards: Vec<WorkerLoadGuard>,
     ) -> Response {
         let status = res.status();
 
@@ -534,8 +551,8 @@ impl PDRouter {
             };
 
             let sse_data = format!(
-                "data: {{'error': {}}}",
-                serde_json::to_string(&error_payload).unwrap_or_default()
+                "data: {}\n\n",
+                serde_json::to_string(&json!({ "error": error_payload })).unwrap_or_default()
             );
             let error_stream = tokio_stream::once(Ok(axum::body::Bytes::from(sse_data)));
 
@@ -547,8 +564,7 @@ impl PDRouter {
                 context.return_logprob,
                 Some(decode_url),
                 Some(response_headers),
-                prefill,
-                decode,
+                load_guards,
             )
         } else {
             // Handle non-streaming error response
@@ -623,7 +639,6 @@ impl PDRouter {
     }
 
     // Internal method that performs the actual dual dispatch (without retry logic)
-    #[expect(clippy::too_many_arguments)]
     async fn execute_dual_dispatch_internal(
         &self,
         headers: Option<&HeaderMap>,
@@ -632,14 +647,11 @@ impl PDRouter {
         context: PDRequestContext<'_>,
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
-        _start_time: Instant,
     ) -> Response {
-        // For non-streaming: use guard for automatic load management
-        // For streaming: load will be managed in create_streaming_response
-        let _prefill_guard =
-            (!context.is_stream).then(|| WorkerLoadGuard::new(prefill.clone(), headers));
-        let _decode_guard =
-            (!context.is_stream).then(|| WorkerLoadGuard::new(decode.clone(), headers));
+        let load_guards = vec![
+            WorkerLoadGuard::new(prefill.clone(), headers),
+            WorkerLoadGuard::new(decode.clone(), headers),
+        ];
 
         let mut headers_with_trace = headers.cloned().unwrap_or_default();
         inject_trace_context_http(&mut headers_with_trace);
@@ -648,7 +660,7 @@ impl PDRouter {
         // Build both requests
         let prefill_request = self.build_post_with_headers(
             &self.client,
-            prefill.url(),
+            prefill.as_ref(),
             context.route,
             &prefill_json_request,
             headers,
@@ -656,7 +668,7 @@ impl PDRouter {
         );
         let decode_request = self.build_post_with_headers(
             &self.client,
-            decode.url(),
+            decode.as_ref(),
             context.route,
             &decode_json_request,
             headers,
@@ -675,22 +687,38 @@ impl PDRouter {
         // hits a transport error, the other is cancelled immediately — otherwise
         // the surviving request hangs waiting for a PD bootstrap that will never
         // come (see #831).
-        let pd_result = tokio::try_join!(prefill_request.send(), decode_request.send());
+        // Each leg captures its own head-arrival elapsed when its `send()`
+        // resolves, so the two are independent even though `try_join!` returns
+        // only once both heads arrive: decode TTFT isn't conflated with the
+        // prefill-head wait, and prefill duration isn't conflated with a slower
+        // decode head. Recorded on the success path only.
+        let runtime = prefill.metadata().spec.runtime_type.as_str();
+        let dispatch_start = Instant::now();
+        let prefill_fut = async {
+            let resp = prefill_request.send().await?;
+            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+        };
+        let decode_fut = async {
+            let resp = decode_request.send().await?;
+            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+        };
+        let pd_result = tokio::try_join!(prefill_fut, decode_fut);
 
         events::RequestReceivedEvent {}.emit();
 
-        let (prefill_response, decode_response) = match pd_result {
-            Ok((prefill_resp, decode_resp)) => (prefill_resp, decode_resp),
-            Err(e) => {
-                error!("PD request transport error, both sides aborted: {e}");
-                // Don't record_outcome here — the caller (execute_dual_dispatch)
-                // records outcomes from the response status after we return.
-                return error::bad_gateway(
-                    "PD disaggregation request failed",
-                    format!("Transport error: {e}"),
-                );
-            }
-        };
+        let ((prefill_head_elapsed, prefill_response), (decode_head_elapsed, decode_response)) =
+            match pd_result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    error!("PD request transport error, both sides aborted: {e}");
+                    // Don't record_outcome here — the caller (execute_dual_dispatch)
+                    // records outcomes from the response status after we return.
+                    return error::bad_gateway(
+                        "PD disaggregation request failed",
+                        format!("Transport error: {e}"),
+                    );
+                }
+            };
 
         // Process decode response
         let status = StatusCode::from_u16(decode_response.status().as_u16())
@@ -705,11 +733,23 @@ impl PDRouter {
             );
 
             return self
-                .handle_decode_error_response(decode_response, &context, prefill, decode)
+                .handle_decode_error_response(decode_response, &context, decode, load_guards)
                 .await;
         }
 
+        // Honest PD TTFT: dispatch to the decode response head — the first
+        // user-visible decode output, since the gateway forwards the decode body
+        // unbuffered. Complements the decode-only `smg_router_ttft_seconds`,
+        // which PD never narrows to a single leg.
+        Metrics::record_pd_ttft(
+            metrics_labels::BACKEND_PD,
+            context.model_id,
+            runtime,
+            decode_head_elapsed,
+        );
+
         // Process prefill response
+        let prefill_drain_start = Instant::now();
         let prefill_body = match self
             .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
             .await
@@ -717,6 +757,15 @@ impl PDRouter {
             Ok((_, body)) => body,
             Err(error_response) => return error_response,
         };
+
+        // Prefill RPC duration: prefill-head elapsed + body drain, independent
+        // of decode so a slower decode head never inflates it.
+        Metrics::record_pd_prefill_duration(
+            metrics_labels::BACKEND_PD,
+            context.model_id,
+            runtime,
+            prefill_head_elapsed + prefill_drain_start.elapsed(),
+        );
 
         if context.is_stream {
             // Streaming response
@@ -739,8 +788,7 @@ impl PDRouter {
                 context.return_logprob,
                 None,
                 Some(response_headers),
-                prefill,
-                decode,
+                load_guards,
             )
         } else {
             // Non-streaming response
@@ -927,8 +975,7 @@ impl PDRouter {
         return_logprob: bool,
         decode_url: Option<String>,
         headers: Option<HeaderMap>,
-        prefill: Arc<dyn Worker>,
-        decode: Arc<dyn Worker>,
+        load_guards: Vec<WorkerLoadGuard>,
     ) -> Response {
         use crate::worker::AttachedBody;
 
@@ -940,14 +987,20 @@ impl PDRouter {
         )]
         tokio::spawn(async move {
             futures_util::pin_mut!(stream);
+            // Reusable SSE encoder for the logprob-merge re-encode path.
+            let mut encoder = SseEncoder::new();
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
                         let is_done = memmem::find(&chunk, b"data: [DONE]").is_some();
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
-                            Self::merge_streaming_logprobs(prefill_logprobs.clone(), &chunk)
-                                .unwrap_or(chunk)
+                            Self::merge_streaming_logprobs(
+                                prefill_logprobs.as_ref(),
+                                &chunk,
+                                &mut encoder,
+                            )
+                            .unwrap_or(chunk)
                         } else {
                             chunk
                         };
@@ -974,11 +1027,6 @@ impl PDRouter {
         let stream = UnboundedReceiverStream::new(rx);
         let body = Body::from_stream(stream);
 
-        let guards = vec![
-            WorkerLoadGuard::new(prefill, headers.as_ref()),
-            WorkerLoadGuard::new(decode, headers.as_ref()),
-        ];
-
         let mut response = Response::new(body);
         *response.status_mut() = status;
 
@@ -986,7 +1034,7 @@ impl PDRouter {
         response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         *response.headers_mut() = response_headers;
 
-        AttachedBody::wrap_response(response, guards)
+        AttachedBody::wrap_response(response, load_guards)
     }
 
     // Helper to process non-streaming decode response with logprob merging
@@ -1117,13 +1165,14 @@ impl PDRouter {
     fn build_post_with_headers(
         &self,
         client: &Client,
-        url: &str,
+        worker: &dyn Worker,
         route: &'static str,
         json_request: &Value,
         headers: Option<&HeaderMap>,
         connection_close: bool,
     ) -> reqwest::RequestBuilder {
-        let mut request = client.post(api_path(url, route)).json(json_request);
+        let endpoint_url = worker.endpoint_url(route);
+        let mut request = client.post(endpoint_url).json(json_request);
         if connection_close {
             request = request.header("Connection", "close");
         }
@@ -1170,8 +1219,9 @@ impl PDRouter {
     // Simple helper to merge logprobs in streaming responses
     // Optimized to reduce allocations in the merge path
     fn merge_streaming_logprobs(
-        prefill_logprobs: Option<Value>,
+        prefill_logprobs: Option<&Value>,
         decode_chunk: &[u8],
+        encoder: &mut SseEncoder,
     ) -> Result<bytes::Bytes, ()> {
         // Skip non-data chunks
         let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
@@ -1184,7 +1234,7 @@ impl PDRouter {
         let mut decode_json: Value = serde_json::from_str(json_str).map_err(|_| ())?;
 
         // Merge prefill logprobs if available
-        if let Some(ref p_logprobs) = prefill_logprobs {
+        if let Some(p_logprobs) = prefill_logprobs {
             if let Some(meta) = decode_json.get_mut("meta_info") {
                 if let Some(d_logprobs) = meta.get_mut("input_token_logprobs") {
                     if let Some(p_arr) = p_logprobs.as_array() {
@@ -1202,12 +1252,8 @@ impl PDRouter {
             }
         }
 
-        // Re-serialize
-        let merged_str = format!(
-            "data: {}\n\n",
-            serde_json::to_string(&decode_json).unwrap_or_default()
-        );
-        Ok(bytes::Bytes::from(merged_str))
+        // Re-serialize via the shared encoder (reuses its buffer across chunks).
+        encoder.encode_data(&decode_json).map_err(|_| ())
     }
 }
 
@@ -1296,8 +1342,6 @@ impl RouterTrait for PDRouter {
     }
 
     async fn get_server_info(&self, _req: Request<Body>) -> Response {
-        // Get info from the first decode server to match sglang's server info format
-        // Note: We use decode workers for server info to match expected format
         self.proxy_to_first_prefill_worker("get_server_info", None)
             .await
     }
@@ -1500,6 +1544,34 @@ mod tests {
         Box::new(worker)
     }
 
+    #[test]
+    fn test_build_post_uses_dp_base_url_for_logical_worker() {
+        let router = create_test_pd_router();
+        let worker = BasicWorkerBuilder::new("http://127.0.0.1:30000")
+            .worker_type(WorkerType::Decode)
+            .dp_config(2, 4)
+            .build();
+
+        let request = router
+            .build_post_with_headers(
+                &router.client,
+                &worker,
+                "/generate",
+                &json!({"text": "hello"}),
+                None,
+                false,
+            )
+            .build()
+            .expect("request should build");
+
+        assert_eq!(worker.url(), "http://127.0.0.1:30000@2");
+        assert_eq!(
+            worker.endpoint_url("/generate"),
+            "http://127.0.0.1:30000/generate"
+        );
+        assert_eq!(request.url().as_str(), "http://127.0.0.1:30000/generate");
+    }
+
     #[tokio::test]
     async fn test_select_healthy_prefill_worker() {
         let router = create_test_pd_router();
@@ -1567,6 +1639,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_streaming_decode_error_emits_valid_json_sse() {
+        let router = create_test_pd_router();
+
+        let prefill: Arc<dyn Worker> = Arc::from(create_test_worker(
+            "http://prefill".to_string(),
+            WorkerType::Prefill,
+            true,
+        ));
+        let decode: Arc<dyn Worker> = Arc::from(create_test_worker(
+            "http://decode".to_string(),
+            WorkerType::Decode,
+            true,
+        ));
+
+        let upstream = http::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(r#"{"error":"boom \"quoted\""}"#)
+            .unwrap();
+        let decode_response = reqwest::Response::from(upstream);
+
+        let context = PDRequestContext {
+            route: "/v1/chat/completions",
+            batch_size: None,
+            is_stream: true,
+            return_logprob: false,
+            request_text: None,
+            model_id: UNKNOWN_MODEL_ID,
+            headers: None,
+        };
+
+        let load_guards = vec![
+            WorkerLoadGuard::new(prefill.clone(), None),
+            WorkerLoadGuard::new(decode.clone(), None),
+        ];
+
+        let response = router
+            .handle_decode_error_response(decode_response, &context, decode, load_guards)
+            .await;
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let frame = std::str::from_utf8(&body).unwrap();
+
+        let payload = frame
+            .strip_prefix("data: ")
+            .expect("SSE frame must start with `data: `")
+            .trim_end();
+        let parsed: Value =
+            serde_json::from_str(payload).expect("bytes after `data: ` must be valid JSON");
+        assert!(
+            parsed.get("error").is_some(),
+            "parsed SSE payload must contain an `error` field: {parsed}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_streaming_load_tracking() {
         use futures_util::StreamExt;
         use tokio::time::{sleep, Duration};
@@ -1598,6 +1727,14 @@ mod tests {
         let stream = UnboundedReceiverStream::new(rx);
 
         {
+            let guards = vec![
+                WorkerLoadGuard::new(prefill_ref.clone(), None),
+                WorkerLoadGuard::new(decode_ref.clone(), None),
+            ];
+
+            assert_eq!(prefill_ref.load(), 1);
+            assert_eq!(decode_ref.load(), 1);
+
             let response = router.create_streaming_response(
                 stream.map(Ok),
                 StatusCode::OK,
@@ -1605,8 +1742,7 @@ mod tests {
                 false,
                 None,
                 None,
-                prefill_ref.clone(),
-                decode_ref.clone(),
+                guards,
             );
 
             // Guards are now attached to response body, so load should be 1

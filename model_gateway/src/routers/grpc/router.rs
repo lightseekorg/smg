@@ -148,7 +148,6 @@ impl GrpcRouter {
                 ctx.response_storage.clone(),
                 ctx.conversation_storage.clone(),
                 ctx.conversation_item_storage.clone(),
-                ctx.conversation_memory_writer.clone(),
                 mcp_orchestrator.clone(),
                 ctx.mcp_format_registry.clone(),
                 storage_request_context.clone(),
@@ -339,9 +338,6 @@ impl GrpcRouter {
                 self.harmony_responses_context.conversation_storage.clone(),
                 self.harmony_responses_context
                     .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context
-                    .conversation_memory_writer
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 self.harmony_responses_context.mcp_format_registry.clone(),

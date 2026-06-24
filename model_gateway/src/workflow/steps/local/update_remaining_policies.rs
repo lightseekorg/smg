@@ -49,6 +49,12 @@ impl StepExecutor<WorkerRemovalWorkflowData> for UpdateRemainingPoliciesStep {
             }
         }
 
+        let prefill_workers = app_context.worker_registry.get_prefill_workers();
+        let decode_workers = app_context.worker_registry.get_decode_workers();
+        app_context
+            .policy_registry
+            .init_pd_cache_aware_policies(&prefill_workers, &decode_workers);
+
         // Log final result at info level
         if worker_urls.len() == 1 {
             info!("Removed worker {}", worker_urls[0]);

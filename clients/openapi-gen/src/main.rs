@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, io::Write};
 
-use schemars::{schema::RootSchema, schema_for};
+use schemars::{schema_for, Schema};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -91,12 +91,12 @@ struct Response {
 // ============================================================================
 
 /// Post-process a JSON value tree to fix schemars output for OpenAPI compatibility:
-/// 1. Rewrite `#/definitions/X` → `#/components/schemas/X`
+/// 1. Rewrite `#/$defs/X` → `#/components/schemas/X`
 /// 2. Replace boolean `true` in `anyOf`/`oneOf`/`allOf` arrays with `{}` (empty = any)
 fn fixup_schema(value: &mut Value) {
     match value {
         Value::String(s) => {
-            if let Some(rest) = s.strip_prefix("#/definitions/") {
+            if let Some(rest) = s.strip_prefix("#/$defs/") {
                 *s = format!("#/components/schemas/{rest}");
             }
         }
@@ -128,29 +128,35 @@ fn fixup_schema(value: &mut Value) {
 
 /// Collect a root schema and all its definitions into the schemas map.
 /// Returns the top-level schema name.
-fn collect_schema(
-    root: &RootSchema,
-    schemas: &mut BTreeMap<String, Value>,
-) -> anyhow::Result<String> {
-    let title = root
-        .schema
-        .metadata
-        .as_ref()
-        .and_then(|m| m.title.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
+///
+/// schemars 1.0 returns a single `Schema` (a JSON object) holding the root
+/// schema inline, plus `$defs` for referenced subschemas and a `$schema`
+/// meta-schema key.
+fn collect_schema(root: Schema, schemas: &mut BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let mut root_value = root.to_value();
+    let Value::Object(map) = &mut root_value else {
+        anyhow::bail!("expected schema object, got {root_value}");
+    };
+
+    let title = match map.get("title") {
+        Some(Value::String(t)) => t.clone(),
+        _ => "Unknown".to_string(),
+    };
+
+    // Pull out the referenced subschemas and the meta-schema key so only the
+    // root schema body remains.
+    let defs = map.remove("$defs");
+    map.remove("$schema");
 
     // Add all definitions (sub-schemas referenced by the root)
-    for (name, schema) in &root.definitions {
-        let mut value = serde_json::to_value(schema)?;
-        fixup_schema(&mut value);
-        schemas.insert(name.clone(), value);
+    if let Some(Value::Object(defs)) = defs {
+        for (name, mut value) in defs {
+            fixup_schema(&mut value);
+            schemas.insert(name, value);
+        }
     }
 
-    // Add the root schema itself (strip definitions to avoid duplication)
-    let mut root_value = serde_json::to_value(&root.schema)?;
-    if let Value::Object(ref mut map) = root_value {
-        map.remove("definitions");
-    }
+    // Add the root schema itself
     fixup_schema(&mut root_value);
     schemas.insert(title.clone(), root_value);
 
@@ -273,9 +279,9 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Chat Completions ----
     use openai_protocol::chat::*;
-    let req_name = collect_schema(&schema_for!(ChatCompletionRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(ChatCompletionResponse), &mut schemas)?;
-    collect_schema(&schema_for!(ChatCompletionStreamResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(ChatCompletionRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(ChatCompletionResponse), &mut schemas)?;
+    collect_schema(schema_for!(ChatCompletionStreamResponse), &mut schemas)?;
     paths.insert(
         "/v1/chat/completions".to_string(),
         post_endpoint(
@@ -288,9 +294,9 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Completions ----
     use openai_protocol::completion::*;
-    let req_name = collect_schema(&schema_for!(CompletionRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(CompletionResponse), &mut schemas)?;
-    collect_schema(&schema_for!(CompletionStreamResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(CompletionRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(CompletionResponse), &mut schemas)?;
+    collect_schema(schema_for!(CompletionStreamResponse), &mut schemas)?;
     paths.insert(
         "/v1/completions".to_string(),
         post_endpoint(
@@ -303,8 +309,8 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Embeddings ----
     use openai_protocol::embedding::*;
-    let req_name = collect_schema(&schema_for!(EmbeddingRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(EmbeddingResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(EmbeddingRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(EmbeddingResponse), &mut schemas)?;
     paths.insert(
         "/v1/embeddings".to_string(),
         post_endpoint("createEmbedding", "Create embedding", &req_name, &resp_name),
@@ -312,8 +318,8 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Rerank ----
     use openai_protocol::rerank::*;
-    let req_name = collect_schema(&schema_for!(RerankRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(RerankResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(RerankRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(RerankResponse), &mut schemas)?;
     paths.insert(
         "/v1/rerank".to_string(),
         post_endpoint("createRerank", "Rerank documents", &req_name, &resp_name),
@@ -321,9 +327,9 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Messages (Anthropic) ----
     use openai_protocol::messages::*;
-    let req_name = collect_schema(&schema_for!(CreateMessageRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(Message), &mut schemas)?;
-    collect_schema(&schema_for!(MessageStreamEvent), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(CreateMessageRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(Message), &mut schemas)?;
+    collect_schema(schema_for!(MessageStreamEvent), &mut schemas)?;
     paths.insert(
         "/v1/messages".to_string(),
         post_endpoint(
@@ -336,8 +342,8 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Responses API ----
     use openai_protocol::responses::*;
-    let req_name = collect_schema(&schema_for!(ResponsesRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(ResponsesResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(ResponsesRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(ResponsesResponse), &mut schemas)?;
     paths.insert(
         "/v1/responses".to_string(),
         post_endpoint("createResponse", "Create response", &req_name, &resp_name),
@@ -413,9 +419,9 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Classify ----
     use openai_protocol::classify::*;
-    let req_name = collect_schema(&schema_for!(ClassifyRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(ClassifyResponse), &mut schemas)?;
-    collect_schema(&schema_for!(ClassifyData), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(ClassifyRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(ClassifyResponse), &mut schemas)?;
+    collect_schema(schema_for!(ClassifyData), &mut schemas)?;
     paths.insert(
         "/v1/classify".to_string(),
         post_endpoint("classify", "Classify text", &req_name, &resp_name),
@@ -423,8 +429,8 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Parser ----
     use openai_protocol::parser::*;
-    let req_name = collect_schema(&schema_for!(ParseFunctionCallRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(ParseFunctionCallResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(ParseFunctionCallRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(ParseFunctionCallResponse), &mut schemas)?;
     paths.insert(
         "/parse/function_call".to_string(),
         post_endpoint(
@@ -434,8 +440,8 @@ fn main() -> anyhow::Result<()> {
             &resp_name,
         ),
     );
-    let req_name = collect_schema(&schema_for!(SeparateReasoningRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(SeparateReasoningResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(SeparateReasoningRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(SeparateReasoningResponse), &mut schemas)?;
     paths.insert(
         "/parse/reasoning".to_string(),
         post_endpoint(
@@ -451,9 +457,9 @@ fn main() -> anyhow::Result<()> {
     // (not WorkerApiResponse), and list returns a different stats shape than
     // WorkerListResponse. We use inline schemas matching the actual server responses.
     use openai_protocol::worker::*;
-    let worker_spec_name = collect_schema(&schema_for!(WorkerSpec), &mut schemas)?;
-    let worker_info_name = collect_schema(&schema_for!(WorkerInfo), &mut schemas)?;
-    let worker_update_name = collect_schema(&schema_for!(WorkerUpdateRequest), &mut schemas)?;
+    let worker_spec_name = collect_schema(schema_for!(WorkerSpec), &mut schemas)?;
+    let worker_info_name = collect_schema(schema_for!(WorkerInfo), &mut schemas)?;
+    let worker_update_name = collect_schema(schema_for!(WorkerUpdateRequest), &mut schemas)?;
 
     // Inline schema for 202 Accepted mutation responses
     let worker_accepted_schema = serde_json::json!({
@@ -575,8 +581,8 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Generate (SGLang native) ----
     use openai_protocol::generate::*;
-    let req_name = collect_schema(&schema_for!(GenerateRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(GenerateResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(GenerateRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(GenerateResponse), &mut schemas)?;
     paths.insert(
         "/generate".to_string(),
         post_endpoint(
@@ -589,15 +595,15 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Tokenize / Detokenize ----
     use openai_protocol::tokenize::*;
-    let req_name = collect_schema(&schema_for!(TokenizeRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(TokenizeResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(TokenizeRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(TokenizeResponse), &mut schemas)?;
     paths.insert(
         "/v1/tokenize".to_string(),
         post_endpoint("tokenize", "Tokenize text", &req_name, &resp_name),
     );
 
-    let req_name = collect_schema(&schema_for!(DetokenizeRequest), &mut schemas)?;
-    let resp_name = collect_schema(&schema_for!(DetokenizeResponse), &mut schemas)?;
+    let req_name = collect_schema(schema_for!(DetokenizeRequest), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(DetokenizeResponse), &mut schemas)?;
     paths.insert(
         "/v1/detokenize".to_string(),
         post_endpoint("detokenize", "Detokenize tokens", &req_name, &resp_name),
@@ -605,7 +611,7 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Models ----
     use openai_protocol::models::ListModelsResponse as OpenAIListModelsResponse;
-    let resp_name = collect_schema(&schema_for!(OpenAIListModelsResponse), &mut schemas)?;
+    let resp_name = collect_schema(schema_for!(OpenAIListModelsResponse), &mut schemas)?;
     paths.insert(
         "/v1/models".to_string(),
         get_endpoint("listModels", "List available models", &resp_name),
@@ -613,9 +619,9 @@ fn main() -> anyhow::Result<()> {
 
     // ---- Shared types (not tied to a specific endpoint) ----
     use openai_protocol::common::{Detail, ErrorDetail, ErrorResponse};
-    collect_schema(&schema_for!(ErrorResponse), &mut schemas)?;
-    collect_schema(&schema_for!(ErrorDetail), &mut schemas)?;
-    collect_schema(&schema_for!(Detail), &mut schemas)?;
+    collect_schema(schema_for!(ErrorResponse), &mut schemas)?;
+    collect_schema(schema_for!(ErrorDetail), &mut schemas)?;
+    collect_schema(schema_for!(Detail), &mut schemas)?;
 
     // ---- Assemble OpenAPI document ----
     let doc = OpenApiDoc {

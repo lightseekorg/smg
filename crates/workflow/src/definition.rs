@@ -251,7 +251,6 @@ impl<D: WorkflowData> WorkflowDefinition<D> {
     /// On success, pre-computes reverse dependencies for O(1) dependent lookup.
     #[must_use = "validation result should be checked"]
     pub fn validate(&mut self) -> Result<(), ValidationError> {
-        // Build HashMap for O(1) lookup instead of O(n) linear search
         let steps_map: HashMap<&StepId, &StepDefinition<D>> =
             self.steps.iter().map(|s| (&s.id, s)).collect();
 
@@ -321,7 +320,6 @@ impl<D: WorkflowData> WorkflowDefinition<D> {
         visited.insert(step_id);
         rec_stack.insert(step_id);
 
-        // O(1) lookup instead of linear search
         // Check both depends_on and depends_on_any for cycles
         if let Some(step) = steps_map.get(step_id) {
             for dep in step.all_dependencies() {

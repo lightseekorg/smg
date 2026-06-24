@@ -155,6 +155,7 @@ nav:
           - Tokenization and Parsing APIs: getting-started/tokenization-and-parsing.md
       - Advanced Features:
           - Load Balancing: getting-started/load-balancing.md
+          - KV Events Cache-Aware Routing: getting-started/kv-events-cache-aware.md
           - Tokenizer Caching: getting-started/tokenizer-caching.md
           - MCP in Responses API: getting-started/mcp.md
           - External Providers: getting-started/external-providers.md
@@ -177,6 +178,7 @@ nav:
       - Reliability:
           - Circuit Breakers: concepts/reliability/circuit-breakers.md
           - Rate Limiting: concepts/reliability/rate-limiting.md
+          - Priority Scheduling: concepts/reliability/priority-scheduling.md
           - Retries: concepts/reliability/retries.md
           - Health Checks: concepts/reliability/health-checks.md
           - Graceful Shutdown: concepts/reliability/graceful-shutdown.md
@@ -193,6 +195,7 @@ nav:
           - Admin API: reference/api/admin.md
           - Gateway Extensions: reference/api/extensions.md
       - Configuration: reference/configuration.md
+      - Priority Scheduler: reference/priority-scheduler.md
       - Metrics: reference/metrics.md
       - Internal MCP Servers: reference/mcp-internal-servers.md
   - Contributing:

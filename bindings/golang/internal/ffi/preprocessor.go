@@ -42,6 +42,13 @@ SglErrorCode sgl_preprocess_chat_request_with_tokenizer(
     char** error_out
 );
 
+SglErrorCode sgl_chat_requires_reasoning_with_tokenizer(
+    const char* request_json,
+    void* tokenizer_handle,
+    int32_t* require_reasoning_out,
+    char** error_out
+);
+
 void sgl_preprocessed_request_free(
     char* prompt_text,
     uint32_t* token_ids,
@@ -213,6 +220,38 @@ func PreprocessChatRequestWithTokenizer(requestJSON string, tokenizerHandle *Tok
 	result.toolConstraintsJSONPtr = toolConstraintsJSONOut
 
 	return result, nil
+}
+
+// ChatRequiresReasoningWithTokenizer returns whether the request should ask
+// SGLang to count reasoning tokens, using the tokenizer's thinking defaults.
+func ChatRequiresReasoningWithTokenizer(requestJSON string, tokenizerHandle *TokenizerHandle) (bool, error) {
+	requestJSONC := C.CString(requestJSON)
+	defer C.free(unsafe.Pointer(requestJSONC))
+
+	if tokenizerHandle == nil || tokenizerHandle.handle == nil {
+		return false, fmt.Errorf("invalid tokenizer handle")
+	}
+
+	var requireReasoningOut C.int32_t
+	var errorOut *C.char
+
+	errorCode := C.sgl_chat_requires_reasoning_with_tokenizer(
+		requestJSONC,
+		unsafe.Pointer(tokenizerHandle.handle),
+		&requireReasoningOut,
+		&errorOut,
+	)
+
+	if errorCode != C.SGL_ERROR_SUCCESS {
+		errorMsg := ""
+		if errorOut != nil {
+			errorMsg = C.GoString(errorOut)
+			C.sgl_free_string(errorOut)
+		}
+		return false, fmt.Errorf("failed to determine require_reasoning: %s", errorMsg)
+	}
+
+	return requireReasoningOut != 0, nil
 }
 
 // Free frees the memory allocated for a preprocessed request

@@ -5,7 +5,7 @@ Markers
 @pytest.mark.model(name)
     Specify which model to use for the test.
 
-@pytest.mark.workers(count=1, prefill=None, decode=None)
+@pytest.mark.workers(count=1, prefill=None, decode=None, gpus=None, extra_engine_args=None)
     Configure worker topology for the test.
 
 @pytest.mark.gateway(policy="round_robin", timeout=None, extra_args=None)
@@ -108,6 +108,7 @@ from fixtures import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     setup_backend,
 )
 from smg_client import SmgClient
@@ -151,6 +152,7 @@ __all__ = [
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",
+    "pytest_sessionfinish",
     # Fixtures
     "setup_backend",
     "backend_router",

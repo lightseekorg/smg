@@ -57,11 +57,16 @@ impl PipelineStage for GenerateRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
-        // Build generate request
-        let request_id = generate_request
-            .rid
-            .clone()
-            .unwrap_or_else(|| format!("gen-{}", Uuid::now_v7()));
+        // Build generate request. PD retries re-run this stage, and a NIXL-tagged
+        // prefill keeps the request_id alive on the worker until the KV lease
+        // expires, so client rids get a unique per-attempt engine id in PD mode.
+        let request_id = match generate_request.rid.clone() {
+            Some(rid) if matches!(clients, ClientSelection::Dual { .. }) => {
+                format!("{rid}-{}", Uuid::now_v7())
+            }
+            Some(rid) => rid,
+            None => format!("gen-{}", Uuid::now_v7()),
+        };
 
         // Build proto request using centralized dispatch
         let mut proto_request = builder_client
@@ -75,6 +80,12 @@ impl PipelineStage for GenerateRequestBuildingStage {
                 error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build generate request");
                 error::bad_request("build_request_failed", e)
             })?;
+
+        helpers::apply_sampling_defaults_to_generate_request(
+            &mut proto_request,
+            &ctx.input.request_type,
+            ctx.state.workers.as_ref(),
+        );
 
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {

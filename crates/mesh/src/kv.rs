@@ -19,30 +19,14 @@ use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::{chunk_assembler::ChunkAssembler, crdt_kv::CrdtOrMap};
+use crate::{
+    crdt_kv::{CrdtOrMap, MergeStrategy, Operation, OperationLog},
+    transport::chunk_assembler::ChunkAssembler,
+};
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
-
-/// Merge strategy for CRDT namespaces. Determines how conflicts are resolved
-/// when two nodes write the same key concurrently.
-#[derive(Debug, Clone)]
-#[expect(clippy::enum_variant_names)]
-pub enum MergeStrategy {
-    /// Higher (version, replica_id) wins. Used for worker:*, policy:*, config:*.
-    LastWriterWins,
-    /// Higher numeric value wins (simple max). Reserved for future use.
-    MaxValueWins,
-    /// Compare epochs first, then max within same epoch.
-    /// The mesh crate implements this internally — no application callback needed.
-    /// Values MUST be exactly 16 bytes: epoch (u64 big-endian) + count (i64 big-endian).
-    /// The adapter is responsible for serializing RateLimitValue to this fixed format.
-    ///
-    /// If either local or remote value is not exactly 16 bytes (corrupt/truncated message),
-    /// the merge keeps the well-formed value. If both are malformed, keeps local.
-    EpochMaxWins,
-}
 
 /// Routing mode for stream namespaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +97,7 @@ pub struct Subscription {
 /// Function signature for stream drain callbacks. Called exactly once per
 /// gossip round. Returns accumulated entries to be sent in this round's
 /// batch. Values are `Bytes` so fan-out to N peers is an Arc refcount bump
-/// per peer rather than N heap copies — keeps a single ~1.5 GB tenant-delta
-/// round from ballooning to 20 × 1.5 GB when chunked across every peer's
-/// sender task.
+/// per peer rather than N heap copies.
 pub type StreamDrainFn = Box<dyn Fn() -> Vec<(String, Bytes)> + Send + Sync>;
 
 /// Handle returned by `register_drain`. Dropping unregisters the drain callback.
@@ -137,13 +119,11 @@ impl Drop for DrainHandle {
 
 /// A single subscription event: (key, value). `None` value means deletion.
 ///
-/// Values are a `Vec<Bytes>` — a list of zero-copy buffer fragments. For
-/// single-value writes this is a 1-element Vec; for reassembled chunked
-/// stream receives it is an N-element Vec where each element wraps one
-/// chunk's original allocation. Subscribers that need a contiguous buffer
-/// can concat; those that fan out further can clone the Bytes cheaply.
-/// The fragmented shape avoids the 2× peak a contiguous reassembly would
-/// impose when a near-cap multi-chunk value completes.
+/// Values are a `Vec<Bytes>` of zero-copy fragments: a 1-element Vec for
+/// single-value writes, an N-element Vec for reassembled chunked receives
+/// (each element wraps one chunk's original allocation). The fragmented
+/// shape avoids the 2× peak a contiguous reassembly would impose when a
+/// near-cap multi-chunk value completes.
 type SubscriptionEvent = (String, Option<Vec<Bytes>>);
 
 /// Tracks all active subscriptions by prefix.
@@ -277,9 +257,14 @@ impl CrdtNamespace {
             "key '{key}' does not match prefix '{}'",
             self.prefix
         );
-        self.store.insert(key.to_string(), value.clone());
+        self.store.insert(key.to_string(), value);
+        // Notify with the canonical post-insert value (matching `get`), not the
+        // raw caller payload: for normalizing engines (e.g. `rl:`) the stored
+        // shard differs from the input, so this keeps the local-write and
+        // remote-merge notification shapes identical.
+        let canonical = self.store.get(key);
         self.subscriber_registry
-            .notify(key, Some(vec![Bytes::from(value)]));
+            .notify(key, canonical.map(|v| vec![Bytes::from(v)]));
     }
 
     /// Get the current value for a key, or None if not present or tombstoned.
@@ -445,6 +430,11 @@ pub struct RoundBatch {
     /// Values are `Bytes` so per-peer senders clone by Arc-refcount bump when
     /// fanning out, not by a full heap copy per peer.
     pub drain_entries: Vec<(String, Bytes)>,
+    /// Shared snapshot of the CRDT operation log for this round. The `Arc`
+    /// is reused across rounds while no engine's log mutates, so idle
+    /// rounds clone no op data; per-peer senders filter it through their
+    /// send watermarks. Merge is idempotent by op-id.
+    pub crdt_ops: Arc<OperationLog>,
 }
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
@@ -495,6 +485,7 @@ impl MeshKV {
     pub fn new(server_name: String) -> Self {
         let replica_id = Self::derive_replica_id(&server_name);
         let store = Arc::new(CrdtOrMap::new());
+        store.register_merge_strategy("config:".to_string(), MergeStrategy::LastWriterWins);
         let subscriber_registry = Arc::new(SubscriberRegistry::new());
         let mut configured_prefixes = HashMap::new();
         configured_prefixes.insert(
@@ -537,6 +528,20 @@ impl MeshKV {
         self.chunk_assembler.clone()
     }
 
+    /// Reclaim tombstone metadata older than the default grace period
+    /// across every CRDT engine. Returns the number reclaimed.
+    ///
+    /// Deliberately not driven anywhere: time-based collection is unsound.
+    /// A peer absent longer than the grace still holds the deleted key's
+    /// older insert in its op-log and replays it on reconnect; with the
+    /// tombstone metadata gone, the stale insert lands on an empty entry
+    /// and resurrects the key. Collection is only safe at causal stability
+    /// — every live peer acked past the tombstone and absent peers
+    /// declared dead — so the caller must be the dead-node cleanup layer.
+    pub fn gc_tombstones(&self) -> usize {
+        self.store.gc_tombstones()
+    }
+
     /// Fire subscribers whose prefix matches `key`. Used by the gossip
     /// receive path when a chunked value completes (or a single-chunk
     /// entry arrives), so handlers can deliver into adapter-owned
@@ -570,13 +575,10 @@ impl MeshKV {
                 !prefixes.contains_key(prefix),
                 "Prefix '{prefix}' is already configured. Each prefix must be configured exactly once."
             );
-            prefixes.insert(
-                prefix.to_string(),
-                StoreMode::Crdt {
-                    merge_strategy: merge_strategy.clone(),
-                },
-            );
+            prefixes.insert(prefix.to_string(), StoreMode::Crdt { merge_strategy });
         }
+        self.store
+            .register_merge_strategy(prefix.to_string(), merge_strategy);
 
         Arc::new(CrdtNamespace {
             prefix: prefix.to_string(),
@@ -649,9 +651,32 @@ impl MeshKV {
         // Broadcast traffic (td:*) flows through this path.
         let drain_entries = self.drain_registry.drain_all();
 
+        // Shared CRDT op-log snapshot for the per-peer senders; reused
+        // across rounds while no engine's log mutates.
+        let crdt_ops = self.store.operation_log_snapshot();
+
         RoundBatch {
             targeted_entries,
             drain_entries,
+            crdt_ops,
+        }
+    }
+
+    /// Merge a batch of CRDT operations received from a peer into the local
+    /// store and fire subscribers for keys whose live value changed. Used by
+    /// the gossip receive path (`dispatch_crdt_batch`). Merge is idempotent by
+    /// op-id, so re-applying an already-seen batch is a no-op and fires no
+    /// subscriber events. Notifications carry the canonical post-merge value
+    /// (matching `get`), so remote-merge subscribers see the same value shape
+    /// as local writes.
+    pub(crate) fn merge_crdt_ops(&self, ops: Vec<Operation>) {
+        let mut log = OperationLog::new();
+        for op in ops {
+            log.append(op);
+        }
+        for change in self.store.merge(&log) {
+            self.subscriber_registry
+                .notify(&change.key, change.value.map(|v| vec![Bytes::from(v)]));
         }
     }
 

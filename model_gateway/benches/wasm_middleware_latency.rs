@@ -13,6 +13,7 @@ use openai_protocol::chat::ChatCompletionRequest;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    health::ProbeState,
     middleware::{wasm_middleware, TenantRequestMeta},
     routers::RouterTrait,
     server::AppState,
@@ -75,10 +76,12 @@ fn bench_wasm_middleware_buffering(c: &mut Criterion) {
         .unwrap();
     let app_state = Arc::new(AppState {
         router: Arc::new(MockRouter),
+        probe_state: ProbeState::new(context.inflight_tracker.clone()),
         context: Arc::new(context),
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        mesh_adapters: None,
     });
 
     c.bench_function("wasm_middleware_pre_fix_latency", |b| {

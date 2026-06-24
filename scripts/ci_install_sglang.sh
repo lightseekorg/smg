@@ -21,34 +21,47 @@ echo "Using uv version: $(uv --version)"
 # Install CUDA toolkit (nvcc) — required for SGLang JIT kernel compilation.
 # SGLang >= 0.5.9 JIT-compiles CUDA kernels (RoPE, etc.) at runtime via tvm_ffi,
 # which invokes nvcc. The CI runners have CUDA runtime (driver) but not the compiler.
+# sglang 0.5.12 pins torch==2.11.0, whose default PyPI wheels are CUDA 13, so the
+# compiler must be nvcc 13 to match the runtime headers (a 12.x nvcc is replaced).
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
-    echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
+if [ ! -x "${CUDA_HOME}/bin/nvcc" ] || ! "${CUDA_HOME}/bin/nvcc" --version | grep -q "release 13\."; then
+    echo "Installing CUDA 13 toolkit (nvcc 13 not found at ${CUDA_HOME}/bin/nvcc)..."
     curl -fsSL -o /tmp/cuda-keyring.deb \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
     sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends cuda-nvcc-12-9 cuda-cudart-dev-12-9
+    sudo apt-get install -y --no-install-recommends cuda-nvcc-13-0 cuda-cudart-dev-13-0
     # Ensure CUDA_HOME points to the installed toolkit
-    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-12.9/bin" ]; then
-        sudo ln -sfn /usr/local/cuda-12.9 "${CUDA_HOME}"
+    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
+        sudo ln -sfn /usr/local/cuda-13.0 "${CUDA_HOME}"
     fi
     echo "nvcc installed: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
 else
-    echo "nvcc already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
+    echo "nvcc 13 already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
 fi
 
 # Install SGLang with all dependencies
 echo "Installing SGLang..."
-uv pip install --prerelease=allow "sglang[all]==0.5.10"
+uv pip install --prerelease=allow "sglang[all]==0.5.12.post1"
+
+# Work around NVIDIA/cutlass#3259 until the fix ships in CUTLASS 4.6.
+uv pip install --force-reinstall --no-deps "nvidia-cutlass-dsl-libs-cu13==4.5.2"
+
+# sglang 0.5.12.post1 leaves its `kernels` dependency unpinned, so the resolver
+# picks kernels >=0.15, which requires LayerRepository(revision=/version=) —
+# an argument the transformers 5.6.0 hub_kernels integration (pinned by sglang)
+# does not pass. `import sglang` then dies at module load with
+# "ValueError: Either a revision or a version must be specified."
+# Pin to the band sglang upstream main now uses; drop once a release carries it.
+uv pip install "kernels>=0.14.1,<0.15"
 
 # Install flashinfer-jit-cache: sglang bundles flashinfer_python but only for attention ops.
 # Multi-GPU models need trtllm_comm kernels (fused allreduce + layernorm) which FlashInfer
 # JIT-compiles at runtime requiring nvcc. The jit-cache provides these pre-compiled.
 # Version must match flashinfer_python from sglang.
 FLASHINFER_VERSION=$(uv pip show flashinfer-python 2>/dev/null | grep "^Version:" | awk '{print $2}')
-CU_VERSION=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))" 2>/dev/null || echo "cu129")
+CU_VERSION=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))" 2>/dev/null || echo "cu130")
 if [ -n "$FLASHINFER_VERSION" ]; then
     echo "Installing flashinfer-jit-cache==${FLASHINFER_VERSION} (${CU_VERSION})..."
     uv pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" \
@@ -59,11 +72,13 @@ fi
 
 # Install mooncake for SGLang PD disaggregation (KV transfer)
 # Mooncake's native transfer engine requires InfiniBand/RDMA libraries at runtime.
-# See: https://github.com/sgl-project/sglang/blob/main/scripts/ci/cuda/ci_install_dependency.sh
+# Package and pin track upstream sglang v0.5.12.post1 CI on the cu13 stack
+# (cuda13 wheel variant + nvrtc, since torch 2.11 defaults to CUDA 13):
+# https://github.com/sgl-project/sglang/blob/v0.5.12.post1/scripts/ci/cuda/ci_install_dependency.sh
 echo "Installing mooncake system dependencies..."
 sudo apt-get install -y --no-install-recommends libnuma-dev libibverbs-dev libibverbs1 ibverbs-providers ibverbs-utils
 echo "Installing mooncake..."
-uv pip install mooncake-transfer-engine==0.3.8.post1
+uv pip install mooncake-transfer-engine-cuda13==0.3.10.post2 nvidia-cuda-nvrtc
 
 # Install gRPC packages from source (not PyPI) so PR changes are always tested
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."

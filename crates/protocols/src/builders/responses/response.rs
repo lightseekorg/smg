@@ -18,11 +18,10 @@ pub struct ResponsesResponseBuilder {
     object: String,
     created_at: i64,
     completed_at: Option<i64>,
-    background: Option<bool>,
     conversation: Option<String>,
     status: ResponseStatus,
     error: Option<Value>,
-    incomplete_details: Option<Value>,
+    incomplete_details: Option<IncompleteDetails>,
     instructions: Option<String>,
     max_output_tokens: Option<u32>,
     model: String,
@@ -55,7 +54,6 @@ impl ResponsesResponseBuilder {
             object: "response".to_string(),
             created_at: chrono::Utc::now().timestamp(),
             completed_at: None,
-            background: None,
             conversation: None,
             status: ResponseStatus::InProgress,
             error: None,
@@ -96,7 +94,6 @@ impl ResponsesResponseBuilder {
         self.previous_response_id
             .clone_from(&request.previous_response_id);
         self.store = request.store.unwrap_or(true);
-        self.background = request.background;
         // ResponsesResponse stores `conversation` as a plain `Option<String>`
         // (response side per spec is `optional { id }` only); flatten the
         // request's union-typed reference down to its underlying id string.
@@ -133,12 +130,6 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Mark the response as created in background mode.
-    pub fn background(mut self, background: bool) -> Self {
-        self.background = Some(background);
-        self
-    }
-
     /// Set the linked conversation ID.
     pub fn conversation(mut self, conversation: impl Into<String>) -> Self {
         self.conversation = Some(conversation.into());
@@ -157,8 +148,8 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Set incomplete details (if response was truncated)
-    pub fn incomplete_details(mut self, details: Value) -> Self {
+    /// Set incomplete details (if the response reached `incomplete` status)
+    pub fn incomplete_details(mut self, details: IncompleteDetails) -> Self {
         self.incomplete_details = Some(details);
         self
     }
@@ -302,7 +293,7 @@ impl ResponsesResponseBuilder {
             object: self.object,
             created_at: self.created_at,
             completed_at: self.completed_at,
-            background: self.background,
+            background: None,
             conversation: self.conversation,
             status: self.status,
             error: self.error,

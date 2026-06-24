@@ -57,10 +57,7 @@ impl ReasoningParser for BaseReasoningParser {
         }
 
         // The text is considered to be in a reasoning block.
-        let processed_text = text
-            .replace(&self.config.think_start_token, "")
-            .trim()
-            .to_string();
+        let processed_text = text.replace(&self.config.think_start_token, "").to_string();
 
         if !processed_text.contains(&self.config.think_end_token) {
             // Assume reasoning was truncated before end token
@@ -72,10 +69,7 @@ impl ReasoningParser for BaseReasoningParser {
             .splitn(2, &self.config.think_end_token)
             .collect();
         let reasoning_text = (*splits.first().unwrap_or(&"")).to_string();
-        let normal_text = splits
-            .get(1)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        let normal_text = splits.get(1).map(|s| s.to_string()).unwrap_or_default();
 
         Ok(ParserResult::new(normal_text, reasoning_text))
     }
@@ -127,7 +121,7 @@ impl ReasoningParser for BaseReasoningParser {
             };
             return Ok(ParserResult::new(
                 normal_text.to_string(),
-                reasoning_text.trim().to_string(),
+                reasoning_text.to_string(),
             ));
         }
 
@@ -138,9 +132,8 @@ impl ReasoningParser for BaseReasoningParser {
             self.buffer.clear();
             Ok(ParserResult::reasoning(reasoning_text))
         } else if !self.in_reasoning {
-            // If we're not in a reasoning block, return as normal text
-            // CRITICAL FIX: Return current_text (with buffer) not just text
-            // This prevents buffer loss when partial tokens are followed by normal text
+            // Return current_text (buffer included), not just `text`, so a buffered
+            // partial token followed by normal text is not dropped.
             let normal_text = current_text;
             self.buffer.clear();
             Ok(ParserResult::normal(normal_text))
@@ -198,7 +191,8 @@ mod tests {
         let result = parser
             .detect_and_parse_reasoning("<think>with reasoning</think> and more text.")
             .unwrap();
-        assert_eq!(result.normal_text, "and more text.");
+        // Leading space after </think> is preserved (matches vLLM behavior).
+        assert_eq!(result.normal_text, " and more text.");
         assert_eq!(result.reasoning_text, "with reasoning");
     }
 
@@ -220,6 +214,29 @@ mod tests {
             .unwrap();
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "with truncated reasoning");
+    }
+
+    #[test]
+    fn test_whitespace_preserved_after_think_tags() {
+        // Whitespace around reasoning and content must be preserved exactly as
+        // the model emitted it. vLLM's KimiK2ReasoningParser.extract_reasoning()
+        // returns raw string slices with no trimming; SMG must match.
+        let mut parser = create_test_parser(false, true);
+
+        // Non-streaming: leading space on content, no extra space on reasoning.
+        let result = parser
+            .detect_and_parse_reasoning("<think>foo</think> hello world")
+            .unwrap();
+        assert_eq!(result.reasoning_text, "foo");
+        assert_eq!(result.normal_text, " hello world");
+
+        // Streaming: same contract.
+        let mut streaming_parser = create_test_parser(false, true);
+        let result = streaming_parser
+            .parse_reasoning_streaming_incremental("<think>foo</think> hello world")
+            .unwrap();
+        assert_eq!(result.reasoning_text, "foo");
+        assert_eq!(result.normal_text, " hello world");
     }
 
     #[test]

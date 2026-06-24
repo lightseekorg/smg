@@ -1,12 +1,14 @@
 //! Basic tests for Messages API
 //!
-//! These tests verify:
-//! - /v1/messages endpoint exists
-//! - Returns 501 Not Implemented (expected for PR #1)
-//! - Request deserialization works
-//! - No breaking changes to existing functionality
+//! These tests verify request deserialization and the `GenerationRequest`
+//! impl (used for routing/streaming on the HTTP backend). End-to-end
+//! routing through the HTTP proxy is exercised by
+//! `tests/api/messages_api_test.rs`.
 
-use openai_protocol::messages::{CreateMessageRequest, InputContent, Role, SystemContent};
+use openai_protocol::{
+    common::GenerationRequest,
+    messages::{CreateMessageRequest, InputContent, Role, SystemContent},
+};
 use serde_json::json;
 
 #[test]
@@ -135,6 +137,98 @@ fn test_create_message_request_with_temperature() {
         serde_json::from_value(json).expect("Failed to deserialize");
 
     assert_eq!(request.temperature, Some(0.7));
+}
+
+#[test]
+fn test_generation_request_impl_is_stream_and_model() {
+    let req: CreateMessageRequest = serde_json::from_value(json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16,
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .unwrap();
+
+    assert!(req.is_stream());
+    assert_eq!(
+        GenerationRequest::get_model(&req),
+        Some("claude-sonnet-4-5-20250929")
+    );
+
+    let no_stream: CreateMessageRequest = serde_json::from_value(json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .unwrap();
+    assert!(!no_stream.is_stream());
+}
+
+#[test]
+fn test_extract_text_for_routing_string_content() {
+    let req: CreateMessageRequest = serde_json::from_value(json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16,
+        "system": "You are helpful.",
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+            {"role": "user", "content": "How are you?"}
+        ]
+    }))
+    .unwrap();
+
+    let text = req.extract_text_for_routing();
+    assert_eq!(text, "You are helpful. Hello Hi there How are you?");
+}
+
+#[test]
+fn test_extract_text_for_routing_text_blocks() {
+    let req: CreateMessageRequest = serde_json::from_value(json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16,
+        "system": [
+            {"type": "text", "text": "Block system 1"},
+            {"type": "text", "text": "Block system 2"}
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first chunk"},
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}},
+                    {"type": "text", "text": "second chunk"}
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let text = req.extract_text_for_routing();
+    // Image block is skipped; text blocks are concatenated with single-space separators.
+    assert_eq!(
+        text,
+        "Block system 1 Block system 2 first chunk second chunk"
+    );
+}
+
+#[test]
+fn test_extract_text_for_routing_empty_messages_with_no_text() {
+    let req: CreateMessageRequest = serde_json::from_value(json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(req.extract_text_for_routing(), "");
 }
 
 #[test]

@@ -11,8 +11,10 @@ use smg_auth as auth;
 pub enum PolicyType {
     Random,
     RoundRobin,
+    Passthrough,
     CacheAware,
     PowerOfTwo,
+    LeastLoad,
     Bucket,
     Manual,
     ConsistentHashing,
@@ -365,6 +367,7 @@ impl PyPostgresConfig {
 struct Router {
     host: String,
     port: u16,
+    health_check_port: Option<u16>,
     worker_urls: Vec<String>,
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
@@ -376,6 +379,11 @@ struct Router {
     eviction_interval_secs: u64,
     max_tree_size: usize,
     block_size: usize,
+    balance_token_usage_threshold: f32,
+    overload_token_usage_threshold: f32,
+    least_load_kv_pressure_weight: f64,
+    least_load_default_throughput: f64,
+    least_load_mean_prefill_tokens: u32,
     max_idle_secs: u64,
     assignment_mode: String,
     max_payload_size: usize,
@@ -467,6 +475,10 @@ struct Router {
     mesh_advertise_host: Option<String>,
     mesh_port: u16,
     mesh_peer_urls: Vec<String>,
+    /// New parameters MUST be appended here (not inserted mid-list) to avoid
+    /// breaking external Python callers that pass `_Router(...)` positionally.
+    drain_settle_secs: u64,
+    enable_wasm: bool,
 }
 
 impl Router {
@@ -501,6 +513,7 @@ impl Router {
             Ok(match policy {
                 PolicyType::Random => ConfigPolicyConfig::Random,
                 PolicyType::RoundRobin => ConfigPolicyConfig::RoundRobin,
+                PolicyType::Passthrough => ConfigPolicyConfig::Passthrough,
                 PolicyType::CacheAware => ConfigPolicyConfig::CacheAware {
                     cache_threshold: self.cache_threshold,
                     balance_abs_threshold: self.balance_abs_threshold,
@@ -508,9 +521,17 @@ impl Router {
                     eviction_interval_secs: self.eviction_interval_secs,
                     max_tree_size: self.max_tree_size,
                     block_size: self.block_size,
+                    balance_token_usage_threshold: self.balance_token_usage_threshold,
+                    overload_token_usage_threshold: self.overload_token_usage_threshold,
                 },
                 PolicyType::PowerOfTwo => ConfigPolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 5,
+                },
+                PolicyType::LeastLoad => ConfigPolicyConfig::LeastLoad {
+                    load_check_interval_secs: 5,
+                    kv_pressure_weight: self.least_load_kv_pressure_weight,
+                    mean_prefill_tokens: self.least_load_mean_prefill_tokens,
+                    default_throughput: self.least_load_default_throughput,
                 },
                 PolicyType::Bucket => ConfigPolicyConfig::Bucket {
                     balance_abs_threshold: self.balance_abs_threshold,
@@ -667,6 +688,7 @@ impl Router {
             .policy(policy)
             .host(&self.host)
             .port(self.port)
+            .health_check_port(self.health_check_port)
             .connection_mode(self.connection_mode)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
@@ -698,6 +720,7 @@ impl Router {
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
+                drain_settle_secs: self.drain_settle_secs,
             })
             .tokenizer_cache(config::TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -731,6 +754,7 @@ impl Router {
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
+            .enable_wasm(self.enable_wasm)
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -766,6 +790,11 @@ impl Router {
         eviction_interval_secs = 120,
         max_tree_size = 2usize.pow(26),
         block_size = 16,
+        balance_token_usage_threshold = 1.0,
+        overload_token_usage_threshold = 1.0,
+        least_load_kv_pressure_weight = 0.15,
+        least_load_default_throughput = 2000.0,
+        least_load_mean_prefill_tokens = 1024,
         max_idle_secs = 14400,
         assignment_mode = String::from("random"),
         max_payload_size = 512 * 1024 * 1024,
@@ -855,6 +884,12 @@ impl Router {
         mesh_port = 39527u16,
         mesh_peer_urls = vec![],
         mesh_advertise_host = None,
+        drain_settle_secs = 5,
+        enable_wasm = false,
+        // Appended last (not inserted mid-list) so every pre-existing
+        // positional argument keeps its index for callers that construct
+        // `_Router(...)` positionally. See the struct-field note above.
+        health_check_port = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -875,6 +910,11 @@ impl Router {
         eviction_interval_secs: u64,
         max_tree_size: usize,
         block_size: usize,
+        balance_token_usage_threshold: f32,
+        overload_token_usage_threshold: f32,
+        least_load_kv_pressure_weight: f64,
+        least_load_default_throughput: f64,
+        least_load_mean_prefill_tokens: u32,
         max_idle_secs: u64,
         assignment_mode: String,
         max_payload_size: usize,
@@ -964,6 +1004,11 @@ impl Router {
         mesh_port: u16,
         mesh_peer_urls: Vec<String>,
         mesh_advertise_host: Option<String>,
+        drain_settle_secs: u64,
+        enable_wasm: bool,
+        // Appended last to match the `#[pyo3(signature)]` order above and
+        // preserve positional-argument compatibility.
+        health_check_port: Option<u16>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -982,6 +1027,7 @@ impl Router {
         Ok(Router {
             host,
             port,
+            health_check_port,
             worker_urls,
             policy,
             worker_startup_timeout_secs,
@@ -993,6 +1039,11 @@ impl Router {
             eviction_interval_secs,
             max_tree_size,
             block_size,
+            balance_token_usage_threshold,
+            overload_token_usage_threshold,
+            least_load_kv_pressure_weight,
+            least_load_default_throughput,
+            least_load_mean_prefill_tokens,
             max_idle_secs,
             assignment_mode,
             max_payload_size,
@@ -1083,10 +1134,12 @@ impl Router {
             mesh_advertise_host,
             mesh_port,
             mesh_peer_urls,
+            drain_settle_secs,
+            enable_wasm,
         })
     }
 
-    fn start(&self) -> PyResult<()> {
+    fn start(&self, py: Python<'_>) -> PyResult<()> {
         use observability::metrics::PrometheusConfig;
 
         let router_config = self.to_router_config().map_err(|e| {
@@ -1140,10 +1193,14 @@ impl Router {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        runtime.block_on(async move {
+        // Release the GIL while the server runs so Python threads can make progress.
+        py.detach(|| {
+            runtime.block_on(async move {
             Box::pin(server::startup(server::ServerConfig {
                 host: self.host.clone(),
                 port: self.port,
+                health_check_port: self.health_check_port,
+                runtime_worker_threads: None,
                 router_config,
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),
@@ -1160,7 +1217,7 @@ impl Router {
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: if self.enable_mesh {
                     let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
-                        use rand::{distr::Alphanumeric, Rng};
+                        use rand::{distr::Alphanumeric, RngExt};
                         let random_string: String = (0..4)
                             .map(|_| rand::rng().sample(Alphanumeric) as char)
                             .collect();
@@ -1210,6 +1267,7 @@ impl Router {
             }))
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            })
         })
     }
 }

@@ -336,9 +336,18 @@ pub(super) async fn execute_tool_loop(
                     )
                 })?;
 
-                // Mark as completed but with incomplete details
-                responses_response.status = ResponseStatus::Completed;
-                responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                // Tool-call limit reached before executing the remaining calls:
+                // an aborted run, not a successful answer. Per the design,
+                // exhausting `max_tool_calls` is a `failed` status with an
+                // `error` payload (truncation `incomplete_details` is reserved
+                // for `max_output_tokens` / `content_filter`).
+                responses_response.status = ResponseStatus::Failed;
+                responses_response.error = Some(json!({
+                    "code": "max_tool_calls_exceeded",
+                    "message": format!(
+                        "Reached the max_tool_calls limit ({effective_limit}) before executing the remaining tool calls."
+                    ),
+                }));
 
                 return Ok(responses_response);
             }

@@ -91,7 +91,7 @@ jobs:
 
           echo "✅ PR title is valid: '$PR_TITLE'"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

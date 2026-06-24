@@ -3,8 +3,10 @@
 //! Defines [`ModelType`] using bitflags to represent which endpoints a model
 //! can support, and [`Endpoint`] for routing decisions.
 
+use std::borrow::Cow;
+
 use bitflags::bitflags;
-use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 bitflags! {
@@ -288,45 +290,32 @@ impl<'de> Deserialize<'de> for ModelType {
 
 /// Manual JsonSchema impl for `ModelType` — serialized as an array of capability name strings.
 impl JsonSchema for ModelType {
-    fn schema_name() -> String {
-        "ModelType".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "ModelType".into()
     }
 
-    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
-        use schemars::schema::*;
-        let items = SchemaObject {
-            instance_type: Some(InstanceType::String.into()),
-            enum_values: Some(vec![
-                "chat".into(),
-                "completions".into(),
-                "responses".into(),
-                "embeddings".into(),
-                "rerank".into(),
-                "generate".into(),
-                "vision".into(),
-                "tools".into(),
-                "reasoning".into(),
-                "image_gen".into(),
-                "audio".into(),
-                "moderation".into(),
-            ]),
-            ..Default::default()
-        };
-        SchemaObject {
-            instance_type: Some(InstanceType::Array.into()),
-            array: Some(Box::new(ArrayValidation {
-                items: Some(SingleOrVec::Single(Box::new(items.into()))),
-                ..Default::default()
-            })),
-            metadata: Some(Box::new(Metadata {
-                description: Some(
-                    "Bitflag capabilities serialized as an array of capability names".to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "array",
+            "description": "Bitflag capabilities serialized as an array of capability names",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "chat",
+                    "completions",
+                    "responses",
+                    "embeddings",
+                    "rerank",
+                    "generate",
+                    "vision",
+                    "tools",
+                    "reasoning",
+                    "image_gen",
+                    "audio",
+                    "moderation"
+                ]
+            }
+        })
     }
 }
 

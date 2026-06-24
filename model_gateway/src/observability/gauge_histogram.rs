@@ -3,47 +3,9 @@
 //! Unlike Prometheus Histogram which uses cumulative `le` buckets, this emits
 //! non-cumulative bucket counts with `(gt, le]` ranges suitable for heatmaps.
 //!
-//! # Design: True Zero-Allocation Hot Path
-//!
-//! The key insight is that `gauge!` returns a `Gauge` handle that can be stored.
-//! By pre-registering all gauge handles at startup, the hot path becomes just
-//! N+1 atomic `gauge.set()` calls with zero allocations.
-//!
-//! # Performance Characteristics
-//!
-//! Setup (once per label combination):
-//! - `register()`: N+1 gauge registrations, N+1 String allocations for gt/le
-//!
-//! Hot path (`set_counts()`):
-//! - **Zero heap allocations**
-//! - **Zero key lookups** (handles are pre-registered)
-//! - N+1 atomic `gauge.set()` calls
-//!
-//! # Example
-//!
-//! ```ignore
-//! use crate::observability::gauge_histogram::{BucketBounds, GaugeHistogramVec};
-//!
-//! // Define at module level
-//! static BOUNDS: BucketBounds<10> = BucketBounds::new([1, 2, 3, 5, 7, 10, 20, 50, 100, 200]);
-//! static HISTOGRAM: GaugeHistogramVec<10> = GaugeHistogramVec::new("smg_request_dist", &BOUNDS);
-//!
-//! // At startup: register for each label combination
-//! let handle = HISTOGRAM.register(&[("router", "round_robin"), ("model", "llama")]);
-//!
-//! // Pre-allocate counts buffer
-//! let mut counts = vec![0usize; BOUNDS.bucket_count()];
-//!
-//! // Hot path: TRUE zero allocation
-//! fn update(handle: &GaugeHistogramHandle, counts: &mut [usize], observations: &[u64]) {
-//!     BOUNDS.compute_counts_into(counts, observations);
-//!     handle.set_counts(counts);  // Just N+1 atomic gauge.set() calls!
-//! }
-//! ```
+//! Gauge handles are pre-registered per label combination at startup so the hot
+//! path (`set_counts`) is N+1 atomic `gauge.set()` calls with no allocation.
 
-use std::sync::Arc;
-
-use dashmap::{mapref::one::Ref, DashMap};
 use metrics::{gauge, Label};
 
 // =============================================================================
@@ -167,14 +129,7 @@ impl<const N: usize> BucketBounds<N> {
     }
 }
 
-// =============================================================================
-// GAUGE HISTOGRAM HANDLE (pre-registered, zero-alloc hot path)
-// =============================================================================
-
 /// Pre-registered gauge handles for a histogram with specific labels.
-///
-/// This is what you use in the hot path. Calling `set_counts()` does only
-/// N+1 atomic `gauge.set()` operations - zero allocations, zero lookups.
 #[derive(Clone)]
 pub struct GaugeHistogramHandle {
     gauges: Vec<metrics::Gauge>,
@@ -211,14 +166,9 @@ impl GaugeHistogramHandle {
     }
 }
 
-// =============================================================================
-// GAUGE HISTOGRAM VEC (factory for registering handles)
-// =============================================================================
-
 /// Factory for creating pre-registered histogram handles.
 ///
-/// Define as a static constant, then call `register()` for each label combination
-/// you need. The returned `GaugeHistogramHandle` provides zero-allocation updates.
+/// Define as a static constant, then call `register()` for each label combination.
 #[derive(Debug)]
 pub struct GaugeHistogramVec<const N: usize> {
     name: &'static str,
@@ -295,158 +245,6 @@ impl<const N: usize> GaugeHistogramVec<N> {
     /// Register with no additional labels (just gt/le).
     pub fn register_no_labels(&self) -> GaugeHistogramHandle {
         self.register(&[])
-    }
-}
-
-// =============================================================================
-// CACHED GAUGE HISTOGRAM (for dynamic labels discovered at runtime)
-// =============================================================================
-
-/// A gauge histogram with automatic handle caching for dynamic labels.
-///
-/// Use this when label values (like worker names) are discovered at runtime.
-/// Handles are registered on first use and cached for subsequent calls.
-///
-/// # Example
-///
-/// ```ignore
-/// static BOUNDS: BucketBounds<10> = BucketBounds::new([1, 2, 3, 5, 7, 10, 20, 50, 100, 200]);
-/// static HISTOGRAM: GaugeHistogramVec<10> = GaugeHistogramVec::new("smg_worker_dist", &BOUNDS);
-///
-/// // Create cached wrapper (do this once, store in your router state)
-/// let cached = CachedGaugeHistogram::new(&HISTOGRAM);
-///
-/// // Hot path - first call registers, subsequent calls use cached handle
-/// cached.observe("worker-1", &request_counts);
-/// cached.observe("worker-2", &request_counts);
-/// cached.observe("worker-1", &request_counts);  // Uses cached handle
-/// ```
-pub struct CachedGaugeHistogram<const N: usize> {
-    histogram: &'static GaugeHistogramVec<N>,
-    /// Cache of label value -> (handle, counts_buffer)
-    cache: DashMap<Arc<str>, (GaugeHistogramHandle, Vec<usize>)>,
-    /// Static label key (e.g., "worker", "model")
-    label_key: &'static str,
-}
-
-impl<const N: usize> CachedGaugeHistogram<N> {
-    /// Create a new cached histogram for a single dynamic label.
-    ///
-    /// # Arguments
-    ///
-    /// - `histogram`: The static histogram factory
-    /// - `label_key`: The label key for the dynamic value (e.g., "worker")
-    pub fn new(histogram: &'static GaugeHistogramVec<N>, label_key: &'static str) -> Self {
-        Self {
-            histogram,
-            cache: DashMap::new(),
-            label_key,
-        }
-    }
-
-    /// Get or create a handle for the given label value.
-    ///
-    /// First call for a label value registers the gauges (allocates).
-    /// Subsequent calls return the cached handle (no allocation).
-    /// Thread-safe: uses entry API to avoid race conditions.
-    pub fn get_or_register(
-        &self,
-        label_value: &str,
-    ) -> Ref<'_, Arc<str>, (GaugeHistogramHandle, Vec<usize>)> {
-        // Fast path: already cached
-        if let Some(entry) = self.cache.get(label_value) {
-            return entry;
-        }
-
-        // Slow path: use entry API to handle concurrent inserts atomically.
-        // Return the reference directly from the entry API to avoid a second
-        // lookup that could race with a concurrent `remove()` or `retain_only()`.
-        self.cache
-            .entry(Arc::from(label_value))
-            .or_insert_with(|| {
-                let handle = self.histogram.register(&[(self.label_key, label_value)]);
-                let counts_buf = vec![0usize; self.histogram.bounds.bucket_count()];
-                (handle, counts_buf)
-            })
-            .downgrade()
-    }
-
-    /// Observe a distribution for a label value. **Zero allocation after first call.**
-    ///
-    /// First call for a new label value registers gauges (allocates).
-    /// All subsequent calls are zero-allocation.
-    /// Thread-safe: uses entry API to avoid race conditions.
-    pub fn observe(&self, label_value: &str, observations: &[u64]) {
-        // Fast path: existing entry
-        if let Some(mut entry) = self.cache.get_mut(label_value) {
-            let (ref handle, ref mut counts_buf) = entry.value_mut();
-            self.histogram
-                .bounds
-                .compute_counts_into(counts_buf, observations);
-            handle.set_counts(counts_buf);
-            return;
-        }
-
-        // Slow path: use entry API to handle concurrent inserts atomically
-        let mut entry = self.cache.entry(Arc::from(label_value)).or_insert_with(|| {
-            let handle = self.histogram.register(&[(self.label_key, label_value)]);
-            let counts_buf = vec![0usize; self.histogram.bounds.bucket_count()];
-            (handle, counts_buf)
-        });
-
-        let (ref handle, ref mut counts_buf) = entry.value_mut();
-        self.histogram
-            .bounds
-            .compute_counts_into(counts_buf, observations);
-        handle.set_counts(counts_buf);
-    }
-
-    /// Number of cached label combinations.
-    pub fn cache_size(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Remove a worker and zero out its metrics. **Zero allocation.**
-    ///
-    /// Call this when a worker is removed from the pool.
-    /// Sets all bucket counts to 0 (so Grafana shows it as empty).
-    ///
-    /// Note: The gauge handles remain in the Prometheus registry (the `metrics`
-    /// crate doesn't support unregistering). But memory in our cache is freed.
-    pub fn remove(&self, label_value: &str) {
-        if let Some((_, (handle, _))) = self.cache.remove(label_value) {
-            handle.zero_counts();
-        }
-    }
-
-    /// Remove workers not in the provided set.
-    ///
-    /// Call this periodically with your current active workers to clean up stale entries.
-    /// Uses `DashMap::retain` for atomic operation without intermediate allocation.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let active: HashSet<&str> = workers.iter().map(|w| w.name.as_str()).collect();
-    /// cached.retain_only(&active);
-    /// ```
-    pub fn retain_only<S: std::borrow::Borrow<str> + std::hash::Hash + Eq>(
-        &self,
-        active_labels: &std::collections::HashSet<S>,
-    ) {
-        self.cache.retain(|key, (handle, _)| {
-            if active_labels.contains(key.as_ref()) {
-                true
-            } else {
-                handle.zero_counts();
-                false
-            }
-        });
-    }
-
-    /// Get all currently tracked label values.
-    pub fn tracked_labels(&self) -> Vec<Arc<str>> {
-        self.cache.iter().map(|e| Arc::clone(e.key())).collect()
     }
 }
 
@@ -541,54 +339,5 @@ mod tests {
         assert_eq!(REQUEST_COUNT_BOUNDS.bucket_index(1), 0);
         assert_eq!(REQUEST_COUNT_BOUNDS.bucket_index(2), 1);
         assert_eq!(REQUEST_COUNT_BOUNDS.bucket_index(201), 10);
-    }
-
-    #[test]
-    fn test_cached_histogram() {
-        static BOUNDS: BucketBounds<3> = BucketBounds::new([10, 30, 60]);
-        static HISTOGRAM: GaugeHistogramVec<3> = GaugeHistogramVec::new("test_cached", &BOUNDS);
-
-        let cached = CachedGaugeHistogram::new(&HISTOGRAM, "worker");
-
-        // First call registers
-        cached.observe("worker-1", &[5, 15, 45, 100]);
-        assert_eq!(cached.cache_size(), 1);
-
-        // Second call uses cache
-        cached.observe("worker-1", &[1, 2, 3]);
-        assert_eq!(cached.cache_size(), 1);
-
-        // New worker registers
-        cached.observe("worker-2", &[10, 20, 30]);
-        assert_eq!(cached.cache_size(), 2);
-    }
-
-    #[test]
-    fn test_cached_histogram_removal() {
-        static BOUNDS: BucketBounds<3> = BucketBounds::new([10, 30, 60]);
-        static HISTOGRAM: GaugeHistogramVec<3> =
-            GaugeHistogramVec::new("test_cached_remove", &BOUNDS);
-
-        let cached = CachedGaugeHistogram::new(&HISTOGRAM, "worker");
-
-        // Add some workers
-        cached.observe("worker-1", &[5, 15]);
-        cached.observe("worker-2", &[10, 20]);
-        cached.observe("worker-3", &[1, 2]);
-        assert_eq!(cached.cache_size(), 3);
-
-        // Remove one
-        cached.remove("worker-2");
-        assert_eq!(cached.cache_size(), 2);
-
-        // retain_only
-        let active: std::collections::HashSet<&str> = ["worker-1"].into_iter().collect();
-        cached.retain_only(&active);
-        assert_eq!(cached.cache_size(), 1);
-
-        // Check tracked labels
-        let labels = cached.tracked_labels();
-        assert_eq!(labels.len(), 1);
-        assert_eq!(&*labels[0], "worker-1");
     }
 }

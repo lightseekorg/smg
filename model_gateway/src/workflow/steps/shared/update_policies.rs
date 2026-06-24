@@ -146,8 +146,12 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
             }
         }
 
-        // Initialize bucket policies for prefill workers (local workers only)
+        // Initialize PD policies for prefill/decode workers (local workers only)
         let prefill_workers = app_context.worker_registry.get_prefill_workers();
+        let decode_workers = app_context.worker_registry.get_decode_workers();
+        app_context
+            .policy_registry
+            .init_pd_cache_aware_policies(&prefill_workers, &decode_workers);
         if !prefill_workers.is_empty() {
             let policy = app_context.policy_registry.get_prefill_policy();
             if policy.name() == "bucket" {

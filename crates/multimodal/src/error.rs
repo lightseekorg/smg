@@ -26,6 +26,8 @@ pub enum MediaConnectorError {
     Blocking(#[from] tokio::task::JoinError),
     #[error("image decode error: {0}")]
     Image(#[from] image::ImageError),
+    #[error("video decode error: {0}")]
+    VideoDecode(String),
     #[error("media fetch timed out after {0:?}")]
     Timeout(Duration),
 }

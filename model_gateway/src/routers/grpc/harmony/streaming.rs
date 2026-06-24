@@ -31,7 +31,10 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::{
-        common::openai_bridge::{self, descriptor, FormatRegistry, ResponseFormat},
+        common::{
+            openai_bridge::{self, descriptor, FormatRegistry, ResponseFormat},
+            sse::SseEncoder,
+        },
         grpc::{
             common::{
                 response_formatting::CompletionTokenTracker,
@@ -116,10 +119,15 @@ impl HarmonyStreamingProcessor {
                         utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
-                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                    let _ = tx.send(Ok(SseEncoder::done()));
                 });
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
+            } => {
                 tokio::spawn(async move {
                     let result =
                         Self::process_dual_stream(prefill, *decode, dispatch, chat_request, &tx)
@@ -130,7 +138,7 @@ impl HarmonyStreamingProcessor {
                         utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
-                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                    let _ = tx.send(Ok(SseEncoder::done()));
                 });
             }
             context::ExecutionResult::Embedding { .. } => {
@@ -140,7 +148,7 @@ impl HarmonyStreamingProcessor {
                     "Embeddings not supported in Harmony streaming",
                     "invalid_request_error",
                 );
-                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                let _ = tx.send(Ok(SseEncoder::done()));
             }
         }
 
@@ -229,6 +237,8 @@ impl HarmonyStreamingProcessor {
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
+        // Reusable SSE encoder shared across every chunk emitted for this stream.
+        let mut encoder = SseEncoder::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -284,6 +294,7 @@ impl HarmonyStreamingProcessor {
                             dispatch,
                             original_request,
                             tx,
+                            &mut encoder,
                             chunk_logprobs,
                         )?;
 
@@ -319,6 +330,7 @@ impl HarmonyStreamingProcessor {
                             dispatch,
                             original_request,
                             tx,
+                            &mut encoder,
                         )?;
                     }
                 }
@@ -343,6 +355,7 @@ impl HarmonyStreamingProcessor {
                 dispatch,
                 original_request,
                 tx,
+                &mut encoder,
             )?;
         }
 
@@ -362,6 +375,7 @@ impl HarmonyStreamingProcessor {
     }
 
     /// Emit a chunk delta from Harmony channels
+    #[expect(clippy::too_many_arguments)]
     fn emit_chunk_delta(
         delta: &HarmonyChannelDelta,
         index: u32,
@@ -369,6 +383,7 @@ impl HarmonyStreamingProcessor {
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        encoder: &mut SseEncoder,
         logprobs: Option<ChatLogProbs>,
     ) -> Result<(), String> {
         // On first chunk, emit role announcement separately
@@ -382,11 +397,11 @@ impl HarmonyStreamingProcessor {
             .maybe_system_fingerprint(dispatch.weight_version.as_deref())
             .build();
 
-            let chunk_json = serde_json::to_string(&role_chunk)
+            let sse_data = encoder
+                .encode_data(&role_chunk)
                 .map_err(|e| format!("JSON serialization error: {e}"))?;
-            let sse_data = format!("data: {chunk_json}\n\n");
 
-            tx.send(Ok(Bytes::from(sse_data)))
+            tx.send(Ok(sse_data))
                 .map_err(|_| "Failed to send role chunk".to_string())?;
         }
 
@@ -422,11 +437,11 @@ impl HarmonyStreamingProcessor {
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
-        let chunk_json =
-            serde_json::to_string(&chunk).map_err(|e| format!("JSON serialization error: {e}"))?;
-        let sse_data = format!("data: {chunk_json}\n\n");
+        let sse_data = encoder
+            .encode_data(&chunk)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
 
-        tx.send(Ok(Bytes::from(sse_data)))
+        tx.send(Ok(sse_data))
             .map_err(|_| "Failed to send chunk".to_string())?;
 
         Ok(())
@@ -440,6 +455,7 @@ impl HarmonyStreamingProcessor {
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        encoder: &mut SseEncoder,
     ) -> Result<(), String> {
         let chunk =
             ChatCompletionStreamResponse::builder(&dispatch.request_id, &original_request.model)
@@ -448,11 +464,11 @@ impl HarmonyStreamingProcessor {
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
-        let chunk_json =
-            serde_json::to_string(&chunk).map_err(|e| format!("JSON serialization error: {e}"))?;
-        let sse_data = format!("data: {chunk_json}\n\n");
+        let sse_data = encoder
+            .encode_data(&chunk)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
 
-        tx.send(Ok(Bytes::from(sse_data)))
+        tx.send(Ok(sse_data))
             .map_err(|_| "Failed to send final chunk".to_string())?;
 
         Ok(())
@@ -466,6 +482,7 @@ impl HarmonyStreamingProcessor {
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        encoder: &mut SseEncoder,
     ) -> Result<(), String> {
         let usage_chunk =
             ChatCompletionStreamResponse::builder(&dispatch.request_id, &original_request.model)
@@ -477,11 +494,11 @@ impl HarmonyStreamingProcessor {
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
-        let chunk_json = serde_json::to_string(&usage_chunk)
+        let sse_data = encoder
+            .encode_data(&usage_chunk)
             .map_err(|e| format!("JSON serialization error: {e}"))?;
-        let sse_data = format!("data: {chunk_json}\n\n");
 
-        tx.send(Ok(Bytes::from(sse_data)))
+        tx.send(Ok(sse_data))
             .map_err(|_| "Failed to send usage chunk".to_string())?;
 
         Ok(())
@@ -507,7 +524,12 @@ impl HarmonyStreamingProcessor {
                 debug!("Processing Responses API single stream mode");
                 Self::process_decode_stream(stream, emitter, tx, session, format_registry, 0).await
             }
-            context::ExecutionResult::Dual { prefill, decode } => {
+            context::ExecutionResult::Dual {
+                // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
+                prefill,
+                decode,
+                ..
+            } => {
                 debug!("Processing Responses API dual stream mode");
                 Self::process_responses_dual_stream(
                     prefill,

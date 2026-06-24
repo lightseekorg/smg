@@ -407,9 +407,18 @@ impl Tree {
             .entry(Arc::clone(&tenant_id))
             .or_insert(0);
 
-        // Track remaining text as a slice - no allocation needed
-        let mut remaining = text;
-        let mut prev = Arc::clone(&self.root);
+        // Descend from the root inserting the whole text.
+        self.insert_from(Arc::clone(&self.root), text, tenant_id);
+    }
+
+    /// Insert `remaining` for `tenant_id` starting the descent at `start` (treated
+    /// as the parent of the first edge), reusing [`Self::insert_text`]'s node-split
+    /// / tenant-attach / leaf-timestamp logic. The caller owns the root bookkeeping
+    /// (`tenant_last_access_time` / `tenant_char_count` entries) and, when resuming
+    /// below the root, attaching `tenant_id` to the ancestor nodes on the matched
+    /// path (which this method does not touch).
+    fn insert_from(&self, start: NodeRef, mut remaining: &str, tenant_id: TenantId) {
+        let mut prev = start;
 
         // Result type to carry state out of the match block
         // This allows the entry guard to be dropped before we update prev
@@ -608,7 +617,7 @@ impl Tree {
                         .iter()
                         .next()
                         .map(|kv| Arc::clone(kv.key()))
-                        .unwrap_or_else(|| Arc::from("empty"));
+                        .unwrap_or_else(|| intern_tenant("empty"));
                     *curr.last_tenant.write() = Some(Arc::clone(&t));
                     t
                 }
@@ -620,7 +629,7 @@ impl Tree {
                     .iter()
                     .next()
                     .map(|kv| Arc::clone(kv.key()))
-                    .unwrap_or_else(|| Arc::from("empty"));
+                    .unwrap_or_else(|| intern_tenant("empty"));
                 *curr.last_tenant.write() = Some(Arc::clone(&t));
                 t
             }
@@ -643,6 +652,204 @@ impl Tree {
 
         PrefixMatchResult {
             tenant,
+            matched_char_count: matched_chars,
+            input_char_count,
+        }
+    }
+
+    /// Read-only resolution of a node's "owning" tenant, mirroring the tenant
+    /// pick in [`Self::match_prefix_with_counts`] **without** the cache-populate
+    /// or probabilistic timestamp side effects. Returns the tenant plus whether
+    /// the slow (iteration) path was taken — the caller replays the original's
+    /// single deferred side effect on the final node.
+    ///
+    /// Used by [`Self::match_and_insert`] so the match tenant is resolved from a
+    /// node's state **before** the fused insert adds the inserting tenant to it,
+    /// reproducing the original "match runs fully before insert" ordering for the
+    /// (otherwise non-deterministic) slow-path tenant pick.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the tree; mirrors match_prefix_with_counts resolution"
+    )]
+    fn resolve_tenant_readonly(&self, node: &NodeRef) -> (TenantId, bool) {
+        let cached = node.last_tenant.read();
+        if let Some(ref t) = *cached {
+            if node.tenant_last_access_time.contains_key(t.as_ref()) {
+                return (Arc::clone(t), false);
+            }
+        }
+        drop(cached);
+        let t = node
+            .tenant_last_access_time
+            .iter()
+            .next()
+            .map(|kv| Arc::clone(kv.key()))
+            .unwrap_or_else(|| intern_tenant("empty"));
+        (t, true)
+    }
+
+    /// Combined match + insert for a known `tenant` in a single descent.
+    ///
+    /// Thin wrapper over [`Self::match_and_insert_with`] for callers that already
+    /// know the tenant to insert for before matching (e.g. the imbalanced
+    /// min-load path, which routes by worker load, not cache affinity). Returns
+    /// the match result for any cache bookkeeping the caller needs.
+    pub fn match_and_insert(&self, text: &str, tenant: &str) -> PrefixMatchResult {
+        self.match_and_insert_with(text, move |_| Some(tenant))
+    }
+
+    /// String analogue of `TokenTree::match_and_insert_with`: match in a single
+    /// descent, then insert for the tenant `select` returns from the
+    /// [`PrefixMatchResult`] (`None` skips the insert). The matched prefix is
+    /// compared once. The match runs fully before any insert mutation, so the
+    /// tenant pick observes the un-polluted tree; only insert's timestamps shift
+    /// by a few ticks, immaterial to LRU.
+    pub fn match_and_insert_with<'t, F>(&self, text: &str, select: F) -> PrefixMatchResult
+    where
+        F: FnOnce(&PrefixMatchResult) -> Option<&'t str>,
+    {
+        // ---- Phase 1: MATCH descent (mirrors match_prefix_with_counts) ----
+        // Record the full-match nodes (for ancestor re-attach) and the fall-off
+        // point (node + remaining slice) for the suffix splice. No mutation here
+        // beyond match's own deferred touch below, so the tenant pick sees the
+        // un-polluted tree exactly like the standalone match.
+        let mut remaining = text;
+        let mut matched_chars = 0usize;
+        let mut current = Arc::clone(&self.root);
+        // The node match resolves its tenant on (its final `curr`): the deepest
+        // full-match node, the partial child, or the root if nothing matched.
+        let mut match_curr = Arc::clone(&self.root);
+        // (node, char_count) for each full-match edge, in order.
+        // Pre-allocated; most matched paths are well under this depth.
+        let mut path: Vec<(NodeRef, usize)> = Vec::with_capacity(16);
+
+        while let Some(first_char) = remaining.chars().next() {
+            let child_node = current.children.get(&first_char).map(|e| e.value().clone());
+
+            let Some(matched_node) = child_node else {
+                // No child for this char: match stops at `current`.
+                break;
+            };
+
+            let matched_text_guard = matched_node.text.read();
+            let matched_node_text_count = matched_text_guard.char_count();
+            let shared_count = shared_prefix_count(remaining, matched_text_guard.as_str());
+            drop(matched_text_guard);
+
+            if shared_count == matched_node_text_count {
+                // Full match -> continue. Record for ancestor re-attach.
+                matched_chars += shared_count;
+                path.push((Arc::clone(&matched_node), matched_node_text_count));
+                remaining = advance_by_chars(remaining, shared_count);
+                current = Arc::clone(&matched_node);
+                match_curr = matched_node;
+            } else {
+                // Partial match: match stops, resolving on this child node.
+                matched_chars += shared_count;
+                match_curr = matched_node;
+                // `current` stays the parent — the splice re-probes it and
+                // splits the partial child exactly like `insert_text`.
+                break;
+            }
+        }
+
+        // ---- Match side effect + result (verbatim match_prefix_with_counts) ----
+        let (match_tenant, match_slow) = self.resolve_tenant_readonly(&match_curr);
+        let result = self.finish_match_and_insert(
+            &match_curr,
+            &match_tenant,
+            match_slow,
+            matched_chars,
+            text,
+        );
+
+        // ---- Decide the insert tenant from the match result ----
+        let Some(tenant) = select(&result) else {
+            return result;
+        };
+        // Intern through the shared pool so the stored Arc dedups (matches
+        // insert_text's interning).
+        let tenant_id = intern_tenant(tenant);
+
+        // ---- Phase 2: INSERT for `tenant_id` without re-walking the prefix ----
+        // Root bookkeeping (mirrors insert_text).
+        self.root
+            .tenant_last_access_time
+            .entry(Arc::clone(&tenant_id))
+            .or_insert(0);
+        self.tenant_char_count
+            .entry(Arc::clone(&tenant_id))
+            .or_insert(0);
+
+        // Re-attach the inserting tenant to every full-match ancestor node, the
+        // epoch-0 intermediate attach `insert_text` performs while descending.
+        for (node, char_count) in &path {
+            if !node
+                .tenant_last_access_time
+                .contains_key(tenant_id.as_ref())
+            {
+                self.tenant_char_count
+                    .entry(Arc::clone(&tenant_id))
+                    .and_modify(|count| *count += *char_count)
+                    .or_insert(*char_count);
+                node.tenant_last_access_time
+                    .insert(Arc::clone(&tenant_id), 0);
+            }
+        }
+
+        if remaining.is_empty() {
+            // Loop-end: `current` is the final leaf; give it the real timestamp
+            // (insert_text's tail). It already received the epoch-0 attach above
+            // if it is on the path.
+            let epoch = get_epoch();
+            current
+                .tenant_last_access_time
+                .insert(Arc::clone(&tenant_id), epoch);
+        } else {
+            // Fall-off: splice only the unmatched suffix below `current`,
+            // reusing insert_text's exact loop (handles split-continue + the
+            // final-leaf real timestamp). The matched prefix is not re-walked.
+            self.insert_from(current, remaining, tenant_id);
+        }
+
+        result
+    }
+
+    /// Replay `match_prefix_with_counts`'s single deferred side effect (populate
+    /// the `last_tenant` cache on the slow path, then a probabilistic 1/8
+    /// timestamp touch) on the resolved final node, and build the match result.
+    /// Factored out so [`Self::match_and_insert_with`] applies it identically to
+    /// the standalone `match_prefix_with_counts` tail.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the tree; mirrors match_prefix_with_counts tail"
+    )]
+    fn finish_match_and_insert(
+        &self,
+        match_node: &NodeRef,
+        tenant: &TenantId,
+        took_slow_path: bool,
+        matched_chars: usize,
+        text: &str,
+    ) -> PrefixMatchResult {
+        // On the slow path the original resolution populates the cache.
+        if took_slow_path {
+            *match_node.last_tenant.write() = Some(Arc::clone(tenant));
+        }
+
+        // Probabilistic (1 in 8) timestamp touch on the resolved tenant, skipping
+        // the synthetic "empty" tenant — identical to match_prefix_with_counts.
+        let epoch = get_epoch();
+        if epoch & 0x7 == 0 && tenant.as_ref() != "empty" {
+            match_node
+                .tenant_last_access_time
+                .insert(Arc::clone(tenant), epoch);
+        }
+
+        let input_char_count = text.chars().count();
+
+        PrefixMatchResult {
+            tenant: Arc::clone(tenant),
             matched_char_count: matched_chars,
             input_char_count,
         }
@@ -1101,6 +1308,126 @@ impl Tree {
         }
     }
 
+    /// Lazily walk the tree in pre-order, yielding each node's
+    /// `(prefix, [(tenant, epoch)])` pair without materializing
+    /// the full tree as a single buffer. Empty-tenant nodes are
+    /// skipped (they're routing intermediates, not real entries).
+    /// Children are visited in deterministic char-sorted order so
+    /// callers paging the iterator can resume by re-running and
+    /// skipping the first N items if the tree is unchanged.
+    ///
+    /// Like [`Tree::snapshot`], the walk is not atomic — concurrent
+    /// `insert_text` may split or replace nodes mid-walk; the
+    /// iterator may then reflect a mix of pre- and post-split
+    /// state. Acceptable for mesh sync (eventual consistency).
+    pub fn iter_entries(&self) -> EntriesIter {
+        EntriesIter::new(self)
+    }
+}
+
+/// Iterator yielded by [`Tree::iter_entries`]. Owns `Arc<Node>`
+/// clones for the path it's currently inside so it survives
+/// across awaits or any temporary release of `&Tree`.
+pub struct EntriesIter {
+    /// DFS frame stack. The top frame's `remaining_children` is
+    /// the queue of children we still have to visit at the
+    /// current depth. Frames are pushed when descending, popped
+    /// when their children exhaust.
+    stack: Vec<EntryFrame>,
+    /// Mutable accumulated path-from-root. Pushed when descending
+    /// into a child, truncated when popping a frame.
+    path: String,
+    /// Pre-staged emission. Set when a node with tenants is
+    /// entered; consumed by the next `next()` call before
+    /// continuing the walk.
+    pending: Option<(String, Vec<(TenantId, u64)>)>,
+}
+
+struct EntryFrame {
+    remaining_children: std::vec::IntoIter<NodeRef>,
+    /// Byte length of this frame's edge text — used to truncate
+    /// the path buffer in O(1) when popping. Each descent pushes
+    /// a complete `&str` of this length, so popping the same
+    /// byte count always lands on a UTF-8 char boundary.
+    edge_byte_len: usize,
+}
+
+impl EntriesIter {
+    fn new(tree: &Tree) -> Self {
+        let root_tenants = snapshot_tenants(&tree.root);
+        let pending = (!root_tenants.is_empty()).then(|| (String::new(), root_tenants));
+        Self {
+            stack: vec![EntryFrame {
+                remaining_children: collect_sorted_children(&tree.root).into_iter(),
+                edge_byte_len: 0,
+            }],
+            path: String::new(),
+            pending,
+        }
+    }
+}
+
+impl Iterator for EntriesIter {
+    type Item = (String, Vec<(TenantId, u64)>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.pending.take() {
+            return Some(entry);
+        }
+        loop {
+            let frame = self.stack.last_mut()?;
+            if let Some(child) = frame.remaining_children.next() {
+                // Push the edge directly through the lock guard —
+                // no intermediate clone — and capture its byte
+                // length so we can truncate atomically on pop.
+                let edge_byte_len = {
+                    let guard = child.text.read();
+                    let s = guard.as_str();
+                    self.path.push_str(s);
+                    s.len()
+                };
+
+                let tenants = snapshot_tenants(&child);
+                self.stack.push(EntryFrame {
+                    remaining_children: collect_sorted_children(&child).into_iter(),
+                    edge_byte_len,
+                });
+                if !tenants.is_empty() {
+                    return Some((self.path.clone(), tenants));
+                }
+                // Empty tenants → loop continues, descending into
+                // this child's children on the next iteration.
+            } else {
+                let edge_byte_len = frame.edge_byte_len;
+                self.stack.pop();
+                let new_len = self.path.len().saturating_sub(edge_byte_len);
+                self.path.truncate(new_len);
+            }
+        }
+    }
+}
+
+fn snapshot_tenants(node: &NodeRef) -> Vec<(TenantId, u64)> {
+    let mut tenants: Vec<(TenantId, u64)> = node
+        .tenant_last_access_time
+        .iter()
+        .map(|entry| (Arc::clone(entry.key()), *entry.value()))
+        .collect();
+    tenants.sort_by(|a, b| a.0.cmp(&b.0));
+    tenants
+}
+
+fn collect_sorted_children(node: &NodeRef) -> Vec<NodeRef> {
+    let mut children: Vec<(char, NodeRef)> = node
+        .children
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+    children.sort_by_key(|(c, _)| *c);
+    children.into_iter().map(|(_, n)| n).collect()
+}
+
+impl Tree {
     /// Reconstruct a tree from a snapshot.
     ///
     /// The snapshot must be in pre-order (parent before children) with
@@ -1503,7 +1830,7 @@ mod tests {
 
     use rand::{
         distr::{Alphanumeric, SampleString},
-        rng as thread_rng, Rng,
+        rng as thread_rng, RngExt,
     };
 
     use super::*;
@@ -2808,5 +3135,187 @@ mod tests {
         let r2 = tree1.match_prefix_with_counts("Hello there");
         assert_eq!(r2.matched_char_count, 11);
         assert_eq!(r2.tenant.as_ref(), "worker-2");
+    }
+
+    #[test]
+    fn test_iter_entries_empty_tree() {
+        let tree = Tree::new();
+        let entries: Vec<_> = tree.iter_entries().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_iter_entries_single_insert() {
+        let tree = Tree::new();
+        tree.insert_text("hello", "worker-1");
+        let entries: Vec<_> = tree
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t).collect::<Vec<_>>()))
+            .collect();
+        // Worker registration would also tag root with the tenant,
+        // but we only call insert_text. Root has no tenants here;
+        // the leaf "hello" carries `worker-1`.
+        let leaf = entries
+            .iter()
+            .find(|(p, _)| p == "hello")
+            .expect("leaf with tenants");
+        assert_eq!(leaf.1.len(), 1);
+        assert_eq!(leaf.1[0].as_ref(), "worker-1");
+    }
+
+    #[test]
+    fn test_iter_entries_pre_order_and_split_nodes() {
+        // Two inserts that share a prefix produce a split node.
+        // The radix tree registers tenants at root and copies the
+        // tenant map to intermediate split nodes, so every level
+        // along the shared path emits an entry. Pre-order means
+        // "" before "Hello " before its leaves; deterministic
+        // char order gives "Hello there" before "Hello world"
+        // (t < w).
+        let tree = Tree::new();
+        tree.insert_text("Hello world", "w1");
+        tree.insert_text("Hello there", "w2");
+
+        let paths: Vec<String> = tree.iter_entries().map(|(p, _)| p).collect();
+        assert_eq!(paths, vec!["", "Hello ", "Hello there", "Hello world"],);
+    }
+
+    #[test]
+    fn test_iter_entries_round_trips_via_snapshot() {
+        // The walker yields the same `(path, tenants)` set that
+        // building a tree from a snapshot would round-trip.
+        let tree = Tree::new();
+        tree.insert_text("alpha", "w1");
+        tree.insert_text("alpha-beta", "w2");
+        tree.insert_text("zulu", "w3");
+
+        let mut from_iter: Vec<(String, Vec<String>)> = tree
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t.to_string()).collect()))
+            .collect();
+        from_iter.sort();
+
+        let restored = Tree::from_snapshot(&tree.snapshot());
+        let mut from_restored: Vec<(String, Vec<String>)> = restored
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t.to_string()).collect()))
+            .collect();
+        from_restored.sort();
+
+        assert_eq!(from_iter, from_restored);
+    }
+
+    #[test]
+    fn test_iter_entries_preserves_utf8_paths() {
+        // Multi-byte chars must not produce torn paths when the
+        // walker pops a frame. Path is truncated by byte length
+        // — safe because each descent pushes a complete `&str`,
+        // so popping the same byte count always lands on a UTF-8
+        // char boundary (`String::truncate` would panic if not).
+        // Also exercises the split-node case where the shared
+        // "你好" prefix node emits with a clean multi-byte path.
+        let tree = Tree::new();
+        tree.insert_text("你好世界", "w1");
+        tree.insert_text("你好朋友", "w2");
+
+        let mut paths: Vec<String> = tree.iter_entries().map(|(p, _)| p).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["", "你好", "你好世界", "你好朋友"]);
+    }
+
+    /// Run the same op sequence two ways — `match_prefix_with_counts` +
+    /// `insert_text` (legacy pair) vs the fused `match_and_insert` — and assert
+    /// the match counts and resulting per-tenant char counts agree. Timestamps
+    /// and the probabilistic tenant cache are not compared.
+    fn assert_fused_matches_pair(ops: &[(&str, &str)]) {
+        let pair = Tree::new();
+        let fused = Tree::new();
+        for (text, tenant) in ops {
+            let r_pair = pair.match_prefix_with_counts(text);
+            pair.insert_text(text, tenant);
+
+            let r_fused = fused.match_and_insert(text, tenant);
+
+            assert_eq!(
+                r_pair.matched_char_count, r_fused.matched_char_count,
+                "matched_char_count mismatch for tenant {tenant}"
+            );
+            assert_eq!(
+                r_pair.input_char_count, r_fused.input_char_count,
+                "input_char_count mismatch"
+            );
+            assert_eq!(
+                r_pair.tenant.as_ref(),
+                r_fused.tenant.as_ref(),
+                "matched tenant mismatch for input {text:?}"
+            );
+        }
+        assert_eq!(
+            pair.get_tenant_char_count(),
+            fused.get_tenant_char_count(),
+            "tenant char counts diverged between pair and fused"
+        );
+    }
+
+    #[test]
+    fn test_string_match_and_insert_equiv_basic() {
+        // Note: every query here either misses on an empty tree (resolves to the
+        // synthetic "empty") or falls off on a node whose `last_tenant` is
+        // single-valued, so the (otherwise approximate) tenant pick is
+        // deterministic and comparable between the two construction paths.
+        assert_fused_matches_pair(&[
+            ("hello world", "w1"), // fresh leaf
+            ("hello world", "w1"), // exact re-insert (full match, loop-end)
+            ("hello there", "w2"), // shared "hello " prefix -> split
+            ("hello", "w3"),       // prefix of "hello " split node
+        ]);
+    }
+
+    #[test]
+    fn test_string_match_and_insert_equiv_deep_chain() {
+        // Build a multi-node chain ("abc" -> {"def","xyz"}), then a query that
+        // FULL-matches several nodes before falling off — exercising the fused
+        // path's ancestor re-attach (`path`) plus a deep `insert_from` splice.
+        assert_fused_matches_pair(&[
+            ("abcdef", "w1"),    // leaf "abcdef"
+            ("abcxyz", "w2"),    // split -> "abc" + "def"/"xyz"
+            ("abcdefghi", "w1"), // full-match "abc"+"def", then append "ghi"
+            ("abcdefghi", "w3"), // full-match whole chain for a new tenant
+        ]);
+    }
+
+    #[test]
+    fn test_string_match_and_insert_equiv_empty_and_unicode() {
+        assert_fused_matches_pair(&[
+            ("", "w1"),         // empty text -> tenant attached at root
+            ("你好世界", "w1"), // multi-byte fresh
+            ("你好朋友", "w2"), // multi-byte shared-prefix split
+        ]);
+    }
+
+    #[test]
+    fn test_string_match_and_insert_with_select_and_skip() {
+        let text = "the quick brown fox";
+
+        let via_with = Tree::new();
+        via_with.match_and_insert_with(text, |_| Some("w1"));
+        let via_plain = Tree::new();
+        via_plain.match_and_insert(text, "w1");
+        assert_eq!(
+            via_with.get_tenant_char_count(),
+            via_plain.get_tenant_char_count()
+        );
+
+        // None selection must leave the tree untouched.
+        let tree = Tree::new();
+        tree.insert_text(text, "w1");
+        let before = tree.get_tenant_char_count();
+        let r = tree.match_and_insert_with(text, |_| None);
+        assert_eq!(r.matched_char_count, text.chars().count());
+        assert_eq!(
+            tree.get_tenant_char_count(),
+            before,
+            "None selection must not insert"
+        );
     }
 }

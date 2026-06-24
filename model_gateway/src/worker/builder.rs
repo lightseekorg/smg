@@ -190,6 +190,12 @@ impl BasicWorkerBuilder {
         self
     }
 
+    /// Set KV transfer engine id (vLLM `kv_transfer_config.engine_id`)
+    pub fn kv_engine_id(mut self, engine_id: impl Into<String>) -> Self {
+        self.spec.kv_engine_id = Some(engine_id.into());
+        self
+    }
+
     /// Set worker priority (higher value = higher priority)
     pub fn priority(mut self, priority: u32) -> Self {
         self.spec.priority = priority;
@@ -241,7 +247,7 @@ impl BasicWorkerBuilder {
             .unwrap_or_else(|| self.spec.health.apply_to(&HealthCheckConfig::default()));
 
         let metadata = WorkerMetadata {
-            spec: self.spec,
+            spec: Arc::new(self.spec),
             health_config,
             health_endpoint: self.health_endpoint,
         };
@@ -380,6 +386,7 @@ mod tests {
             failure_threshold: 3,
             success_threshold: 2,
             disable_health_check: false,
+            drain_settle_secs: 5,
         };
 
         let cb_config = CircuitBreakerConfig {
@@ -462,6 +469,7 @@ mod tests {
             failure_threshold: 5,
             success_threshold: 3,
             disable_health_check: false,
+            drain_settle_secs: 5,
         };
 
         let worker = BasicWorkerBuilder::new("http://localhost:8080")

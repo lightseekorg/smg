@@ -73,8 +73,8 @@ SMG supports PD disaggregation with two inference backends:
 
 | Runtime | Protocol | Dispatch | KV Transfer | Best For |
 |---------|----------|----------|-------------|----------|
-| **SGLang** | HTTP | Parallel | Bootstrap-based coordination | Production deployments with SGLang |
 | **vLLM** | gRPC | Sequential | NIXL or Mooncake | High-performance with RDMA/TCP networking |
+| **SGLang** | HTTP | Parallel | Bootstrap-based coordination | Production deployments with SGLang |
 
 ### vLLM KV Transfer Backends
 
@@ -91,8 +91,10 @@ vLLM supports two backends for KV cache transfer:
 
 ### SGLang PD (Parallel Dispatch)
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/pd-sglang.svg" alt="SGLang PD Parallel Dispatch Sequence">
+<div class="architecture-diagram" markdown>
+
+![SGLang PD Parallel Dispatch Sequence](../../assets/images/pd-sglang.svg)
+
 </div>
 
 SGLang uses **parallel dispatch** with bootstrap-based coordination:
@@ -104,16 +106,18 @@ SGLang uses **parallel dispatch** with bootstrap-based coordination:
 
 ### vLLM PD (Sequential Dispatch)
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/pd-vllm.svg" alt="vLLM PD Sequential Dispatch Sequence">
+<div class="architecture-diagram" markdown>
+
+![vLLM PD Sequential Dispatch Sequence](../../assets/images/pd-vllm.svg)
+
 </div>
 
 vLLM uses **sequential dispatch** with NIXL or Mooncake KV transfer:
 
-1. SMG sends request to prefill worker with `max_tokens=1`
-2. Prefill computes KV cache and returns (response discarded)
-3. SMG sends original request to decode worker
-4. KV backend (NIXL/Mooncake) transparently transfers KV cache
+1. SMG sends request to prefill worker with `max_tokens=1` (tagged with `do_remote_decode=true` for NIXL)
+2. Prefill computes KV cache and returns its KV handoff params (output tokens discarded)
+3. SMG sends original request to decode worker with the relayed `kv_transfer_params`
+4. Decode worker pulls the KV cache from prefill (NIXL RDMA / Mooncake)
 5. Decode streams tokens back to client
 
 ### Request Flow
@@ -297,16 +301,16 @@ The KV cache is transferred between workers using the backend's native mechanism
 
 | Backend | Transfer Method | Coordination |
 |---------|-----------------|--------------|
-| SGLang | NCCL/Gloo over network | Bootstrap metadata (host/port/room) |
-| vLLM + NIXL | RDMA | Automatic prefix matching |
+| vLLM + NIXL | RDMA | `kv_transfer_params` relayed by SMG |
 | vLLM + Mooncake | TCP/RDMA | P2P handshake via master server |
+| SGLang | NCCL/Gloo over network | Bootstrap metadata (host/port/room) |
+
+**vLLM**: SMG uses the standard proxy pattern — sends `max_tokens=1` to prefill to trigger KV cache computation, then relays the engine's KV-transfer metadata to the decode request:
+
+- **NIXL**: SMG tags the prefill request with `do_remote_decode=true`; the engine holds its KV blocks and returns handoff params (e.g. `remote_engine_id`, `remote_request_id`, `remote_block_ids`, `remote_host`/`remote_port`, `tp_size`) that SMG forwards verbatim with the decode request, which pulls the blocks over RDMA
+- **Mooncake**: push-based — the engine returns no handoff, so SMG mints a shared `transfer_id`, tags the prefill request, and synthesizes the decode params (`remote_engine_id` from worker registration via GetServerInfo, `remote_bootstrap_addr` = `http://bootstrap_host:bootstrap_port`); workers coordinate via P2P handshake (no external metadata server required). Falls back to legacy host/port injection when the servicer predates `kv_engine_id` reporting
 
 **SGLang**: SMG injects bootstrap metadata (`DisaggregatedParams`) into requests, enabling workers to coordinate KV transfer through a shared "room".
-
-**vLLM**: SMG uses the simple proxy pattern—sends `max_tokens=1` to prefill to trigger KV cache computation, then the KV backend (NIXL or Mooncake) automatically discovers and transfers the cache to decode. No protocol changes required.
-
-- **NIXL**: Uses RDMA for high-bandwidth KV transfer with automatic prefix matching
-- **Mooncake**: Supports both TCP and RDMA, uses P2P handshake for coordination (no external metadata server required)
 
 ---
 

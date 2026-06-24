@@ -350,27 +350,20 @@ mod tests {
 
     use super::*;
 
+    // `Tool` and `ToolAnnotations` are `#[non_exhaustive]` in rmcp 1.7, so build
+    // them via the constructor/setters rather than struct literals.
     fn entry_with_rmcp_annotations(annotations: Option<RmcpToolAnnotations>) -> ToolEntry {
-        let tool = Tool {
-            name: Cow::Owned("widget".to_string()),
-            title: None,
-            description: Some(Cow::Owned("widget description".to_string())),
-            input_schema: Arc::new(serde_json::Map::new()),
-            output_schema: None,
-            annotations,
-            icons: None,
-        };
+        let mut tool = Tool::new(
+            Cow::Owned("widget".to_string()),
+            Cow::Owned("widget description".to_string()),
+            Arc::new(serde_json::Map::new()),
+        );
+        tool.annotations = annotations;
         ToolEntry::from_server_tool("srv", tool)
     }
 
     fn read_only_hint(value: bool) -> RmcpToolAnnotations {
-        RmcpToolAnnotations {
-            title: None,
-            read_only_hint: Some(value),
-            destructive_hint: None,
-            idempotent_hint: None,
-            open_world_hint: None,
-        }
+        RmcpToolAnnotations::new().read_only(value)
     }
 
     #[test]

@@ -8,6 +8,7 @@ for orchestration without tokenization.
 import asyncio
 import dataclasses
 import hashlib
+import json
 import logging
 import os
 import time
@@ -25,6 +26,7 @@ import zmq.asyncio
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
+from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
@@ -35,24 +37,59 @@ from sglang.srt.disaggregation.kv_events import (
 )
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.io_struct import (
+    FlushCacheReqInput,
     GetLoadsReqOutput,
+    ProfileReq,
+    ProfileReqType,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalInputs
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_bool_env_var
 from sglang.utils import get_exception_traceback
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
 
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
-from smg_grpc_servicer.sglang.utils import abort_code_from_output
+from smg_grpc_servicer.sglang.utils import abort_code_from_output, to_token_id_array
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
+# Profile round-trips include trace serialization, which can take minutes.
+PROFILE_COMM_TIMEOUT = 600.0
+
+
+def _aggregate_communicator_results(results: list, ok_message: str) -> tuple[bool, str]:
+    """Aggregate per-DP-rank communicator outputs into (success, message)."""
+    if not results:
+        return False, "No response from scheduler"
+    failures = [r for r in results if not r.success]
+    if failures:
+        return False, " | ".join(r.message or "failed" for r in failures)
+    return True, ok_message
+
+
+SAMPLING_DEFAULT_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+)
+
+
+def _filtered_sampling_defaults(params: dict | None) -> dict:
+    if not params:
+        return {}
+    return {
+        key: params[key]
+        for key in SAMPLING_DEFAULT_KEYS
+        if key in params and params[key] is not None
+    }
 
 
 def _convert_loads_to_protobuf(
@@ -71,6 +108,8 @@ def _convert_loads_to_protobuf(
         cache_hit_rate=result.cache_hit_rate,
         utilization=result.utilization,
         max_running_requests=result.max_running_requests,
+        # Queued token-work: waiting-queue tokens not served from cache.
+        num_waiting_uncached_tokens=result.num_waiting_uncached_tokens,
     )
 
     # Add optional sections using CopyFrom for proper protobuf assignment
@@ -159,6 +198,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         self,
         request_manager: GrpcRequestManager,
         server_args: ServerArgs,
+        model_config: ModelConfig,
         model_info: dict,
         scheduler_info: dict,
         health_servicer: SGLangHealthServicer | None = None,
@@ -166,6 +206,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         """Initialize the standalone gRPC service."""
         self.request_manager = request_manager
         self.server_args = server_args
+        self.model_config = model_config
         self.model_info = model_info
         self.scheduler_info = scheduler_info
         self.start_time = time.time()
@@ -335,7 +376,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             health_req = TokenizedGenerateReqInput(
                 rid=rid,
                 input_text="",
-                input_ids=[0],
+                input_ids=to_token_id_array([0]),
                 sampling_params=sampling_params,
                 return_logprob=False,
                 logprob_start_len=-1,
@@ -343,6 +384,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 stream=False,
                 mm_inputs=None,
                 token_ids_logprob=None,
+                require_reasoning=False,
             )
             # Set disaggregation params if needed
             if self.server_args.disaggregation_mode != DisaggregationMode.NULL.value:
@@ -353,7 +395,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             health_req = TokenizedEmbeddingReqInput(
                 rid=rid,
                 input_text="",
-                input_ids=[0],
+                input_ids=to_token_id_array([0]),
                 image_inputs=None,
                 token_type_ids=[0],
                 sampling_params=sampling_params,
@@ -420,6 +462,35 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 message=str(e),
             )
 
+    def _default_sampling_params_json(self) -> str:
+        defaults = dict(self.model_config.get_default_sampling_params() or {})
+        preferred = self.server_args.preferred_sampling_params
+        if preferred:
+            if isinstance(preferred, str):
+                try:
+                    preferred = json.loads(preferred)
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse preferred_sampling_params JSON")
+                    preferred = {}
+            if isinstance(preferred, dict):
+                defaults.update(preferred)
+            else:
+                logger.warning(
+                    "Ignoring preferred_sampling_params with unsupported type: %s",
+                    type(preferred).__name__,
+                )
+
+        defaults = _filtered_sampling_defaults(defaults)
+        return json.dumps(defaults, separators=(",", ":")) if defaults else ""
+
+    def _preferred_sampling_params_json(self) -> str:
+        preferred = self.server_args.preferred_sampling_params
+        if isinstance(preferred, dict):
+            return json.dumps(preferred, separators=(",", ":"))
+        if isinstance(preferred, str):
+            return preferred
+        return ""
+
     async def GetModelInfo(
         self,
         _request: sglang_scheduler_pb2.GetModelInfoRequest,
@@ -436,7 +507,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             model_path=self.server_args.model_path,
             tokenizer_path=self.server_args.tokenizer_path or "",
             is_generation=is_generation,
-            preferred_sampling_params=(self.server_args.preferred_sampling_params or ""),
+            preferred_sampling_params=self._preferred_sampling_params_json(),
+            default_sampling_params_json=self._default_sampling_params_json(),
             weight_version=self.server_args.weight_version or "",
             served_model_name=self.server_args.served_model_name,
             max_context_length=self.model_info["max_context_length"],
@@ -548,6 +620,112 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             loads=loads,
             aggregate=_compute_aggregate_protobuf(loads),
         )
+
+    async def FlushCache(
+        self,
+        request: common_pb2.FlushCacheRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.FlushCacheResponse:
+        """Flush the KV cache on all scheduler processes."""
+        logger.debug("Receive flush cache request (timeout_s=%.1f)", request.timeout_s)
+        timeout_s = request.timeout_s
+        comm_timeout = max(30.0, timeout_s + 10.0)
+        try:
+            results = await self.request_manager.send_communicator_req(
+                FlushCacheReqInput(timeout_s=timeout_s),
+                "flush_cache_communicator",
+                timeout=comm_timeout,
+            )
+        except TimeoutError:
+            context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            context.set_details(
+                f"Flush cache timed out after {comm_timeout}s. "
+                "The scheduler may be unresponsive or under heavy load."
+            )
+            return common_pb2.FlushCacheResponse(
+                success=False, message=f"Flush cache timed out after {comm_timeout}s"
+            )
+        except Exception as e:
+            logger.error(f"FlushCache failed: {e}\n{get_exception_traceback()}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Flush cache failed: {e}")
+            return common_pb2.FlushCacheResponse(success=False, message=f"Flush cache failed: {e}")
+
+        success, message = _aggregate_communicator_results(results, "Cache flushed successfully")
+        if not results:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+        return common_pb2.FlushCacheResponse(success=success, message=message)
+
+    async def StartProfile(
+        self,
+        request: common_pb2.StartProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Start the profiler on all scheduler processes."""
+        logger.debug("Receive start profile request")
+
+        # Env-var overrides mirror sglang's TokenizerCommunicatorMixin defaults.
+        with_stack = request.with_stack if request.HasField("with_stack") else None
+        with_stack = (with_stack is not False) and get_bool_env_var(
+            "SGLANG_PROFILE_WITH_STACK", "true"
+        )
+        record_shapes = request.record_shapes if request.HasField("record_shapes") else None
+        record_shapes = (record_shapes is not False) and get_bool_env_var(
+            "SGLANG_PROFILE_RECORD_SHAPES", "true"
+        )
+
+        req = ProfileReq(
+            type=ProfileReqType.START_PROFILE,
+            output_dir=request.output_dir if request.HasField("output_dir") else None,
+            start_step=request.start_step if request.HasField("start_step") else None,
+            num_steps=request.num_steps if request.HasField("num_steps") else None,
+            activities=list(request.activities) if request.activities else None,
+            with_stack=with_stack,
+            record_shapes=record_shapes,
+            profile_by_stage=request.profile_by_stage,
+            profile_id=str(time.time()),
+        )
+        return await self._run_profile_req(req, "Start profiling", context)
+
+    async def StopProfile(
+        self,
+        request: common_pb2.StopProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Stop the profiler and export traces."""
+        logger.debug("Receive stop profile request")
+        req = ProfileReq(type=ProfileReqType.STOP_PROFILE)
+        return await self._run_profile_req(req, "Stop profiling", context)
+
+    async def _run_profile_req(
+        self,
+        req: ProfileReq,
+        op_name: str,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Send a ProfileReq to the scheduler and aggregate per-rank results."""
+        try:
+            results = await self.request_manager.send_communicator_req(
+                req, "profile_communicator", timeout=PROFILE_COMM_TIMEOUT
+            )
+        except TimeoutError:
+            context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            context.set_details(f"{op_name} timed out after {PROFILE_COMM_TIMEOUT}s")
+            return common_pb2.ProfileResponse(
+                success=False, message=f"{op_name} timed out after {PROFILE_COMM_TIMEOUT}s"
+            )
+        except Exception as e:
+            logger.error(f"{op_name} failed: {e}\n{get_exception_traceback()}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"{op_name} failed: {e}")
+            return common_pb2.ProfileResponse(success=False, message=f"{op_name} failed: {e}")
+
+        success, message = _aggregate_communicator_results(results, f"{op_name} succeeded")
+        if not results:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+        return common_pb2.ProfileResponse(success=success, message=message)
 
     async def GetTokenizer(
         self,
@@ -758,7 +936,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             raise ValueError("Tokenized input must be provided")
 
         input_text = grpc_req.tokenized.original_text
-        input_ids = list(grpc_req.tokenized.input_ids)
+        input_ids = to_token_id_array(grpc_req.tokenized.input_ids)
 
         # Convert sampling params
         sampling_params = self._convert_sampling_params(grpc_req.sampling_params)
@@ -790,6 +968,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             mm_inputs = self._parse_mm_inputs(grpc_req.mm_inputs)
 
         # Create request
+        require_reasoning = bool(grpc_req.require_reasoning)
+
         return TokenizedGenerateReqInput(
             rid=grpc_req.request_id,
             input_text=input_text,
@@ -809,6 +989,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
+            require_reasoning=require_reasoning,
         )
 
     @staticmethod
@@ -864,7 +1045,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             raise ValueError("Tokenized input must be provided")
 
         input_text = grpc_req.tokenized.original_text
-        input_ids = list(grpc_req.tokenized.input_ids)
+        input_ids = to_token_id_array(grpc_req.tokenized.input_ids)
 
         # Convert sampling params
         sampling_params = self._convert_sampling_params(grpc_req.sampling_params)
@@ -1035,6 +1216,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 prompt_tokens=meta_info.get("prompt_tokens", 0),
                 completion_tokens=meta_info.get("completion_tokens", 0),
                 cached_tokens=meta_info.get("cached_tokens", 0),
+                reasoning_tokens=meta_info.get("reasoning_tokens", 0),
                 output_logprobs=output_logprobs_proto,
                 input_logprobs=input_logprobs_proto,
                 index=output.get("index", 0),
@@ -1091,6 +1273,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                     "completion_tokens", len(output.get("token_ids", []))
                 ),
                 cached_tokens=meta_info.get("cached_tokens", 0),
+                reasoning_tokens=meta_info.get("reasoning_tokens", 0),
                 output_logprobs=output_logprobs_proto,
                 input_logprobs=input_logprobs_proto,
                 index=output.get("index", 0),

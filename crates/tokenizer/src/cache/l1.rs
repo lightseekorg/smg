@@ -30,10 +30,28 @@ use std::{
 use blake3;
 use dashmap::DashMap;
 
-use crate::traits::TokenIdType;
+use crate::traits::{Encoder, Encoding, TokenIdType};
 
 /// Hash type for cache keys
 type Blake3Hash = [u8; 32];
+
+/// `(boundary byte offset, blake3 digest of add_special_tokens || input[..boundary])`
+/// pairs computed while scanning an input — produced once per lookup and reusable by
+/// the insert side, so a miss neither re-scans for boundaries nor re-hashes prefixes.
+pub(super) type PrefixSeeds = Vec<(usize, Blake3Hash)>;
+
+/// Outcome of [`L1Cache::lookup_with_seeds`].
+pub(super) enum PrefixLookup {
+    /// Longest cached prefix: the shared token allocation plus the byte length of the
+    /// matched prefix. The tokens are returned as `Arc<[TokenIdType]>` so a hit does
+    /// not copy the (large) cached prefix; the caller splices the suffix into an
+    /// exact-capacity buffer.
+    Hit(Arc<[TokenIdType]>, usize),
+    /// No cached prefix. Carries the `(boundary, digest)` pairs the failed search
+    /// computed (empty when the input has no special-token boundaries) so the miss
+    /// path can seed entries without recomputing them.
+    Miss(PrefixSeeds),
+}
 
 /// Number of shards for concurrent access
 const NUM_SHARDS: usize = 16;
@@ -124,36 +142,70 @@ impl L1Cache {
         }
     }
 
-    /// Try to find the longest prefix match at special token boundaries
-    /// Returns (cached_tokens, byte_offset) if found
+    /// Compute the `(boundary, digest)` seed list for `input`: the blake3 digest of
+    /// `add_special_tokens || input[..boundary]` at every special token boundary,
+    /// built with one incremental O(N) hashing pass.
     ///
-    /// Uses pre-computed tokens cached during insertion.
-    /// Returns Vec<TokenIdType> as the caller needs to extend it with suffix tokens.
-    pub fn longest_prefix_match(
-        &self,
+    /// Seeding with `add_special_tokens` maps prefixes tokenized with/without a
+    /// leading BOS to distinct keys (the first segment honors this flag).
+    fn boundary_seeds(
         input: &str,
         special_tokens: &[&str],
-    ) -> Option<(Vec<TokenIdType>, usize)> {
+        add_special_tokens: bool,
+    ) -> PrefixSeeds {
         let boundaries = find_special_token_boundaries(input, special_tokens);
 
-        if boundaries.is_empty() {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-
-        // Build all prefix hashes incrementally O(N)
         let mut hasher = blake3::Hasher::new();
-        let mut prefix_hashes = Vec::with_capacity(boundaries.len());
+        hasher.update(&[add_special_tokens as u8]);
+        let mut seeds = Vec::with_capacity(boundaries.len());
         let mut last_pos = 0;
         let bytes = input.as_bytes();
         for &boundary_pos in &boundaries {
             hasher.update(&bytes[last_pos..boundary_pos]);
-            prefix_hashes.push((boundary_pos, *hasher.clone().finalize().as_bytes()));
+            // `finalize(&self)` borrows — no need to clone the hasher to keep updating it.
+            seeds.push((boundary_pos, *hasher.finalize().as_bytes()));
             last_pos = boundary_pos;
+        }
+        seeds
+    }
+
+    /// Try to find the longest prefix match at special token boundaries
+    /// Returns (cached_tokens, byte_offset) if found
+    ///
+    /// Uses pre-computed tokens cached during insertion.
+    /// Returns the shared `Arc<[TokenIdType]>` directly — the caller splices suffix
+    /// tokens into an exact-capacity buffer instead of cloning the cached prefix.
+    pub fn longest_prefix_match(
+        &self,
+        input: &str,
+        special_tokens: &[&str],
+        add_special_tokens: bool,
+    ) -> Option<(Arc<[TokenIdType]>, usize)> {
+        match self.lookup_with_seeds(input, special_tokens, add_special_tokens) {
+            PrefixLookup::Hit(tokens, boundary_pos) => Some((tokens, boundary_pos)),
+            PrefixLookup::Miss(_) => None,
+        }
+    }
+
+    /// Like [`Self::longest_prefix_match`], but on a miss hands back the
+    /// `(boundary, digest)` pairs computed during the failed search so the caller can
+    /// seed entries via [`Self::populate_with_seeds`] without re-scanning the input
+    /// for boundaries or re-hashing the prefixes.
+    pub(super) fn lookup_with_seeds(
+        &self,
+        input: &str,
+        special_tokens: &[&str],
+        add_special_tokens: bool,
+    ) -> PrefixLookup {
+        let seeds = Self::boundary_seeds(input, special_tokens, add_special_tokens);
+
+        if seeds.is_empty() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return PrefixLookup::Miss(seeds);
         }
 
         // Search from the longest boundary to find the best match
-        for (boundary_pos, hash_bytes) in prefix_hashes.into_iter().rev() {
+        for &(boundary_pos, hash_bytes) in seeds.iter().rev() {
             let shard_idx = hash_bytes[0] as usize % NUM_SHARDS;
 
             if let Some(entry) = self.shards[shard_idx].get(&hash_bytes) {
@@ -162,51 +214,101 @@ impl L1Cache {
                 entry.last_accessed.store(timestamp, Ordering::Relaxed);
 
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                // Convert Arc<[T]> to Vec<T> - caller will extend with suffix tokens
-                return Some((entry.tokens.to_vec(), boundary_pos));
+                // Share the cached allocation instead of copying it on every hit.
+                return PrefixLookup::Hit(Arc::clone(&entry.tokens), boundary_pos);
             }
         }
 
         self.misses.fetch_add(1, Ordering::Relaxed);
-        None
+        PrefixLookup::Miss(seeds)
     }
 
-    /// Insert prefix entries at ALL special token boundaries
-    ///
-    /// Uses incremental hashing and tokenization for O(N) performance.
-    ///
-    /// Optimized for workloads with high prefix reuse (e.g., chat templates with repeated system prompts).
-    pub fn insert_at_boundaries<E: super::super::traits::Encoder + ?Sized>(
+    /// Insert prefix entries at all special token boundaries (incremental hashing
+    /// and tokenization, O(N)). The miss path of [`super::CachedTokenizer`] instead
+    /// uses [`Self::populate_with_seeds`], which reuses this per-segment work to also
+    /// return the full encoding.
+    pub fn insert_at_boundaries<E: Encoder + ?Sized>(
         &self,
         input: &str,
         tokenizer: &E,
         special_tokens: &[&str],
         add_special_tokens: bool,
     ) -> anyhow::Result<()> {
-        let boundaries = find_special_token_boundaries(input, special_tokens);
+        let seeds = Self::boundary_seeds(input, special_tokens, add_special_tokens);
 
-        if boundaries.is_empty() {
+        if seeds.is_empty() {
             return Ok(());
         }
 
-        let mut hasher = blake3::Hasher::new();
+        self.populate_boundaries(input, &seeds, tokenizer, add_special_tokens)?;
+        Ok(())
+    }
+
+    /// Miss-path encode: tokenize `input` exactly once, caching the cumulative prefix
+    /// at every special token boundary, and return the assembled encoding. The
+    /// per-segment encodes concatenate to an uncached `encode(input, add_special_tokens)`
+    /// because special tokens are atomic in BPE.
+    pub fn populate_and_encode<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        tokenizer: &E,
+        special_tokens: &[&str],
+        add_special_tokens: bool,
+    ) -> anyhow::Result<Encoding> {
+        let seeds = Self::boundary_seeds(input, special_tokens, add_special_tokens);
+        self.populate_with_seeds(input, &seeds, tokenizer, add_special_tokens)
+    }
+
+    /// Like [`Self::populate_and_encode`], but reuses the `(boundary, digest)` seed
+    /// list a failed [`Self::lookup_with_seeds`] already computed, so the miss path
+    /// neither re-scans for boundaries nor re-hashes the prefixes it just hashed.
+    pub(super) fn populate_with_seeds<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        seeds: &[(usize, Blake3Hash)],
+        tokenizer: &E,
+        add_special_tokens: bool,
+    ) -> anyhow::Result<Encoding> {
+        let Some(&(tail_start, _)) = seeds.last() else {
+            // No special token boundaries — nothing cacheable; a single plain encode
+            // (preserves the inner tokenizer's native encoding variant).
+            return tokenizer.encode(input, add_special_tokens);
+        };
+
+        // Tokenize + cache every boundary prefix; `running` covers input[0..last boundary].
+        let mut running = self.populate_boundaries(input, seeds, tokenizer, add_special_tokens)?;
+
+        // The trailing segment after the last boundary is not a cache key (boundaries
+        // exclude input.len()); encoding it completes the full tokenization. It is
+        // never segment 0, so special tokens are never re-added here.
+        let tail = tokenizer.encode(&input[tail_start..], false)?;
+        running.extend_from_slice(tail.token_ids());
+        Ok(Encoding::Plain(running))
+    }
+
+    /// Shared core of the insert and fused-miss paths: walk the precomputed `seeds`
+    /// (`(boundary, digest)` pairs), tokenizing each inter-boundary segment exactly
+    /// once, cache the cumulative prefix at each boundary, and return the running
+    /// token vector (covering `input[0..last boundary]`).
+    fn populate_boundaries<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        seeds: &[(usize, Blake3Hash)],
+        tokenizer: &E,
+        add_special_tokens: bool,
+    ) -> anyhow::Result<Vec<TokenIdType>> {
         let mut running_tokens = Vec::new();
         let mut last_pos = 0;
-        let mut entries_to_insert = Vec::with_capacity(boundaries.len());
-        let bytes = input.as_bytes();
-        for (i, &boundary_pos) in boundaries.iter().enumerate() {
+        let mut entries_to_insert = Vec::with_capacity(seeds.len());
+        for (i, &(boundary_pos, hash_bytes)) in seeds.iter().enumerate() {
             let delta_text = &input[last_pos..boundary_pos];
 
-            // 1. Incremental Hash update
-            hasher.update(&bytes[last_pos..boundary_pos]);
-            let hash_bytes: Blake3Hash = *hasher.clone().finalize().as_bytes();
-
-            // 2. Incremental Tokenization
+            // 1. Incremental Tokenization
             // Only add special tokens (like BOS) for the very first segment to avoid duplicates
             let segment_encoding = tokenizer.encode(delta_text, (i == 0) && add_special_tokens)?;
             running_tokens.extend_from_slice(segment_encoding.token_ids());
 
-            // 3. Prepare entry
+            // 2. Prepare entry
             // Convert current tokens to Arc<[TokenIdType]> for sharing
             let prefix_tokens: Arc<[TokenIdType]> = running_tokens.as_slice().into();
 
@@ -219,7 +321,7 @@ impl L1Cache {
         }
 
         if entries_to_insert.is_empty() {
-            return Ok(());
+            return Ok(running_tokens);
         }
 
         let total_size_needed: usize = entries_to_insert.iter().map(|(_, _, size)| size).sum();
@@ -262,7 +364,7 @@ impl L1Cache {
             }
         }
 
-        Ok(())
+        Ok(running_tokens)
     }
 
     /// Evict least recently used entries using approximate LRU via random sampling
@@ -394,7 +496,7 @@ mod tests {
 
         // Search with same prefix but different user query
         let input2 = "<|im_start|>system\nYou are a helpful assistant that provides clear and detailed responses.<|im_end|><|im_start|>user\nWhat is 2+2?<|im_end|>";
-        let result = cache.longest_prefix_match(input2, special_tokens);
+        let result = cache.longest_prefix_match(input2, special_tokens, false);
 
         // Should find a match at the special token boundary (after system message)
         assert!(result.is_some());
@@ -420,7 +522,7 @@ mod tests {
         assert!(!cache.is_empty());
 
         // Should find a match
-        let result = cache.longest_prefix_match(input, special_tokens);
+        let result = cache.longest_prefix_match(input, special_tokens, false);
         assert!(result.is_some());
     }
 
@@ -442,7 +544,7 @@ mod tests {
 
         // Search with partial conversation - should match at a special token boundary
         let partial_input = "<|im_start|>system\nYou are a helpful AI assistant that provides detailed and accurate responses.<|im_end|><|im_start|>user\nHello there! How are you today? Can you help me understand how tokenization works in language models?<|im_end|>";
-        let result = cache.longest_prefix_match(partial_input, special_tokens);
+        let result = cache.longest_prefix_match(partial_input, special_tokens, false);
 
         // Should find a match at a special token boundary
         assert!(result.is_some());
@@ -465,7 +567,7 @@ mod tests {
             .unwrap();
 
         // Try to find match
-        let _ = cache.longest_prefix_match(input, special_tokens);
+        let _ = cache.longest_prefix_match(input, special_tokens, false);
 
         let stats = cache.stats();
         // Should have at least one hit (the longest special token boundary should match)
@@ -509,7 +611,7 @@ mod tests {
             .unwrap();
 
         // Access the first entry to update its timestamp
-        let result = cache.longest_prefix_match(input1, special_tokens);
+        let result = cache.longest_prefix_match(input1, special_tokens, false);
         assert!(result.is_some());
 
         // Insert second conversation
@@ -519,7 +621,7 @@ mod tests {
             .unwrap();
 
         // Access the second entry to make it more recent
-        let result = cache.longest_prefix_match(input2, special_tokens);
+        let result = cache.longest_prefix_match(input2, special_tokens, false);
         assert!(result.is_some());
 
         // Insert third conversation (should trigger eviction of oldest)
@@ -533,7 +635,7 @@ mod tests {
         assert!(stats.memory_bytes <= 5 * 1024);
 
         // The most recently accessed entries should still be present
-        let result = cache.longest_prefix_match(input3, special_tokens);
+        let result = cache.longest_prefix_match(input3, special_tokens, false);
         assert!(result.is_some());
     }
 
@@ -569,7 +671,7 @@ mod tests {
                     .unwrap();
 
                 // Query for the same input - should find a prefix match
-                let result = cache_clone.longest_prefix_match(&input, &special_tokens);
+                let result = cache_clone.longest_prefix_match(&input, &special_tokens, false);
                 assert!(
                     result.is_some(),
                     "Thread {i} expected a prefix match after insertion"
@@ -613,5 +715,141 @@ mod tests {
             "Expected at least 10 cache hits, got {}",
             stats.hits
         );
+    }
+
+    /// Encoder that prepends a sentinel BOS token when `add_special_tokens` is
+    /// set, so the same text yields different tokens per flag.
+    struct BosTokenizer;
+
+    const BOS_ID: TokenIdType = 99;
+
+    impl Encoder for BosTokenizer {
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+            let mut ids: Vec<TokenIdType> = Vec::new();
+            if add_special_tokens {
+                ids.push(BOS_ID);
+            }
+            ids.extend(input.bytes().map(TokenIdType::from));
+            Ok(Encoding::Plain(ids))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|i| self.encode(i, add_special_tokens))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_add_special_tokens_separates_keys() {
+        let cache = L1Cache::new(1024 * 1024);
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = BosTokenizer;
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nq<|im_end|>";
+
+        // Insert the same input under both flags.
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, true)
+            .unwrap();
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, false)
+            .unwrap();
+
+        // Each flag must return its own prefix: BOS present only for `true`.
+        let (with_bos, _) = cache
+            .longest_prefix_match(input, special_tokens, true)
+            .expect("match for add_special_tokens=true");
+        let (without_bos, _) = cache
+            .longest_prefix_match(input, special_tokens, false)
+            .expect("match for add_special_tokens=false");
+
+        assert_eq!(with_bos.first(), Some(&BOS_ID));
+        assert_ne!(without_bos.first(), Some(&BOS_ID));
+    }
+
+    #[test]
+    fn test_opposite_flag_does_not_collide() {
+        let cache = L1Cache::new(1024 * 1024);
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = BosTokenizer;
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nq<|im_end|>";
+
+        // Only the `true` flag is populated.
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, true)
+            .unwrap();
+
+        // A lookup with the opposite flag must miss rather than return BOS tokens.
+        assert!(cache
+            .longest_prefix_match(input, special_tokens, false)
+            .is_none());
+    }
+
+    #[test]
+    fn test_hit_returns_shared_prefix_allocation() {
+        use std::sync::Arc;
+
+        let cache = L1Cache::new(1024 * 1024);
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = MockTokenizer::new();
+
+        let input = "<|im_start|>system\nYou are a helpful assistant.<|im_end|><|im_start|>user\nWhat is 2+2?<|im_end|>";
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, false)
+            .unwrap();
+
+        let (first, first_offset) = cache
+            .longest_prefix_match(input, special_tokens, false)
+            .expect("hit after insert");
+        let (second, second_offset) = cache
+            .longest_prefix_match(input, special_tokens, false)
+            .expect("hit after insert");
+
+        assert_eq!(first_offset, second_offset);
+        // The hit path must hand back the cached allocation itself (shared
+        // ownership) — not a fresh per-hit copy of the prefix tokens.
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "longest_prefix_match must return the shared cached Arc, not a clone of its contents"
+        );
+    }
+
+    #[test]
+    fn test_populate_and_encode_matches_uncached_and_seeds_cache() {
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = BosTokenizer;
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nquery<|im_end|>";
+
+        for add_special_tokens in [false, true] {
+            let cache = L1Cache::new(1024 * 1024);
+
+            // The fused miss path must return ids byte-exact to an uncached encode.
+            let assembled = cache
+                .populate_and_encode(input, &tokenizer, special_tokens, add_special_tokens)
+                .unwrap();
+            let plain = tokenizer.encode(input, add_special_tokens).unwrap();
+            assert_eq!(
+                assembled.token_ids(),
+                plain.token_ids(),
+                "fused miss encode must equal uncached encode (add_special_tokens={add_special_tokens})"
+            );
+
+            // It must also seed the cache, keyed on the same add_special_tokens flag.
+            assert!(
+                !cache.is_empty(),
+                "miss path must populate boundary entries"
+            );
+            let (_, offset) = cache
+                .longest_prefix_match(input, special_tokens, add_special_tokens)
+                .expect("hit after populate");
+            assert!(offset > 0);
+            assert!(
+                cache
+                    .longest_prefix_match(input, special_tokens, !add_special_tokens)
+                    .is_none(),
+                "opposite flag must not collide with populated entries"
+            );
+        }
     }
 }

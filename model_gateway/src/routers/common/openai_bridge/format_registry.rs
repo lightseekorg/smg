@@ -164,15 +164,7 @@ mod tests {
         let mut schema = serde_json::Map::new();
         schema.insert("type".to_string(), json!("object"));
         schema.insert("properties".to_string(), json!({}));
-        Tool {
-            name: name.to_string().into(),
-            title: None,
-            description: Some("test".into()),
-            input_schema: schema.into(),
-            output_schema: None,
-            icons: None,
-            annotations: None,
-        }
+        Tool::new(name.to_string(), "test", schema)
     }
 
     #[test]

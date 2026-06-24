@@ -4,7 +4,10 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,8 +23,137 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock, Semaphore};
 use uuid::Uuid;
+
+/// Test-controlled hold gate for the `/generate` endpoint.
+///
+/// Lets a test pin requests on the mock worker *before* it emits any byte —
+/// i.e. holds them in the pre-TTFT window — and release them on demand. This
+/// replaces racing `sleep`s in scheduler admission tests with explicit
+/// signalling, so capacity occupancy and preemption windows are deterministic.
+///
+/// Flow:
+/// 1. Each `/generate` handler, on entry, bumps `arrived` (one permit) so the
+///    test can `wait_for_arrivals(n)` to learn that exactly `n` requests have
+///    reached the worker and are now occupying scheduler slots.
+/// 2. The handler then parks on `release` until the test calls `release()`.
+///    A request whose admission cancel token fires while parked is unwound by
+///    the gateway's `PreemptionGuard` (the handler future is dropped), so the
+///    gate never needs to observe cancellation itself.
+pub struct HoldGate {
+    arrived: Semaphore,
+    release: Notify,
+    released: AtomicBool,
+}
+
+impl HoldGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            arrived: Semaphore::new(0),
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Handler side: signal arrival, then park until released.
+    async fn arrive_and_wait(&self) {
+        self.arrived.add_permits(1);
+        // Loop guards against spurious wakeups and the release-before-park
+        // race: `notified()` registered before the `released` check would miss
+        // a `notify_waiters()` that already fired, so re-check the flag.
+        while !self.released.load(Ordering::Acquire) {
+            let notified = self.release.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    /// Test side: block until `n` handlers have reached the worker (and are
+    /// therefore occupying `n` scheduler slots).
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
+    pub async fn wait_for_arrivals(&self, n: u32) {
+        let permits = self
+            .arrived
+            .acquire_many(n)
+            .await
+            .expect("hold-gate semaphore is never closed");
+        permits.forget();
+    }
+
+    /// Test side: release every parked handler (and any that arrive later).
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release.notify_waiters();
+    }
+}
+
+/// Per-port scheduler test controls, looked up by the mock worker's bound
+/// port. Kept *outside* [`MockWorkerConfig`] so adding scheduler knobs doesn't
+/// force every existing `MockWorkerConfig { .. }` literal in the test suite to
+/// gain new fields. Tests register controls via [`set_scheduler_controls`]
+/// before the worker starts; the relevant handlers consult them by port.
+#[derive(Clone, Default)]
+pub struct SchedulerControls {
+    /// Value reported as `max_running_requests` in `/server_info`. `None`
+    /// keeps the historical default (2048). The priority scheduler derives
+    /// backend capacity from the sum of this across the healthy fleet, so
+    /// admission tests set it to a small, known number (e.g. 1) to pin
+    /// capacity deterministically.
+    pub max_running_requests: Option<u16>,
+    /// Optional pre-TTFT hold gate for `/generate`. When set, each generate
+    /// request signals arrival then parks until [`HoldGate::release`] is
+    /// called. `None` preserves the normal immediate-response behavior.
+    pub hold_gate: Option<Arc<HoldGate>>,
+}
+
+static SCHEDULER_CONTROLS: OnceLock<Mutex<HashMap<u16, SchedulerControls>>> = OnceLock::new();
+
+fn scheduler_controls_table() -> &'static Mutex<HashMap<u16, SchedulerControls>> {
+    SCHEDULER_CONTROLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register scheduler test controls for a mock worker that will bind `port`.
+/// Call this *before* the worker starts (pick a free port via `portpicker`
+/// and pass the same value in [`MockWorkerConfig::port`]).
+#[expect(
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+pub fn set_scheduler_controls(port: u16, controls: SchedulerControls) {
+    scheduler_controls_table()
+        .lock()
+        .expect("scheduler controls mutex poisoned")
+        .insert(port, controls);
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+fn scheduler_controls_for(port: u16) -> SchedulerControls {
+    scheduler_controls_table()
+        .lock()
+        .expect("scheduler controls mutex poisoned")
+        .get(&port)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Remove a port's scheduler controls. Called on [`MockWorker`] teardown so a
+/// later worker that reuses the same port (portpicker recycles freed ports)
+/// doesn't inherit stale `max_running_requests` / `hold_gate`. Tolerant of a
+/// poisoned mutex since it runs from `Drop`.
+fn clear_scheduler_controls(port: u16) {
+    if let Ok(mut table) = scheduler_controls_table().lock() {
+        table.remove(&port);
+    }
+}
 
 /// Configuration for mock worker behavior
 #[derive(Clone)]
@@ -52,6 +184,9 @@ pub struct MockWorker {
     config: Arc<RwLock<MockWorkerConfig>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Resolved bind port, cached so sync `Drop` can prune this worker's entry
+    /// from the global scheduler-controls table.
+    bound_port: Option<u16>,
 }
 
 impl MockWorker {
@@ -60,6 +195,7 @@ impl MockWorker {
             config: Arc::new(RwLock::new(config)),
             shutdown_handle: None,
             shutdown_tx: None,
+            bound_port: None,
         }
     }
 
@@ -83,6 +219,7 @@ impl MockWorker {
         } else {
             port
         };
+        self.bound_port = Some(port);
 
         let app = Router::new()
             .route("/health", get(health_handler))
@@ -93,6 +230,7 @@ impl MockWorker {
             .route("/get_model_info", get(model_info_handler))
             .route("/generate", post(generate_handler))
             .route("/v1/chat/completions", post(chat_completions_handler))
+            .route("/v1/messages", post(messages_handler))
             .route("/v1/completions", post(completions_handler))
             .route("/v1/rerank", post(rerank_handler))
             .route("/v1/responses", post(responses_handler))
@@ -154,6 +292,11 @@ impl Drop for MockWorker {
         // Clean shutdown when dropped
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
+        }
+        // Prune our scheduler controls so a later worker reusing this port
+        // doesn't inherit stale state.
+        if let Some(port) = self.bound_port {
+            clear_scheduler_controls(port);
         }
     }
 }
@@ -232,6 +375,16 @@ async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
     // server_info is a metadata endpoint used during worker registration.
     // Must always succeed regardless of fail_rate so workers register properly.
 
+    // The worker-registration metadata pipeline reads `max_running_requests`
+    // from here and stores it as a label; `WorkerCapacity` sums it across the
+    // healthy fleet to size the priority scheduler. Tests pin it to a small
+    // value (looked up by port) to make scheduler capacity deterministic;
+    // absent an override we keep the historical 2048 so non-scheduler tests
+    // are unaffected.
+    let max_running_requests = scheduler_controls_for(config.port)
+        .max_running_requests
+        .map_or(2048, u32::from);
+
     Json(json!({
         "model_path": "mock-model",
         "served_model_name": "mock-model",
@@ -258,7 +411,7 @@ async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
         "running_queue_size": 0,
         "req_to_token_ratio": 1.2,
         "min_running_requests": 0,
-        "max_running_requests": 2048,
+        "max_running_requests": max_running_requests,
         "max_req_num": 8192,
         "max_batch_tokens": 32768,
         "schedule_policy": "lpm",
@@ -319,6 +472,15 @@ async fn generate_handler(
             })),
         )
             .into_response();
+    }
+
+    // Pre-TTFT hold: signal arrival (so the test knows this request now holds a
+    // scheduler slot) and park until released. The gate is looked up by port
+    // from the test-controlled registry. If the gateway preempts this request
+    // while parked, `PreemptionGuard` drops this whole future, so we never
+    // reach the response below.
+    if let Some(gate) = scheduler_controls_for(config.port).hold_gate {
+        gate.arrive_and_wait().await;
     }
 
     if config.response_delay_ms > 0 {
@@ -496,6 +658,117 @@ async fn chat_completions_handler(
                 "completion_tokens": 5,
                 "total_tokens": 15
             }
+        }))
+        .into_response()
+    }
+}
+
+async fn messages_handler(
+    State(config): State<Arc<RwLock<MockWorkerConfig>>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    let config = config.read().await;
+
+    if should_fail(&config) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Random failure for testing"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    if config.response_delay_ms > 0 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(config.response_delay_ms)).await;
+    }
+
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mock-model")
+        .to_string();
+    let message_id = format!("msg_{}", Uuid::now_v7());
+
+    if is_stream {
+        let message_id_for_stream = message_id.clone();
+        let model_for_stream = model.clone();
+        let events = vec![
+            (
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": message_id_for_stream,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model_for_stream,
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": 10, "output_tokens": 0}
+                    }
+                }),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""}
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "Mock streamed response."}
+                }),
+            ),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                    "usage": {"output_tokens": 5}
+                }),
+            ),
+            ("message_stop", json!({"type": "message_stop"})),
+        ];
+
+        let stream = stream::iter(events.into_iter().map(|(event, data)| {
+            Ok::<_, Infallible>(Event::default().event(event).data(data.to_string()))
+        }));
+
+        Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        Json(json!({
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "This is a mock messages response."}
+            ],
+            "model": model,
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 5}
         }))
         .into_response()
     }

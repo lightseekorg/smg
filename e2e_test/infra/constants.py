@@ -25,6 +25,8 @@ class Runtime(StrEnum):
     SGLANG = "sglang"
     VLLM = "vllm"
     TRTLLM = "trtllm"
+    MLX = "mlx"
+    TOKENSPEED = "tokenspeed"
     OPENAI = "openai"
     XAI = "xai"
     GEMINI = "gemini"
@@ -33,7 +35,9 @@ class Runtime(StrEnum):
 
 # Convenience sets
 LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC})
-LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM})
+LOCAL_RUNTIMES = frozenset(
+    {Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM, Runtime.MLX, Runtime.TOKENSPEED}
+)
 CLOUD_RUNTIMES = frozenset({Runtime.OPENAI, Runtime.XAI, Runtime.GEMINI, Runtime.ANTHROPIC})
 
 # Fixture parameter names (used in @pytest.mark.parametrize)
@@ -51,7 +55,9 @@ DEFAULT_RUNTIME = "sglang"
 ENV_MODELS = "E2E_MODELS"
 ENV_BACKENDS = "E2E_BACKENDS"
 ENV_MODEL = "E2E_MODEL"
-ENV_RUNTIME = "E2E_RUNTIME"  # Runtime for gRPC tests: "sglang", "vllm", or "trtllm"
+ENV_RUNTIME = (
+    "E2E_RUNTIME"  # Runtime for gRPC tests — one of Runtime.{SGLANG,VLLM,TRTLLM,TOKENSPEED}
+)
 ENV_STARTUP_TIMEOUT = "E2E_STARTUP_TIMEOUT"
 ENV_SKIP_MODEL_POOL = "SKIP_MODEL_POOL"
 ENV_SKIP_BACKEND_SETUP = "SKIP_BACKEND_SETUP"
@@ -100,11 +106,39 @@ def is_trtllm() -> bool:
     return get_runtime() == "trtllm"
 
 
+def is_mlx() -> bool:
+    """Check if tests are running with MLX runtime (Apple Silicon only).
+
+    Returns:
+        True if E2E_RUNTIME is "mlx", False otherwise.
+    """
+    return get_runtime() == "mlx"
+
+
+def is_tokenspeed() -> bool:
+    """Check if tests are running with TokenSpeed runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "tokenspeed", False otherwise.
+    """
+    return get_runtime() == "tokenspeed"
+
+
+ENV_VLLM_KV_BACKEND = "E2E_VLLM_KV_BACKEND"
+
+
+def vllm_kv_backend() -> str:
+    """KV transfer backend for vLLM PD workers: "nixl" (default) or "mooncake"."""
+    return os.environ.get(ENV_VLLM_KV_BACKEND, "nixl").lower()
+
+
 # Runtime display labels
 RUNTIME_LABELS = {
     "sglang": "SGLang",
     "vllm": "vLLM",
     "trtllm": "TensorRT-LLM",
+    "mlx": "MLX",
+    "tokenspeed": "TokenSpeed",
 }
 
 ENV_SHOW_ROUTER_LOGS = "SHOW_ROUTER_LOGS"

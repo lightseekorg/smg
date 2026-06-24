@@ -282,30 +282,33 @@ def _start_local_grpc_gateway_with_mcp(
 ):
     """Launch a local gRPC worker + gateway wired to the mock MCP server.
 
-    Returns ``(gateway, client, workers, model_path)``. Caller is
-    responsible for teardown (``gateway.shutdown()`` + ``stop_workers``).
+    Returns ``(gateway, client, workers, model_path)``. Workers come from
+    the session-scoped pool (``infra.worker_pool``), so the caller MUST
+    NOT stop them on teardown — only ``gateway.shutdown()`` is required.
     Skips (not fails) when worker startup fails — CI runs without GPUs
     would otherwise poison every engine-parametrized suite.
     """
     from infra import ConnectionMode, Gateway
     from infra.model_specs import get_model_spec
-    from infra.worker import start_workers, stop_workers
+    from infra.worker_pool import get_pool
 
     try:
-        workers = start_workers(model_id, engine, mode=ConnectionMode.GRPC, count=1)
+        workers = get_pool().acquire(
+            model_id=model_id,
+            engine=engine,
+            mode=ConnectionMode.GRPC,
+            count=1,
+        )
     except Exception as e:
         pytest.skip(f"gRPC {engine} worker for {model_id} not available: {e}")
 
-    # Everything from this point onward must clean up ``workers`` on any
-    # exception — ``get_model_spec`` / ``Gateway()`` / ``gateway.start`` /
-    # ``openai.OpenAI`` each have independent failure modes, and leaking
-    # the GPU worker on init failure would strand quota until CI
-    # reclaimed it.
-    try:
-        worker = workers[0]
-        model_path = get_model_spec(model_id)["model"]
+    # Worker stays in the pool on any downstream failure; the gateway is
+    # ours so we shut it down on any error from ``start()`` or client init.
+    worker = workers[0]
+    model_path = get_model_spec(model_id)["model"]
 
-        gateway = Gateway()
+    gateway = Gateway()
+    try:
         gateway.start(
             worker_urls=[worker.base_url],
             model_path=model_path,
@@ -316,15 +319,9 @@ def _start_local_grpc_gateway_with_mcp(
                 "memory",
             ],
         )
-    except Exception:
-        stop_workers(workers)
-        raise
-
-    try:
         client = openai.OpenAI(base_url=f"{gateway.base_url}/v1", api_key="not-used")
     except Exception:
         gateway.shutdown()
-        stop_workers(workers)
         raise
 
     return gateway, client, workers, model_path
@@ -341,7 +338,7 @@ def gateway_with_mock_mcp_grpc_sglang(
     (R6.3). Skips when the worker can't start (no GPU available, missing
     model weights, etc.) rather than hard-failing.
     """
-    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+    gateway, client, _workers, model_path = _start_local_grpc_gateway_with_mcp(
         engine="sglang",
         model_id="openai/gpt-oss-20b",
         mcp_config_file=mock_mcp_config_file,
@@ -349,10 +346,7 @@ def gateway_with_mock_mcp_grpc_sglang(
     try:
         yield gateway, client, mock_mcp_server, model_path
     finally:
-        from infra.worker import stop_workers
-
         gateway.shutdown()
-        stop_workers(workers)
 
 
 @pytest.fixture(scope="class")
@@ -365,7 +359,7 @@ def gateway_with_mock_mcp_grpc_vllm(
     Uses Llama-3.1-8B-Instruct, which flows through the regular (non-
     harmony) path (R6.4). Skips when the worker can't start.
     """
-    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+    gateway, client, _workers, model_path = _start_local_grpc_gateway_with_mcp(
         engine="vllm",
         model_id="meta-llama/Llama-3.1-8B-Instruct",
         mcp_config_file=mock_mcp_config_file,
@@ -373,7 +367,4 @@ def gateway_with_mock_mcp_grpc_vllm(
     try:
         yield gateway, client, mock_mcp_server, model_path
     finally:
-        from infra.worker import stop_workers
-
         gateway.shutdown()
-        stop_workers(workers)

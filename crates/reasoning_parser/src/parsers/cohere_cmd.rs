@@ -250,8 +250,8 @@ Let me analyze this step by step.
         let result = parser
             .detect_and_parse_reasoning("<|START_THINKING|>   \n\t  <|END_THINKING|>answer")
             .unwrap();
-        // BaseReasoningParser trims reasoning text
-        assert_eq!(result.reasoning_text, "");
+        // Whitespace is preserved (no trimming in BaseReasoningParser)
+        assert_eq!(result.reasoning_text, "   \n\t  ");
         assert_eq!(result.normal_text, "answer");
     }
 }

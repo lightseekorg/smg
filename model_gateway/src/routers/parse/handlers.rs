@@ -44,7 +44,10 @@ pub async fn parse_function_call(
     };
 
     let parser = pooled_parser.lock().await;
-    match parser.parse_complete(&req.text).await {
+    match parser
+        .parse_complete_with_tools(&req.text, &req.tools)
+        .await
+    {
         Ok((remaining_text, tool_calls)) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -73,14 +76,15 @@ pub async fn parse_reasoning(ctx: &Arc<AppContext>, req: &SeparateReasoningReque
         );
     };
 
-    let Some(pooled_parser) = factory.registry().get_pooled_parser(&req.reasoning_parser) else {
+    // Fresh parser per request: non-streaming extraction keeps no state across
+    // requests, so avoid serializing on the shared pooled mutex.
+    let Some(mut parser) = factory.registry().create_parser(&req.reasoning_parser) else {
         return error_response(
             StatusCode::BAD_REQUEST,
             &format!("Unknown reasoning parser: {}", req.reasoning_parser),
         );
     };
 
-    let mut parser = pooled_parser.lock().await;
     match parser.detect_and_parse_reasoning(&req.text) {
         Ok(result) => (
             StatusCode::OK,

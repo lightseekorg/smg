@@ -18,6 +18,17 @@ keyVault: {}
 ## Runner pod template
 template:
   spec:
+    # Allow CPU runners to schedule onto GPU nodes' stranded CPU (those nodes
+    # taint themselves nvidia.com/gpu:NoSchedule but routinely have 80%+ of
+    # their cores idle while only the GPUs are consumed). `Exists` tolerates
+    # both `nvidia.com/gpu=true:NoSchedule` and `nvidia.com/gpu=:NoSchedule`.
+    # No nodeSelector, so runners still schedule on plain CPU nodes too. Other
+    # taints (robobrain, robobrain-vla, ci-runner) are intentionally NOT
+    # tolerated so those reservations stay honored.
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
     volumes:
       - name: work
         emptyDir: {}

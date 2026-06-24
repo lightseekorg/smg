@@ -6,6 +6,7 @@ use reqwest::Client;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    health,
     middleware::{AuthConfig, TokenBucket},
     policies::PolicyRegistry,
     routers::RouterTrait,
@@ -17,7 +18,6 @@ use smg::{
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
-    NoOpConversationMemoryWriter,
 };
 use smg_mcp::{McpConfig, McpOrchestrator};
 
@@ -54,7 +54,6 @@ pub fn create_test_app(
     let response_storage = Arc::new(MemoryResponseStorage::new());
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-    let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
     // Initialize the worker monitor with the same interval the
     // production builder uses so tests exercise the real polling
@@ -64,6 +63,7 @@ pub fn create_test_app(
         policy_registry.clone(),
         client.clone(),
         router_config.load_monitor_interval_secs,
+        router_config.engine_metrics,
     )));
 
     // Create empty OnceLock for worker job queue and workflow engines
@@ -84,7 +84,6 @@ pub fn create_test_app(
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .conversation_memory_writer(conversation_memory_writer)
             .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
@@ -102,10 +101,12 @@ pub fn create_test_app(
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {
         router,
+        probe_state: start_probe_state(&app_context),
         context: app_context,
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        mesh_adapters: None,
     });
 
     // Configure request ID headers (use defaults if not specified)
@@ -136,6 +137,22 @@ pub fn create_test_app(
     .expect("valid tenant resolution config")
 }
 
+/// Mirror production wiring: cached probe state plus its readiness
+/// maintainer, so `/readiness` reflects worker registry state in tests.
+/// The initial snapshot is computed synchronously, so workers registered
+/// before app creation are visible immediately; later mutations arrive via
+/// the registry event subscription. Must be called from a tokio runtime.
+fn start_probe_state(app_context: &Arc<AppContext>) -> Arc<health::ProbeState> {
+    let probe_state = health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _maintainer = health::spawn_readiness_maintainer(
+        probe_state.clone(),
+        app_context.worker_registry.clone(),
+        app_context.tokenizer_registry.clone(),
+        app_context.router_config.clone(),
+    );
+    probe_state
+}
+
 /// Create a test Axum application with an existing AppContext
 pub fn create_test_app_with_context(
     router: Arc<dyn RouterTrait>,
@@ -144,10 +161,12 @@ pub fn create_test_app_with_context(
     // Create AppState with the test router and context
     let app_state = Arc::new(AppState {
         router,
+        probe_state: start_probe_state(&app_context),
         context: app_context.clone(),
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        mesh_adapters: None,
     });
 
     // Get config from the context
@@ -218,7 +237,6 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
     let response_storage = Arc::new(MemoryResponseStorage::new());
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-    let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
     Arc::new(
         AppContext::builder()
@@ -233,7 +251,6 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
-            .conversation_memory_writer(conversation_memory_writer)
             .worker_monitor(None)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)

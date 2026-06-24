@@ -390,9 +390,12 @@ type GenerateRequest struct {
 	// Data parallel routing
 	DataParallelRank int32 `protobuf:"varint,16,opt,name=data_parallel_rank,json=dataParallelRank,proto3" json:"data_parallel_rank,omitempty"`
 	// Whether client wants streaming response
-	Stream        bool `protobuf:"varint,17,opt,name=stream,proto3" json:"stream,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Stream bool `protobuf:"varint,17,opt,name=stream,proto3" json:"stream,omitempty"`
+	// Ask SGLang scheduler to count reasoning tokens.
+	// Keep false unless the request explicitly enables reasoning/thinking.
+	RequireReasoning bool `protobuf:"varint,18,opt,name=require_reasoning,json=requireReasoning,proto3" json:"require_reasoning,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GenerateRequest) Reset() {
@@ -544,6 +547,13 @@ func (x *GenerateRequest) GetStream() bool {
 	return false
 }
 
+func (x *GenerateRequest) GetRequireReasoning() bool {
+	if x != nil {
+		return x.RequireReasoning
+	}
+	return false
+}
+
 type TokenizedInput struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OriginalText  string                 `protobuf:"bytes,1,opt,name=original_text,json=originalText,proto3" json:"original_text,omitempty"` // For reference
@@ -596,27 +606,94 @@ func (x *TokenizedInput) GetInputIds() []uint32 {
 	return nil
 }
 
-type MultimodalInputs struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Simplified multimodal handling - actual data processed by tokenizer
-	ImageUrls []string `protobuf:"bytes,1,rep,name=image_urls,json=imageUrls,proto3" json:"image_urls,omitempty"`
-	VideoUrls []string `protobuf:"bytes,2,rep,name=video_urls,json=videoUrls,proto3" json:"video_urls,omitempty"`
-	AudioUrls []string `protobuf:"bytes,3,rep,name=audio_urls,json=audioUrls,proto3" json:"audio_urls,omitempty"`
-	// Pre-processed multimodal features (if available)
-	ProcessedFeatures *structpb.Struct `protobuf:"bytes,4,opt,name=processed_features,json=processedFeatures,proto3" json:"processed_features,omitempty"`
-	// Raw data for direct processing
-	ImageData [][]byte `protobuf:"bytes,5,rep,name=image_data,json=imageData,proto3" json:"image_data,omitempty"`
-	VideoData [][]byte `protobuf:"bytes,6,rep,name=video_data,json=videoData,proto3" json:"video_data,omitempty"`
-	AudioData [][]byte `protobuf:"bytes,7,rep,name=audio_data,json=audioData,proto3" json:"audio_data,omitempty"`
-	// Modality metadata
-	Modalities    []string `protobuf:"bytes,8,rep,name=modalities,proto3" json:"modalities,omitempty"`
+// A typed tensor: raw little-endian bytes + shape + dtype.
+// Replaces the base64-in-Struct hack for binary data over gRPC.
+type TensorData struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`           // Raw little-endian bytes (f32/i64/u32)
+	Shape         []uint32               `protobuf:"varint,2,rep,packed,name=shape,proto3" json:"shape,omitempty"` // Dimension sizes
+	Dtype         string                 `protobuf:"bytes,3,opt,name=dtype,proto3" json:"dtype,omitempty"`         // "float32", "int64", "uint32"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *TensorData) Reset() {
+	*x = TensorData{}
+	mi := &file_sglang_scheduler_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TensorData) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TensorData) ProtoMessage() {}
+
+func (x *TensorData) ProtoReflect() protoreflect.Message {
+	mi := &file_sglang_scheduler_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TensorData.ProtoReflect.Descriptor instead.
+func (*TensorData) Descriptor() ([]byte, []int) {
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *TensorData) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *TensorData) GetShape() []uint32 {
+	if x != nil {
+		return x.Shape
+	}
+	return nil
+}
+
+func (x *TensorData) GetDtype() string {
+	if x != nil {
+		return x.Dtype
+	}
+	return ""
+}
+
+type MultimodalInputs struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ImageUrls []string               `protobuf:"bytes,1,rep,name=image_urls,json=imageUrls,proto3" json:"image_urls,omitempty"`
+	VideoUrls []string               `protobuf:"bytes,2,rep,name=video_urls,json=videoUrls,proto3" json:"video_urls,omitempty"`
+	AudioUrls []string               `protobuf:"bytes,3,rep,name=audio_urls,json=audioUrls,proto3" json:"audio_urls,omitempty"`
+	// Preprocessed pixel values tensor
+	PixelValues *TensorData `protobuf:"bytes,4,opt,name=pixel_values,json=pixelValues,proto3" json:"pixel_values,omitempty"`
+	// Raw image/video/audio bytes
+	ImageData [][]byte `protobuf:"bytes,5,rep,name=image_data,json=imageData,proto3" json:"image_data,omitempty"`
+	VideoData [][]byte `protobuf:"bytes,6,rep,name=video_data,json=videoData,proto3" json:"video_data,omitempty"`
+	AudioData [][]byte `protobuf:"bytes,7,rep,name=audio_data,json=audioData,proto3" json:"audio_data,omitempty"`
+	// Modality metadata
+	Modalities []string `protobuf:"bytes,8,rep,name=modalities,proto3" json:"modalities,omitempty"`
+	// Model-specific tensors (aspect_ratios, image_grid_thw, etc.)
+	ModelSpecificTensors map[string]*TensorData `protobuf:"bytes,9,rep,name=model_specific_tensors,json=modelSpecificTensors,proto3" json:"model_specific_tensors,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Image token ID for pad_input_ids_func
+	ImTokenId *uint32 `protobuf:"varint,10,opt,name=im_token_id,json=imTokenId,proto3,oneof" json:"im_token_id,omitempty"`
+	// Placeholder offsets: where each image's tokens are in input_ids
+	MmPlaceholders []*PlaceholderRange `protobuf:"bytes,11,rep,name=mm_placeholders,json=mmPlaceholders,proto3" json:"mm_placeholders,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
 func (x *MultimodalInputs) Reset() {
 	*x = MultimodalInputs{}
-	mi := &file_sglang_scheduler_proto_msgTypes[4]
+	mi := &file_sglang_scheduler_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -628,7 +705,7 @@ func (x *MultimodalInputs) String() string {
 func (*MultimodalInputs) ProtoMessage() {}
 
 func (x *MultimodalInputs) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[4]
+	mi := &file_sglang_scheduler_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -641,7 +718,7 @@ func (x *MultimodalInputs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MultimodalInputs.ProtoReflect.Descriptor instead.
 func (*MultimodalInputs) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{4}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *MultimodalInputs) GetImageUrls() []string {
@@ -665,9 +742,9 @@ func (x *MultimodalInputs) GetAudioUrls() []string {
 	return nil
 }
 
-func (x *MultimodalInputs) GetProcessedFeatures() *structpb.Struct {
+func (x *MultimodalInputs) GetPixelValues() *TensorData {
 	if x != nil {
-		return x.ProcessedFeatures
+		return x.PixelValues
 	}
 	return nil
 }
@@ -700,16 +777,86 @@ func (x *MultimodalInputs) GetModalities() []string {
 	return nil
 }
 
+func (x *MultimodalInputs) GetModelSpecificTensors() map[string]*TensorData {
+	if x != nil {
+		return x.ModelSpecificTensors
+	}
+	return nil
+}
+
+func (x *MultimodalInputs) GetImTokenId() uint32 {
+	if x != nil && x.ImTokenId != nil {
+		return *x.ImTokenId
+	}
+	return 0
+}
+
+func (x *MultimodalInputs) GetMmPlaceholders() []*PlaceholderRange {
+	if x != nil {
+		return x.MmPlaceholders
+	}
+	return nil
+}
+
+type PlaceholderRange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Offset        uint32                 `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	Length        uint32                 `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaceholderRange) Reset() {
+	*x = PlaceholderRange{}
+	mi := &file_sglang_scheduler_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaceholderRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaceholderRange) ProtoMessage() {}
+
+func (x *PlaceholderRange) ProtoReflect() protoreflect.Message {
+	mi := &file_sglang_scheduler_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaceholderRange.ProtoReflect.Descriptor instead.
+func (*PlaceholderRange) Descriptor() ([]byte, []int) {
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PlaceholderRange) GetOffset() uint32 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *PlaceholderRange) GetLength() uint32 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
 type GenerateResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// Response type
-	//
 	// Types that are valid to be assigned to Response:
 	//
 	//	*GenerateResponse_Chunk
 	//	*GenerateResponse_Complete
-	//	*GenerateResponse_Error
 	Response      isGenerateResponse_Response `protobuf_oneof:"response"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -717,7 +864,7 @@ type GenerateResponse struct {
 
 func (x *GenerateResponse) Reset() {
 	*x = GenerateResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[5]
+	mi := &file_sglang_scheduler_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -729,7 +876,7 @@ func (x *GenerateResponse) String() string {
 func (*GenerateResponse) ProtoMessage() {}
 
 func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[5]
+	mi := &file_sglang_scheduler_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -742,7 +889,7 @@ func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateResponse.ProtoReflect.Descriptor instead.
 func (*GenerateResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{5}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GenerateResponse) GetRequestId() string {
@@ -777,15 +924,6 @@ func (x *GenerateResponse) GetComplete() *GenerateComplete {
 	return nil
 }
 
-func (x *GenerateResponse) GetError() *GenerateError {
-	if x != nil {
-		if x, ok := x.Response.(*GenerateResponse_Error); ok {
-			return x.Error
-		}
-	}
-	return nil
-}
-
 type isGenerateResponse_Response interface {
 	isGenerateResponse_Response()
 }
@@ -798,15 +936,9 @@ type GenerateResponse_Complete struct {
 	Complete *GenerateComplete `protobuf:"bytes,3,opt,name=complete,proto3,oneof"`
 }
 
-type GenerateResponse_Error struct {
-	Error *GenerateError `protobuf:"bytes,4,opt,name=error,proto3,oneof"`
-}
-
 func (*GenerateResponse_Chunk) isGenerateResponse_Response() {}
 
 func (*GenerateResponse_Complete) isGenerateResponse_Response() {}
-
-func (*GenerateResponse_Error) isGenerateResponse_Response() {}
 
 type GenerateStreamChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -816,6 +948,7 @@ type GenerateStreamChunk struct {
 	PromptTokens     uint32 `protobuf:"varint,2,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
 	CompletionTokens uint32 `protobuf:"varint,3,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
 	CachedTokens     uint32 `protobuf:"varint,4,opt,name=cached_tokens,json=cachedTokens,proto3" json:"cached_tokens,omitempty"`
+	ReasoningTokens  uint32 `protobuf:"varint,9,opt,name=reasoning_tokens,json=reasoningTokens,proto3" json:"reasoning_tokens,omitempty"`
 	// Output logprobs (if requested) - incremental for streaming
 	OutputLogprobs *OutputLogProbs `protobuf:"bytes,5,opt,name=output_logprobs,json=outputLogprobs,proto3" json:"output_logprobs,omitempty"`
 	// Hidden states (if requested)
@@ -830,7 +963,7 @@ type GenerateStreamChunk struct {
 
 func (x *GenerateStreamChunk) Reset() {
 	*x = GenerateStreamChunk{}
-	mi := &file_sglang_scheduler_proto_msgTypes[6]
+	mi := &file_sglang_scheduler_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -842,7 +975,7 @@ func (x *GenerateStreamChunk) String() string {
 func (*GenerateStreamChunk) ProtoMessage() {}
 
 func (x *GenerateStreamChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[6]
+	mi := &file_sglang_scheduler_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -855,7 +988,7 @@ func (x *GenerateStreamChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateStreamChunk.ProtoReflect.Descriptor instead.
 func (*GenerateStreamChunk) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{6}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GenerateStreamChunk) GetTokenIds() []uint32 {
@@ -882,6 +1015,13 @@ func (x *GenerateStreamChunk) GetCompletionTokens() uint32 {
 func (x *GenerateStreamChunk) GetCachedTokens() uint32 {
 	if x != nil {
 		return x.CachedTokens
+	}
+	return 0
+}
+
+func (x *GenerateStreamChunk) GetReasoningTokens() uint32 {
+	if x != nil {
+		return x.ReasoningTokens
 	}
 	return 0
 }
@@ -924,6 +1064,7 @@ type GenerateComplete struct {
 	PromptTokens     uint32 `protobuf:"varint,3,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
 	CompletionTokens uint32 `protobuf:"varint,4,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
 	CachedTokens     uint32 `protobuf:"varint,5,opt,name=cached_tokens,json=cachedTokens,proto3" json:"cached_tokens,omitempty"`
+	ReasoningTokens  uint32 `protobuf:"varint,12,opt,name=reasoning_tokens,json=reasoningTokens,proto3" json:"reasoning_tokens,omitempty"`
 	// Output logprobs if requested (cumulative)
 	OutputLogprobs *OutputLogProbs `protobuf:"bytes,6,opt,name=output_logprobs,json=outputLogprobs,proto3" json:"output_logprobs,omitempty"`
 	// All hidden states if requested
@@ -945,7 +1086,7 @@ type GenerateComplete struct {
 
 func (x *GenerateComplete) Reset() {
 	*x = GenerateComplete{}
-	mi := &file_sglang_scheduler_proto_msgTypes[7]
+	mi := &file_sglang_scheduler_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -957,7 +1098,7 @@ func (x *GenerateComplete) String() string {
 func (*GenerateComplete) ProtoMessage() {}
 
 func (x *GenerateComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[7]
+	mi := &file_sglang_scheduler_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -970,7 +1111,7 @@ func (x *GenerateComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateComplete.ProtoReflect.Descriptor instead.
 func (*GenerateComplete) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{7}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GenerateComplete) GetOutputIds() []uint32 {
@@ -1004,6 +1145,13 @@ func (x *GenerateComplete) GetCompletionTokens() uint32 {
 func (x *GenerateComplete) GetCachedTokens() uint32 {
 	if x != nil {
 		return x.CachedTokens
+	}
+	return 0
+}
+
+func (x *GenerateComplete) GetReasoningTokens() uint32 {
+	if x != nil {
+		return x.ReasoningTokens
 	}
 	return 0
 }
@@ -1077,71 +1225,11 @@ func (*GenerateComplete_MatchedTokenId) isGenerateComplete_MatchedStop() {}
 
 func (*GenerateComplete_MatchedStopStr) isGenerateComplete_MatchedStop() {}
 
-type GenerateError struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Message        string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-	HttpStatusCode string                 `protobuf:"bytes,2,opt,name=http_status_code,json=httpStatusCode,proto3" json:"http_status_code,omitempty"`
-	Details        string                 `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *GenerateError) Reset() {
-	*x = GenerateError{}
-	mi := &file_sglang_scheduler_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GenerateError) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GenerateError) ProtoMessage() {}
-
-func (x *GenerateError) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GenerateError.ProtoReflect.Descriptor instead.
-func (*GenerateError) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *GenerateError) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
-}
-
-func (x *GenerateError) GetHttpStatusCode() string {
-	if x != nil {
-		return x.HttpStatusCode
-	}
-	return ""
-}
-
-func (x *GenerateError) GetDetails() string {
-	if x != nil {
-		return x.Details
-	}
-	return ""
-}
-
 // Output logprobs - all values are present (no None)
 type OutputLogProbs struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TokenLogprobs []float32              `protobuf:"fixed32,1,rep,packed,name=token_logprobs,json=tokenLogprobs,proto3" json:"token_logprobs,omitempty"`
-	TokenIds      []int32                `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
+	TokenIds      []uint32               `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
 	// Top logprobs at each position
 	TopLogprobs   []*TopLogProbs `protobuf:"bytes,3,rep,name=top_logprobs,json=topLogprobs,proto3" json:"top_logprobs,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1150,7 +1238,7 @@ type OutputLogProbs struct {
 
 func (x *OutputLogProbs) Reset() {
 	*x = OutputLogProbs{}
-	mi := &file_sglang_scheduler_proto_msgTypes[9]
+	mi := &file_sglang_scheduler_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1162,7 +1250,7 @@ func (x *OutputLogProbs) String() string {
 func (*OutputLogProbs) ProtoMessage() {}
 
 func (x *OutputLogProbs) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[9]
+	mi := &file_sglang_scheduler_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1175,7 +1263,7 @@ func (x *OutputLogProbs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutputLogProbs.ProtoReflect.Descriptor instead.
 func (*OutputLogProbs) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{9}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *OutputLogProbs) GetTokenLogprobs() []float32 {
@@ -1185,7 +1273,7 @@ func (x *OutputLogProbs) GetTokenLogprobs() []float32 {
 	return nil
 }
 
-func (x *OutputLogProbs) GetTokenIds() []int32 {
+func (x *OutputLogProbs) GetTokenIds() []uint32 {
 	if x != nil {
 		return x.TokenIds
 	}
@@ -1203,7 +1291,7 @@ func (x *OutputLogProbs) GetTopLogprobs() []*TopLogProbs {
 type InputLogProbs struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TokenLogprobs []*InputTokenLogProb   `protobuf:"bytes,1,rep,name=token_logprobs,json=tokenLogprobs,proto3" json:"token_logprobs,omitempty"`
-	TokenIds      []int32                `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
+	TokenIds      []uint32               `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
 	// Top logprobs at each position
 	TopLogprobs   []*TopLogProbs `protobuf:"bytes,3,rep,name=top_logprobs,json=topLogprobs,proto3" json:"top_logprobs,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1212,7 +1300,7 @@ type InputLogProbs struct {
 
 func (x *InputLogProbs) Reset() {
 	*x = InputLogProbs{}
-	mi := &file_sglang_scheduler_proto_msgTypes[10]
+	mi := &file_sglang_scheduler_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1224,7 +1312,7 @@ func (x *InputLogProbs) String() string {
 func (*InputLogProbs) ProtoMessage() {}
 
 func (x *InputLogProbs) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[10]
+	mi := &file_sglang_scheduler_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1237,7 +1325,7 @@ func (x *InputLogProbs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InputLogProbs.ProtoReflect.Descriptor instead.
 func (*InputLogProbs) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{10}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *InputLogProbs) GetTokenLogprobs() []*InputTokenLogProb {
@@ -1247,7 +1335,7 @@ func (x *InputLogProbs) GetTokenLogprobs() []*InputTokenLogProb {
 	return nil
 }
 
-func (x *InputLogProbs) GetTokenIds() []int32 {
+func (x *InputLogProbs) GetTokenIds() []uint32 {
 	if x != nil {
 		return x.TokenIds
 	}
@@ -1271,7 +1359,7 @@ type InputTokenLogProb struct {
 
 func (x *InputTokenLogProb) Reset() {
 	*x = InputTokenLogProb{}
-	mi := &file_sglang_scheduler_proto_msgTypes[11]
+	mi := &file_sglang_scheduler_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1283,7 +1371,7 @@ func (x *InputTokenLogProb) String() string {
 func (*InputTokenLogProb) ProtoMessage() {}
 
 func (x *InputTokenLogProb) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[11]
+	mi := &file_sglang_scheduler_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1296,7 +1384,7 @@ func (x *InputTokenLogProb) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InputTokenLogProb.ProtoReflect.Descriptor instead.
 func (*InputTokenLogProb) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{11}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *InputTokenLogProb) GetValue() float32 {
@@ -1309,14 +1397,14 @@ func (x *InputTokenLogProb) GetValue() float32 {
 type TopLogProbs struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Values        []float32              `protobuf:"fixed32,1,rep,packed,name=values,proto3" json:"values,omitempty"`
-	TokenIds      []int32                `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
+	TokenIds      []uint32               `protobuf:"varint,2,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TopLogProbs) Reset() {
 	*x = TopLogProbs{}
-	mi := &file_sglang_scheduler_proto_msgTypes[12]
+	mi := &file_sglang_scheduler_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1328,7 +1416,7 @@ func (x *TopLogProbs) String() string {
 func (*TopLogProbs) ProtoMessage() {}
 
 func (x *TopLogProbs) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[12]
+	mi := &file_sglang_scheduler_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1341,7 +1429,7 @@ func (x *TopLogProbs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopLogProbs.ProtoReflect.Descriptor instead.
 func (*TopLogProbs) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{12}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TopLogProbs) GetValues() []float32 {
@@ -1351,7 +1439,7 @@ func (x *TopLogProbs) GetValues() []float32 {
 	return nil
 }
 
-func (x *TopLogProbs) GetTokenIds() []int32 {
+func (x *TopLogProbs) GetTokenIds() []uint32 {
 	if x != nil {
 		return x.TokenIds
 	}
@@ -1369,7 +1457,7 @@ type HiddenStates struct {
 
 func (x *HiddenStates) Reset() {
 	*x = HiddenStates{}
-	mi := &file_sglang_scheduler_proto_msgTypes[13]
+	mi := &file_sglang_scheduler_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1381,7 +1469,7 @@ func (x *HiddenStates) String() string {
 func (*HiddenStates) ProtoMessage() {}
 
 func (x *HiddenStates) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[13]
+	mi := &file_sglang_scheduler_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1394,7 +1482,7 @@ func (x *HiddenStates) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HiddenStates.ProtoReflect.Descriptor instead.
 func (*HiddenStates) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{13}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *HiddenStates) GetValues() []float32 {
@@ -1428,7 +1516,6 @@ type EmbedRequest struct {
 	// Dummy sampling params for compatibility
 	// EmbedRequest doesn't use sampling_params
 	SamplingParams *SamplingParams `protobuf:"bytes,5,opt,name=sampling_params,json=samplingParams,proto3" json:"sampling_params,omitempty"`
-	LogMetrics     bool            `protobuf:"varint,6,opt,name=log_metrics,json=logMetrics,proto3" json:"log_metrics,omitempty"`
 	// Token type IDs for models that require them
 	TokenTypeIds []int32 `protobuf:"varint,7,rep,packed,name=token_type_ids,json=tokenTypeIds,proto3" json:"token_type_ids,omitempty"`
 	// Data parallel routing
@@ -1442,7 +1529,7 @@ type EmbedRequest struct {
 
 func (x *EmbedRequest) Reset() {
 	*x = EmbedRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[14]
+	mi := &file_sglang_scheduler_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1454,7 +1541,7 @@ func (x *EmbedRequest) String() string {
 func (*EmbedRequest) ProtoMessage() {}
 
 func (x *EmbedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[14]
+	mi := &file_sglang_scheduler_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1467,7 +1554,7 @@ func (x *EmbedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmbedRequest.ProtoReflect.Descriptor instead.
 func (*EmbedRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{14}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *EmbedRequest) GetRequestId() string {
@@ -1496,13 +1583,6 @@ func (x *EmbedRequest) GetSamplingParams() *SamplingParams {
 		return x.SamplingParams
 	}
 	return nil
-}
-
-func (x *EmbedRequest) GetLogMetrics() bool {
-	if x != nil {
-		return x.LogMetrics
-	}
-	return false
 }
 
 func (x *EmbedRequest) GetTokenTypeIds() []int32 {
@@ -1534,20 +1614,18 @@ func (x *EmbedRequest) GetTexts() []string {
 }
 
 type EmbedResponse struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// Types that are valid to be assigned to Response:
-	//
-	//	*EmbedResponse_Complete
-	//	*EmbedResponse_Error
-	Response      isEmbedResponse_Response `protobuf_oneof:"response"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Flat response — no oneof, errors via gRPC status
+	EmbeddingDim  uint32    `protobuf:"varint,4,opt,name=embedding_dim,json=embeddingDim,proto3" json:"embedding_dim,omitempty"`
+	Embedding     []float32 `protobuf:"fixed32,5,rep,packed,name=embedding,proto3" json:"embedding,omitempty"`
+	PromptTokens  uint32    `protobuf:"varint,6,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EmbedResponse) Reset() {
 	*x = EmbedResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[15]
+	mi := &file_sglang_scheduler_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1559,7 +1637,7 @@ func (x *EmbedResponse) String() string {
 func (*EmbedResponse) ProtoMessage() {}
 
 func (x *EmbedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[15]
+	mi := &file_sglang_scheduler_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1572,245 +1650,28 @@ func (x *EmbedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmbedResponse.ProtoReflect.Descriptor instead.
 func (*EmbedResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *EmbedResponse) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
-}
-
-func (x *EmbedResponse) GetResponse() isEmbedResponse_Response {
-	if x != nil {
-		return x.Response
-	}
-	return nil
-}
-
-func (x *EmbedResponse) GetComplete() *EmbedComplete {
-	if x != nil {
-		if x, ok := x.Response.(*EmbedResponse_Complete); ok {
-			return x.Complete
-		}
-	}
-	return nil
-}
-
-func (x *EmbedResponse) GetError() *EmbedError {
-	if x != nil {
-		if x, ok := x.Response.(*EmbedResponse_Error); ok {
-			return x.Error
-		}
-	}
-	return nil
-}
-
-type isEmbedResponse_Response interface {
-	isEmbedResponse_Response()
-}
-
-type EmbedResponse_Complete struct {
-	Complete *EmbedComplete `protobuf:"bytes,2,opt,name=complete,proto3,oneof"`
-}
-
-type EmbedResponse_Error struct {
-	Error *EmbedError `protobuf:"bytes,3,opt,name=error,proto3,oneof"`
-}
-
-func (*EmbedResponse_Complete) isEmbedResponse_Response() {}
-
-func (*EmbedResponse_Error) isEmbedResponse_Response() {}
-
-type EmbedComplete struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Embedding    []float32              `protobuf:"fixed32,1,rep,packed,name=embedding,proto3" json:"embedding,omitempty"`
-	PromptTokens uint32                 `protobuf:"varint,2,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
-	CachedTokens uint32                 `protobuf:"varint,3,opt,name=cached_tokens,json=cachedTokens,proto3" json:"cached_tokens,omitempty"`
-	// Additional metadata
-	EmbeddingDim uint32 `protobuf:"varint,4,opt,name=embedding_dim,json=embeddingDim,proto3" json:"embedding_dim,omitempty"`
-	// For batch embeddings
-	BatchEmbeddings []*Embedding `protobuf:"bytes,5,rep,name=batch_embeddings,json=batchEmbeddings,proto3" json:"batch_embeddings,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *EmbedComplete) Reset() {
-	*x = EmbedComplete{}
-	mi := &file_sglang_scheduler_proto_msgTypes[16]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EmbedComplete) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EmbedComplete) ProtoMessage() {}
-
-func (x *EmbedComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[16]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EmbedComplete.ProtoReflect.Descriptor instead.
-func (*EmbedComplete) Descriptor() ([]byte, []int) {
 	return file_sglang_scheduler_proto_rawDescGZIP(), []int{16}
 }
 
-func (x *EmbedComplete) GetEmbedding() []float32 {
-	if x != nil {
-		return x.Embedding
-	}
-	return nil
-}
-
-func (x *EmbedComplete) GetPromptTokens() uint32 {
-	if x != nil {
-		return x.PromptTokens
-	}
-	return 0
-}
-
-func (x *EmbedComplete) GetCachedTokens() uint32 {
-	if x != nil {
-		return x.CachedTokens
-	}
-	return 0
-}
-
-func (x *EmbedComplete) GetEmbeddingDim() uint32 {
+func (x *EmbedResponse) GetEmbeddingDim() uint32 {
 	if x != nil {
 		return x.EmbeddingDim
 	}
 	return 0
 }
 
-func (x *EmbedComplete) GetBatchEmbeddings() []*Embedding {
+func (x *EmbedResponse) GetEmbedding() []float32 {
 	if x != nil {
-		return x.BatchEmbeddings
+		return x.Embedding
 	}
 	return nil
 }
 
-type Embedding struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Values        []float32              `protobuf:"fixed32,1,rep,packed,name=values,proto3" json:"values,omitempty"`
-	Index         int32                  `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Embedding) Reset() {
-	*x = Embedding{}
-	mi := &file_sglang_scheduler_proto_msgTypes[17]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Embedding) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Embedding) ProtoMessage() {}
-
-func (x *Embedding) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[17]
+func (x *EmbedResponse) GetPromptTokens() uint32 {
 	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Embedding.ProtoReflect.Descriptor instead.
-func (*Embedding) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{17}
-}
-
-func (x *Embedding) GetValues() []float32 {
-	if x != nil {
-		return x.Values
-	}
-	return nil
-}
-
-func (x *Embedding) GetIndex() int32 {
-	if x != nil {
-		return x.Index
+		return x.PromptTokens
 	}
 	return 0
-}
-
-type EmbedError struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
-	Details       string                 `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *EmbedError) Reset() {
-	*x = EmbedError{}
-	mi := &file_sglang_scheduler_proto_msgTypes[18]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EmbedError) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EmbedError) ProtoMessage() {}
-
-func (x *EmbedError) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[18]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EmbedError.ProtoReflect.Descriptor instead.
-func (*EmbedError) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{18}
-}
-
-func (x *EmbedError) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
-}
-
-func (x *EmbedError) GetCode() string {
-	if x != nil {
-		return x.Code
-	}
-	return ""
-}
-
-func (x *EmbedError) GetDetails() string {
-	if x != nil {
-		return x.Details
-	}
-	return ""
 }
 
 type HealthCheckRequest struct {
@@ -1821,7 +1682,7 @@ type HealthCheckRequest struct {
 
 func (x *HealthCheckRequest) Reset() {
 	*x = HealthCheckRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[19]
+	mi := &file_sglang_scheduler_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1833,7 +1694,7 @@ func (x *HealthCheckRequest) String() string {
 func (*HealthCheckRequest) ProtoMessage() {}
 
 func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[19]
+	mi := &file_sglang_scheduler_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1846,7 +1707,7 @@ func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckRequest.ProtoReflect.Descriptor instead.
 func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{19}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{17}
 }
 
 type HealthCheckResponse struct {
@@ -1859,7 +1720,7 @@ type HealthCheckResponse struct {
 
 func (x *HealthCheckResponse) Reset() {
 	*x = HealthCheckResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[20]
+	mi := &file_sglang_scheduler_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +1732,7 @@ func (x *HealthCheckResponse) String() string {
 func (*HealthCheckResponse) ProtoMessage() {}
 
 func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[20]
+	mi := &file_sglang_scheduler_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +1745,7 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{20}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *HealthCheckResponse) GetHealthy() bool {
@@ -1911,7 +1772,7 @@ type AbortRequest struct {
 
 func (x *AbortRequest) Reset() {
 	*x = AbortRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[21]
+	mi := &file_sglang_scheduler_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1923,7 +1784,7 @@ func (x *AbortRequest) String() string {
 func (*AbortRequest) ProtoMessage() {}
 
 func (x *AbortRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[21]
+	mi := &file_sglang_scheduler_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1936,7 +1797,7 @@ func (x *AbortRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortRequest.ProtoReflect.Descriptor instead.
 func (*AbortRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{21}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *AbortRequest) GetRequestId() string {
@@ -1963,7 +1824,7 @@ type AbortResponse struct {
 
 func (x *AbortResponse) Reset() {
 	*x = AbortResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[22]
+	mi := &file_sglang_scheduler_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1975,7 +1836,7 @@ func (x *AbortResponse) String() string {
 func (*AbortResponse) ProtoMessage() {}
 
 func (x *AbortResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[22]
+	mi := &file_sglang_scheduler_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1988,7 +1849,7 @@ func (x *AbortResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortResponse.ProtoReflect.Descriptor instead.
 func (*AbortResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{22}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AbortResponse) GetSuccess() bool {
@@ -2017,7 +1878,7 @@ type LoadLoRARequest struct {
 
 func (x *LoadLoRARequest) Reset() {
 	*x = LoadLoRARequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[23]
+	mi := &file_sglang_scheduler_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2029,7 +1890,7 @@ func (x *LoadLoRARequest) String() string {
 func (*LoadLoRARequest) ProtoMessage() {}
 
 func (x *LoadLoRARequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[23]
+	mi := &file_sglang_scheduler_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2042,7 +1903,7 @@ func (x *LoadLoRARequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoadLoRARequest.ProtoReflect.Descriptor instead.
 func (*LoadLoRARequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{23}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *LoadLoRARequest) GetAdapterId() string {
@@ -2077,7 +1938,7 @@ type LoadLoRAResponse struct {
 
 func (x *LoadLoRAResponse) Reset() {
 	*x = LoadLoRAResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[24]
+	mi := &file_sglang_scheduler_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2089,7 +1950,7 @@ func (x *LoadLoRAResponse) String() string {
 func (*LoadLoRAResponse) ProtoMessage() {}
 
 func (x *LoadLoRAResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[24]
+	mi := &file_sglang_scheduler_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2102,7 +1963,7 @@ func (x *LoadLoRAResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoadLoRAResponse.ProtoReflect.Descriptor instead.
 func (*LoadLoRAResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{24}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *LoadLoRAResponse) GetSuccess() bool {
@@ -2136,7 +1997,7 @@ type UnloadLoRARequest struct {
 
 func (x *UnloadLoRARequest) Reset() {
 	*x = UnloadLoRARequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[25]
+	mi := &file_sglang_scheduler_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2148,7 +2009,7 @@ func (x *UnloadLoRARequest) String() string {
 func (*UnloadLoRARequest) ProtoMessage() {}
 
 func (x *UnloadLoRARequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[25]
+	mi := &file_sglang_scheduler_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2161,7 +2022,7 @@ func (x *UnloadLoRARequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnloadLoRARequest.ProtoReflect.Descriptor instead.
 func (*UnloadLoRARequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{25}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *UnloadLoRARequest) GetAdapterId() string {
@@ -2181,7 +2042,7 @@ type UnloadLoRAResponse struct {
 
 func (x *UnloadLoRAResponse) Reset() {
 	*x = UnloadLoRAResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[26]
+	mi := &file_sglang_scheduler_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2193,7 +2054,7 @@ func (x *UnloadLoRAResponse) String() string {
 func (*UnloadLoRAResponse) ProtoMessage() {}
 
 func (x *UnloadLoRAResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[26]
+	mi := &file_sglang_scheduler_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2206,7 +2067,7 @@ func (x *UnloadLoRAResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnloadLoRAResponse.ProtoReflect.Descriptor instead.
 func (*UnloadLoRAResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{26}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *UnloadLoRAResponse) GetSuccess() bool {
@@ -2239,7 +2100,7 @@ type UpdateWeightsRequest struct {
 
 func (x *UpdateWeightsRequest) Reset() {
 	*x = UpdateWeightsRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[27]
+	mi := &file_sglang_scheduler_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2251,7 +2112,7 @@ func (x *UpdateWeightsRequest) String() string {
 func (*UpdateWeightsRequest) ProtoMessage() {}
 
 func (x *UpdateWeightsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[27]
+	mi := &file_sglang_scheduler_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2264,7 +2125,7 @@ func (x *UpdateWeightsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateWeightsRequest.ProtoReflect.Descriptor instead.
 func (*UpdateWeightsRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{27}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UpdateWeightsRequest) GetSource() isUpdateWeightsRequest_Source {
@@ -2340,7 +2201,7 @@ type UpdateWeightsResponse struct {
 
 func (x *UpdateWeightsResponse) Reset() {
 	*x = UpdateWeightsResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[28]
+	mi := &file_sglang_scheduler_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2352,7 +2213,7 @@ func (x *UpdateWeightsResponse) String() string {
 func (*UpdateWeightsResponse) ProtoMessage() {}
 
 func (x *UpdateWeightsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[28]
+	mi := &file_sglang_scheduler_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2365,7 +2226,7 @@ func (x *UpdateWeightsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateWeightsResponse.ProtoReflect.Descriptor instead.
 func (*UpdateWeightsResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{28}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UpdateWeightsResponse) GetSuccess() bool {
@@ -2392,7 +2253,7 @@ type GetInternalStateRequest struct {
 
 func (x *GetInternalStateRequest) Reset() {
 	*x = GetInternalStateRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[29]
+	mi := &file_sglang_scheduler_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2404,7 +2265,7 @@ func (x *GetInternalStateRequest) String() string {
 func (*GetInternalStateRequest) ProtoMessage() {}
 
 func (x *GetInternalStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[29]
+	mi := &file_sglang_scheduler_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2417,7 +2278,7 @@ func (x *GetInternalStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetInternalStateRequest.ProtoReflect.Descriptor instead.
 func (*GetInternalStateRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{29}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetInternalStateRequest) GetStateKeys() []string {
@@ -2436,7 +2297,7 @@ type GetInternalStateResponse struct {
 
 func (x *GetInternalStateResponse) Reset() {
 	*x = GetInternalStateResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[30]
+	mi := &file_sglang_scheduler_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2448,7 +2309,7 @@ func (x *GetInternalStateResponse) String() string {
 func (*GetInternalStateResponse) ProtoMessage() {}
 
 func (x *GetInternalStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[30]
+	mi := &file_sglang_scheduler_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2461,7 +2322,7 @@ func (x *GetInternalStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetInternalStateResponse.ProtoReflect.Descriptor instead.
 func (*GetInternalStateResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{30}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *GetInternalStateResponse) GetState() *structpb.Struct {
@@ -2481,7 +2342,7 @@ type SetInternalStateRequest struct {
 
 func (x *SetInternalStateRequest) Reset() {
 	*x = SetInternalStateRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[31]
+	mi := &file_sglang_scheduler_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2493,7 +2354,7 @@ func (x *SetInternalStateRequest) String() string {
 func (*SetInternalStateRequest) ProtoMessage() {}
 
 func (x *SetInternalStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[31]
+	mi := &file_sglang_scheduler_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2506,7 +2367,7 @@ func (x *SetInternalStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetInternalStateRequest.ProtoReflect.Descriptor instead.
 func (*SetInternalStateRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{31}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SetInternalStateRequest) GetState() *structpb.Struct {
@@ -2526,7 +2387,7 @@ type SetInternalStateResponse struct {
 
 func (x *SetInternalStateResponse) Reset() {
 	*x = SetInternalStateResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[32]
+	mi := &file_sglang_scheduler_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2538,7 +2399,7 @@ func (x *SetInternalStateResponse) String() string {
 func (*SetInternalStateResponse) ProtoMessage() {}
 
 func (x *SetInternalStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[32]
+	mi := &file_sglang_scheduler_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2551,7 +2412,7 @@ func (x *SetInternalStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetInternalStateResponse.ProtoReflect.Descriptor instead.
 func (*SetInternalStateResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{32}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SetInternalStateResponse) GetSuccess() bool {
@@ -2577,7 +2438,7 @@ type GetModelInfoRequest struct {
 
 func (x *GetModelInfoRequest) Reset() {
 	*x = GetModelInfoRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[33]
+	mi := &file_sglang_scheduler_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2589,7 +2450,7 @@ func (x *GetModelInfoRequest) String() string {
 func (*GetModelInfoRequest) ProtoMessage() {}
 
 func (x *GetModelInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[33]
+	mi := &file_sglang_scheduler_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2602,7 +2463,7 @@ func (x *GetModelInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetModelInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetModelInfoRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{33}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{31}
 }
 
 type GetModelInfoResponse struct {
@@ -2626,14 +2487,17 @@ type GetModelInfoResponse struct {
 	// id2label maps class indices to label names, e.g., {"0": "negative", "1": "positive"}
 	Id2LabelJson string `protobuf:"bytes,16,opt,name=id2label_json,json=id2labelJson,proto3" json:"id2label_json,omitempty"`
 	// Number of classification labels (0 if not a classifier)
-	NumLabels     int32 `protobuf:"varint,17,opt,name=num_labels,json=numLabels,proto3" json:"num_labels,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NumLabels int32 `protobuf:"varint,17,opt,name=num_labels,json=numLabels,proto3" json:"num_labels,omitempty"`
+	// Resolved sampling defaults from --sampling-defaults + --preferred-sampling-params.
+	// JSON dict, e.g. '{"temperature": 0.6, "top_p": 0.9}'. Empty = no overrides.
+	DefaultSamplingParamsJson string `protobuf:"bytes,20,opt,name=default_sampling_params_json,json=defaultSamplingParamsJson,proto3" json:"default_sampling_params_json,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *GetModelInfoResponse) Reset() {
 	*x = GetModelInfoResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[34]
+	mi := &file_sglang_scheduler_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2645,7 +2509,7 @@ func (x *GetModelInfoResponse) String() string {
 func (*GetModelInfoResponse) ProtoMessage() {}
 
 func (x *GetModelInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[34]
+	mi := &file_sglang_scheduler_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2658,7 +2522,7 @@ func (x *GetModelInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetModelInfoResponse.ProtoReflect.Descriptor instead.
 func (*GetModelInfoResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{34}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetModelInfoResponse) GetModelPath() string {
@@ -2780,6 +2644,13 @@ func (x *GetModelInfoResponse) GetNumLabels() int32 {
 	return 0
 }
 
+func (x *GetModelInfoResponse) GetDefaultSamplingParamsJson() string {
+	if x != nil {
+		return x.DefaultSamplingParamsJson
+	}
+	return ""
+}
+
 // Get server information
 type GetServerInfoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2789,7 +2660,7 @@ type GetServerInfoRequest struct {
 
 func (x *GetServerInfoRequest) Reset() {
 	*x = GetServerInfoRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[35]
+	mi := &file_sglang_scheduler_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2801,7 +2672,7 @@ func (x *GetServerInfoRequest) String() string {
 func (*GetServerInfoRequest) ProtoMessage() {}
 
 func (x *GetServerInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[35]
+	mi := &file_sglang_scheduler_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2814,7 +2685,7 @@ func (x *GetServerInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServerInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetServerInfoRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{35}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{33}
 }
 
 type GetServerInfoResponse struct {
@@ -2831,15 +2702,16 @@ type GetServerInfoResponse struct {
 	// Version info
 	SglangVersion string `protobuf:"bytes,7,opt,name=sglang_version,json=sglangVersion,proto3" json:"sglang_version,omitempty"`
 	// Server metadata
-	ServerType    string                 `protobuf:"bytes,8,opt,name=server_type,json=serverType,proto3" json:"server_type,omitempty"` // "grpc"
-	StartTime     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ServerType        string                 `protobuf:"bytes,8,opt,name=server_type,json=serverType,proto3" json:"server_type,omitempty"` // "grpc"
+	StartTime         *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=start_time,json=startTime,proto3" json:"start_time,omitempty"`
+	MaxTotalNumTokens int32                  `protobuf:"varint,10,opt,name=max_total_num_tokens,json=maxTotalNumTokens,proto3" json:"max_total_num_tokens,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetServerInfoResponse) Reset() {
 	*x = GetServerInfoResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[36]
+	mi := &file_sglang_scheduler_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2851,7 +2723,7 @@ func (x *GetServerInfoResponse) String() string {
 func (*GetServerInfoResponse) ProtoMessage() {}
 
 func (x *GetServerInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[36]
+	mi := &file_sglang_scheduler_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2864,7 +2736,7 @@ func (x *GetServerInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServerInfoResponse.ProtoReflect.Descriptor instead.
 func (*GetServerInfoResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{36}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GetServerInfoResponse) GetServerArgs() *structpb.Struct {
@@ -2930,6 +2802,13 @@ func (x *GetServerInfoResponse) GetStartTime() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *GetServerInfoResponse) GetMaxTotalNumTokens() int32 {
+	if x != nil {
+		return x.MaxTotalNumTokens
+	}
+	return 0
+}
+
 type GetLoadsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Optional: filter to specific DP rank
@@ -2942,7 +2821,7 @@ type GetLoadsRequest struct {
 
 func (x *GetLoadsRequest) Reset() {
 	*x = GetLoadsRequest{}
-	mi := &file_sglang_scheduler_proto_msgTypes[37]
+	mi := &file_sglang_scheduler_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2954,7 +2833,7 @@ func (x *GetLoadsRequest) String() string {
 func (*GetLoadsRequest) ProtoMessage() {}
 
 func (x *GetLoadsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[37]
+	mi := &file_sglang_scheduler_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2967,7 +2846,7 @@ func (x *GetLoadsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLoadsRequest.ProtoReflect.Descriptor instead.
 func (*GetLoadsRequest) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{37}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GetLoadsRequest) GetDpRank() int32 {
@@ -3002,7 +2881,7 @@ type GetLoadsResponse struct {
 
 func (x *GetLoadsResponse) Reset() {
 	*x = GetLoadsResponse{}
-	mi := &file_sglang_scheduler_proto_msgTypes[38]
+	mi := &file_sglang_scheduler_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3014,7 +2893,7 @@ func (x *GetLoadsResponse) String() string {
 func (*GetLoadsResponse) ProtoMessage() {}
 
 func (x *GetLoadsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[38]
+	mi := &file_sglang_scheduler_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3027,7 +2906,7 @@ func (x *GetLoadsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLoadsResponse.ProtoReflect.Descriptor instead.
 func (*GetLoadsResponse) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{38}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *GetLoadsResponse) GetTimestamp() string {
@@ -3079,6 +2958,11 @@ type SchedulerLoad struct {
 	CacheHitRate       float64 `protobuf:"fixed64,9,opt,name=cache_hit_rate,json=cacheHitRate,proto3" json:"cache_hit_rate,omitempty"`
 	Utilization        float64 `protobuf:"fixed64,10,opt,name=utilization,proto3" json:"utilization,omitempty"`
 	MaxRunningRequests int32   `protobuf:"varint,11,opt,name=max_running_requests,json=maxRunningRequests,proto3" json:"max_running_requests,omitempty"`
+	// Queued token-work: waiting-queue tokens not yet served from cache
+	// (SGLang num_waiting_uncached_tokens). Field 17 is intentionally out of
+	// order — appended after the optional-section field numbers to preserve
+	// wire compatibility with existing readers.
+	NumWaitingUncachedTokens int32 `protobuf:"varint,17,opt,name=num_waiting_uncached_tokens,json=numWaitingUncachedTokens,proto3" json:"num_waiting_uncached_tokens,omitempty"`
 	// Optional sections
 	Memory         *MemoryMetrics         `protobuf:"bytes,12,opt,name=memory,proto3,oneof" json:"memory,omitempty"`
 	Speculative    *SpeculativeMetrics    `protobuf:"bytes,13,opt,name=speculative,proto3,oneof" json:"speculative,omitempty"`
@@ -3091,7 +2975,7 @@ type SchedulerLoad struct {
 
 func (x *SchedulerLoad) Reset() {
 	*x = SchedulerLoad{}
-	mi := &file_sglang_scheduler_proto_msgTypes[39]
+	mi := &file_sglang_scheduler_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3103,7 +2987,7 @@ func (x *SchedulerLoad) String() string {
 func (*SchedulerLoad) ProtoMessage() {}
 
 func (x *SchedulerLoad) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[39]
+	mi := &file_sglang_scheduler_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3116,7 +3000,7 @@ func (x *SchedulerLoad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedulerLoad.ProtoReflect.Descriptor instead.
 func (*SchedulerLoad) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{39}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *SchedulerLoad) GetDpRank() int32 {
@@ -3196,6 +3080,13 @@ func (x *SchedulerLoad) GetMaxRunningRequests() int32 {
 	return 0
 }
 
+func (x *SchedulerLoad) GetNumWaitingUncachedTokens() int32 {
+	if x != nil {
+		return x.NumWaitingUncachedTokens
+	}
+	return 0
+}
+
 func (x *SchedulerLoad) GetMemory() *MemoryMetrics {
 	if x != nil {
 		return x.Memory
@@ -3243,7 +3134,7 @@ type MemoryMetrics struct {
 
 func (x *MemoryMetrics) Reset() {
 	*x = MemoryMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[40]
+	mi := &file_sglang_scheduler_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3255,7 +3146,7 @@ func (x *MemoryMetrics) String() string {
 func (*MemoryMetrics) ProtoMessage() {}
 
 func (x *MemoryMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[40]
+	mi := &file_sglang_scheduler_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3268,7 +3159,7 @@ func (x *MemoryMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemoryMetrics.ProtoReflect.Descriptor instead.
 func (*MemoryMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{40}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *MemoryMetrics) GetWeightGb() float64 {
@@ -3309,7 +3200,7 @@ type SpeculativeMetrics struct {
 
 func (x *SpeculativeMetrics) Reset() {
 	*x = SpeculativeMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[41]
+	mi := &file_sglang_scheduler_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3321,7 +3212,7 @@ func (x *SpeculativeMetrics) String() string {
 func (*SpeculativeMetrics) ProtoMessage() {}
 
 func (x *SpeculativeMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[41]
+	mi := &file_sglang_scheduler_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3334,7 +3225,7 @@ func (x *SpeculativeMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpeculativeMetrics.ProtoReflect.Descriptor instead.
 func (*SpeculativeMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{41}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SpeculativeMetrics) GetAcceptLength() float64 {
@@ -3362,7 +3253,7 @@ type LoRAMetrics struct {
 
 func (x *LoRAMetrics) Reset() {
 	*x = LoRAMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[42]
+	mi := &file_sglang_scheduler_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3374,7 +3265,7 @@ func (x *LoRAMetrics) String() string {
 func (*LoRAMetrics) ProtoMessage() {}
 
 func (x *LoRAMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[42]
+	mi := &file_sglang_scheduler_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3387,7 +3278,7 @@ func (x *LoRAMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoRAMetrics.ProtoReflect.Descriptor instead.
 func (*LoRAMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{42}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LoRAMetrics) GetSlotsUsed() int32 {
@@ -3427,7 +3318,7 @@ type DisaggregationMetrics struct {
 
 func (x *DisaggregationMetrics) Reset() {
 	*x = DisaggregationMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[43]
+	mi := &file_sglang_scheduler_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3439,7 +3330,7 @@ func (x *DisaggregationMetrics) String() string {
 func (*DisaggregationMetrics) ProtoMessage() {}
 
 func (x *DisaggregationMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[43]
+	mi := &file_sglang_scheduler_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3452,7 +3343,7 @@ func (x *DisaggregationMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisaggregationMetrics.ProtoReflect.Descriptor instead.
 func (*DisaggregationMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{43}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *DisaggregationMetrics) GetMode() string {
@@ -3523,7 +3414,7 @@ type QueueMetrics struct {
 
 func (x *QueueMetrics) Reset() {
 	*x = QueueMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[44]
+	mi := &file_sglang_scheduler_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3535,7 +3426,7 @@ func (x *QueueMetrics) String() string {
 func (*QueueMetrics) ProtoMessage() {}
 
 func (x *QueueMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[44]
+	mi := &file_sglang_scheduler_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3548,7 +3439,7 @@ func (x *QueueMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueMetrics.ProtoReflect.Descriptor instead.
 func (*QueueMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{44}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *QueueMetrics) GetWaiting() int32 {
@@ -3593,7 +3484,7 @@ type AggregateMetrics struct {
 
 func (x *AggregateMetrics) Reset() {
 	*x = AggregateMetrics{}
-	mi := &file_sglang_scheduler_proto_msgTypes[45]
+	mi := &file_sglang_scheduler_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3605,7 +3496,7 @@ func (x *AggregateMetrics) String() string {
 func (*AggregateMetrics) ProtoMessage() {}
 
 func (x *AggregateMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_sglang_scheduler_proto_msgTypes[45]
+	mi := &file_sglang_scheduler_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3618,7 +3509,7 @@ func (x *AggregateMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AggregateMetrics.ProtoReflect.Descriptor instead.
 func (*AggregateMetrics) Descriptor() ([]byte, []int) {
-	return file_sglang_scheduler_proto_rawDescGZIP(), []int{45}
+	return file_sglang_scheduler_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *AggregateMetrics) GetTotalRunningReqs() int32 {
@@ -3667,7 +3558,7 @@ var File_sglang_scheduler_proto protoreflect.FileDescriptor
 
 const file_sglang_scheduler_proto_rawDesc = "" +
 	"\n" +
-	"\x16sglang_scheduler.proto\x12\x15sglang.grpc.scheduler\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\"\x82\b\n" +
+	"\x16sglang_scheduler.proto\x12\x15sglang.grpc.scheduler\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\fcommon.proto\"\x82\b\n" +
 	"\x0eSamplingParams\x12 \n" +
 	"\vtemperature\x18\x01 \x01(\x02R\vtemperature\x12\x13\n" +
 	"\x05top_p\x18\x02 \x01(\x02R\x04topP\x12\x13\n" +
@@ -3707,7 +3598,7 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\x13DisaggregatedParams\x12%\n" +
 	"\x0ebootstrap_host\x18\x01 \x01(\tR\rbootstrapHost\x12%\n" +
 	"\x0ebootstrap_port\x18\x02 \x01(\x05R\rbootstrapPort\x12%\n" +
-	"\x0ebootstrap_room\x18\x03 \x01(\x05R\rbootstrapRoom\"\xd8\x06\n" +
+	"\x0ebootstrap_room\x18\x03 \x01(\x05R\rbootstrapRoom\"\x85\a\n" +
 	"\x0fGenerateRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12C\n" +
@@ -3728,18 +3619,24 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\finput_embeds\x18\x0e \x03(\x02R\vinputEmbeds\x12\x17\n" +
 	"\alora_id\x18\x0f \x01(\tR\x06loraId\x12,\n" +
 	"\x12data_parallel_rank\x18\x10 \x01(\x05R\x10dataParallelRank\x12\x16\n" +
-	"\x06stream\x18\x11 \x01(\bR\x06stream\"R\n" +
+	"\x06stream\x18\x11 \x01(\bR\x06stream\x12+\n" +
+	"\x11require_reasoning\x18\x12 \x01(\bR\x10requireReasoning\"R\n" +
 	"\x0eTokenizedInput\x12#\n" +
 	"\roriginal_text\x18\x01 \x01(\tR\foriginalText\x12\x1b\n" +
-	"\tinput_ids\x18\x02 \x03(\rR\binputIds\"\xb4\x02\n" +
+	"\tinput_ids\x18\x02 \x03(\rR\binputIds\"L\n" +
+	"\n" +
+	"TensorData\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\x12\x14\n" +
+	"\x05shape\x18\x02 \x03(\rR\x05shape\x12\x14\n" +
+	"\x05dtype\x18\x03 \x01(\tR\x05dtype\"\x9e\x05\n" +
 	"\x10MultimodalInputs\x12\x1d\n" +
 	"\n" +
 	"image_urls\x18\x01 \x03(\tR\timageUrls\x12\x1d\n" +
 	"\n" +
 	"video_urls\x18\x02 \x03(\tR\tvideoUrls\x12\x1d\n" +
 	"\n" +
-	"audio_urls\x18\x03 \x03(\tR\taudioUrls\x12F\n" +
-	"\x12processed_features\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x11processedFeatures\x12\x1d\n" +
+	"audio_urls\x18\x03 \x03(\tR\taudioUrls\x12D\n" +
+	"\fpixel_values\x18\x04 \x01(\v2!.sglang.grpc.scheduler.TensorDataR\vpixelValues\x12\x1d\n" +
 	"\n" +
 	"image_data\x18\x05 \x03(\fR\timageData\x12\x1d\n" +
 	"\n" +
@@ -3748,31 +3645,43 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"audio_data\x18\a \x03(\fR\taudioData\x12\x1e\n" +
 	"\n" +
 	"modalities\x18\b \x03(\tR\n" +
-	"modalities\"\x86\x02\n" +
+	"modalities\x12w\n" +
+	"\x16model_specific_tensors\x18\t \x03(\v2A.sglang.grpc.scheduler.MultimodalInputs.ModelSpecificTensorsEntryR\x14modelSpecificTensors\x12#\n" +
+	"\vim_token_id\x18\n" +
+	" \x01(\rH\x00R\timTokenId\x88\x01\x01\x12P\n" +
+	"\x0fmm_placeholders\x18\v \x03(\v2'.sglang.grpc.scheduler.PlaceholderRangeR\x0emmPlaceholders\x1aj\n" +
+	"\x19ModelSpecificTensorsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x127\n" +
+	"\x05value\x18\x02 \x01(\v2!.sglang.grpc.scheduler.TensorDataR\x05value:\x028\x01B\x0e\n" +
+	"\f_im_token_id\"B\n" +
+	"\x10PlaceholderRange\x12\x16\n" +
+	"\x06offset\x18\x01 \x01(\rR\x06offset\x12\x16\n" +
+	"\x06length\x18\x02 \x01(\rR\x06length\"\xce\x01\n" +
 	"\x10GenerateResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12B\n" +
 	"\x05chunk\x18\x02 \x01(\v2*.sglang.grpc.scheduler.GenerateStreamChunkH\x00R\x05chunk\x12E\n" +
-	"\bcomplete\x18\x03 \x01(\v2'.sglang.grpc.scheduler.GenerateCompleteH\x00R\bcomplete\x12<\n" +
-	"\x05error\x18\x04 \x01(\v2$.sglang.grpc.scheduler.GenerateErrorH\x00R\x05errorB\n" +
+	"\bcomplete\x18\x03 \x01(\v2'.sglang.grpc.scheduler.GenerateCompleteH\x00R\bcompleteB\n" +
 	"\n" +
-	"\bresponse\"\x81\x03\n" +
+	"\bresponseJ\x04\b\x04\x10\x05\"\xac\x03\n" +
 	"\x13GenerateStreamChunk\x12\x1b\n" +
 	"\ttoken_ids\x18\x01 \x03(\rR\btokenIds\x12#\n" +
 	"\rprompt_tokens\x18\x02 \x01(\rR\fpromptTokens\x12+\n" +
 	"\x11completion_tokens\x18\x03 \x01(\rR\x10completionTokens\x12#\n" +
-	"\rcached_tokens\x18\x04 \x01(\rR\fcachedTokens\x12N\n" +
+	"\rcached_tokens\x18\x04 \x01(\rR\fcachedTokens\x12)\n" +
+	"\x10reasoning_tokens\x18\t \x01(\rR\x0freasoningTokens\x12N\n" +
 	"\x0foutput_logprobs\x18\x05 \x01(\v2%.sglang.grpc.scheduler.OutputLogProbsR\x0eoutputLogprobs\x12#\n" +
 	"\rhidden_states\x18\x06 \x03(\x02R\fhiddenStates\x12K\n" +
 	"\x0einput_logprobs\x18\a \x01(\v2$.sglang.grpc.scheduler.InputLogProbsR\rinputLogprobs\x12\x14\n" +
-	"\x05index\x18\b \x01(\rR\x05index\"\xb9\x04\n" +
+	"\x05index\x18\b \x01(\rR\x05index\"\xe4\x04\n" +
 	"\x10GenerateComplete\x12\x1d\n" +
 	"\n" +
 	"output_ids\x18\x01 \x03(\rR\toutputIds\x12#\n" +
 	"\rfinish_reason\x18\x02 \x01(\tR\ffinishReason\x12#\n" +
 	"\rprompt_tokens\x18\x03 \x01(\rR\fpromptTokens\x12+\n" +
 	"\x11completion_tokens\x18\x04 \x01(\rR\x10completionTokens\x12#\n" +
-	"\rcached_tokens\x18\x05 \x01(\rR\fcachedTokens\x12N\n" +
+	"\rcached_tokens\x18\x05 \x01(\rR\fcachedTokens\x12)\n" +
+	"\x10reasoning_tokens\x18\f \x01(\rR\x0freasoningTokens\x12N\n" +
 	"\x0foutput_logprobs\x18\x06 \x01(\v2%.sglang.grpc.scheduler.OutputLogProbsR\x0eoutputLogprobs\x12O\n" +
 	"\x11all_hidden_states\x18\a \x03(\v2#.sglang.grpc.scheduler.HiddenStatesR\x0fallHiddenStates\x12*\n" +
 	"\x10matched_token_id\x18\b \x01(\rH\x00R\x0ematchedTokenId\x12*\n" +
@@ -3780,63 +3689,40 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\x0einput_logprobs\x18\n" +
 	" \x01(\v2$.sglang.grpc.scheduler.InputLogProbsR\rinputLogprobs\x12\x14\n" +
 	"\x05index\x18\v \x01(\rR\x05indexB\x0e\n" +
-	"\fmatched_stop\"m\n" +
-	"\rGenerateError\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\x12(\n" +
-	"\x10http_status_code\x18\x02 \x01(\tR\x0ehttpStatusCode\x12\x18\n" +
-	"\adetails\x18\x03 \x01(\tR\adetails\"\x9b\x01\n" +
+	"\fmatched_stop\"\x9b\x01\n" +
 	"\x0eOutputLogProbs\x12%\n" +
 	"\x0etoken_logprobs\x18\x01 \x03(\x02R\rtokenLogprobs\x12\x1b\n" +
-	"\ttoken_ids\x18\x02 \x03(\x05R\btokenIds\x12E\n" +
+	"\ttoken_ids\x18\x02 \x03(\rR\btokenIds\x12E\n" +
 	"\ftop_logprobs\x18\x03 \x03(\v2\".sglang.grpc.scheduler.TopLogProbsR\vtopLogprobs\"\xc4\x01\n" +
 	"\rInputLogProbs\x12O\n" +
 	"\x0etoken_logprobs\x18\x01 \x03(\v2(.sglang.grpc.scheduler.InputTokenLogProbR\rtokenLogprobs\x12\x1b\n" +
-	"\ttoken_ids\x18\x02 \x03(\x05R\btokenIds\x12E\n" +
+	"\ttoken_ids\x18\x02 \x03(\rR\btokenIds\x12E\n" +
 	"\ftop_logprobs\x18\x03 \x03(\v2\".sglang.grpc.scheduler.TopLogProbsR\vtopLogprobs\"8\n" +
 	"\x11InputTokenLogProb\x12\x19\n" +
 	"\x05value\x18\x01 \x01(\x02H\x00R\x05value\x88\x01\x01B\b\n" +
 	"\x06_value\"B\n" +
 	"\vTopLogProbs\x12\x16\n" +
 	"\x06values\x18\x01 \x03(\x02R\x06values\x12\x1b\n" +
-	"\ttoken_ids\x18\x02 \x03(\x05R\btokenIds\"X\n" +
+	"\ttoken_ids\x18\x02 \x03(\rR\btokenIds\"X\n" +
 	"\fHiddenStates\x12\x16\n" +
 	"\x06values\x18\x01 \x03(\x02R\x06values\x12\x14\n" +
 	"\x05layer\x18\x02 \x01(\x05R\x05layer\x12\x1a\n" +
-	"\bposition\x18\x03 \x01(\x05R\bposition\"\xbd\x03\n" +
+	"\bposition\x18\x03 \x01(\x05R\bposition\"\xa2\x03\n" +
 	"\fEmbedRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12C\n" +
 	"\ttokenized\x18\x02 \x01(\v2%.sglang.grpc.scheduler.TokenizedInputR\ttokenized\x12D\n" +
 	"\tmm_inputs\x18\x04 \x01(\v2'.sglang.grpc.scheduler.MultimodalInputsR\bmmInputs\x12N\n" +
-	"\x0fsampling_params\x18\x05 \x01(\v2%.sglang.grpc.scheduler.SamplingParamsR\x0esamplingParams\x12\x1f\n" +
-	"\vlog_metrics\x18\x06 \x01(\bR\n" +
-	"logMetrics\x12$\n" +
+	"\x0fsampling_params\x18\x05 \x01(\v2%.sglang.grpc.scheduler.SamplingParamsR\x0esamplingParams\x12$\n" +
 	"\x0etoken_type_ids\x18\a \x03(\x05R\ftokenTypeIds\x12,\n" +
 	"\x12data_parallel_rank\x18\b \x01(\x05R\x10dataParallelRank\x12(\n" +
 	"\x10is_cross_encoder\x18\t \x01(\bR\x0eisCrossEncoder\x12\x14\n" +
 	"\x05texts\x18\n" +
-	" \x03(\tR\x05texts\"\xb9\x01\n" +
-	"\rEmbedResponse\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12B\n" +
-	"\bcomplete\x18\x02 \x01(\v2$.sglang.grpc.scheduler.EmbedCompleteH\x00R\bcomplete\x129\n" +
-	"\x05error\x18\x03 \x01(\v2!.sglang.grpc.scheduler.EmbedErrorH\x00R\x05errorB\n" +
-	"\n" +
-	"\bresponse\"\xe9\x01\n" +
-	"\rEmbedComplete\x12\x1c\n" +
-	"\tembedding\x18\x01 \x03(\x02R\tembedding\x12#\n" +
-	"\rprompt_tokens\x18\x02 \x01(\rR\fpromptTokens\x12#\n" +
-	"\rcached_tokens\x18\x03 \x01(\rR\fcachedTokens\x12#\n" +
-	"\rembedding_dim\x18\x04 \x01(\rR\fembeddingDim\x12K\n" +
-	"\x10batch_embeddings\x18\x05 \x03(\v2 .sglang.grpc.scheduler.EmbeddingR\x0fbatchEmbeddings\"9\n" +
-	"\tEmbedding\x12\x16\n" +
-	"\x06values\x18\x01 \x03(\x02R\x06values\x12\x14\n" +
-	"\x05index\x18\x02 \x01(\x05R\x05index\"T\n" +
-	"\n" +
-	"EmbedError\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\tR\x04code\x12\x18\n" +
-	"\adetails\x18\x03 \x01(\tR\adetails\"\x14\n" +
+	" \x03(\tR\x05textsJ\x04\b\x06\x10\a\"\x89\x01\n" +
+	"\rEmbedResponse\x12#\n" +
+	"\rembedding_dim\x18\x04 \x01(\rR\fembeddingDim\x12\x1c\n" +
+	"\tembedding\x18\x05 \x03(\x02R\tembedding\x12#\n" +
+	"\rprompt_tokens\x18\x06 \x01(\rR\fpromptTokensJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04\"\x14\n" +
 	"\x12HealthCheckRequest\"I\n" +
 	"\x13HealthCheckResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12\x18\n" +
@@ -3886,7 +3772,7 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\x18SetInternalStateResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"\x15\n" +
-	"\x13GetModelInfoRequest\"\xa2\x05\n" +
+	"\x13GetModelInfoRequest\"\xe3\x05\n" +
 	"\x14GetModelInfoResponse\x12\x1d\n" +
 	"\n" +
 	"model_path\x18\x01 \x01(\tR\tmodelPath\x12%\n" +
@@ -3911,8 +3797,9 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\rarchitectures\x18\x0f \x03(\tR\rarchitectures\x12#\n" +
 	"\rid2label_json\x18\x10 \x01(\tR\fid2labelJson\x12\x1d\n" +
 	"\n" +
-	"num_labels\x18\x11 \x01(\x05R\tnumLabels\"\x16\n" +
-	"\x14GetServerInfoRequest\"\xb7\x03\n" +
+	"num_labels\x18\x11 \x01(\x05R\tnumLabels\x12?\n" +
+	"\x1cdefault_sampling_params_json\x18\x14 \x01(\tR\x19defaultSamplingParamsJson\"\x16\n" +
+	"\x14GetServerInfoRequest\"\xe8\x03\n" +
 	"\x15GetServerInfoResponse\x128\n" +
 	"\vserver_args\x18\x01 \x01(\v2\x17.google.protobuf.StructR\n" +
 	"serverArgs\x12>\n" +
@@ -3925,7 +3812,9 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\vserver_type\x18\b \x01(\tR\n" +
 	"serverType\x129\n" +
 	"\n" +
-	"start_time\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tstartTime\"U\n" +
+	"start_time\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tstartTime\x12/\n" +
+	"\x14max_total_num_tokens\x18\n" +
+	" \x01(\x05R\x11maxTotalNumTokens\"U\n" +
 	"\x0fGetLoadsRequest\x12\x1c\n" +
 	"\adp_rank\x18\x01 \x01(\x05H\x00R\x06dpRank\x88\x01\x01\x12\x18\n" +
 	"\ainclude\x18\x02 \x03(\tR\aincludeB\n" +
@@ -3936,7 +3825,7 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\"\n" +
 	"\rdp_rank_count\x18\x03 \x01(\x05R\vdpRankCount\x12:\n" +
 	"\x05loads\x18\x04 \x03(\v2$.sglang.grpc.scheduler.SchedulerLoadR\x05loads\x12E\n" +
-	"\taggregate\x18\x05 \x01(\v2'.sglang.grpc.scheduler.AggregateMetricsR\taggregate\"\xee\x06\n" +
+	"\taggregate\x18\x05 \x01(\v2'.sglang.grpc.scheduler.AggregateMetricsR\taggregate\"\xad\a\n" +
 	"\rSchedulerLoad\x12\x17\n" +
 	"\adp_rank\x18\x01 \x01(\x05R\x06dpRank\x12(\n" +
 	"\x10num_running_reqs\x18\x02 \x01(\x05R\x0enumRunningReqs\x12(\n" +
@@ -3950,7 +3839,8 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\x0ecache_hit_rate\x18\t \x01(\x01R\fcacheHitRate\x12 \n" +
 	"\vutilization\x18\n" +
 	" \x01(\x01R\vutilization\x120\n" +
-	"\x14max_running_requests\x18\v \x01(\x05R\x12maxRunningRequests\x12A\n" +
+	"\x14max_running_requests\x18\v \x01(\x05R\x12maxRunningRequests\x12=\n" +
+	"\x1bnum_waiting_uncached_tokens\x18\x11 \x01(\x05R\x18numWaitingUncachedTokens\x12A\n" +
 	"\x06memory\x18\f \x01(\v2$.sglang.grpc.scheduler.MemoryMetricsH\x00R\x06memory\x88\x01\x01\x12P\n" +
 	"\vspeculative\x18\r \x01(\v2).sglang.grpc.scheduler.SpeculativeMetricsH\x01R\vspeculative\x88\x01\x01\x12;\n" +
 	"\x04lora\x18\x0e \x01(\v2\".sglang.grpc.scheduler.LoRAMetricsH\x02R\x04lora\x88\x01\x01\x12Y\n" +
@@ -3997,7 +3887,7 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"total_reqs\x18\x03 \x01(\x05R\ttotalReqs\x12&\n" +
 	"\x0favg_token_usage\x18\x04 \x01(\x01R\ravgTokenUsage\x12%\n" +
 	"\x0eavg_throughput\x18\x05 \x01(\x01R\ravgThroughput\x12'\n" +
-	"\x0favg_utilization\x18\x06 \x01(\x01R\x0eavgUtilization2\xb0\x05\n" +
+	"\x0favg_utilization\x18\x06 \x01(\x01R\x0eavgUtilization2\xf2\b\n" +
 	"\x0fSglangScheduler\x12]\n" +
 	"\bGenerate\x12&.sglang.grpc.scheduler.GenerateRequest\x1a'.sglang.grpc.scheduler.GenerateResponse0\x01\x12R\n" +
 	"\x05Embed\x12#.sglang.grpc.scheduler.EmbedRequest\x1a$.sglang.grpc.scheduler.EmbedResponse\x12d\n" +
@@ -4005,7 +3895,13 @@ const file_sglang_scheduler_proto_rawDesc = "" +
 	"\x05Abort\x12#.sglang.grpc.scheduler.AbortRequest\x1a$.sglang.grpc.scheduler.AbortResponse\x12g\n" +
 	"\fGetModelInfo\x12*.sglang.grpc.scheduler.GetModelInfoRequest\x1a+.sglang.grpc.scheduler.GetModelInfoResponse\x12j\n" +
 	"\rGetServerInfo\x12+.sglang.grpc.scheduler.GetServerInfoRequest\x1a,.sglang.grpc.scheduler.GetServerInfoResponse\x12[\n" +
-	"\bGetLoads\x12&.sglang.grpc.scheduler.GetLoadsRequest\x1a'.sglang.grpc.scheduler.GetLoadsResponseb\x06proto3"
+	"\bGetLoads\x12&.sglang.grpc.scheduler.GetLoadsRequest\x1a'.sglang.grpc.scheduler.GetLoadsResponse\x12U\n" +
+	"\n" +
+	"FlushCache\x12\".smg.grpc.common.FlushCacheRequest\x1a#.smg.grpc.common.FlushCacheResponse\x12V\n" +
+	"\fStartProfile\x12$.smg.grpc.common.StartProfileRequest\x1a .smg.grpc.common.ProfileResponse\x12T\n" +
+	"\vStopProfile\x12#.smg.grpc.common.StopProfileRequest\x1a .smg.grpc.common.ProfileResponse\x12Z\n" +
+	"\fGetTokenizer\x12$.smg.grpc.common.GetTokenizerRequest\x1a\".smg.grpc.common.GetTokenizerChunk0\x01\x12_\n" +
+	"\x11SubscribeKvEvents\x12).smg.grpc.common.SubscribeKvEventsRequest\x1a\x1d.smg.grpc.common.KvEventBatch0\x01b\x06proto3"
 
 var (
 	file_sglang_scheduler_proto_rawDescOnce sync.Once
@@ -4019,115 +3915,132 @@ func file_sglang_scheduler_proto_rawDescGZIP() []byte {
 	return file_sglang_scheduler_proto_rawDescData
 }
 
-var file_sglang_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_sglang_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_sglang_scheduler_proto_goTypes = []any{
 	(*SamplingParams)(nil),           // 0: sglang.grpc.scheduler.SamplingParams
 	(*DisaggregatedParams)(nil),      // 1: sglang.grpc.scheduler.DisaggregatedParams
 	(*GenerateRequest)(nil),          // 2: sglang.grpc.scheduler.GenerateRequest
 	(*TokenizedInput)(nil),           // 3: sglang.grpc.scheduler.TokenizedInput
-	(*MultimodalInputs)(nil),         // 4: sglang.grpc.scheduler.MultimodalInputs
-	(*GenerateResponse)(nil),         // 5: sglang.grpc.scheduler.GenerateResponse
-	(*GenerateStreamChunk)(nil),      // 6: sglang.grpc.scheduler.GenerateStreamChunk
-	(*GenerateComplete)(nil),         // 7: sglang.grpc.scheduler.GenerateComplete
-	(*GenerateError)(nil),            // 8: sglang.grpc.scheduler.GenerateError
-	(*OutputLogProbs)(nil),           // 9: sglang.grpc.scheduler.OutputLogProbs
-	(*InputLogProbs)(nil),            // 10: sglang.grpc.scheduler.InputLogProbs
-	(*InputTokenLogProb)(nil),        // 11: sglang.grpc.scheduler.InputTokenLogProb
-	(*TopLogProbs)(nil),              // 12: sglang.grpc.scheduler.TopLogProbs
-	(*HiddenStates)(nil),             // 13: sglang.grpc.scheduler.HiddenStates
-	(*EmbedRequest)(nil),             // 14: sglang.grpc.scheduler.EmbedRequest
-	(*EmbedResponse)(nil),            // 15: sglang.grpc.scheduler.EmbedResponse
-	(*EmbedComplete)(nil),            // 16: sglang.grpc.scheduler.EmbedComplete
-	(*Embedding)(nil),                // 17: sglang.grpc.scheduler.Embedding
-	(*EmbedError)(nil),               // 18: sglang.grpc.scheduler.EmbedError
-	(*HealthCheckRequest)(nil),       // 19: sglang.grpc.scheduler.HealthCheckRequest
-	(*HealthCheckResponse)(nil),      // 20: sglang.grpc.scheduler.HealthCheckResponse
-	(*AbortRequest)(nil),             // 21: sglang.grpc.scheduler.AbortRequest
-	(*AbortResponse)(nil),            // 22: sglang.grpc.scheduler.AbortResponse
-	(*LoadLoRARequest)(nil),          // 23: sglang.grpc.scheduler.LoadLoRARequest
-	(*LoadLoRAResponse)(nil),         // 24: sglang.grpc.scheduler.LoadLoRAResponse
-	(*UnloadLoRARequest)(nil),        // 25: sglang.grpc.scheduler.UnloadLoRARequest
-	(*UnloadLoRAResponse)(nil),       // 26: sglang.grpc.scheduler.UnloadLoRAResponse
-	(*UpdateWeightsRequest)(nil),     // 27: sglang.grpc.scheduler.UpdateWeightsRequest
-	(*UpdateWeightsResponse)(nil),    // 28: sglang.grpc.scheduler.UpdateWeightsResponse
-	(*GetInternalStateRequest)(nil),  // 29: sglang.grpc.scheduler.GetInternalStateRequest
-	(*GetInternalStateResponse)(nil), // 30: sglang.grpc.scheduler.GetInternalStateResponse
-	(*SetInternalStateRequest)(nil),  // 31: sglang.grpc.scheduler.SetInternalStateRequest
-	(*SetInternalStateResponse)(nil), // 32: sglang.grpc.scheduler.SetInternalStateResponse
-	(*GetModelInfoRequest)(nil),      // 33: sglang.grpc.scheduler.GetModelInfoRequest
-	(*GetModelInfoResponse)(nil),     // 34: sglang.grpc.scheduler.GetModelInfoResponse
-	(*GetServerInfoRequest)(nil),     // 35: sglang.grpc.scheduler.GetServerInfoRequest
-	(*GetServerInfoResponse)(nil),    // 36: sglang.grpc.scheduler.GetServerInfoResponse
-	(*GetLoadsRequest)(nil),          // 37: sglang.grpc.scheduler.GetLoadsRequest
-	(*GetLoadsResponse)(nil),         // 38: sglang.grpc.scheduler.GetLoadsResponse
-	(*SchedulerLoad)(nil),            // 39: sglang.grpc.scheduler.SchedulerLoad
-	(*MemoryMetrics)(nil),            // 40: sglang.grpc.scheduler.MemoryMetrics
-	(*SpeculativeMetrics)(nil),       // 41: sglang.grpc.scheduler.SpeculativeMetrics
-	(*LoRAMetrics)(nil),              // 42: sglang.grpc.scheduler.LoRAMetrics
-	(*DisaggregationMetrics)(nil),    // 43: sglang.grpc.scheduler.DisaggregationMetrics
-	(*QueueMetrics)(nil),             // 44: sglang.grpc.scheduler.QueueMetrics
-	(*AggregateMetrics)(nil),         // 45: sglang.grpc.scheduler.AggregateMetrics
-	nil,                              // 46: sglang.grpc.scheduler.SamplingParams.LogitBiasEntry
-	(*structpb.Struct)(nil),          // 47: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),    // 48: google.protobuf.Timestamp
+	(*TensorData)(nil),               // 4: sglang.grpc.scheduler.TensorData
+	(*MultimodalInputs)(nil),         // 5: sglang.grpc.scheduler.MultimodalInputs
+	(*PlaceholderRange)(nil),         // 6: sglang.grpc.scheduler.PlaceholderRange
+	(*GenerateResponse)(nil),         // 7: sglang.grpc.scheduler.GenerateResponse
+	(*GenerateStreamChunk)(nil),      // 8: sglang.grpc.scheduler.GenerateStreamChunk
+	(*GenerateComplete)(nil),         // 9: sglang.grpc.scheduler.GenerateComplete
+	(*OutputLogProbs)(nil),           // 10: sglang.grpc.scheduler.OutputLogProbs
+	(*InputLogProbs)(nil),            // 11: sglang.grpc.scheduler.InputLogProbs
+	(*InputTokenLogProb)(nil),        // 12: sglang.grpc.scheduler.InputTokenLogProb
+	(*TopLogProbs)(nil),              // 13: sglang.grpc.scheduler.TopLogProbs
+	(*HiddenStates)(nil),             // 14: sglang.grpc.scheduler.HiddenStates
+	(*EmbedRequest)(nil),             // 15: sglang.grpc.scheduler.EmbedRequest
+	(*EmbedResponse)(nil),            // 16: sglang.grpc.scheduler.EmbedResponse
+	(*HealthCheckRequest)(nil),       // 17: sglang.grpc.scheduler.HealthCheckRequest
+	(*HealthCheckResponse)(nil),      // 18: sglang.grpc.scheduler.HealthCheckResponse
+	(*AbortRequest)(nil),             // 19: sglang.grpc.scheduler.AbortRequest
+	(*AbortResponse)(nil),            // 20: sglang.grpc.scheduler.AbortResponse
+	(*LoadLoRARequest)(nil),          // 21: sglang.grpc.scheduler.LoadLoRARequest
+	(*LoadLoRAResponse)(nil),         // 22: sglang.grpc.scheduler.LoadLoRAResponse
+	(*UnloadLoRARequest)(nil),        // 23: sglang.grpc.scheduler.UnloadLoRARequest
+	(*UnloadLoRAResponse)(nil),       // 24: sglang.grpc.scheduler.UnloadLoRAResponse
+	(*UpdateWeightsRequest)(nil),     // 25: sglang.grpc.scheduler.UpdateWeightsRequest
+	(*UpdateWeightsResponse)(nil),    // 26: sglang.grpc.scheduler.UpdateWeightsResponse
+	(*GetInternalStateRequest)(nil),  // 27: sglang.grpc.scheduler.GetInternalStateRequest
+	(*GetInternalStateResponse)(nil), // 28: sglang.grpc.scheduler.GetInternalStateResponse
+	(*SetInternalStateRequest)(nil),  // 29: sglang.grpc.scheduler.SetInternalStateRequest
+	(*SetInternalStateResponse)(nil), // 30: sglang.grpc.scheduler.SetInternalStateResponse
+	(*GetModelInfoRequest)(nil),      // 31: sglang.grpc.scheduler.GetModelInfoRequest
+	(*GetModelInfoResponse)(nil),     // 32: sglang.grpc.scheduler.GetModelInfoResponse
+	(*GetServerInfoRequest)(nil),     // 33: sglang.grpc.scheduler.GetServerInfoRequest
+	(*GetServerInfoResponse)(nil),    // 34: sglang.grpc.scheduler.GetServerInfoResponse
+	(*GetLoadsRequest)(nil),          // 35: sglang.grpc.scheduler.GetLoadsRequest
+	(*GetLoadsResponse)(nil),         // 36: sglang.grpc.scheduler.GetLoadsResponse
+	(*SchedulerLoad)(nil),            // 37: sglang.grpc.scheduler.SchedulerLoad
+	(*MemoryMetrics)(nil),            // 38: sglang.grpc.scheduler.MemoryMetrics
+	(*SpeculativeMetrics)(nil),       // 39: sglang.grpc.scheduler.SpeculativeMetrics
+	(*LoRAMetrics)(nil),              // 40: sglang.grpc.scheduler.LoRAMetrics
+	(*DisaggregationMetrics)(nil),    // 41: sglang.grpc.scheduler.DisaggregationMetrics
+	(*QueueMetrics)(nil),             // 42: sglang.grpc.scheduler.QueueMetrics
+	(*AggregateMetrics)(nil),         // 43: sglang.grpc.scheduler.AggregateMetrics
+	nil,                              // 44: sglang.grpc.scheduler.SamplingParams.LogitBiasEntry
+	nil,                              // 45: sglang.grpc.scheduler.MultimodalInputs.ModelSpecificTensorsEntry
+	(*structpb.Struct)(nil),          // 46: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),    // 47: google.protobuf.Timestamp
+	(*FlushCacheRequest)(nil),        // 48: smg.grpc.common.FlushCacheRequest
+	(*StartProfileRequest)(nil),      // 49: smg.grpc.common.StartProfileRequest
+	(*StopProfileRequest)(nil),       // 50: smg.grpc.common.StopProfileRequest
+	(*GetTokenizerRequest)(nil),      // 51: smg.grpc.common.GetTokenizerRequest
+	(*SubscribeKvEventsRequest)(nil), // 52: smg.grpc.common.SubscribeKvEventsRequest
+	(*FlushCacheResponse)(nil),       // 53: smg.grpc.common.FlushCacheResponse
+	(*ProfileResponse)(nil),          // 54: smg.grpc.common.ProfileResponse
+	(*GetTokenizerChunk)(nil),        // 55: smg.grpc.common.GetTokenizerChunk
+	(*KvEventBatch)(nil),             // 56: smg.grpc.common.KvEventBatch
 }
 var file_sglang_scheduler_proto_depIdxs = []int32{
-	46, // 0: sglang.grpc.scheduler.SamplingParams.logit_bias:type_name -> sglang.grpc.scheduler.SamplingParams.LogitBiasEntry
-	47, // 1: sglang.grpc.scheduler.SamplingParams.custom_params:type_name -> google.protobuf.Struct
+	44, // 0: sglang.grpc.scheduler.SamplingParams.logit_bias:type_name -> sglang.grpc.scheduler.SamplingParams.LogitBiasEntry
+	46, // 1: sglang.grpc.scheduler.SamplingParams.custom_params:type_name -> google.protobuf.Struct
 	3,  // 2: sglang.grpc.scheduler.GenerateRequest.tokenized:type_name -> sglang.grpc.scheduler.TokenizedInput
-	4,  // 3: sglang.grpc.scheduler.GenerateRequest.mm_inputs:type_name -> sglang.grpc.scheduler.MultimodalInputs
+	5,  // 3: sglang.grpc.scheduler.GenerateRequest.mm_inputs:type_name -> sglang.grpc.scheduler.MultimodalInputs
 	0,  // 4: sglang.grpc.scheduler.GenerateRequest.sampling_params:type_name -> sglang.grpc.scheduler.SamplingParams
 	1,  // 5: sglang.grpc.scheduler.GenerateRequest.disaggregated_params:type_name -> sglang.grpc.scheduler.DisaggregatedParams
-	48, // 6: sglang.grpc.scheduler.GenerateRequest.timestamp:type_name -> google.protobuf.Timestamp
-	47, // 7: sglang.grpc.scheduler.MultimodalInputs.processed_features:type_name -> google.protobuf.Struct
-	6,  // 8: sglang.grpc.scheduler.GenerateResponse.chunk:type_name -> sglang.grpc.scheduler.GenerateStreamChunk
-	7,  // 9: sglang.grpc.scheduler.GenerateResponse.complete:type_name -> sglang.grpc.scheduler.GenerateComplete
-	8,  // 10: sglang.grpc.scheduler.GenerateResponse.error:type_name -> sglang.grpc.scheduler.GenerateError
-	9,  // 11: sglang.grpc.scheduler.GenerateStreamChunk.output_logprobs:type_name -> sglang.grpc.scheduler.OutputLogProbs
-	10, // 12: sglang.grpc.scheduler.GenerateStreamChunk.input_logprobs:type_name -> sglang.grpc.scheduler.InputLogProbs
-	9,  // 13: sglang.grpc.scheduler.GenerateComplete.output_logprobs:type_name -> sglang.grpc.scheduler.OutputLogProbs
-	13, // 14: sglang.grpc.scheduler.GenerateComplete.all_hidden_states:type_name -> sglang.grpc.scheduler.HiddenStates
-	10, // 15: sglang.grpc.scheduler.GenerateComplete.input_logprobs:type_name -> sglang.grpc.scheduler.InputLogProbs
-	12, // 16: sglang.grpc.scheduler.OutputLogProbs.top_logprobs:type_name -> sglang.grpc.scheduler.TopLogProbs
-	11, // 17: sglang.grpc.scheduler.InputLogProbs.token_logprobs:type_name -> sglang.grpc.scheduler.InputTokenLogProb
-	12, // 18: sglang.grpc.scheduler.InputLogProbs.top_logprobs:type_name -> sglang.grpc.scheduler.TopLogProbs
-	3,  // 19: sglang.grpc.scheduler.EmbedRequest.tokenized:type_name -> sglang.grpc.scheduler.TokenizedInput
-	4,  // 20: sglang.grpc.scheduler.EmbedRequest.mm_inputs:type_name -> sglang.grpc.scheduler.MultimodalInputs
-	0,  // 21: sglang.grpc.scheduler.EmbedRequest.sampling_params:type_name -> sglang.grpc.scheduler.SamplingParams
-	16, // 22: sglang.grpc.scheduler.EmbedResponse.complete:type_name -> sglang.grpc.scheduler.EmbedComplete
-	18, // 23: sglang.grpc.scheduler.EmbedResponse.error:type_name -> sglang.grpc.scheduler.EmbedError
-	17, // 24: sglang.grpc.scheduler.EmbedComplete.batch_embeddings:type_name -> sglang.grpc.scheduler.Embedding
-	47, // 25: sglang.grpc.scheduler.GetInternalStateResponse.state:type_name -> google.protobuf.Struct
-	47, // 26: sglang.grpc.scheduler.SetInternalStateRequest.state:type_name -> google.protobuf.Struct
-	47, // 27: sglang.grpc.scheduler.GetServerInfoResponse.server_args:type_name -> google.protobuf.Struct
-	47, // 28: sglang.grpc.scheduler.GetServerInfoResponse.scheduler_info:type_name -> google.protobuf.Struct
-	48, // 29: sglang.grpc.scheduler.GetServerInfoResponse.start_time:type_name -> google.protobuf.Timestamp
-	39, // 30: sglang.grpc.scheduler.GetLoadsResponse.loads:type_name -> sglang.grpc.scheduler.SchedulerLoad
-	45, // 31: sglang.grpc.scheduler.GetLoadsResponse.aggregate:type_name -> sglang.grpc.scheduler.AggregateMetrics
-	40, // 32: sglang.grpc.scheduler.SchedulerLoad.memory:type_name -> sglang.grpc.scheduler.MemoryMetrics
-	41, // 33: sglang.grpc.scheduler.SchedulerLoad.speculative:type_name -> sglang.grpc.scheduler.SpeculativeMetrics
-	42, // 34: sglang.grpc.scheduler.SchedulerLoad.lora:type_name -> sglang.grpc.scheduler.LoRAMetrics
-	43, // 35: sglang.grpc.scheduler.SchedulerLoad.disaggregation:type_name -> sglang.grpc.scheduler.DisaggregationMetrics
-	44, // 36: sglang.grpc.scheduler.SchedulerLoad.queues:type_name -> sglang.grpc.scheduler.QueueMetrics
-	2,  // 37: sglang.grpc.scheduler.SglangScheduler.Generate:input_type -> sglang.grpc.scheduler.GenerateRequest
-	14, // 38: sglang.grpc.scheduler.SglangScheduler.Embed:input_type -> sglang.grpc.scheduler.EmbedRequest
-	19, // 39: sglang.grpc.scheduler.SglangScheduler.HealthCheck:input_type -> sglang.grpc.scheduler.HealthCheckRequest
-	21, // 40: sglang.grpc.scheduler.SglangScheduler.Abort:input_type -> sglang.grpc.scheduler.AbortRequest
-	33, // 41: sglang.grpc.scheduler.SglangScheduler.GetModelInfo:input_type -> sglang.grpc.scheduler.GetModelInfoRequest
-	35, // 42: sglang.grpc.scheduler.SglangScheduler.GetServerInfo:input_type -> sglang.grpc.scheduler.GetServerInfoRequest
-	37, // 43: sglang.grpc.scheduler.SglangScheduler.GetLoads:input_type -> sglang.grpc.scheduler.GetLoadsRequest
-	5,  // 44: sglang.grpc.scheduler.SglangScheduler.Generate:output_type -> sglang.grpc.scheduler.GenerateResponse
-	15, // 45: sglang.grpc.scheduler.SglangScheduler.Embed:output_type -> sglang.grpc.scheduler.EmbedResponse
-	20, // 46: sglang.grpc.scheduler.SglangScheduler.HealthCheck:output_type -> sglang.grpc.scheduler.HealthCheckResponse
-	22, // 47: sglang.grpc.scheduler.SglangScheduler.Abort:output_type -> sglang.grpc.scheduler.AbortResponse
-	34, // 48: sglang.grpc.scheduler.SglangScheduler.GetModelInfo:output_type -> sglang.grpc.scheduler.GetModelInfoResponse
-	36, // 49: sglang.grpc.scheduler.SglangScheduler.GetServerInfo:output_type -> sglang.grpc.scheduler.GetServerInfoResponse
-	38, // 50: sglang.grpc.scheduler.SglangScheduler.GetLoads:output_type -> sglang.grpc.scheduler.GetLoadsResponse
-	44, // [44:51] is the sub-list for method output_type
-	37, // [37:44] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	47, // 6: sglang.grpc.scheduler.GenerateRequest.timestamp:type_name -> google.protobuf.Timestamp
+	4,  // 7: sglang.grpc.scheduler.MultimodalInputs.pixel_values:type_name -> sglang.grpc.scheduler.TensorData
+	45, // 8: sglang.grpc.scheduler.MultimodalInputs.model_specific_tensors:type_name -> sglang.grpc.scheduler.MultimodalInputs.ModelSpecificTensorsEntry
+	6,  // 9: sglang.grpc.scheduler.MultimodalInputs.mm_placeholders:type_name -> sglang.grpc.scheduler.PlaceholderRange
+	8,  // 10: sglang.grpc.scheduler.GenerateResponse.chunk:type_name -> sglang.grpc.scheduler.GenerateStreamChunk
+	9,  // 11: sglang.grpc.scheduler.GenerateResponse.complete:type_name -> sglang.grpc.scheduler.GenerateComplete
+	10, // 12: sglang.grpc.scheduler.GenerateStreamChunk.output_logprobs:type_name -> sglang.grpc.scheduler.OutputLogProbs
+	11, // 13: sglang.grpc.scheduler.GenerateStreamChunk.input_logprobs:type_name -> sglang.grpc.scheduler.InputLogProbs
+	10, // 14: sglang.grpc.scheduler.GenerateComplete.output_logprobs:type_name -> sglang.grpc.scheduler.OutputLogProbs
+	14, // 15: sglang.grpc.scheduler.GenerateComplete.all_hidden_states:type_name -> sglang.grpc.scheduler.HiddenStates
+	11, // 16: sglang.grpc.scheduler.GenerateComplete.input_logprobs:type_name -> sglang.grpc.scheduler.InputLogProbs
+	13, // 17: sglang.grpc.scheduler.OutputLogProbs.top_logprobs:type_name -> sglang.grpc.scheduler.TopLogProbs
+	12, // 18: sglang.grpc.scheduler.InputLogProbs.token_logprobs:type_name -> sglang.grpc.scheduler.InputTokenLogProb
+	13, // 19: sglang.grpc.scheduler.InputLogProbs.top_logprobs:type_name -> sglang.grpc.scheduler.TopLogProbs
+	3,  // 20: sglang.grpc.scheduler.EmbedRequest.tokenized:type_name -> sglang.grpc.scheduler.TokenizedInput
+	5,  // 21: sglang.grpc.scheduler.EmbedRequest.mm_inputs:type_name -> sglang.grpc.scheduler.MultimodalInputs
+	0,  // 22: sglang.grpc.scheduler.EmbedRequest.sampling_params:type_name -> sglang.grpc.scheduler.SamplingParams
+	46, // 23: sglang.grpc.scheduler.GetInternalStateResponse.state:type_name -> google.protobuf.Struct
+	46, // 24: sglang.grpc.scheduler.SetInternalStateRequest.state:type_name -> google.protobuf.Struct
+	46, // 25: sglang.grpc.scheduler.GetServerInfoResponse.server_args:type_name -> google.protobuf.Struct
+	46, // 26: sglang.grpc.scheduler.GetServerInfoResponse.scheduler_info:type_name -> google.protobuf.Struct
+	47, // 27: sglang.grpc.scheduler.GetServerInfoResponse.start_time:type_name -> google.protobuf.Timestamp
+	37, // 28: sglang.grpc.scheduler.GetLoadsResponse.loads:type_name -> sglang.grpc.scheduler.SchedulerLoad
+	43, // 29: sglang.grpc.scheduler.GetLoadsResponse.aggregate:type_name -> sglang.grpc.scheduler.AggregateMetrics
+	38, // 30: sglang.grpc.scheduler.SchedulerLoad.memory:type_name -> sglang.grpc.scheduler.MemoryMetrics
+	39, // 31: sglang.grpc.scheduler.SchedulerLoad.speculative:type_name -> sglang.grpc.scheduler.SpeculativeMetrics
+	40, // 32: sglang.grpc.scheduler.SchedulerLoad.lora:type_name -> sglang.grpc.scheduler.LoRAMetrics
+	41, // 33: sglang.grpc.scheduler.SchedulerLoad.disaggregation:type_name -> sglang.grpc.scheduler.DisaggregationMetrics
+	42, // 34: sglang.grpc.scheduler.SchedulerLoad.queues:type_name -> sglang.grpc.scheduler.QueueMetrics
+	4,  // 35: sglang.grpc.scheduler.MultimodalInputs.ModelSpecificTensorsEntry.value:type_name -> sglang.grpc.scheduler.TensorData
+	2,  // 36: sglang.grpc.scheduler.SglangScheduler.Generate:input_type -> sglang.grpc.scheduler.GenerateRequest
+	15, // 37: sglang.grpc.scheduler.SglangScheduler.Embed:input_type -> sglang.grpc.scheduler.EmbedRequest
+	17, // 38: sglang.grpc.scheduler.SglangScheduler.HealthCheck:input_type -> sglang.grpc.scheduler.HealthCheckRequest
+	19, // 39: sglang.grpc.scheduler.SglangScheduler.Abort:input_type -> sglang.grpc.scheduler.AbortRequest
+	31, // 40: sglang.grpc.scheduler.SglangScheduler.GetModelInfo:input_type -> sglang.grpc.scheduler.GetModelInfoRequest
+	33, // 41: sglang.grpc.scheduler.SglangScheduler.GetServerInfo:input_type -> sglang.grpc.scheduler.GetServerInfoRequest
+	35, // 42: sglang.grpc.scheduler.SglangScheduler.GetLoads:input_type -> sglang.grpc.scheduler.GetLoadsRequest
+	48, // 43: sglang.grpc.scheduler.SglangScheduler.FlushCache:input_type -> smg.grpc.common.FlushCacheRequest
+	49, // 44: sglang.grpc.scheduler.SglangScheduler.StartProfile:input_type -> smg.grpc.common.StartProfileRequest
+	50, // 45: sglang.grpc.scheduler.SglangScheduler.StopProfile:input_type -> smg.grpc.common.StopProfileRequest
+	51, // 46: sglang.grpc.scheduler.SglangScheduler.GetTokenizer:input_type -> smg.grpc.common.GetTokenizerRequest
+	52, // 47: sglang.grpc.scheduler.SglangScheduler.SubscribeKvEvents:input_type -> smg.grpc.common.SubscribeKvEventsRequest
+	7,  // 48: sglang.grpc.scheduler.SglangScheduler.Generate:output_type -> sglang.grpc.scheduler.GenerateResponse
+	16, // 49: sglang.grpc.scheduler.SglangScheduler.Embed:output_type -> sglang.grpc.scheduler.EmbedResponse
+	18, // 50: sglang.grpc.scheduler.SglangScheduler.HealthCheck:output_type -> sglang.grpc.scheduler.HealthCheckResponse
+	20, // 51: sglang.grpc.scheduler.SglangScheduler.Abort:output_type -> sglang.grpc.scheduler.AbortResponse
+	32, // 52: sglang.grpc.scheduler.SglangScheduler.GetModelInfo:output_type -> sglang.grpc.scheduler.GetModelInfoResponse
+	34, // 53: sglang.grpc.scheduler.SglangScheduler.GetServerInfo:output_type -> sglang.grpc.scheduler.GetServerInfoResponse
+	36, // 54: sglang.grpc.scheduler.SglangScheduler.GetLoads:output_type -> sglang.grpc.scheduler.GetLoadsResponse
+	53, // 55: sglang.grpc.scheduler.SglangScheduler.FlushCache:output_type -> smg.grpc.common.FlushCacheResponse
+	54, // 56: sglang.grpc.scheduler.SglangScheduler.StartProfile:output_type -> smg.grpc.common.ProfileResponse
+	54, // 57: sglang.grpc.scheduler.SglangScheduler.StopProfile:output_type -> smg.grpc.common.ProfileResponse
+	55, // 58: sglang.grpc.scheduler.SglangScheduler.GetTokenizer:output_type -> smg.grpc.common.GetTokenizerChunk
+	56, // 59: sglang.grpc.scheduler.SglangScheduler.SubscribeKvEvents:output_type -> smg.grpc.common.KvEventBatch
+	48, // [48:60] is the sub-list for method output_type
+	36, // [36:48] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_sglang_scheduler_proto_init() }
@@ -4135,40 +4048,37 @@ func file_sglang_scheduler_proto_init() {
 	if File_sglang_scheduler_proto != nil {
 		return
 	}
+	file_common_proto_init()
 	file_sglang_scheduler_proto_msgTypes[0].OneofWrappers = []any{
 		(*SamplingParams_Regex)(nil),
 		(*SamplingParams_JsonSchema)(nil),
 		(*SamplingParams_EbnfGrammar)(nil),
 		(*SamplingParams_StructuralTag)(nil),
 	}
-	file_sglang_scheduler_proto_msgTypes[5].OneofWrappers = []any{
+	file_sglang_scheduler_proto_msgTypes[5].OneofWrappers = []any{}
+	file_sglang_scheduler_proto_msgTypes[7].OneofWrappers = []any{
 		(*GenerateResponse_Chunk)(nil),
 		(*GenerateResponse_Complete)(nil),
-		(*GenerateResponse_Error)(nil),
 	}
-	file_sglang_scheduler_proto_msgTypes[7].OneofWrappers = []any{
+	file_sglang_scheduler_proto_msgTypes[9].OneofWrappers = []any{
 		(*GenerateComplete_MatchedTokenId)(nil),
 		(*GenerateComplete_MatchedStopStr)(nil),
 	}
-	file_sglang_scheduler_proto_msgTypes[11].OneofWrappers = []any{}
-	file_sglang_scheduler_proto_msgTypes[15].OneofWrappers = []any{
-		(*EmbedResponse_Complete)(nil),
-		(*EmbedResponse_Error)(nil),
-	}
-	file_sglang_scheduler_proto_msgTypes[27].OneofWrappers = []any{
+	file_sglang_scheduler_proto_msgTypes[12].OneofWrappers = []any{}
+	file_sglang_scheduler_proto_msgTypes[25].OneofWrappers = []any{
 		(*UpdateWeightsRequest_DiskPath)(nil),
 		(*UpdateWeightsRequest_TensorData)(nil),
 		(*UpdateWeightsRequest_RemoteUrl)(nil),
 	}
+	file_sglang_scheduler_proto_msgTypes[35].OneofWrappers = []any{}
 	file_sglang_scheduler_proto_msgTypes[37].OneofWrappers = []any{}
-	file_sglang_scheduler_proto_msgTypes[39].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sglang_scheduler_proto_rawDesc), len(file_sglang_scheduler_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   47,
+			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

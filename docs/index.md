@@ -41,8 +41,9 @@ Route, balance, and orchestrate traffic across your LLM fleet with enterprise-gr
 <div class="backends-label">Works With</div>
 <div class="backends-grid">
 <span class="backend">vLLM</span>
-<span class="backend">SGLang</span>
 <span class="backend">TensorRT-LLM</span>
+<span class="backend">TokenSpeed</span>
+<span class="backend">SGLang</span>
 <span class="backend">OpenAI</span>
 <span class="backend">Claude</span>
 <span class="backend">Gemini</span>
@@ -107,7 +108,7 @@ Circuit breakers, automatic retries with exponential backoff, rate limiting, and
 
 **Gateway = Full Server**
 
-SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, detokenization, and PD routing. Workers run raw inference on SGLang, vLLM, or TensorRT-LLM.
+SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, detokenization, and PD routing. Workers run raw inference on vLLM, TensorRT-LLM, TokenSpeed, or SGLang.
 
 </div>
 
@@ -117,7 +118,7 @@ SMG handles everything: tokenization, chat templates, tool parsing, MCP loops, d
 
 **Gateway = Smart Proxy**
 
-SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers (SGLang, vLLM, TRT-LLM). Supports PD disaggregation.
+SMG handles routing, load balancing, and failover. Workers run full OpenAI-compatible servers (vLLM, TRT-LLM, SGLang). Supports PD disaggregation.
 
 </div>
 

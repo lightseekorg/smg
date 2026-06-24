@@ -20,9 +20,10 @@ SMG connects to workers over HTTP or gRPC, and supports both local inference ser
 
 | Worker Type | Protocol | Example URL |
 |-------------|----------|-------------|
-| SGLang | HTTP / gRPC | `http://worker:8000` or `grpc://worker:50051` |
 | vLLM | gRPC | `grpc://worker:50051` |
 | TensorRT-LLM | gRPC | `grpc://worker:50051` |
+| TokenSpeed | gRPC | `grpc://worker:50051` |
+| SGLang | HTTP / gRPC | `http://worker:8000` or `grpc://worker:50051` |
 | OpenAI (GPT) | HTTP | `https://api.openai.com` |
 | Anthropic (Claude) | HTTP | `https://api.anthropic.com` |
 | xAI (Grok) | HTTP | `https://api.x.ai` |

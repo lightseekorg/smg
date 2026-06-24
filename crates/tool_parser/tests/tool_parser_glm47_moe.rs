@@ -2,7 +2,7 @@
 mod common;
 
 use common::create_test_tools;
-use tool_parser::{Glm4MoeParser, ToolParser};
+use tool_parser::{Glm4MoeParser, ParserFactory, ToolParser};
 
 #[tokio::test]
 async fn test_glm47_complete_parsing() {
@@ -98,6 +98,23 @@ fn test_glm47_format_detection() {
     assert!(!parser.has_tool_markers("[TOOL_CALLS]"));
     assert!(!parser.has_tool_markers("<｜tool▁calls▁begin｜>"));
     assert!(!parser.has_tool_markers("plain text"));
+}
+
+#[tokio::test]
+async fn test_glm5_routes_to_glm47_moe() {
+    // GLM-5.x must route to glm47_moe, not the catch-all glm-* -> json mapping.
+    let factory = ParserFactory::new();
+    let input =
+        r"<tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call>";
+    for model in ["glm-5", "glm-5.1", "glm-5.2", "glm-5.2-fp8"] {
+        let parser = factory
+            .registry()
+            .create_for_model(model)
+            .unwrap_or_else(|| panic!("no parser for {model}"));
+        let (_, tools) = parser.parse_complete(input).await.unwrap();
+        assert_eq!(tools.len(), 1, "{model} should extract one tool call");
+        assert_eq!(tools[0].function.name, "get_weather", "{model}");
+    }
 }
 
 #[tokio::test]

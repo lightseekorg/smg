@@ -82,7 +82,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         messages.push(role_to_chat_message(role.as_str(), text));
                     }
                     ResponseInputOutputItem::FunctionToolCall {
-                        id,
+                        call_id,
                         name,
                         arguments,
                         output,
@@ -90,13 +90,14 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                     } => {
                         // Tool call from history - add as assistant message with tool call
                         // followed by tool response if output exists
+                        let tool_call_id = call_id.clone();
 
                         // Add assistant message with tool_calls (the LLM's decision)
                         messages.push(ChatMessage::Assistant {
                             content: None,
                             name: None,
                             tool_calls: Some(vec![ToolCall {
-                                id: id.clone(),
+                                id: tool_call_id.clone(),
                                 tool_type: "function".to_string(),
                                 function: FunctionCallResponse {
                                     name: name.clone(),
@@ -110,7 +111,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         if let Some(output_text) = output {
                             messages.push(ChatMessage::Tool {
                                 content: MessageContent::Text(output_text.clone()),
-                                tool_call_id: id.clone(),
+                                tool_call_id,
                             });
                         }
                     }
@@ -378,7 +379,7 @@ pub(crate) fn chat_to_responses(
     if let Some(tool_calls) = &choice.message.tool_calls {
         for tool_call in tool_calls {
             output.push(ResponseOutputItem::FunctionToolCall {
-                id: tool_call.id.clone(),
+                id: Some(tool_call.id.clone()),
                 call_id: tool_call.id.clone(),
                 name: tool_call.function.name.clone(),
                 arguments: tool_call.function.arguments.clone().unwrap_or_default(),
@@ -478,6 +479,39 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_history_uses_call_id_for_chat_tool_messages() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::FunctionToolCall {
+                id: Some("fc_item_id".to_string()),
+                call_id: "call_tool_id".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{\"q\":\"rust\"}".to_string(),
+                output: Some("done".to_string()),
+                status: Some("completed".to_string()),
+            }]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.messages.len(), 2);
+
+        match &chat_req.messages[0] {
+            ChatMessage::Assistant {
+                tool_calls: Some(tool_calls),
+                ..
+            } => assert_eq!(tool_calls[0].id, "call_tool_id"),
+            other => panic!("expected assistant tool call, got {other:?}"),
+        }
+
+        match &chat_req.messages[1] {
+            ChatMessage::Tool { tool_call_id, .. } => {
+                assert_eq!(tool_call_id, "call_tool_id");
+            }
+            other => panic!("expected tool message, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_empty_input_error() {
         let req = ResponsesRequest {
             input: ResponseInput::Text(String::new()),
@@ -499,6 +533,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: None,
                 include_obfuscation: Some(false),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };
@@ -524,6 +559,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: Some(false),
                 include_obfuscation: Some(true),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };
@@ -542,6 +578,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: Some(true),
                 include_obfuscation: Some(false),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };

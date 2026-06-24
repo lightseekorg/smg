@@ -32,7 +32,7 @@ use kv_index::{
 };
 use rand::{
     distr::{Alphanumeric, SampleString},
-    rng as thread_rng, Rng,
+    rng as thread_rng, RngExt,
 };
 
 // Global results storage for summary
@@ -445,7 +445,7 @@ fn build_populated_indexer(
     let mut all_worker_chunks = Vec::with_capacity(workers.len());
 
     for worker in workers {
-        let worker_id = indexer.intern_worker(worker);
+        let worker_id = indexer.intern_worker(worker).unwrap();
         let mut wb = WorkerBlockMap::default();
         indexer
             .apply_stored(worker_id, &shared_blocks, None, &mut wb)
@@ -500,7 +500,7 @@ macro_rules! bench_indexer_store {
                 for _ in 0..iters {
                     let indexer = PositionalIndexer::new(32);
                     for worker in &workers {
-                        let worker_id = indexer.intern_worker(worker);
+                        let worker_id = indexer.intern_worker(worker).unwrap();
                         let mut wb = WorkerBlockMap::default();
                         let chunks = generate_token_chunks($blocks_per_worker, $block_size);
                         let blocks = chunks_to_stored_blocks(&chunks);
@@ -596,7 +596,7 @@ macro_rules! bench_indexer_concurrent {
             (0..$num_threads)
                 .map(|t| {
                     let chunks = &worker_chunks[t % workers.len()];
-                    let worker_id = indexer.intern_worker(&workers[t % workers.len()]);
+                    let worker_id = indexer.intern_worker(&workers[t % workers.len()]).unwrap();
 
                     // Read data: pre-computed content hashes
                     let query_tokens = flatten_tokens(chunks);
@@ -900,9 +900,87 @@ fn print_summary() {
     eprintln!("\n{}", "=".repeat(95));
 }
 
+/// Benchmark the fused `match_and_insert` against the legacy
+/// `match_prefix_with_counts` + `insert_*` pair that cache-aware routing used to
+/// run on every request. The win grows with prefix length because the pair walks
+/// the whole prefix twice; the fused call walks it once. Includes a long-context
+/// (128K-token / 512K-char) case representative of large agentic prompts where
+/// the double traversal dominated routing latency.
+fn bench_match_and_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("match_and_insert");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(2));
+    group.sample_size(30);
+
+    // Sizes span the short request path up to long-context prompts.
+    const TOKEN_SIZES: [usize; 4] = [1024, 16384, 65536, 131072];
+    const CHAR_SIZES: [usize; 4] = [4096, 65536, 262144, 524288];
+    const TENANT: &str = "grpc://worker-0.sglang.svc.cluster.local:50051";
+
+    // ---- TokenTree ----
+    for &token_size in &TOKEN_SIZES {
+        // A single shared sequence: after the first insert every request is a
+        // full cache hit, so both the pair and the fused call traverse the whole
+        // prefix (worst case for the double traversal, best case for fusion).
+        let seq: Vec<TokenId> = (0..token_size as u32).collect();
+
+        let pair_name = format!("token_pair_{token_size}tok");
+        group.bench_function(&pair_name, |b| {
+            let tree = TokenTree::new();
+            tree.insert_tokens(&seq, TENANT);
+            b.iter(|| {
+                let r = tree.match_prefix_with_counts(black_box(&seq));
+                tree.insert_tokens(black_box(&seq), TENANT);
+                black_box(r);
+            });
+        });
+
+        // `match_and_insert_with` is the exact production hot-path entry
+        // (cache-aware routing picks the tenant from the match result).
+        let fused_name = format!("token_fused_{token_size}tok");
+        group.bench_function(&fused_name, |b| {
+            let tree = TokenTree::new();
+            tree.insert_tokens(&seq, TENANT);
+            b.iter(|| {
+                let r = tree.match_and_insert_with(black_box(&seq), |_| Some(TENANT));
+                black_box(r);
+            });
+        });
+    }
+
+    // ---- StringTree ----
+    for &char_size in &CHAR_SIZES {
+        let text = random_ascii_string(char_size);
+
+        let pair_name = format!("string_pair_{char_size}c");
+        group.bench_function(&pair_name, |b| {
+            let tree = StringTree::new();
+            tree.insert_text(&text, TENANT);
+            b.iter(|| {
+                let r = tree.match_prefix_with_counts(black_box(&text));
+                tree.insert_text(black_box(&text), TENANT);
+                black_box(r);
+            });
+        });
+
+        let fused_name = format!("string_fused_{char_size}c");
+        group.bench_function(&fused_name, |b| {
+            let tree = StringTree::new();
+            tree.insert_text(&text, TENANT);
+            b.iter(|| {
+                let r = tree.match_and_insert_with(black_box(&text), |_| Some(TENANT));
+                black_box(r);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn run_benchmarks(c: &mut Criterion) {
     bench_summary(c);
     print_summary();
+    bench_match_and_insert(c);
 }
 
 criterion_group!(benches, run_benchmarks);

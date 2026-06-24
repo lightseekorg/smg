@@ -19,8 +19,10 @@ on:
 permissions:
   contents: read
 
+# Per-PR groups cancel superseded runs; pushes to main key on the commit SHA so
+# every commit on main gets its own run and is never cancelled by a later push.
 concurrency:
-  group: gateway-tests-${{ github.ref }}
+  group: gateway-tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -34,7 +36,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -54,7 +56,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -81,7 +83,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -100,41 +102,48 @@ jobs:
       - name: Test import
         run: |
           pip install crates/grpc_client/python/dist/*.whl
-          python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
+          python - <<'PY'
+          from smg_grpc_proto import sglang_scheduler_pb2, tokenspeed_scheduler_pb2
+
+          fields = tokenspeed_scheduler_pb2.TensorData.DESCRIPTOR.fields_by_name
+          assert "data" not in fields
+          assert fields["shape"].number == 1
+          assert fields["dtype"].number == 2
+          assert fields["inline"].number == 3
+          assert fields["shm"].number == 4
+          assert fields["remote"].number == 5
+
+          print("OK")
+          PY
 
   build-wheel:
-    runs-on: k8s-runner-gpu
+    # CPU-only Rust/wheel/Go-FFI/WASM compile — no GPU needed. Runs on the CPU
+    # runner pool (which also tolerates the nvidia.com/gpu taint, so it can use
+    # the abundant stranded CPU on GPU nodes) instead of competing for scarce
+    # GPU runners.
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - name: Cache wheel and Go FFI artifacts
-        id: cache-wheel
-        uses: actions/cache@v5
-        with:
-          path: |
-            bindings/python/dist/*.whl
-            bindings/golang/target/release/libsmg_go.*
-            crates/wasm/tests/fixtures/*.wasm
-            clients/python/smg_client/types/_generated.py
-          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/auth/src/**', 'bindings/python/src/**', 'crates/data_connector/src/**', 'crates/grpc_client/src/**', 'crates/kv_index/src/**', 'crates/mcp/src/**', 'crates/mesh/src/**', 'model_gateway/src/**', 'crates/multimodal/src/**', 'crates/protocols/src/**', 'crates/reasoning_parser/src/**', 'crates/tokenizer/src/**', 'crates/tool_parser/src/**', 'crates/wasm/src/**', 'crates/workflow/src/**', 'bindings/golang/src/**', 'examples/wasm/**') }}
-          restore-keys: |
-            wheel-${{ runner.os }}-
-
+      # No wheel-output cache here. It was keyed on a hash of every crate's
+      # source, so it missed on essentially every code PR (all-or-nothing), and
+      # on a miss it *masked* the incremental compilation cache by skipping the
+      # build entirely — which also meant rust-cache rarely got populated. The
+      # build now always runs and leans on rust-cache + sccache (set up in
+      # ./.github/actions/setup-rust), which degrade gracefully: with the
+      # dependency graph cached, only changed crates recompile.
       - name: Setup Rust
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Build Python wheel and Go FFI library
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           rm -rf bindings/python/dist/
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
 
       - name: Generate Python client types
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
           mkdir -p clients/openapi
@@ -154,7 +163,6 @@ jobs:
           sed -i 's/class \(.*\)(Enum):/class \1(str, Enum):/' clients/python/smg_client/types/_generated.py
 
       - name: Build WASM test fixtures
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
           bash crates/wasm/tests/fixtures/build_fixtures.sh
@@ -189,7 +197,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Show sccache stats
-        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
+        if: always()
         run: sccache --show-stats
 
       - name: Set up Python
@@ -210,7 +218,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -232,12 +240,29 @@ jobs:
           python3 -m pip install pytest pytest-cov pytest-xdist
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
+      - name: Run grpc_servicer unit tests
+        run: |
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
+          pip install ./crates/grpc_client/python
+          pytest -q grpc_servicer/tests
+
   unit-tests:
+    needs: [detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.detect-changes.result == 'success'
+      && (
+        github.event_name != 'pull_request'
+        || needs.detect-changes.outputs.rust-ci == 'true'
+      )
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -246,6 +271,16 @@ jobs:
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
+
+      - name: Verify default multimodal build does not require OpenCV
+        run: |
+          source "$HOME/.cargo/env"
+          cargo check -p llm-multimodal
+          cargo check --manifest-path bindings/python/Cargo.toml
+          cargo check --manifest-path bindings/golang/Cargo.toml
+
+      - name: Install OpenCV build dependencies
+        run: AUTO_INSTALL=1 bash scripts/install_opencv.sh
 
       - name: Build WASM test fixtures
         run: |
@@ -267,9 +302,8 @@ jobs:
 
       - name: Generate vision golden fixtures
         run: |
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-          pip install transformers pillow numpy scipy
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install transformers pillow numpy scipy
           python crates/multimodal/scripts/generate_vision_golden.py
 
       - name: Run Rust tests
@@ -287,12 +321,12 @@ jobs:
   benchmarks:
     needs: build-wheel
     runs-on: 4-gpu-h100
-    timeout-minutes: 30
+    timeout-minutes: 36
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup SGLang backend
         uses: ./.github/actions/setup-sglang
@@ -329,6 +363,7 @@ jobs:
         env:
           ROUTER_LOCAL_MODEL_PATH: /models
           E2E_LOG_DIR: benchmark-logs
+          GENAI_BENCH_TEST_TIMEOUT: "600"
         run: |
           mkdir -p benchmark-logs
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
@@ -359,7 +394,6 @@ jobs:
 
   detect-changes:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: read
@@ -370,8 +404,9 @@ jobs:
       agentic: ${{ steps.filter.outputs.agentic }}
       embeddings: ${{ steps.filter.outputs.embeddings }}
       go-bindings: ${{ steps.filter.outputs.go-bindings }}
+      rust-ci: ${{ steps.filter.outputs.rust-ci }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -390,6 +425,7 @@ jobs:
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
               - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
               - 'scripts/ci_install_e2e_deps.sh'
               - 'scripts/ci_killall_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
@@ -404,6 +440,7 @@ jobs:
               - 'e2e_test/router/**'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
             agentic:
               - 'crates/mcp/**'
               - 'crates/data_connector/**'
@@ -419,6 +456,27 @@ jobs:
               - 'e2e_test/embeddings/**'
             go-bindings:
               - 'e2e_test/bindings_go/**'
+            rust-ci:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - 'crates/**'
+              - 'test_support/**'
+              - 'model_gateway/**'
+              - 'bindings/python/Cargo.toml'
+              - 'bindings/python/build.rs'
+              - 'bindings/python/src/**'
+              - 'bindings/golang/Cargo.toml'
+              - 'bindings/golang/src/**'
+              - 'clients/rust/**'
+              - 'clients/openapi-gen/**'
+              - '.cargo/**'
+              - '.github/actions/setup-rust/**'
+              - 'scripts/ci_install_rust.sh'
+              - '.github/workflows/pr-test-rust.yml'
+              - 'examples/wasm/wasm-guest-storage-hook/**'
+              - 'examples/wasm/wasm-guest-storage-hook-passthrough/**'
 
   # --- GPU E2E: organized by GPU tier + API, engine as matrix axis ---
 
@@ -435,23 +493,39 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
+    # Now also runs the previously-2-GPU chat tests (gpt-oss-20b,
+    # Qwen2.5-14B) since they're tp=1.
     strategy:
       fail-fast: false
       matrix:
         include:
           - engine: sglang
-            timeout: 30
+            timeout: 36
+            test_timeout: 28
           - engine: vllm
-            timeout: 20
+            timeout: 24
+            test_timeout: 18
           - engine: trtllm
-            timeout: 90
+            timeout: 32
+            test_timeout: 18
+          # tokenspeed builds from source (~30m cold), so keep the job
+          # timeout generous even though the test step is short.
+          # Admin-ops e2e (flush/profile) piggybacks here because this is
+          # the only lane with tokenspeed installed — e2e-1gpu-gateway
+          # installs sglang/vllm only. The engine marker filter keeps the
+          # rest of e2e_test/router out of this job.
+          - engine: tokenspeed
+            timeout: 50
+            test_timeout: 18
+            test_dirs: e2e_test/chat_completions e2e_test/router/test_admin_ops.py
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "1"
       runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
-      test_dirs: e2e_test/chat_completions
+      test_timeout: ${{ matrix.test_timeout }}
+      test_dirs: ${{ matrix.test_dirs || 'e2e_test/chat_completions' }}
     secrets: inherit
 
   e2e-1gpu-completions:
@@ -542,29 +616,10 @@ jobs:
 
   # === 2 GPU ===
 
-  e2e-2gpu-chat:
-    name: e2e-2gpu-chat (${{ matrix.engine }})
-    needs: [e2e-1gpu-chat]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - engine: sglang
-            timeout: 20
-          - engine: vllm
-            timeout: 20
-          - engine: trtllm
-            timeout: 30
-    uses: ./.github/workflows/e2e-gpu-job.yml
-    with:
-      engine: ${{ matrix.engine }}
-      gpu_tier: "2"
-      runner: 2-gpu-h100
-      timeout: ${{ matrix.timeout }}
-      test_dirs: e2e_test/chat_completions
-    secrets: inherit
+  # e2e-2gpu-chat was retired: all chat_completions tests are tp=1 now
+  # and run under e2e-1gpu-chat above.
 
-  e2e-2gpu-responses:
+  e2e-1gpu-responses:
     needs: [build-wheel, detect-changes]
     if: >-
       always()
@@ -577,15 +632,16 @@ jobs:
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
-      gpu_tier: "2"
-      runner: 2-gpu-h100
-      timeout: 30
+      gpu_tier: "1"
+      runner: 1-gpu-h100
+      timeout: 28
+      test_timeout: 20
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
     secrets: inherit
 
   e2e-2gpu-pd:
-    name: e2e-2gpu-pd (${{ matrix.engine }})
+    name: e2e-2gpu-pd (${{ matrix.engine }}${{ matrix.kv_backend && format('-{0}', matrix.kv_backend) || '' }})
     needs: [e2e-1gpu-gateway, detect-changes]
     if: >-
       always()
@@ -603,6 +659,9 @@ jobs:
             timeout: 30
           - engine: vllm
             timeout: 30
+          - engine: vllm
+            kv_backend: mooncake
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -610,6 +669,7 @@ jobs:
       runner: 2-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
+      vllm_kv_backend: ${{ matrix.kv_backend || 'nixl' }}
     secrets: inherit
 
   # === 4 GPU ===
@@ -699,7 +759,7 @@ jobs:
       SHOW_ROUTER_LOGS: "1"
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -766,7 +826,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -814,7 +874,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup SGLang backend
         uses: ./.github/actions/setup-sglang
@@ -885,7 +945,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup SGLang backend
         uses: ./.github/actions/setup-sglang
@@ -940,7 +1000,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-2gpu-chat, e2e-2gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-1gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -958,8 +1018,7 @@ jobs:
                 "${{ needs.e2e-1gpu-completions.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-embeddings.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-gateway.result }}" == "failure" || \
-                "${{ needs.e2e-2gpu-chat.result }}" == "failure" || \
-                "${{ needs.e2e-2gpu-responses.result }}" == "failure" || \
+                "${{ needs.e2e-1gpu-responses.result }}" == "failure" || \
                 "${{ needs.e2e-2gpu-pd.result }}" == "failure" || \
                 "${{ needs.e2e-4gpu-chat.result }}" == "failure" || \
                 "${{ needs.e2e-4gpu-gateway.result }}" == "failure" || \
@@ -980,7 +1039,7 @@ jobs:
       contents: read
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Python
       uses: actions/setup-python@v6

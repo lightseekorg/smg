@@ -1,12 +1,6 @@
 //! NoOp storage implementations
 //!
 //! These implementations do nothing - useful for when persistence is disabled.
-//!
-//! Structure:
-//! 1. NoOpConversationStorage
-//! 2. NoOpConversationItemStorage
-//! 3. NoOpConversationMemoryWriter
-//! 4. NoOpResponseStorage
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -133,31 +127,7 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
 }
 
 // ============================================================================
-// PART 3: NoOpConversationMemoryWriter
-// ============================================================================
-
-/// No-op implementation of conversation memory writer.
-#[derive(Clone, Copy, Default)]
-pub struct NoOpConversationMemoryWriter;
-
-impl NoOpConversationMemoryWriter {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl ConversationMemoryWriter for NoOpConversationMemoryWriter {
-    async fn create_memory(
-        &self,
-        _input: NewConversationMemory,
-    ) -> ConversationMemoryResult<ConversationMemoryId> {
-        Ok(ConversationMemoryId(format!("mem_{}", ulid::Ulid::new())))
-    }
-}
-
-// ============================================================================
-// PART 4: NoOpResponseStorage
+// PART 3: NoOpResponseStorage
 // ============================================================================
 
 /// No-op implementation of response storage (does nothing)

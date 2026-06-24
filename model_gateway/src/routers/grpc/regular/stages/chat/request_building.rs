@@ -8,10 +8,12 @@ use uuid::Uuid;
 use crate::routers::{
     error,
     grpc::{
+        client::GenerateRequestBuildOptions,
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext},
         multimodal::assemble_multimodal_data,
         proto_wrapper::ProtoRequest,
+        utils,
     },
 };
 
@@ -86,7 +88,24 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Assemble backend-specific multimodal data now that the backend is known
         let multimodal_data = processed_messages
             .multimodal_intermediate
-            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+            .map(|intermediate| {
+                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+            })
+            .transpose()
+            .map_err(|e| {
+                error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
+                error::bad_request("multimodal_not_supported", format!("{e}"))
+        })?;
+
+        let require_reasoning = ctx.tokenizer_arc().is_some_and(|tokenizer| {
+            utils::should_mark_reasoning_started(
+                utils::extract_thinking_from_kwargs(
+                    chat_request.chat_template_kwargs.as_ref(),
+                    tokenizer.as_ref(),
+                ),
+                tokenizer.as_ref(),
+            )
+        });
 
         let mut proto_request = builder_client
             .build_chat_request(
@@ -94,13 +113,22 @@ impl PipelineStage for ChatRequestBuildingStage {
                 &chat_request,
                 processed_messages.text,
                 token_ids,
-                multimodal_data,
-                tool_constraints,
+                GenerateRequestBuildOptions {
+                    multimodal_inputs: multimodal_data,
+                    tool_constraints,
+                    require_reasoning,
+                },
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");
                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
             })?;
+
+        helpers::apply_sampling_defaults_to_generate_request(
+            &mut proto_request,
+            &ctx.input.request_type,
+            ctx.state.workers.as_ref(),
+        );
 
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {

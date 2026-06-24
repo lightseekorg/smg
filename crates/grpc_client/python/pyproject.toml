@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "grpcio-tools>=1.78.0"]
+requires = ["setuptools>=68.0", "grpcio-tools>=1.81.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "smg-grpc-proto"
-version = "0.4.7"
-description = "SMG gRPC proto definitions for SGLang, vLLM, TRT-LLM, and MLX"
+version = "0.4.11"
+description = "SMG gRPC proto definitions for vLLM, TRT-LLM, MLX, TokenSpeed, and SGLang"
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.78.0",
+    "grpcio>=1.81.1",
     "protobuf>=5.26.0",
 ]
 readme = "README.md"

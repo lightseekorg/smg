@@ -22,4 +22,4 @@ pub use parsers::{
     Step3Parser,
 };
 pub use traits::ToolParser;
-pub use types::{FunctionCall, PartialToolCall, StreamingParseResult, ToolCall};
+pub use types::{FunctionCall, StreamingParseResult, ToolCall};

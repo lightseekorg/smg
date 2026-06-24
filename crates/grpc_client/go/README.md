@@ -1,6 +1,6 @@
 # SMG gRPC Client (Go)
 
-This module contains auto-generated Go gRPC code for Shepherd Model Gateway services (SGLang, vLLM, TRT-LLM).
+This module contains auto-generated Go gRPC code for Shepherd Model Gateway services (vLLM, TRT-LLM, TokenSpeed, SGLang).
 
 ## Installation
 
@@ -16,9 +16,10 @@ The generated code is divided into packages under the `generated` directory:
 
 -   `generated/common`: Common types (e.g., KV Events)
 -   `generated/sglang_encoder`: SGLang Encoder service
--   `generated/sglang_scheduler`: SGLang Scheduler service
+-   `generated/tokenspeed_scheduler`: TokenSpeed Scheduler service
 -   `generated/trtllm`: TensorRT-LLM Service
 -   `generated/vllm`: vLLM Engine service
+-   `generated/sglang_scheduler`: SGLang Scheduler service
 
 ## Generation
 

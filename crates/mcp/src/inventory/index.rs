@@ -429,39 +429,23 @@ mod tests {
             serde_json::Map::new()
         };
 
-        Tool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(format!("Test tool: {name}"))),
-            input_schema: Arc::new(schema_map),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        }
+        Tool::new(
+            Cow::Owned(name.to_string()),
+            Cow::Owned(format!("Test tool: {name}")),
+            Arc::new(schema_map),
+        )
     }
 
     // Helper to create a test prompt
     fn create_test_prompt(name: &str) -> Prompt {
-        Prompt {
-            name: name.to_string(),
-            title: None,
-            description: Some(format!("Test prompt: {name}")),
-            arguments: None,
-            icons: None,
-        }
+        Prompt::new(name, Some(format!("Test prompt: {name}")), None)
     }
 
     // Helper to create a test resource
     fn create_test_resource(uri: &str) -> RawResource {
-        RawResource {
-            uri: uri.to_string(),
-            name: uri.to_string(),
-            title: None,
-            description: Some(format!("Test resource: {uri}")),
-            mime_type: Some("text/plain".to_string()),
-            size: None,
-            icons: None,
-        }
+        RawResource::new(uri, uri)
+            .with_description(format!("Test resource: {uri}"))
+            .with_mime_type("text/plain")
     }
 
     #[test]

@@ -13,9 +13,10 @@
   <a href="https://discord.lightseek.org"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://slack.lightseek.org"><img src="https://img.shields.io/badge/Slack-Join%20Us-4A154B?logo=slack&logoColor=white" alt="Slack"></a>
   <a href="https://deepwiki.com/lightseekorg/smg"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://pytorch.org/blog/lightseek-smg/"><img src="https://img.shields.io/badge/PyTorch-Technical%20Blog-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch Blog"></a>
 </p>
 
-High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
+Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
@@ -25,8 +26,8 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 
 |                                 |                                                                                                                                                                  |
 |:--------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether SGLang, vLLM, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
-| **🔌 One API, Any Backend**     | Route to self-hosted models (SGLang, vLLM, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint.    |
+| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, TensorRT-LLM, TokenSpeed, or SGLang—to reuse prefixes and reduce redundant computation. |
+| **🔌 One API, Any Backend**     | Route to self-hosted models (vLLM, TensorRT-LLM, TokenSpeed, SGLang) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint. |
 | **⚡ Built for Speed**           | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running.     |
 | **🔒 Enterprise Control**       | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure.   |
 | **📊 Full Observability**       | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer.                   |
@@ -52,13 +53,13 @@ cargo install smg
 
 ```bash
 # Single worker
-smg --worker-urls http://localhost:8000
+smg launch --worker-urls http://localhost:8000
 
 # Multiple workers with cache-aware routing
-smg --worker-urls http://gpu1:8000 http://gpu2:8000 --policy cache_aware
+smg launch --worker-urls http://gpu1:8000 http://gpu2:8000 --policy cache_aware
 
 # With high availability mesh
-smg --worker-urls http://gpu1:8000 --enable-mesh \
+smg launch --worker-urls http://gpu1:8000 --enable-mesh \
   --mesh-advertise-host 10.0.0.1 --mesh-peer-urls 10.0.0.2:39527
 ```
 
@@ -77,10 +78,11 @@ That's it. SMG is now load-balancing requests across your workers.
 | Self-Hosted | Cloud Providers |
 |-------------|-----------------|
 | vLLM | OpenAI |
-| SGLang | Anthropic |
-| TensorRT-LLM | Google Gemini |
-| Ollama | AWS Bedrock |
-| Any OpenAI-compatible server | Azure OpenAI |
+| TensorRT-LLM | Anthropic |
+| TokenSpeed | Google Gemini |
+| SGLang | AWS Bedrock |
+| Ollama | Azure OpenAI |
+| Any OpenAI-compatible server | Any OpenAI-compatible provider |
 
 ## Features
 

@@ -41,21 +41,34 @@
     block_size:              Backend KV cache block size for event-driven routing
 */
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
+use openai_protocol::worker::WorkerLoadResponse;
 use parking_lot::RwLock;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
+use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::{
-    get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
-    LoadBalancingPolicy, SelectWorkerInfo,
+    normalize_model_key, utils::PeriodicTask, CacheAwareConfig, LoadBalancingPolicy,
+    SelectWorkerInfo,
 };
-use crate::worker::{KvEventMonitor, Worker};
+use crate::{
+    mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
+    worker::{KvEventMonitor, Worker},
+};
+
+/// Latest per-worker backend load snapshot stream, keyed by worker URL.
+pub(crate) type LoadReceiver = watch::Receiver<HashMap<String, WorkerLoadResponse>>;
 
 /// Cache-aware routing policy
 ///
@@ -75,10 +88,14 @@ pub struct CacheAwarePolicy {
     string_trees: Arc<DashMap<String, Arc<Tree>>>,
     /// Token-based trees for gRPC connections (pre-tokenized input)
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
-    mesh_sync: RwLock<OptionalMeshSyncManager>,
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
+    /// Latest per-worker backend load snapshot (keyed by worker URL) from the
+    /// `WorkerMonitor` load poll. Read on the hot path for the KV-usage imbalance
+    /// trigger. `None` until wired by the registry (then the policy stays
+    /// count-only, preserving current behavior).
+    load_rx: RwLock<Option<LoadReceiver>>,
     /// Model-scoped hash indexes for resolving tenant delta hashes.
     /// Outer key is the normalized model_id; inner maps hold
     /// `hash → reconstructable prefix/tokens` per tree kind.
@@ -92,12 +109,18 @@ pub struct CacheAwarePolicy {
     ///   shared prefix from a pre-insert match. Bytes/entry is
     ///   bounded by tree depth, not input size — a 32K-token
     ///   request costs O(matched-prefix), not O(input).
-    /// - `apply_insert_to_trees` (snapshot/restore replay) stores
-    ///   the full inserted path because `apply_tenant_delta`
-    ///   re-inserts whatever value is stored, and the canonical
-    ///   path is required to attach tenants at the right node.
-    ///   This path runs at replay frequency, not request rate.
+    /// - `apply_repair_page` (cold-start replay) stores the full
+    ///   inserted path because the canonical path is required to
+    ///   attach remote tenants at the correct node. This path
+    ///   runs at replay frequency, not request rate.
     hash_index: Arc<DashMap<String, PerModelHashIndex>>,
+    /// Gate request-hot-path `hash_index` writes. The index's only
+    /// consumers are mesh paths (`apply_known_remote_insert` reads,
+    /// `apply_repair_page` writes). When mesh is disabled the
+    /// hot-path writes accumulate with no reader and OOM the
+    /// gateway. Off by default; the mesh wiring code flips it on
+    /// when it attaches.
+    populate_hash_index: AtomicBool,
 }
 
 /// Per-model inner container for [`CacheAwarePolicy::hash_index`].
@@ -202,19 +225,23 @@ impl CacheAwarePolicy {
             config,
             string_trees,
             token_trees,
-            mesh_sync: RwLock::new(None),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
+            load_rx: RwLock::new(None),
             hash_index,
+            populate_hash_index: AtomicBool::new(false),
         }
     }
 
-    /// Set mesh sync manager (can be called after construction)
-    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        self.mesh_sync.write().clone_from(&mesh_sync);
-        if mesh_sync.is_some() {
-            self.restore_tree_state_from_mesh();
-        }
+    /// Enable request-hot-path `hash_index` population. Called by mesh
+    /// wiring when the policy is attached to a mesh adapter; otherwise
+    /// the index stays empty (its only readers are mesh-only paths).
+    pub fn set_populate_hash_index(&self, enabled: bool) {
+        self.populate_hash_index.store(enabled, Ordering::Relaxed);
+    }
+
+    fn should_populate_hash_index(&self) -> bool {
+        self.populate_hash_index.load(Ordering::Relaxed)
     }
 
     /// Set event-driven KV cache monitor (thread-safe, can be called after construction).
@@ -223,12 +250,92 @@ impl CacheAwarePolicy {
         *self.kv_monitor.write() = monitor;
     }
 
+    /// Set the backend load-snapshot receiver (thread-safe, after construction).
+    /// Wired from the `WorkerMonitor` via the `PolicyRegistry` so the KV-usage
+    /// imbalance trigger can read fresh per-worker `token_usage`.
+    pub fn set_load_receiver(&self, rx: Option<LoadReceiver>) {
+        *self.load_rx.write() = rx;
+    }
+
+    /// True when the pool is imbalanced enough to abandon cache affinity.
+    ///
+    /// Three independent triggers, OR'd together. The two KV-based triggers
+    /// require a backend `token_usage` snapshot and are disabled at their `1.0`
+    /// default (utilization and spread are both `<= 1.0`, so `> 1.0` never
+    /// fires):
+    ///
+    /// - **overload** (`overload_token_usage_threshold`): the hottest engine's
+    ///   KV utilization exceeds the ceiling — a critically-saturated engine,
+    ///   shed regardless of balance. Set high (e.g. 0.9) as a safety valve.
+    /// - **KV spread** (`balance_token_usage_threshold`): the hottest engine is
+    ///   materially more KV-saturated than the coldest, i.e. a cooler engine
+    ///   exists to spill toward. This is the true balance signal for long-context
+    ///   workloads, and — unlike request counts, which each gateway sees only
+    ///   locally — it is invariant to the number of gateway replicas.
+    /// - **count spread**: request-count dispersion (abs AND rel) over healthy
+    ///   workers. Always evaluated, so high-count / low-KV imbalance is still
+    ///   caught when KV looks even.
+    /// Whether to abandon cache affinity for shortest-queue because the pool is
+    /// imbalanced — by backend KV usage (overload ceiling or hot-vs-cool spread)
+    /// or by request-count spread. `min_load`/`max_load` are the request-count
+    /// bounds over the healthy workers, which `select_worker` gathers in its
+    /// single worker pass (tests use the `imbalanced` helper to fold them).
+    fn is_imbalanced(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        healthy_indices: &[usize],
+        min_load: usize,
+        max_load: usize,
+    ) -> bool {
+        // KV-based triggers — need a load snapshot; both default 1.0 = disabled.
+        if let Some((min_usage, max_usage)) =
+            self.backend_token_usage_bounds(workers, healthy_indices)
+        {
+            // Overload: a single engine is critically saturated.
+            if max_usage > f64::from(self.config.overload_token_usage_threshold) {
+                return true;
+            }
+            // KV imbalance: a hot engine with a materially cooler home.
+            if max_usage - min_usage > f64::from(self.config.balance_token_usage_threshold) {
+                return true;
+            }
+        }
+
+        // Count spread (abs AND rel) over healthy workers.
+        max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
+            && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold)
+    }
+
+    /// Min and max backend KV-cache utilization (0.0–1.0) across healthy workers
+    /// that have a `WorkerMonitor` snapshot entry, as `(min, max)`. `None` when
+    /// no receiver is wired or no healthy worker has a load entry (→ caller
+    /// relies on the request-count spread).
+    fn backend_token_usage_bounds(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        healthy_indices: &[usize],
+    ) -> Option<(f64, f64)> {
+        let guard = self.load_rx.read();
+        let rx = guard.as_ref()?;
+        let loads = rx.borrow();
+        let mut bounds: Option<(f64, f64)> = None;
+        for &idx in healthy_indices {
+            if let Some(load) = loads.get(workers[idx].url()) {
+                let usage = load.effective_token_usage();
+                bounds = Some(match bounds {
+                    Some((min, max)) => (min.min(usage), max.max(usage)),
+                    None => (usage, usage),
+                });
+            }
+        }
+        bounds
+    }
+
     /// Initialize the trees with worker URLs (used only during initial setup)
     /// Initializes both string trees (HTTP) and token trees (gRPC) for each model.
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
         // Group workers by model
-        let mut model_workers: std::collections::HashMap<String, Vec<&Arc<dyn Worker>>> =
-            std::collections::HashMap::new();
+        let mut model_workers: HashMap<String, Vec<&Arc<dyn Worker>>> = HashMap::new();
         for worker in workers {
             let tree_key = normalize_model_key(worker.model_id());
             model_workers
@@ -316,252 +423,6 @@ impl CacheAwarePolicy {
         // No-op: rely on LRU eviction to clean up stale entries
     }
 
-    fn restore_tree_state_from_mesh(&self) {
-        let tree_states = {
-            let guard = self.mesh_sync.read();
-            guard
-                .as_ref()
-                .map(|mesh_sync| mesh_sync.get_all_tree_states())
-        };
-
-        if let Some(tree_states) = tree_states {
-            for tree_state in &tree_states {
-                // Use the merge path (not replace) so concurrent live updates
-                // arriving via subscriber callbacks are not overwritten.
-                self.apply_remote_tree_state(&tree_state.model_id, tree_state);
-            }
-        }
-    }
-
-    pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
-        let tree_key = normalize_model_key(model_id);
-
-        match operation {
-            TreeOperation::Insert(insert_op) => {
-                self.apply_insert_operation(tree_key, insert_op);
-            }
-            TreeOperation::Remove(remove_op) => {
-                debug!(
-                    "Skipping remote tree remove (LRU will clean up): model={}, tenant={}",
-                    model_id, remove_op.tenant
-                );
-            }
-        }
-    }
-
-    fn apply_insert_operation(&self, model_id: &str, insert_op: &TreeInsertOp) {
-        let string_tree = self
-            .string_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()))
-            .clone();
-        let token_tree = self
-            .token_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(TokenTree::new()))
-            .clone();
-
-        self.apply_insert_to_trees(model_id, &string_tree, &token_tree, insert_op);
-    }
-
-    /// Apply a tree insert and populate the model-scoped hash
-    /// index alongside it. Remote-replay paths
-    /// (`apply_remote_tree_operation`, `restore_tree_state_from_mesh`)
-    /// funnel here, so `TreeHandle::apply_known_remote_insert`
-    /// can find these nodes when a peer broadcasts a delta that
-    /// references them. Without this, replayed prefixes would be
-    /// misclassified as unknown and trigger unnecessary repair.
-    /// The string-side value is the full `text` (not a matched
-    /// prefix) because remote apply doesn't compute a match;
-    /// `apply_known_remote_insert` re-inserts whatever string is
-    /// stored.
-    fn apply_insert_to_trees(
-        &self,
-        model_id: &str,
-        string_tree: &Arc<Tree>,
-        token_tree: &Arc<TokenTree>,
-        insert_op: &TreeInsertOp,
-    ) {
-        // Replay/restore path: store the FULL inserted path, not a
-        // matched prefix. `apply_tenant_delta` re-inserts whatever
-        // value is stored, so the canonical path is required to
-        // attach remote tenants at the correct node.
-        // On cold start the local tree is empty → a pre-insert
-        // `match_prefix_with_counts` would return 0 → storing ""
-        // would later cause `insert_text("", remote_worker)`,
-        // attaching the worker at root and tainting routing for
-        // every request to this model. This path runs at replay
-        // frequency (cold start, snapshot reconciliation), not per
-        // request, so the unbounded value cost is acceptable.
-        match &insert_op.key {
-            TreeKey::Text(text) => {
-                string_tree.insert_text(text, &insert_op.tenant);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(smg_mesh::hash_node_path(text), text.clone());
-            }
-            TreeKey::Tokens(tokens) => {
-                token_tree.insert_tokens(tokens, &insert_op.tenant);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
-            }
-        }
-    }
-
-    /// Notify mesh that a tree insert happened. Only the pre-computed hash
-    /// is passed — NOT the full prompt text — to avoid 80k+ String clones
-    /// on every request (16 MB/s of allocator churn at 200 rps).
-    fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
-        let mesh_sync = self.mesh_sync.read().clone();
-        if let Some(mesh_sync) = mesh_sync {
-            let mesh_model_id = normalize_model_key(model_id);
-            mesh_sync.sync_tree_insert_hash(mesh_model_id, path_hash, tenant);
-        }
-    }
-
-    /// Deferred token allocation: only allocate `Vec` for TreeKey if mesh sync is active.
-    fn sync_insert_tokens(&self, model_id: &str, tokens: &[u32], tenant: &str) {
-        let mesh_sync = self.mesh_sync.read().clone();
-        if let Some(mesh_sync) = mesh_sync {
-            let op = TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Tokens(tokens.to_vec()),
-                tenant: tenant.to_string(),
-            });
-            let mesh_model_id = normalize_model_key(model_id);
-            if let Err(error) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                warn!("Failed to sync tree insert operation to mesh: {}", error);
-            }
-        }
-    }
-
-    /// Merge remote tree state into local trees incrementally.
-    /// Uses entry-based insertion to preserve existing local routing state.
-    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        let model_id = normalize_model_key(model_id);
-        for operation in &tree_state.operations {
-            if let TreeOperation::Insert(insert_op) = operation {
-                self.apply_insert_operation(model_id, insert_op);
-            }
-        }
-    }
-
-    /// Apply lightweight tenant delta directly to local radix trees.
-    /// No TreeState deserialization — each insert/eviction is applied
-    /// individually to the string tree via the node_path.
-    pub fn apply_tenant_delta(
-        &self,
-        model_id: &str,
-        inserts: &[smg_mesh::TenantInsert],
-        evictions: &[smg_mesh::TenantEvict],
-    ) {
-        let model_id = normalize_model_key(model_id);
-
-        let string_tree = self
-            .string_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()))
-            .clone();
-
-        // Apply inserts — look up the prefix path by hash in this
-        // model's index. Unknown hashes are silently dropped; the
-        // next structure snapshot (every ~30s) delivers the full
-        // tree including this prefix + its tenants.
-        for insert in inserts {
-            if let Some(model_entry) = self.hash_index.get(model_id) {
-                if let Some(path) = model_entry.string_tree.get(&insert.node_path_hash) {
-                    string_tree.insert_text(path.value(), &insert.worker_url);
-                }
-            }
-            // Unknown hash — dropped, next snapshot corrects
-        }
-
-        // Apply evictions
-        for evict in evictions {
-            let tenant_id: Arc<str> = Arc::from(evict.worker_url.as_str());
-            if evict.node_path_hash == smg_mesh::GLOBAL_EVICTION_HASH {
-                // Global eviction: remove from all nodes
-                string_tree.remove_tenant_all(&tenant_id);
-            }
-            // TODO: targeted eviction by hash requires a hash→node index on the tree.
-            // tracks eviction paths too
-        }
-    }
-
-    /// Export the current tree state for a model by walking the live radix tree.
-    /// Builds a `TreeState` from `Tree::snapshot()` — each (prefix, tenant) pair
-    /// becomes a `TreeOperation::Insert`. This avoids storing full prompt text
-    /// per request; the snapshot is built on-demand during periodic checkpoints.
-    #[expect(
-        clippy::unwrap_used,
-        reason = "pop() after last_mut().is_some() is infallible"
-    )]
-    pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
-        let model_id = normalize_model_key(model_id);
-        let tree = self.string_trees.get(model_id)?;
-        let snapshot = tree.snapshot();
-        if snapshot.nodes.is_empty() {
-            return None;
-        }
-
-        // Walk snapshot nodes in pre-order, reconstructing full prefix paths
-        let mut tree_state = smg_mesh::TreeState::new(model_id.to_string());
-        let mut path_stack: Vec<(String, u32)> = Vec::new(); // (prefix_so_far, remaining_children)
-        let mut current_prefix = String::new();
-
-        for node in &snapshot.nodes {
-            // Pop completed parents from the stack
-            while let Some((_, remaining)) = path_stack.last_mut() {
-                if *remaining == 0 {
-                    let (parent_prefix, _) = path_stack.pop().unwrap();
-                    current_prefix = parent_prefix;
-                } else {
-                    *remaining -= 1;
-                    break;
-                }
-            }
-
-            // Build this node's full prefix
-            let node_prefix = format!("{}{}", current_prefix, node.edge);
-
-            // Emit an Insert operation for each tenant at this node
-            for (tenant_url, _epoch) in &node.tenants {
-                if !node_prefix.is_empty() {
-                    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
-                        key: TreeKey::Text(node_prefix.clone()),
-                        tenant: tenant_url.clone(),
-                    }));
-                }
-            }
-
-            // Push this node onto the stack for its children
-            if node.child_count > 0 {
-                path_stack.push((current_prefix.clone(), node.child_count));
-                current_prefix = node_prefix;
-            }
-        }
-
-        Some(tree_state)
-    }
-
-    /// Export a compact tree snapshot for a model from the live radix tree.
-    /// Returns the compact [`kv_index::snapshot::TreeSnapshot`] directly,
-    /// which preserves shared prefixes and is much smaller than the flat
-    /// `TreeState` returned by [`export_tree_state`].
-    pub fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
-        let model_id = normalize_model_key(model_id);
-        let tree = self.string_trees.get(model_id)?;
-        let snapshot = tree.snapshot();
-        if snapshot.nodes.is_empty() {
-            return None;
-        }
-        Some(snapshot)
-    }
-
     /// Run cache eviction to prevent unbounded growth
     pub fn evict_cache(&self, max_size: usize) {
         // Evict string trees (HTTP)
@@ -612,7 +473,7 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         info: &SelectWorkerInfo,
-        healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         // Log load balancing trigger (only compute worker loads if debug enabled)
@@ -622,11 +483,10 @@ impl CacheAwarePolicy {
             debug!("Load balancing triggered | workers: {:?}", worker_loads);
         }
 
-        // Use shortest queue when imbalanced
-        let min_load_idx = healthy_indices
-            .iter()
-            .min_by_key(|&&idx| workers[idx].load())
-            .copied()?;
+        // Shortest queue when imbalanced. The min-load index is gathered upstream
+        // in select_worker with the (load, processed_requests, idx) tie-break
+        // from #1714 (spreads load when decode outpaces prefill).
+        let min_load_idx = min_load_idx?;
 
         let worker_url = workers[min_load_idx].url();
 
@@ -639,22 +499,25 @@ impl CacheAwarePolicy {
                 .get(model_id)
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
-                // Match BEFORE insert (mirrors the string-side
-                // imbalanced path below). After `insert_tokens`,
-                // the tree contains a full path for `tokens` so a
-                // match returns the entire input length and we'd
-                // store the full sequence — at 32K tokens × 4 bytes
-                // × max_tree_size that's multi-GB per model.
-                let result = tree.match_prefix_with_counts(tokens);
-                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
-
-                tree.insert_tokens(tokens, worker_url);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
-                self.sync_insert_tokens(model_id, tokens, worker_url);
+                // We need the match result (the prior shared prefix) BEFORE the
+                // insert so the hash_index stores only that bounded prefix, not
+                // the full path that exists post-insert (32K tokens × 4 bytes ×
+                // max_tree_size = multi-GB/model). `match_and_insert` resolves
+                // the match against the pre-insert tree and inserts in the SAME
+                // descent, so `result.matched_token_count` is the same prior
+                // prefix length the standalone match returned. When we don't
+                // populate the index, a plain insert (no match) suffices.
+                if self.should_populate_hash_index() {
+                    let result = tree.match_and_insert(tokens, worker_url);
+                    let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .token_tree
+                        .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                } else {
+                    tree.insert_tokens(tokens, worker_url);
+                }
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -664,24 +527,25 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
 
             if let Some(tree) = tree {
-                // Match BEFORE insert: after `insert_text`, the
-                // tree contains a full path for `text` so a match
-                // would return the entire input length and we'd
-                // store the full prompt — exactly the memory leak
-                // we're trying to avoid. The pre-insert match
-                // returns the prior shared prefix (~50-200 chars).
-                let result = tree.match_prefix_with_counts(text);
-                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
-
-                tree.insert_text(text, worker_url);
-
-                let path_hash = smg_mesh::hash_node_path(text);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(path_hash, matched_prefix);
-                self.sync_insert_hash(model_id, path_hash, worker_url);
+                // Match BEFORE insert so the hash_index stores only the prior
+                // shared prefix (~50-200 chars), not the full prompt (20KB+)
+                // that exists post-insert. `match_and_insert` does both in a
+                // single descent; `result.matched_char_count` is the same prior
+                // prefix length the standalone match returned. When we don't
+                // populate the index, a plain insert (no match) suffices.
+                if self.should_populate_hash_index() {
+                    let result = tree.match_and_insert(text, worker_url);
+                    let matched_prefix: String =
+                        text.chars().take(result.matched_char_count).collect();
+                    let path_hash = kv_index::hash_node_path(text);
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .string_tree
+                        .insert(path_hash, matched_prefix);
+                } else {
+                    tree.insert_text(text, worker_url);
+                }
             } else {
                 debug!(
                     "Warning: No string tree found for model '{}', skipping cache update",
@@ -727,6 +591,29 @@ pub trait TreeHandle: Send + Sync + std::fmt::Debug {
         node_hash: u64,
         worker_url: &str,
     ) -> bool;
+
+    /// Open a stream of `RepairEntry` for one `(model_id,
+    /// tree_kind)`, in the deterministic pre-order produced by
+    /// the underlying tree's `iter_entries`. Returns `None` if
+    /// no tree exists locally for that model. Paging is wire
+    /// shape and lives in the adapter, not on this trait — the
+    /// stream just yields entries one at a time.
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>>;
+
+    /// Apply every entry in `page` to the local `(model_id,
+    /// tree_kind)` tree, creating the tree if it doesn't yet
+    /// exist locally. Returns the number of entries successfully
+    /// applied (entries whose variant doesn't match `tree_kind`
+    /// are logged and skipped, not applied). Idempotent —
+    /// reapplying the same page is a no-op on the tree state
+    /// because the underlying radix tree's `insert_text` /
+    /// `insert_tokens` are themselves idempotent for the same
+    /// `(path, tenant)` pair.
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize;
 }
 
 impl TreeHandle for CacheAwarePolicy {
@@ -783,35 +670,149 @@ impl TreeHandle for CacheAwarePolicy {
             }
         }
     }
+
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
+        let model_id = normalize_model_key(model_id);
+        match tree_kind {
+            TreeKind::String => {
+                let tree = self.string_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(path, tenants)| {
+                    RepairEntry::String { path, tenants }
+                })))
+            }
+            TreeKind::Token => {
+                let tree = self.token_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(tokens, tenants)| {
+                    RepairEntry::Token { tokens, tenants }
+                })))
+            }
+        }
+    }
+
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize {
+        let model_id = normalize_model_key(&page.model_id);
+        let mut applied: usize = 0;
+        match page.tree_kind {
+            TreeKind::String => {
+                // Create the tree on first repair page if it
+                // doesn't exist yet locally — repair is the
+                // primary cold-start path for a fresh peer.
+                let tree = self
+                    .string_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(Tree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::String { path, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_text(path, tenant);
+                            }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .string_tree
+                                .insert(kv_index::hash_node_path(path), path.clone());
+                            applied += 1;
+                        }
+                        RepairEntry::Token { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=String but entry kind=Token; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+            TreeKind::Token => {
+                let tree = self
+                    .token_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(TokenTree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::Token { tokens, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_tokens(tokens, tenant);
+                            }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .token_tree
+                                .insert(kv_index::hash_token_path(tokens), tokens.clone());
+                            applied += 1;
+                        }
+                        RepairEntry::String { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=Token but entry kind=String; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        applied
+    }
 }
 
 impl LoadBalancingPolicy for CacheAwarePolicy {
     fn select_worker(&self, workers: &[Arc<dyn Worker>], info: &SelectWorkerInfo) -> Option<usize> {
         let request_text = info.request_text;
         let request_tokens = info.tokens;
-        let healthy_indices = get_healthy_worker_indices(workers);
+
+        // Single O(workers) gather: read each worker once via routing_state()
+        // (status + load + processed under one ArcSwap guard), replacing the
+        // former separate passes whose per-worker guard traffic dominated routing
+        // CPU at scale. Collects healthy indices, load min/max, and the min-load
+        // index; cache-hit tenant lookup is a hash-free scan over healthy_indices.
+        let mut healthy_indices: Vec<usize> = Vec::with_capacity(workers.len());
+        let mut min_load = usize::MAX;
+        let mut max_load = 0usize;
+        // Min-load worker, (load, processed_requests, idx) tie-break (#1714);
+        // `processed` rides the same guard as `load`, so it is free here.
+        let mut min_key: Option<(usize, usize, usize)> = None;
+        let mut min_load_idx: Option<usize> = None;
+        for (idx, worker) in workers.iter().enumerate() {
+            let state = worker.routing_state();
+            if state.healthy && state.can_execute {
+                healthy_indices.push(idx);
+                min_load = min_load.min(state.load);
+                max_load = max_load.max(state.load);
+                let key = (state.load, state.processed, idx);
+                match min_key {
+                    Some(best) if key >= best => {}
+                    _ => {
+                        min_key = Some(key);
+                        min_load_idx = Some(idx);
+                    }
+                }
+            }
+        }
 
         if healthy_indices.is_empty() {
             return None;
         }
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
 
         // Determine the model for this set of workers (router pre-filters by model)
         // All workers should be from the same model
         let model_id = normalize_model_key(workers[healthy_indices[0]].model_id());
 
-        // Get current load statistics - compute min/max in single pass without allocation
-        let (min_load, max_load) = workers.iter().fold((usize::MAX, 0usize), |(min, max), w| {
-            let load = w.load();
-            (min.min(load), max.max(load))
-        });
-        let min_load = if min_load == usize::MAX { 0 } else { min_load };
-
-        // Check if load is imbalanced
-        let is_imbalanced = max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
-            && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold);
-
-        if is_imbalanced {
-            return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
+        // Abandon cache affinity for shortest-queue when the pool is imbalanced —
+        // by request count (using the loads already gathered above), or (for
+        // long-context workloads) by backend KV usage.
+        if self.is_imbalanced(workers, &healthy_indices, min_load, max_load) {
+            return self.select_worker_min_load(workers, info, min_load_idx, model_id);
         }
 
         // Cache-aware routing when balanced — three types (mutually exclusive):
@@ -820,13 +821,25 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
             if self.has_event_indexer(model_id) {
-                self.select_worker_event_driven(workers, tokens, &healthy_indices, model_id)
+                self.select_worker_event_driven(
+                    workers,
+                    tokens,
+                    &healthy_indices,
+                    min_load_idx,
+                    model_id,
+                )
             } else {
-                self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
+                self.select_worker_with_tokens(
+                    workers,
+                    tokens,
+                    &healthy_indices,
+                    min_load_idx,
+                    model_id,
+                )
             }
         } else {
             let text = request_text.unwrap_or("");
-            self.select_worker_with_text(workers, text, &healthy_indices, model_id)
+            self.select_worker_with_text(workers, text, &healthy_indices, min_load_idx, model_id)
         }
     }
 
@@ -879,6 +892,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let guard = self.kv_monitor.read();
@@ -896,11 +910,8 @@ impl CacheAwarePolicy {
             return Some(idx);
         }
 
-        // No cache overlap — min-load fallback (no token tree involved)
-        let min_idx = healthy_indices
-            .iter()
-            .min_by_key(|&&idx| workers[idx].load())
-            .copied()?;
+        // No cache overlap — min-load fallback (min-load index gathered upstream)
+        let min_idx = min_load_idx?;
         debug!(
             worker = workers[min_idx].url(),
             model_id, "Event-driven routing: no overlap, min-load fallback"
@@ -977,6 +988,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let tree = self
@@ -985,29 +997,44 @@ impl CacheAwarePolicy {
             .map(|entry| entry.value().clone());
 
         if let Some(tree) = tree {
-            let result = tree.match_prefix_with_counts(tokens);
-            let match_rate = if result.input_token_count == 0 {
-                0.0
-            } else {
-                result.matched_token_count as f32 / result.input_token_count as f32
-            };
+            // Single tree descent: match, pick the worker from the match
+            // result, then insert for it — replacing the former
+            // match_prefix_with_counts + insert_tokens pair (two full descents
+            // over the same prefix). The selection closure runs once, after the
+            // match, mirroring the previous branch exactly:
+            //   * cache hit  (match_rate > threshold): route to the matched
+            //     worker if it is still healthy — insert for it;
+            //   * cache miss (match_rate <= threshold): route to the least-loaded
+            //     worker — insert for it;
+            //   * matched worker gone/unhealthy: select nothing and DON'T insert
+            //     (closure returns None), falling back to first-healthy below.
+            let mut selected_idx: Option<usize> = None;
+            let result = tree.match_and_insert_with(tokens, |result| {
+                let match_rate = if result.input_token_count == 0 {
+                    0.0
+                } else {
+                    result.matched_token_count as f32 / result.input_token_count as f32
+                };
 
-            let selected_idx = if match_rate > self.config.cache_threshold {
-                let tenant_url: &str = &result.tenant;
-                workers
-                    .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
-            } else {
-                healthy_indices
-                    .iter()
-                    .min_by_key(|&&idx| workers[idx].load())
-                    .copied()
-            };
+                selected_idx = if match_rate > self.config.cache_threshold {
+                    // Cache hit: scan healthy_indices for the tenant (hash-free;
+                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
+                    // a CB-tripped tenant falls through to min-load (intended).
+                    let tenant_url: &str = &result.tenant;
+                    healthy_indices
+                        .iter()
+                        .copied()
+                        .find(|&idx| workers[idx].url() == tenant_url)
+                } else {
+                    min_load_idx
+                };
+
+                // Insert for the selected worker (None => no insert, exactly
+                // like the old `if let Some(idx)` guard around insert_tokens).
+                selected_idx.map(|idx| workers[idx].url())
+            });
 
             if let Some(idx) = selected_idx {
-                tree.insert_tokens(tokens, workers[idx].url());
-
                 // Record hash(full_tokens)→matched_prefix tokens.
                 // The hash key matches what sync_tree_operation
                 // sends on the wire (hash of full sequence). The
@@ -1018,15 +1045,15 @@ impl CacheAwarePolicy {
                 // incoming token delta, so maintain it alongside
                 // the tree. Mirrors the string side at the
                 // analogous block; reuses the match `result`
-                // already computed at the top of this branch.
-                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
-
-                self.sync_insert_tokens(model_id, tokens, workers[idx].url());
+                // returned by match_and_insert_with.
+                if self.should_populate_hash_index() {
+                    let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .token_tree
+                        .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                }
                 workers[idx].increment_processed();
                 return Some(idx);
             }
@@ -1051,6 +1078,7 @@ impl CacheAwarePolicy {
         workers: &[Arc<dyn Worker>],
         text: &str,
         healthy_indices: &[usize],
+        min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
         let tree = self
@@ -1059,29 +1087,37 @@ impl CacheAwarePolicy {
             .map(|entry| entry.value().clone());
 
         if let Some(tree) = tree {
-            let result = tree.match_prefix_with_counts(text);
-            let match_rate = if result.input_char_count == 0 {
-                0.0
-            } else {
-                result.matched_char_count as f32 / result.input_char_count as f32
-            };
+            // Single tree descent: match, pick the worker from the match result,
+            // then insert for it — replacing the former match_prefix_with_counts
+            // + insert_text pair. Selection logic is unchanged (see the token
+            // path for the per-branch rationale).
+            let mut selected_idx: Option<usize> = None;
+            let result = tree.match_and_insert_with(text, |result| {
+                let match_rate = if result.input_char_count == 0 {
+                    0.0
+                } else {
+                    result.matched_char_count as f32 / result.input_char_count as f32
+                };
 
-            let selected_idx = if match_rate > self.config.cache_threshold {
-                let tenant_url: &str = &result.tenant;
-                workers
-                    .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
-            } else {
-                healthy_indices
-                    .iter()
-                    .min_by_key(|&&idx| workers[idx].load())
-                    .copied()
-            };
+                selected_idx = if match_rate > self.config.cache_threshold {
+                    // Cache hit: scan healthy_indices for the tenant (hash-free;
+                    // url() is cheap). "Healthy" excludes circuit-broken workers, so
+                    // a CB-tripped tenant falls through to min-load (intended).
+                    let tenant_url: &str = &result.tenant;
+                    healthy_indices
+                        .iter()
+                        .copied()
+                        .find(|&idx| workers[idx].url() == tenant_url)
+                } else {
+                    min_load_idx
+                };
+
+                // Insert for the selected worker (None => no insert, exactly
+                // like the old `if let Some(idx)` guard around insert_text).
+                selected_idx.map(|idx| workers[idx].url())
+            });
 
             if let Some(idx) = selected_idx {
-                tree.insert_text(text, workers[idx].url());
-
                 // Record hash(full_text)→matched_prefix for mesh tenant delta
                 // resolution. The hash key matches what sync_tree_operation sends
                 // on the wire (hash of full text). The VALUE is only the matched
@@ -1089,16 +1125,16 @@ impl CacheAwarePolicy {
                 // remote delta arrives, we look up the hash and call
                 // insert_text(matched_prefix, worker) which routes to the same
                 // tree node. This keeps the index memory-bounded.
-                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
-                let path_hash = smg_mesh::hash_node_path(text);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(path_hash, matched_prefix);
-
-                // Use hash-based sync to avoid cloning 80k+ prompt text.
-                self.sync_insert_hash(model_id, path_hash, workers[idx].url());
+                if self.should_populate_hash_index() {
+                    let matched_prefix: String =
+                        text.chars().take(result.matched_char_count).collect();
+                    let path_hash = kv_index::hash_node_path(text);
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .string_tree
+                        .insert(path_hash, matched_prefix);
+                }
 
                 workers[idx].increment_processed();
                 return Some(idx);
@@ -1128,10 +1164,10 @@ impl Default for CacheAwarePolicy {
 #[cfg(test)]
 mod tests {
     use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
-    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerStatus};
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, WorkerType, UNKNOWN_MODEL_ID};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     fn no_health_check() -> HealthCheckConfig {
         HealthCheckConfig {
@@ -1213,6 +1249,8 @@ mod tests {
             eviction_interval_secs: 0, // Disable eviction thread
             max_tree_size: 10000,
             block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         });
 
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
@@ -1242,6 +1280,160 @@ mod tests {
             let idx = policy.select_worker(&workers, &info).unwrap();
             assert_eq!(idx, 1); // Should always pick worker2
         }
+    }
+
+    // ---- is_imbalanced: 3-term trigger (overload ∨ KV-spread ∨ count) ----
+
+    /// Single-DP load snapshot reporting the given KV utilization (0.0–1.0).
+    fn kv_load(token_usage: f64) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            loads: vec![SchedulerLoadSnapshot {
+                token_usage,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Healthy workers (health checks disabled) for the given URLs.
+    fn make_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
+        urls.iter()
+            .map(|u| {
+                Arc::new(
+                    BasicWorkerBuilder::new(*u)
+                        .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
+                        .build(),
+                ) as Arc<dyn Worker>
+            })
+            .collect()
+    }
+
+    /// Inject a backend KV snapshot (utilization per worker, by index). Returns
+    /// the sender; bind it (`let _tx = ...`) to keep the watch channel open.
+    fn inject_kv(
+        policy: &CacheAwarePolicy,
+        workers: &[Arc<dyn Worker>],
+        usages: &[f64],
+    ) -> watch::Sender<HashMap<String, WorkerLoadResponse>> {
+        let map: HashMap<String, WorkerLoadResponse> = workers
+            .iter()
+            .zip(usages)
+            .map(|(w, &u)| (w.url().to_string(), kv_load(u)))
+            .collect();
+        let (tx, rx) = watch::channel(map);
+        policy.set_load_receiver(Some(rx));
+        tx
+    }
+
+    /// Config isolating the KV triggers (count effectively disabled): `balance`
+    /// is the spread threshold, `overload` the ceiling.
+    fn kv_only_config(balance_spread: f32, overload_ceiling: f32) -> CacheAwareConfig {
+        CacheAwareConfig {
+            balance_abs_threshold: usize::MAX,
+            eviction_interval_secs: 0,
+            balance_token_usage_threshold: balance_spread,
+            overload_token_usage_threshold: overload_ceiling,
+            ..Default::default()
+        }
+    }
+
+    fn all_healthy(workers: &[Arc<dyn Worker>]) -> Vec<usize> {
+        (0..workers.len()).collect()
+    }
+
+    /// Run the imbalance check the way `select_worker` does: fold the request-count
+    /// bounds over the healthy workers (production gathers them in one pass), then
+    /// call `is_imbalanced`.
+    fn imbalanced(policy: &CacheAwarePolicy, workers: &[Arc<dyn Worker>]) -> bool {
+        let healthy = all_healthy(workers);
+        let (min_load, max_load) = healthy
+            .iter()
+            .fold((usize::MAX, 0usize), |(min, max), &idx| {
+                let load = workers[idx].load();
+                (min.min(load), max.max(load))
+            });
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
+        policy.is_imbalanced(workers, &healthy, min_load, max_load)
+    }
+
+    #[test]
+    fn is_imbalanced_uniform_high_kv_does_not_fire() {
+        // All engines equally saturated: high utilization, zero spread.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.9, 0.9, 0.9]);
+        // max 0.9 < 0.95 ceiling, spread 0.0 < 0.3 → keep cache affinity.
+        assert!(
+            !imbalanced(&policy, &workers),
+            "uniform-high KV (no cooler home) must not abandon cache affinity"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_one_hot_rest_idle_fires_via_spread() {
+        // Same hottest engine (0.9) as the uniform case, but neighbors are idle.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.9, 0.15, 0.15]);
+        // spread 0.75 > 0.3 → spill toward a cooler engine.
+        assert!(
+            imbalanced(&policy, &workers),
+            "a hot engine with idle neighbors (large KV spread) must rebalance"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_overload_ceiling_fires_below_spread() {
+        // Critically hot engine, but the spread is under the balance threshold.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.97, 0.80]);
+        // spread 0.17 < 0.3 (balance quiet) but 0.97 > 0.95 ceiling → shed.
+        assert!(
+            imbalanced(&policy, &workers),
+            "a critically-saturated engine must shed even below the spread threshold"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_high_count_low_kv_caught_by_count() {
+        // KV is even, so both KV triggers stay quiet — count must still catch it.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            balance_token_usage_threshold: 0.3,
+            overload_token_usage_threshold: 0.95,
+            ..Default::default()
+        });
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.3, 0.3]);
+        for _ in 0..20 {
+            workers[0].increment_load();
+        }
+        // KV spread 0.0, max 0.3 → KV quiet; count 20 vs 0 → fire.
+        assert!(
+            imbalanced(&policy, &workers),
+            "count spread must still trigger when KV utilization looks even"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_kv_disabled_by_default_ignores_snapshot() {
+        // Default config: both KV thresholds 1.0 (disabled).
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        // A massive KV spread that WOULD fire if KV balancing were enabled...
+        let _tx = inject_kv(&policy, &workers, &[0.95, 0.05]);
+        // ...is ignored at the 1.0 default; counts balanced → no rebalance.
+        assert!(
+            !imbalanced(&policy, &workers),
+            "default thresholds (1.0) must ignore KV usage entirely"
+        );
     }
 
     #[test]
@@ -1302,155 +1494,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_aware_sync_tree_operation_to_mesh() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
-            BasicWorkerBuilder::new("http://w1:8000")
-                .worker_type(WorkerType::Regular)
-                .api_key("test_api_key")
-                .health_config(no_health_check())
-                .build(),
-        )];
-
-        policy.init_workers(&workers);
-
-        // Select worker with a request - should sync to mesh
-        let _idx = policy
-            .select_worker(
-                &workers,
-                &SelectWorkerInfo {
-                    request_text: Some("test request"),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        // Verify the tree version was bumped (sync_tree_operation buffers
-        // tenant deltas and bumps version, but does not store full prompt text).
-        // get_tree_state returns None without a checkpoint, but the version
-        // counter proves the operation was processed.
-        assert!(
-            mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_none(),
-            "get_tree_state should be None until checkpoint runs"
-        );
-    }
-
-    #[test]
-    fn test_cache_aware_restore_tree_state_from_mesh() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        // Pre-populate mesh with tree state via apply_remote_tree_operation
-        // (simulates receiving a full tree state from another node)
-        let mut ts = smg_mesh::TreeState::new("model1".to_string());
-        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_1".to_string()),
-            tenant: "http://w1:8000".to_string(),
-        }));
-        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_2".to_string()),
-            tenant: "http://w2:8000".to_string(),
-        }));
-        mesh_sync.apply_remote_tree_operation("model1".to_string(), ts, None);
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        // Verify local tree was populated from mesh state
-        let tree = policy.string_trees.get("model1");
-        assert!(tree.is_some());
-
-        let tree_state = mesh_sync.get_tree_state("model1").unwrap();
-        assert_eq!(tree_state.operations.len(), 2);
-    }
-
-    #[test]
-    fn test_cache_aware_apply_remote_tree_operation() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        // Apply remote tree operation
-        let remote_op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("remote_text".to_string()),
-            tenant: "http://remote:8000".to_string(),
-        });
-
-        policy.apply_remote_tree_operation("model1", &remote_op);
-
-        // Verify the string tree was updated.
-        let tree = policy.string_trees.get("model1");
-        assert!(tree.is_some());
-    }
-
-    #[test]
-    fn test_cache_aware_apply_remote_token_tree_operation() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync));
-
-        let remote_op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Tokens(vec![1; 16]),
-            tenant: "http://remote:8000".to_string(),
-        });
-
-        policy.apply_remote_tree_operation("model1", &remote_op);
-
-        let tree = policy.token_trees.get("model1");
-        assert!(tree.is_some());
-    }
-
-    #[test]
     fn test_apply_known_remote_insert_round_trip() {
-        // Populate via apply_remote_tree_operation (which goes
-        // through apply_insert_to_trees and seeds hash_index for
-        // both kinds), then verify apply_known_remote_insert
-        // resolves the hash and returns true. Unknown hashes
-        // return false. Wrong-kind lookups against the same
-        // hash return false (model + kind scope the index).
-        use smg_mesh::{TreeInsertOp, TreeKey, TreeOperation};
-
+        // Seed both kinds via `apply_repair_page` (the v2 cold-start
+        // path that populates hash_index), then verify
+        // `apply_known_remote_insert` resolves the hash and returns
+        // true. Unknown hashes return false. Wrong-kind lookups
+        // against the same hash return false (model + kind scope
+        // the index).
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
             ..Default::default()
@@ -1459,23 +1509,36 @@ mod tests {
 
         let text = "remote_text";
         let tokens = vec![1u32, 2, 3, 4];
-        policy.apply_remote_tree_operation(
-            "model1",
-            &TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Text(text.to_string()),
-                tenant: "http://w1".to_string(),
-            }),
-        );
-        policy.apply_remote_tree_operation(
-            "model1",
-            &TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Tokens(tokens.clone()),
-                tenant: "http://w1".to_string(),
-            }),
-        );
+        let string_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::String,
+            page_index: 0,
+            entries: vec![RepairEntry::String {
+                path: text.to_string(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&string_page), 1);
 
-        let text_hash = smg_mesh::hash_node_path(text);
-        let token_hash = smg_mesh::hash_token_path(&tokens);
+        let token_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: vec![RepairEntry::Token {
+                tokens: tokens.clone(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&token_page), 1);
+
+        let text_hash = kv_index::hash_node_path(text);
+        let token_hash = kv_index::hash_token_path(&tokens);
 
         // Known hashes apply for the matching kind.
         assert!(policy.apply_known_remote_insert(
@@ -1515,19 +1578,77 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_repair_page_seeds_hash_index() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let text = "repaired text";
+        let tokens = vec![1u32; 16];
+
+        let string_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::String,
+            page_index: 0,
+            entries: vec![RepairEntry::String {
+                path: text.to_string(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&string_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::String,
+            kv_index::hash_node_path(text),
+            "http://w2",
+        ));
+
+        let token_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: vec![RepairEntry::Token {
+                tokens: tokens.clone(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&token_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::Token,
+            kv_index::hash_token_path(&tokens),
+            "http://w2",
+        ));
+    }
+
+    #[test]
     fn test_apply_known_remote_insert_from_request_hot_path() {
         // Companion to `test_apply_known_remote_insert_round_trip`.
-        // That test seeds via `apply_remote_tree_operation`, which
-        // stores full text/tokens. The local request hot path
+        // That test seeds via `apply_repair_page`, which stores
+        // full text/tokens. The local request hot path
         // (`select_worker_with_text` / `_with_tokens` plus the
         // imbalanced fallback) stores the *matched prefix* shape
         // instead. A regression on the matched-prefix apply path
         // would still pass the full-path test, so seed via
         // `select_worker` here and assert apply succeeds.
+        //
+        // Opt into request-hot-path hash_index population — without
+        // this the populate sites are no-ops and the apply call
+        // below would have nothing to resolve. In production this
+        // flag is flipped by the mesh wiring code; here we set it
+        // directly because the test mimics the mesh consumer.
         let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             eviction_interval_secs: 0,
             ..Default::default()
         });
+        policy.set_populate_hash_index(true);
         let workers: Vec<Arc<dyn Worker>> = vec![
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
@@ -1556,7 +1677,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let text_hash = smg_mesh::hash_node_path(text);
+        let text_hash = kv_index::hash_node_path(text);
 
         // Drive a token request — populates the token-side
         // hash_index. select_worker uses the model_id from the
@@ -1572,7 +1693,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let token_hash = smg_mesh::hash_token_path(&tokens);
+        let token_hash = kv_index::hash_token_path(&tokens);
 
         // Both populate sites use UNKNOWN_MODEL_ID for these
         // workers (no model_id set on the builder), and the
@@ -1581,46 +1702,6 @@ mod tests {
         // sites wrote.
         assert!(policy.apply_known_remote_insert("", TreeKind::String, text_hash, "http://remote",));
         assert!(policy.apply_known_remote_insert("", TreeKind::Token, token_hash, "http://remote",));
-    }
-
-    #[test]
-    fn test_cache_aware_multi_node_consistency() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        // Simulate two nodes
-        let stores1 = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync1 = Arc::new(MeshSyncManager::new(stores1.clone(), "node1".to_string()));
-
-        let stores2 = Arc::new(StateStores::with_self_name("node2".to_string()));
-        let mesh_sync2 = Arc::new(MeshSyncManager::new(stores2.clone(), "node2".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-
-        let _policy1 = CacheAwarePolicy::with_config(config.clone());
-        _policy1.set_mesh_sync(Some(mesh_sync1.clone()));
-        let _policy2 = CacheAwarePolicy::with_config(config);
-        _policy2.set_mesh_sync(Some(mesh_sync2.clone()));
-
-        // Node1 syncs a tree operation
-        let op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("shared_text".to_string()),
-            tenant: "http://shared:8000".to_string(),
-        });
-        mesh_sync1
-            .sync_tree_operation("model1".to_string(), op.clone())
-            .unwrap();
-
-        // Node2 should be able to get the tree state
-        let tree_state = mesh_sync2.get_tree_state("model1");
-        // Note: In a real scenario, this would be synced via gossip protocol
-        // For unit test, we verify the sync mechanism works
-        // Tree state may or may not exist depending on sync timing
-        let _ = tree_state;
     }
 
     #[test]
@@ -1666,7 +1747,7 @@ mod tests {
         jump_size: usize,
     ) -> Arc<PositionalIndexer> {
         let indexer = Arc::new(PositionalIndexer::new(jump_size));
-        let worker_id = indexer.intern_worker(worker_url);
+        let worker_id = indexer.intern_worker(worker_url).unwrap();
         let mut wb = WorkerBlockMap::default();
         let blocks: Vec<StoredBlock> = token_chunks
             .iter()
@@ -1782,8 +1863,8 @@ mod tests {
 
         // Store same blocks for both workers (equal overlap)
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         let blocks = vec![StoredBlock {
@@ -1826,8 +1907,8 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
 
@@ -1895,8 +1976,8 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
 
@@ -2145,7 +2226,7 @@ mod tests {
 
         // Store blocks using block_size=8 (tokens chunked in groups of 8)
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
@@ -2182,6 +2263,8 @@ mod tests {
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0,
             block_size: 4,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
             ..Default::default()
         });
 
@@ -2252,24 +2335,28 @@ mod tests {
         // Empty indexer → has_event_indexer returns false → falls through to token tree
         assert!(!policy.has_event_indexer("unknown"));
 
-        // Route a request — should use token tree, not event-driven min-load
+        // Tokens must be >= PAGE_SIZE (16) to populate the tree; shorter
+        // sequences are uncacheable and fall through to min-load.
+        let tokens: Vec<u32> = (1..=16).collect();
+
+        // First request populates the token tree for the selected worker.
         let idx = policy
             .select_worker(
                 &workers,
                 &SelectWorkerInfo {
-                    tokens: Some(&[1, 2, 3, 4]),
+                    tokens: Some(&tokens),
                     ..Default::default()
                 },
             )
             .unwrap();
         assert!(idx < 2); // valid worker via token tree
 
-        // Route the same tokens again — token tree should route to same worker (cache hit)
+        // Same tokens again — token-tree cache hit routes to the same worker.
         let idx2 = policy
             .select_worker(
                 &workers,
                 &SelectWorkerInfo {
-                    tokens: Some(&[1, 2, 3, 4]),
+                    tokens: Some(&tokens),
                     ..Default::default()
                 },
             )

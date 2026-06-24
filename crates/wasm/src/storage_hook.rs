@@ -59,7 +59,6 @@ impl WasmStorageHook {
     /// Use `wasm-tools component new` to wrap a core module if needed.
     pub fn new(wasm_bytes: &[u8]) -> Result<Self, String> {
         let mut config = Config::new();
-        config.async_support(true);
         config.wasm_component_model(true);
         config.epoch_interruption(true);
 
