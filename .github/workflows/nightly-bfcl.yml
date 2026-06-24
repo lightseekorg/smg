@@ -184,7 +184,7 @@ jobs:
                "vllm_tool": "glm47", "vllm_reason": "glm45",
                "smg_tool": "glm47_moe", "smg_reason": "glm45",
                # FP8 load + DeepGEMM warmup on the largest leg: generous startup ceiling.
-               "vllm_extra": "--kv-cache-dtype fp8_e4m3", "gpu_mem": "0.90", "startup_timeout": "3000",
+               "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3", "gpu_mem": "0.90", "startup_timeout": "3000",
                "model_cache": "/raid/models", "arm_mode": "sequential", "max_model_len": "32768"},
           ]
           only = os.environ.get("ONLY", "")
