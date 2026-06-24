@@ -366,9 +366,12 @@ jobs:
           ROOT="$RUNNER_TEMP/bfcl_ab"
           OUT="$RUNNER_TEMP/bfcl_transcripts.tgz"
           if [ -d "$ROOT" ]; then
-            tar -czf "$OUT" -C "$ROOT" . 2>/dev/null || true
-            echo "transcript tarball: $(du -h "$OUT" 2>/dev/null | cut -f1)"
-            echo "contents (head):"; tar tzf "$OUT" 2>/dev/null | head -40 || echo "(empty)"
+            if tar -czf "$OUT" -C "$ROOT" .; then
+              echo "transcript tarball: $(du -h "$OUT" | cut -f1)"
+              echo "contents (head):"; tar tzf "$OUT" | head -40 || true
+            else
+              echo "::warning::failed to create $OUT"
+            fi
           else
             echo "no $ROOT"
           fi
