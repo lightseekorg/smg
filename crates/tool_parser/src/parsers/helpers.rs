@@ -9,10 +9,33 @@ use crate::{
     types::{StreamingParseResult, ToolCallItem},
 };
 
+/// Resolve a property schema to a single representative JSON-schema type,
+/// looking through the common nullable/union spellings so an optional `string`
+/// is still treated as `string`:
+/// - scalar: `{"type": "string"}`
+/// - nullable array: `{"type": ["string", "null"]}` (first non-`null`)
+/// - union: `{"anyOf"|"oneOf": [{"type": "string"}, {"type": "null"}]}`
+fn schema_type(schema: &Value) -> Option<&str> {
+    if let Some(t) = schema.get("type").and_then(Value::as_str) {
+        return Some(t);
+    }
+    if let Some(arr) = schema.get("type").and_then(Value::as_array) {
+        return arr.iter().filter_map(Value::as_str).find(|t| *t != "null");
+    }
+    ["anyOf", "oneOf"].iter().find_map(|key| {
+        schema
+            .get(key)
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(schema_type)
+            .find(|t| *t != "null")
+    })
+}
+
 /// `param_name -> declared JSON-schema type` for the named function (empty if the
 /// function or its `properties` are absent). Lets XML-style parsers coerce by the
 /// declared type instead of guessing from text (e.g. keep a numeric-looking
-/// `string` as a string).
+/// `string` as a string). Nullable/union schemas resolve to their non-`null` type.
 pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<String, String> {
     let mut types = HashMap::new();
     let Some(tool) = tools.iter().find(|t| t.function.name == func_name) else {
@@ -25,7 +48,7 @@ pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<Stri
         .and_then(Value::as_object)
     {
         for (key, schema) in props {
-            if let Some(ty) = schema.get("type").and_then(Value::as_str) {
+            if let Some(ty) = schema_type(schema) {
                 types.insert(key.clone(), ty.to_string());
             }
         }
@@ -660,5 +683,33 @@ mod tests {
         // unknown type / value that fails to parse -> None (caller infers)
         assert_eq!(coerce_by_schema_type("4", None), None);
         assert_eq!(coerce_by_schema_type("abc", Some("integer")), None);
+    }
+
+    #[test]
+    fn test_param_types_nullable_and_union() {
+        use openai_protocol::common::Function;
+        let tools = vec![Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: "f".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": ["string", "null"]},
+                        "c": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "d": {"type": ["null", "integer"]},
+                    }
+                }),
+                strict: None,
+            },
+        }];
+        let types = param_types_for_function(&tools, "f");
+        // Optional/nullable strings still resolve to "string" (not dropped).
+        assert_eq!(types.get("a").map(String::as_str), Some("string"));
+        assert_eq!(types.get("b").map(String::as_str), Some("string"));
+        assert_eq!(types.get("c").map(String::as_str), Some("string"));
+        assert_eq!(types.get("d").map(String::as_str), Some("integer"));
     }
 }
