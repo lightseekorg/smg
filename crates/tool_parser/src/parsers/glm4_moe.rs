@@ -418,4 +418,24 @@ mod tests {
         assert_eq!(args["coords"], Value::String("[60,30]".to_string()));
         assert_eq!(args["count"], Value::Number(5.into()));
     }
+
+    // The streaming path threads `tools` separately, so cover it too.
+    #[tokio::test]
+    async fn test_streaming_schema_aware_coercion() {
+        let tools = tool_with_props(serde_json::json!({
+            "limit": {"type": "string"},
+            "count": {"type": "integer"},
+        }));
+        let text = "<tool_call>f\n\
+            <arg_key>limit</arg_key>\n<arg_value>4</arg_value>\n\
+            <arg_key>count</arg_key>\n<arg_value>5</arg_value>\n\
+            </tool_call>";
+        let result = Glm4MoeParser::glm45()
+            .parse_incremental(text, &tools)
+            .await
+            .unwrap();
+        let args: Value = serde_json::from_str(&result.calls[0].parameters).unwrap();
+        assert_eq!(args["limit"], Value::String("4".to_string()));
+        assert_eq!(args["count"], Value::Number(5.into()));
+    }
 }

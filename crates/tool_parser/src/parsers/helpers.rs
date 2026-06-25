@@ -9,30 +9,11 @@ use crate::{
     types::{StreamingParseResult, ToolCallItem},
 };
 
-/// Representative JSON-schema type for a property, resolving the common nullable/
-/// union spellings (`["string","null"]`, `anyOf`/`oneOf`) to their non-`null`
-/// type so an optional string still resolves to `string`.
-fn schema_type(schema: &Value) -> Option<&str> {
-    if let Some(t) = schema.get("type").and_then(Value::as_str) {
-        return Some(t);
-    }
-    if let Some(arr) = schema.get("type").and_then(Value::as_array) {
-        return arr.iter().filter_map(Value::as_str).find(|t| *t != "null");
-    }
-    ["anyOf", "oneOf"].iter().find_map(|key| {
-        schema
-            .get(key)
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(schema_type)
-            .find(|t| *t != "null")
-    })
-}
-
 /// `param_name -> declared JSON-schema type` for the named function (empty if the
 /// function or its `properties` are absent). Lets XML-style parsers coerce by the
 /// declared type instead of guessing from text (e.g. keep a numeric-looking
-/// `string` as a string). Nullable/union schemas resolve to their non-`null` type.
+/// `string` as a string). Only scalar `type` is read; unions/nullable schemas
+/// have no single type, so they fall back to the caller's inference.
 pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<String, String> {
     let mut types = HashMap::new();
     let Some(tool) = tools.iter().find(|t| t.function.name == func_name) else {
@@ -45,7 +26,7 @@ pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<Stri
         .and_then(Value::as_object)
     {
         for (key, schema) in props {
-            if let Some(ty) = schema_type(schema) {
+            if let Some(ty) = schema.get("type").and_then(Value::as_str) {
                 types.insert(key.clone(), ty.to_string());
             }
         }
@@ -67,12 +48,11 @@ pub fn coerce_by_schema_type(text: &str, declared_type: Option<&str>) -> Option<
             .parse::<i64>()
             .ok()
             .map(|n| Value::Number(n.into())),
-        "number" => text
-            .trim()
-            .parse::<f64>()
+        // Parse as JSON so large integers keep their precision (a plain f64 parse
+        // would round e.g. 9007199254740993).
+        "number" => serde_json::from_str::<Value>(text.trim())
             .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number),
+            .filter(Value::is_number),
         "boolean" => match text.trim() {
             "true" | "True" => Some(Value::Bool(true)),
             "false" | "False" => Some(Value::Bool(false)),
@@ -649,8 +629,13 @@ mod tests {
     #[test]
     fn test_coerce_by_schema_type() {
         use serde_json::json;
-        // string: bare text stays a string; a JSON string literal is unwrapped.
+        // string: numeric/bool/array-looking text stays a string; a JSON string
+        // literal is unwrapped.
         assert_eq!(coerce_by_schema_type("4", Some("string")), Some(json!("4")));
+        assert_eq!(
+            coerce_by_schema_type("true", Some("string")),
+            Some(json!("true"))
+        );
         assert_eq!(
             coerce_by_schema_type("[60,30]", Some("string")),
             Some(json!("[60,30]"))
@@ -669,37 +654,14 @@ mod tests {
             coerce_by_schema_type("[60,30]", Some("array")),
             Some(json!([60, 30]))
         );
+        // number keeps integer precision (no f64 rounding).
+        assert_eq!(
+            coerce_by_schema_type("9007199254740993", Some("number")),
+            Some(json!(9007199254740993i64))
+        );
 
         // unknown type / value that fails to parse -> None (caller infers)
         assert_eq!(coerce_by_schema_type("4", None), None);
         assert_eq!(coerce_by_schema_type("abc", Some("integer")), None);
-    }
-
-    #[test]
-    fn test_param_types_nullable_and_union() {
-        use openai_protocol::common::Function;
-        let tools = vec![Tool {
-            tool_type: "function".to_string(),
-            function: Function {
-                name: "f".to_string(),
-                description: None,
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "string"},
-                        "b": {"type": ["string", "null"]},
-                        "c": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                        "d": {"type": ["null", "integer"]},
-                    }
-                }),
-                strict: None,
-            },
-        }];
-        let types = param_types_for_function(&tools, "f");
-        // Optional/nullable strings still resolve to "string" (not dropped).
-        assert_eq!(types.get("a").map(String::as_str), Some("string"));
-        assert_eq!(types.get("b").map(String::as_str), Some("string"));
-        assert_eq!(types.get("c").map(String::as_str), Some("string"));
-        assert_eq!(types.get("d").map(String::as_str), Some("integer"));
     }
 }
