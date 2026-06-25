@@ -3,7 +3,7 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::OnceLock};
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -326,14 +326,12 @@ fn fir_image_to_dynamic(
 // ---------------------------------------------------------------------------
 // Pillow-exact bicubic resize.
 //
-// HuggingFace's (slow) `Qwen2VLImageProcessor` — which vLLM uses for Qwen2/3-VL
-// — resizes via `PIL.Image.resize(size, BICUBIC)` on the uint8 image. The SIMD
-// `fast_image_resize` path above is the same filter *family* (Catmull-Rom,
-// a=-0.5) but diverges bit-wise on non-integer ratios (support scaling +
-// fixed-point details), which the vision encoder amplifies into a large
-// embedding shift vs vLLM. This routine replicates Pillow's `Resample.c`
-// algorithm exactly (validated bit-for-bit against Pillow) so SMG's encoder
-// inputs match HF/vLLM.
+// Qwen image processors resize via `PIL.Image.resize(size, BICUBIC)` on the
+// uint8 image. The SIMD `fast_image_resize` path above is the same filter
+// *family* (Catmull-Rom, a=-0.5) but diverges bit-wise on non-integer ratios
+// (support scaling + fixed-point details), which the vision encoder amplifies
+// into a large embedding shift. This routine replicates Pillow's `Resample.c`
+// algorithm exactly, validated against Pillow.
 const PIL_PRECISION_BITS: i64 = 32 - 8 - 2;
 const PIL_BICUBIC_SUPPORT: f64 = 2.0;
 
@@ -416,23 +414,46 @@ fn pil_clip8(v: i64) -> u8 {
     }
 }
 
-/// Number of threads to split a resample pass across. Each output row is an
-/// independent fixed-point integer sum, so banding rows over threads yields
-/// BIT-IDENTICAL output (no shared accumulation, inner sum order unchanged).
-/// Small images run serial to avoid thread-spawn overhead.
+struct ParConfig {
+    min_bytes: usize,
+    min_rows_per_thread: usize,
+    max_threads: usize,
+}
+
+fn par_config() -> &'static ParConfig {
+    static PAR_CONFIG: OnceLock<ParConfig> = OnceLock::new();
+    PAR_CONFIG.get_or_init(|| ParConfig {
+        min_bytes: env_usize("SMG_MM_PREPROCESS_PAR_MIN_BYTES", 1 << 19),
+        min_rows_per_thread: env_usize("SMG_MM_PREPROCESS_PAR_MIN_ROWS", 32).max(1),
+        // Preprocessing already runs in the blocking worker pool. Keep each
+        // item from spawning too many additional OS threads at high request
+        // concurrency; large single inputs can opt up via env.
+        max_threads: env_usize("SMG_MM_PREPROCESS_PAR_MAX_THREADS", 8).max(1),
+    })
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+/// Number of threads to split an elementwise or row-banded preprocessing pass
+/// across. Each output row/element is independent, so banding work over threads
+/// yields BIT-IDENTICAL output: no shared accumulation and no inner-loop order
+/// changes. Small images run serial to avoid thread-spawn overhead.
 pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
-    const PAR_MIN_BYTES: usize = 1 << 19; // ~512 KiB output; below this, serial
-    const MIN_ROWS_PER_THREAD: usize = 32; // keep enough work per thread
-    const MAX_THREADS: usize = 32; // spawning hundreds of threads costs more than it saves
-    if out_bytes < PAR_MIN_BYTES || out_rows < 2 * MIN_ROWS_PER_THREAD {
+    let cfg = par_config();
+    if out_bytes < cfg.min_bytes || out_rows < cfg.min_rows_per_thread.saturating_mul(2) {
         return 1;
     }
-    let avail = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    (out_rows / MIN_ROWS_PER_THREAD)
+    static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
+    let avail = *AVAILABLE_PARALLELISM
+        .get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    (out_rows / cfg.min_rows_per_thread)
         .min(avail)
-        .clamp(1, MAX_THREADS)
+        .clamp(1, cfg.max_threads)
 }
 
 /// Process output rows `[oy0, oy0 + out_band.len()/row_out)` of the horizontal
@@ -596,9 +617,8 @@ pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> Dynam
 /// PIL-exact bicubic resize over borrowed interleaved RGB bytes.
 ///
 /// Byte-for-byte equivalent of [`resize_bicubic_pil`] but for the raw-RGB video
-/// frame path (`preprocess_video_rgb`), so default-bicubic video frames match
-/// HF/vLLM the same way images do. Returns an `RgbImage` to drop straight into
-/// the existing [`resize_rgb_bytes`] call sites.
+/// frame path (`preprocess_video_rgb`). Returns an `RgbImage` to drop straight
+/// into the existing [`resize_rgb_bytes`] call sites.
 pub fn resize_bicubic_pil_rgb(
     data: &[u8],
     width: u32,
@@ -876,10 +896,8 @@ mod tests {
     }
 
     /// The raw-RGB video resizer must be byte-for-byte identical to the
-    /// DynamicImage PIL-bicubic resizer used for images, so default-bicubic
-    /// video frames match HF/vLLM exactly — the same bit-identity guarantee
-    /// images get via the fingerprint tests. Guards the video resize path added
-    /// for HF/vLLM parity (`preprocess_video_rgb`).
+    /// DynamicImage PIL-bicubic resizer used for images. Guards the video resize
+    /// path used by `preprocess_video_rgb`.
     #[test]
     fn resize_bicubic_pil_rgb_matches_dynamic_path() {
         let (src_w, src_h) = (37u32, 23u32); // non-aligned source, non-trivial ratios
