@@ -657,7 +657,7 @@ mod tests {
             Some(json!([60, 30]))
         );
 
-        // unknown type / unparseable -> None (caller falls back to inference)
+        // unknown type / value that fails to parse -> None (caller infers)
         assert_eq!(coerce_by_schema_type("4", None), None);
         assert_eq!(coerce_by_schema_type("abc", Some("integer")), None);
     }
