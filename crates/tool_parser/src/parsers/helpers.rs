@@ -33,12 +33,16 @@ pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<Stri
     types
 }
 
-/// Coerce a raw value by its declared JSON-schema type. `string` is kept verbatim;
-/// numeric/boolean/structured types are parsed. `None` (unknown type or parse
-/// failure) means the caller should fall back to its own inference.
+/// Coerce a raw value by its declared JSON-schema type. For `string`, a JSON
+/// string literal (`"4"`) is unwrapped to its content while bare text (`4`,
+/// `true`, `[60,30]`) is kept as the string itself; numeric/boolean/structured
+/// types are parsed. `None` (unknown type or parse failure) means the caller
+/// should fall back to its own inference.
 pub fn coerce_by_schema_type(text: &str, declared_type: Option<&str>) -> Option<Value> {
     match declared_type? {
-        "string" => Some(Value::String(text.to_string())),
+        "string" => Some(Value::String(
+            serde_json::from_str::<String>(text).unwrap_or_else(|_| text.to_string()),
+        )),
         "integer" => text
             .trim()
             .parse::<i64>()
@@ -621,5 +625,40 @@ mod tests {
             normalized.get("arguments").unwrap(),
             &serde_json::json!({"key": "value"})
         );
+    }
+
+    #[test]
+    fn test_coerce_by_schema_type() {
+        use serde_json::json;
+        // string: bare numeric/bool/array-looking text stays a string...
+        assert_eq!(coerce_by_schema_type("4", Some("string")), Some(json!("4")));
+        assert_eq!(
+            coerce_by_schema_type("true", Some("string")),
+            Some(json!("true"))
+        );
+        assert_eq!(
+            coerce_by_schema_type("[60,30]", Some("string")),
+            Some(json!("[60,30]"))
+        );
+        // ...but a JSON string literal is unwrapped to its content.
+        assert_eq!(
+            coerce_by_schema_type("\"4\"", Some("string")),
+            Some(json!("4"))
+        );
+
+        // typed values are parsed
+        assert_eq!(coerce_by_schema_type("4", Some("integer")), Some(json!(4)));
+        assert_eq!(
+            coerce_by_schema_type("true", Some("boolean")),
+            Some(json!(true))
+        );
+        assert_eq!(
+            coerce_by_schema_type("[60,30]", Some("array")),
+            Some(json!([60, 30]))
+        );
+
+        // unknown type / unparseable -> None (caller falls back to inference)
+        assert_eq!(coerce_by_schema_type("4", None), None);
+        assert_eq!(coerce_by_schema_type("abc", Some("integer")), None);
     }
 }
