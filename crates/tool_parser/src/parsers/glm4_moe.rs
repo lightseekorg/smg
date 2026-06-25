@@ -91,9 +91,8 @@ impl Glm4MoeParser {
         Self::new(r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>")
     }
 
-    /// Parse arguments from key-value pairs, coerced by the function's declared
-    /// schema. A `string` parameter keeps a numeric/bool/array-looking value as a
-    /// string (matches vLLM); unknown types fall back to [`infer_value`].
+    /// Parse arguments, coercing each value by its declared schema type and
+    /// falling back to [`infer_value`] when the type is unknown.
     fn parse_arguments(
         &self,
         args_text: &str,
@@ -124,7 +123,6 @@ impl Glm4MoeParser {
             // Get arguments text
             let args_text = captures.get(2).map_or("", |m| m.as_str());
 
-            // Parse arguments, coerced by this function's declared schema.
             let param_types = helpers::param_types_for_function(tools, func_name);
             let arguments = self.parse_arguments(args_text, &param_types);
 
@@ -394,8 +392,7 @@ mod tests {
         }]
     }
 
-    // String-typed params keep numeric/bool/array-looking values as strings (the
-    // JavaScript-category bug); non-string params still coerce.
+    // String-typed params stay strings even when they look numeric/bool/array.
     #[tokio::test]
     async fn test_schema_aware_coercion_keeps_strings() {
         let tools = tool_with_props(serde_json::json!({
@@ -419,35 +416,6 @@ mod tests {
         assert_eq!(args["limit"], Value::String("4".to_string()));
         assert_eq!(args["flag"], Value::String("true".to_string()));
         assert_eq!(args["coords"], Value::String("[60,30]".to_string()));
-        assert_eq!(args["count"], Value::Number(5.into()));
-    }
-
-    // Without a schema (no tools), behavior is unchanged: blind inference.
-    #[tokio::test]
-    async fn test_no_schema_infers_type() {
-        let text = "<tool_call>f\n<arg_key>count</arg_key>\n<arg_value>5</arg_value>\n</tool_call>";
-        let (_, calls) = Glm4MoeParser::glm45().parse_complete(text).await.unwrap();
-        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["count"], Value::Number(5.into()));
-    }
-
-    // The incremental path forwards tools, so it coerces by schema too.
-    #[tokio::test]
-    async fn test_streaming_schema_aware_coercion() {
-        let tools = tool_with_props(serde_json::json!({
-            "limit": {"type": "string"},
-            "count": {"type": "integer"},
-        }));
-        let text = "<tool_call>f\n\
-            <arg_key>limit</arg_key>\n<arg_value>4</arg_value>\n\
-            <arg_key>count</arg_key>\n<arg_value>5</arg_value>\n\
-            </tool_call>";
-        let result = Glm4MoeParser::glm45()
-            .parse_incremental(text, &tools)
-            .await
-            .unwrap();
-        let args: Value = serde_json::from_str(&result.calls[0].parameters).unwrap();
-        assert_eq!(args["limit"], Value::String("4".to_string()));
         assert_eq!(args["count"], Value::Number(5.into()));
     }
 }

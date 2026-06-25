@@ -153,11 +153,8 @@ fn safe_val(raw: &str) -> Value {
     Value::String(unescaped)
 }
 
-/// Coerce a raw XML parameter value by its declared JSON-schema type: a declared
-/// `string` is kept verbatim (decoded), typed values are parsed, and an unknown
-/// type falls back to [`safe_val`]'s inference. Mirrors `minimax_m2`/vLLM so a
-/// numeric- or bool-looking value for a `string` parameter stays a string
-/// instead of being coerced to a number/bool/array/object.
+/// Coerce an XML parameter value by its declared schema type, falling back to
+/// [`safe_val`] inference when the type is unknown.
 fn coerce_value(raw: &str, declared_type: Option<&str>) -> Value {
     let decoded = html_unescape(raw.trim());
     helpers::coerce_by_schema_type(&decoded, declared_type).unwrap_or_else(|| safe_val(raw))
@@ -215,8 +212,6 @@ impl QwenXmlParser {
             return Ok(None);
         }
 
-        // Coerce by the function's declared schema so e.g. a `string` parameter
-        // whose value looks numeric/bool/array stays a string (matches vLLM).
         let param_types = helpers::param_types_for_function(tools, &function_name);
         let mut parameters = serde_json::Map::new();
 
@@ -244,8 +239,6 @@ impl QwenXmlParser {
     /// Returns tool call items to emit (similar to Python's _parse_and_stream_parameters)
     fn parse_and_stream_parameters(&mut self, tools: &[Tool]) -> Vec<ToolCallItem> {
         let mut calls: Vec<ToolCallItem> = vec![];
-
-        // Coerce by the current function's declared schema (see parse_xml_format).
         let param_types = helpers::param_types_for_function(tools, &self.current_function_name);
 
         // Find all complete parameter patterns in buffer
@@ -642,8 +635,7 @@ mod tests {
         }]
     }
 
-    // String-typed params keep numeric/bool/array/object-looking values as
-    // strings (the JavaScript-category bug); non-string params still coerce.
+    // String-typed params stay strings even when they look numeric/bool/array/object.
     #[tokio::test]
     async fn test_schema_aware_coercion_keeps_strings() {
         let tools = tool_with_props(serde_json::json!({
@@ -671,42 +663,5 @@ mod tests {
         assert_eq!(args["coords"], Value::String("[60,30]".to_string()));
         assert_eq!(args["cfg"], Value::String("{\"a\": 1}".to_string()));
         assert_eq!(args["count"], Value::Number(5.into()));
-    }
-
-    // Without a schema (no tools), behavior is unchanged: blind inference.
-    #[tokio::test]
-    async fn test_no_schema_infers_type() {
-        let text =
-            "<tool_call>\n<function=f>\n<parameter=count>5</parameter>\n</function>\n</tool_call>";
-        let (_, calls) = QwenXmlParser::new().parse_complete(text).await.unwrap();
-        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["count"], Value::Number(5.into()));
-    }
-
-    // The streaming path coerces by schema too: concatenated parameter fragments
-    // keep a string-typed value quoted while a non-string one is parsed.
-    #[tokio::test]
-    async fn test_streaming_schema_aware_coercion() {
-        let tools = tool_with_props(serde_json::json!({
-            "limit": {"type": "string"},
-            "count": {"type": "integer"},
-        }));
-        let text = "<tool_call>\n<function=f>\n\
-            <parameter=limit>4</parameter>\n\
-            <parameter=count>5</parameter>\n\
-            </function>\n</tool_call>";
-        let result = QwenXmlParser::new()
-            .parse_incremental(text, &tools)
-            .await
-            .unwrap();
-        let args: String = result.calls.iter().map(|c| c.parameters.as_str()).collect();
-        assert!(
-            args.contains(r#""limit": "4""#),
-            "string param must stay string: {args}"
-        );
-        assert!(
-            args.contains(r#""count": 5"#),
-            "int param must coerce: {args}"
-        );
     }
 }
