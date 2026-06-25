@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -957,6 +958,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         im_token_id = None
         video_token_id = None
         total_started = time.perf_counter() if LOG_MM_TIMING else None
+        deferred_shm_unlinks: set[str] = set()
 
         for item_proto in mm_inputs.items:
             item_started = time.perf_counter() if LOG_MM_TIMING else None
@@ -965,7 +967,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 raise ValueError("MultimodalItem must include encoder_input")
 
             feature_started = time.perf_counter() if LOG_MM_TIMING else None
-            feature = self._feature_from_proto(item_proto.encoder_input, cast_to=model_dtype)
+            feature = self._feature_from_proto(
+                item_proto.encoder_input,
+                cast_to=model_dtype,
+                deferred_unlink_names=deferred_shm_unlinks,
+            )
             feature_elapsed_ms = (
                 (time.perf_counter() - feature_started) * 1000
                 if feature_started is not None
@@ -990,7 +996,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 )
             model_started = time.perf_counter() if LOG_MM_TIMING else None
             model_specific_data = {
-                name: self._tensor_from_proto(tensor_data, cast_to=model_dtype)
+                name: self._tensor_from_proto(
+                    tensor_data,
+                    cast_to=model_dtype,
+                    unlink_after_read=False,
+                    deferred_unlink_names=deferred_shm_unlinks,
+                )
                 for name, tensor_data in item_proto.model_specific_tensors.items()
             }
             model_elapsed_ms = (
@@ -998,11 +1009,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             )
             self._validate_item_tensor_consistency(modality, model_specific_data)
 
-            if not item_proto.placeholders:
-                raise ValueError("MultimodalItem carried no placeholders")
-            if any(p.length <= 0 for p in item_proto.placeholders):
-                raise ValueError("MultimodalItem.placeholders.length must be > 0")
-            offsets = [(p.offset, p.offset + p.length - 1) for p in item_proto.placeholders]
+            offsets, token_count, offset_ends, offset_prefix = (
+                self._offsets_from_proto_placeholders(item_proto.placeholders)
+            )
 
             content_hash = bytes(item_proto.content_hash)
             mm_item = MultimodalDataItem(
@@ -1010,7 +1019,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 feature=feature,
                 model_specific_data=model_specific_data,
                 offsets=offsets,
+                token_count=token_count,
                 hash=int.from_bytes(content_hash[:8], "little") if content_hash else None,
+                offset_ends=offset_ends,
+                offset_prefix=offset_prefix,
             )
             mm_item.set_pad_value()
             items.append(mm_item)
@@ -1051,10 +1063,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 len(items),
                 (time.perf_counter() - total_started) * 1000,
             )
+        self._unlink_deferred_shm(deferred_shm_unlinks)
         return MultimodalInputs(
             mm_items=items,
             im_token_id=im_token_id,
             video_token_id=video_token_id,
+            pad_values_ready=True,
         )
 
     @staticmethod
@@ -1093,9 +1107,50 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             raise ValueError("VIDEO MultimodalItem must carry video_grid_thw")
 
     @staticmethod
+    def _offsets_from_proto_placeholders(
+        placeholders,
+    ) -> tuple[list[tuple[int, int]], int, list[int] | None, list[int] | None]:
+        if len(placeholders) == 1:
+            placeholder = placeholders[0]
+            length = int(placeholder.length)
+            if length <= 0:
+                raise ValueError("MultimodalItem.placeholders.length must be > 0")
+            start = int(placeholder.offset)
+            end = start + length - 1
+            return [(start, end)], length, [end], [0, length]
+
+        offsets = []
+        offset_ends = []
+        offset_prefix = [0]
+        sorted_non_overlapping = True
+        prev_end = -1
+        token_count = 0
+        for placeholder in placeholders:
+            length = int(placeholder.length)
+            if length <= 0:
+                raise ValueError("MultimodalItem.placeholders.length must be > 0")
+            start = int(placeholder.offset)
+            end = start + length - 1
+            if start <= prev_end:
+                sorted_non_overlapping = False
+            offsets.append((start, end))
+            offset_ends.append(end)
+            token_count += length
+            offset_prefix.append(token_count)
+            prev_end = end
+        if not offsets:
+            raise ValueError("MultimodalItem carried no placeholders")
+        if not sorted_non_overlapping:
+            return offsets, token_count, None, None
+        return offsets, token_count, offset_ends, offset_prefix
+
+    @staticmethod
     def _tensor_from_proto(
         tensor_data: tokenspeed_scheduler_pb2.TensorData,
         cast_to: torch.dtype | None = None,
+        *,
+        unlink_after_read: bool = True,
+        deferred_unlink_names: set[str] | None = None,
     ):
         """Reconstruct a torch.Tensor from a proto TensorData.
 
@@ -1103,11 +1158,15 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         copied so it never aliases the transient proto bytes.
         """
         shape = list(tensor_data.shape)
-        raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(tensor_data)
+        raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(
+            tensor_data,
+            unlink_after_read=unlink_after_read,
+            deferred_unlink_names=deferred_unlink_names,
+        )
 
         if tensor_data.dtype == "bfloat16":
             # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
-            expected = int(np.prod(shape, dtype=np.int64)) * np.dtype(np.uint16).itemsize
+            expected = math.prod(shape) * np.dtype(np.uint16).itemsize
             if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for bfloat16 shape={shape}: "
@@ -1118,7 +1177,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             )
         else:
             dtype = np.dtype(tensor_data.dtype)
-            expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+            expected = math.prod(shape) * dtype.itemsize
             if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for dtype={tensor_data.dtype}, "
@@ -1134,6 +1193,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     def _feature_from_proto(
         tensor_data: tokenspeed_scheduler_pb2.TensorData,
         cast_to: torch.dtype | None = None,
+        *,
+        deferred_unlink_names: set[str] | None = None,
     ) -> torch.Tensor | ShmTensorHandle:
         """Reconstruct a feature tensor, preserving SHM handles when possible.
 
@@ -1146,35 +1207,54 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
 
         dtype = TokenSpeedSchedulerServicer._torch_dtype_from_proto(tensor_data.dtype)
-        if (
-            cast_to is not None
-            and dtype != cast_to
-            and torch.is_floating_point(torch.empty((), dtype=dtype))
-        ):
-            return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
-
-        shm = tensor_data.shm
-        if shm.offset != 0:
-            return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
+        if cast_to is not None and dtype != cast_to:
+            return TokenSpeedSchedulerServicer._tensor_from_proto(
+                tensor_data,
+                cast_to=cast_to,
+                unlink_after_read=deferred_unlink_names is None,
+                deferred_unlink_names=deferred_unlink_names,
+            )
 
         shape = tuple(int(dim) for dim in tensor_data.shape)
-        expected = int(np.prod(shape, dtype=np.int64)) * torch.empty((), dtype=dtype).element_size()
-        if int(shm.nbytes) != expected:
+        expected = math.prod(shape) * TokenSpeedSchedulerServicer._torch_dtype_size(dtype)
+        shm = tensor_data.shm
+        offset = int(shm.offset)
+        nbytes = int(shm.nbytes)
+        if offset < 0:
+            raise ValueError(
+                f"TensorData.shm offset must be non-negative for shape={list(shape)}: {offset}"
+            )
+        if nbytes != expected:
             raise ValueError(
                 f"TensorData.shm byte length mismatch for dtype={tensor_data.dtype}, "
-                f"shape={list(shape)}: expected {expected}, got {int(shm.nbytes)}"
+                f"shape={list(shape)}: expected {expected}, got {nbytes}"
             )
 
         name = TokenSpeedSchedulerServicer._validated_shm_name(shm.name)
-        return ShmTensorHandle(shm_name=name, shape=shape, dtype=dtype)
+        return ShmTensorHandle(
+            shm_name=name,
+            shape=shape,
+            dtype=dtype,
+            offset=offset,
+            nbytes=nbytes,
+        )
 
     @staticmethod
-    def _tensor_payload_bytes(tensor_data: tokenspeed_scheduler_pb2.TensorData) -> bytes:
+    def _tensor_payload_bytes(
+        tensor_data: tokenspeed_scheduler_pb2.TensorData,
+        *,
+        unlink_after_read: bool = True,
+        deferred_unlink_names: set[str] | None = None,
+    ) -> bytes:
         payload = tensor_data.WhichOneof("payload")
         if payload == "inline":
             return bytes(tensor_data.inline)
         if payload == "shm":
-            return TokenSpeedSchedulerServicer._tensor_payload_bytes_from_shm(tensor_data.shm)
+            return TokenSpeedSchedulerServicer._tensor_payload_bytes_from_shm(
+                tensor_data.shm,
+                unlink_after_read=unlink_after_read,
+                deferred_unlink_names=deferred_unlink_names,
+            )
         if payload == "remote":
             raise ValueError("TensorData.remote payload is not implemented yet")
         raise ValueError("TensorData payload is required")
@@ -1182,6 +1262,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     @staticmethod
     def _tensor_payload_bytes_from_shm(
         shm_handle: tokenspeed_scheduler_pb2.ShmHandle,
+        *,
+        unlink_after_read: bool = True,
+        deferred_unlink_names: set[str] | None = None,
     ) -> bytes:
         name = TokenSpeedSchedulerServicer._validated_shm_name(shm_handle.name)
 
@@ -1193,18 +1276,27 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         finally:
             if fd is not None:
                 os.close(fd)
-            if fd is not None and UNLINK_MM_SHM_AFTER_READ:
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
 
         if len(raw) != int(shm_handle.nbytes):
             raise ValueError(
                 f"TensorData.shm byte length mismatch for name={shm_handle.name!r}: "
                 f"expected {int(shm_handle.nbytes)}, got {len(raw)}"
             )
+        if unlink_after_read:
+            TokenSpeedSchedulerServicer._unlink_deferred_shm({name})
+        elif deferred_unlink_names is not None and UNLINK_MM_SHM_AFTER_READ:
+            deferred_unlink_names.add(name)
         return raw
+
+    @staticmethod
+    def _unlink_deferred_shm(names: set[str]) -> None:
+        if not UNLINK_MM_SHM_AFTER_READ:
+            return
+        for name in names:
+            try:
+                os.unlink(os.path.join("/dev/shm", name))
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def _validated_shm_name(name: str) -> str:
@@ -1222,6 +1314,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if dtype == "float32":
             return torch.float32
         raise ValueError(f"Unsupported TensorData dtype for SHM feature: {dtype!r}")
+
+    @staticmethod
+    def _torch_dtype_size(dtype: torch.dtype) -> int:
+        if dtype is torch.float32:
+            return 4
+        if dtype is torch.float16 or dtype is torch.bfloat16:
+            return 2
+        return torch.empty((), dtype=dtype).element_size()
 
     @staticmethod
     def _torch_dtype_to_proto(dtype: torch.dtype | None) -> str:

@@ -360,13 +360,15 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
-    let started = Instant::now();
+    let started = log_timing.then(Instant::now);
     match write_tokenspeed_shm(&data) {
         Ok(handle) => {
             if log_timing {
                 tracing::info!(
                     nbytes,
-                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    elapsed_ms = started
+                        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or_default(),
                     "smg_mm_timing tokenspeed_shm_write"
                 );
             }
@@ -387,9 +389,12 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
 }
 
 fn log_tokenspeed_mm_timing_enabled() -> bool {
-    std::env::var("SMG_LOG_MM_TIMING")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SMG_LOG_MM_TIMING")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 /// Multimodal tensor transport mode for the TokenSpeed backend.
@@ -398,25 +403,67 @@ fn log_tokenspeed_mm_timing_enabled() -> bool {
 /// model-specific tensors); prompt `input_ids` are always sent inline. Set via
 /// `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`.
 pub fn tokenspeed_mm_tensor_transport_mode() -> String {
-    std::env::var("SMG_TOKENSPEED_MM_TENSOR_TRANSPORT")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
+    static MODE: OnceLock<String> = OnceLock::new();
+    MODE.get_or_init(|| {
+        std::env::var("SMG_TOKENSPEED_MM_TENSOR_TRANSPORT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+    })
+    .clone()
 }
 
 /// Minimum multimodal tensor size (bytes) before the SHM transport is used.
 /// Set via `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`. Defaults to 64 KiB.
 pub fn tokenspeed_mm_shm_min_bytes() -> usize {
-    std::env::var("SMG_TOKENSPEED_MM_SHM_MIN_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(64 * 1024)
+    static MIN_BYTES: OnceLock<usize> = OnceLock::new();
+    *MIN_BYTES.get_or_init(|| {
+        std::env::var("SMG_TOKENSPEED_MM_SHM_MIN_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(64 * 1024)
+    })
 }
 
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
     write_tokenspeed_shm_with(data.len(), |file| file.write_all(data))
+}
+
+pub(crate) struct CountingWriter<W> {
+    inner: W,
+    bytes_written: usize,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes_written = self.bytes_written.checked_add(n).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TokenSpeed SHM writer byte count overflowed",
+            )
+        })?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Whether SMG can actually create+write files under `/dev/shm`. Probed once;
@@ -494,15 +541,16 @@ fn sweep_orphan_tokenspeed_shm_once() {
     });
 }
 
-// TODO: pack all of a request's tensors (encoder_input + model_specific) into
-// ONE /dev/shm segment at running offsets instead of one file per tensor
-// (ShmHandle.offset already exists, always 0 here). Needs consumer
-// ShmTensorHandle offset support + a per-segment refcount so the segment is
-// unlinked exactly once after all its tensors are consumed. Cleanliness / fewer
-// files, not a measured speed win (tmpfs makes per-file syscalls negligible).
-pub fn write_tokenspeed_shm_with(
+// Multimodal assembly can pack multiple encoder_input tensors into one segment
+// by cloning this returned handle and setting per-tensor offsets. Do not pack
+// model-specific tensors into that same segment until the worker has segment
+// refcounting: those tensors are read and unlinked by the gRPC servicer before
+// encoder_input handles are materialized by TokenSpeed's multimodal planner.
+pub(crate) fn write_tokenspeed_shm_with(
     nbytes: usize,
-    write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> std::io::Result<()>,
+    write_fn: impl FnOnce(
+        &mut CountingWriter<BufWriter<std::fs::File>>,
+    ) -> std::io::Result<()>,
 ) -> std::io::Result<tokenspeed::ShmHandle> {
     sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();
@@ -516,14 +564,14 @@ pub fn write_tokenspeed_shm_with(
         opts.mode(0o600);
     }
     let file = opts.open(&path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = CountingWriter::new(BufWriter::new(file));
     if let Err(error) = write_fn(&mut writer) {
         drop(writer);
         let _ = remove_file(&path);
         return Err(error);
     }
     if let Err(error) = writer.flush().and_then(|()| {
-        if writer.get_ref().metadata()?.len() != nbytes as u64 {
+        if writer.bytes_written() != nbytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "TokenSpeed SHM writer produced an unexpected byte length",
@@ -612,35 +660,6 @@ pub(crate) fn finish_tokenspeed_request(
             cleanup_tokenspeed_shm_handles(&shm_handles);
             Err(error)
         }
-    }
-}
-
-/// Unlink the `/dev/shm` segments backing the encoder inputs of intermediate
-/// `items` (plus an optional just-built `pending` tensor that hasn't been pushed
-/// yet). Used when multimodal assembly aborts partway: the successfully built
-/// `TokenSpeedTensor::Shm` segments would otherwise be dropped without their
-/// handles ever reaching the send-path cleanup hooks, leaking files until the
-/// next process sweep. Only the encoder input uses SHM (model-specific tensors
-/// stay inline). MUST run on the error path only — the success path keeps the
-/// files alive for the worker and unlinks them after the RPC.
-pub(crate) fn cleanup_tokenspeed_items_encoder_shm(
-    items: &[TokenSpeedMultimodalItem],
-    pending: Option<&TokenSpeedTensor>,
-) {
-    let mut handles = Vec::new();
-    let mut push = |tensor: &TokenSpeedTensor| {
-        if let TokenSpeedTensorStorage::Shm(handle) = &tensor.storage {
-            handles.push(handle.clone());
-        }
-    };
-    for item in items {
-        push(&item.encoder_input);
-    }
-    if let Some(tensor) = pending {
-        push(tensor);
-    }
-    if !handles.is_empty() {
-        cleanup_tokenspeed_shm_handles(&handles);
     }
 }
 
