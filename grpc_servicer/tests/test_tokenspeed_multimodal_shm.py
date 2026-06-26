@@ -115,28 +115,18 @@ def test_mm_inputs_rejects_model_specific_reusing_preserved_encoder_shm(monkeypa
     monkeypatch.setattr(servicer_module, "UNLINK_MM_SHM_AFTER_READ", True)
     name = f"smg-tokenspeed-test-preserved-{os.getpid()}"
     path = os.path.join("/dev/shm", name)
-    with open(path, "wb") as f:
-        f.write(torch.tensor([1.0], dtype=torch.float32).numpy().tobytes())
+    try:
+        with open(path, "wb") as f:
+            f.write(torch.tensor([1.0], dtype=torch.float32).numpy().tobytes())
 
-    mm_inputs = tokenspeed_scheduler_pb2.MultimodalInputs(
-        items=[
-            tokenspeed_scheduler_pb2.MultimodalItem(
-                modality=tokenspeed_scheduler_pb2.IMAGE,
-                content_hash=b"hash",
-                encoder_input=tokenspeed_scheduler_pb2.TensorData(
-                    shape=[1],
-                    dtype="float32",
-                    shm=tokenspeed_scheduler_pb2.ShmHandle(
-                        name=name,
-                        offset=0,
-                        nbytes=4,
-                        owner_id="smg:test",
-                    ),
-                ),
-                model_specific_tensors={
-                    "image_grid_thw": tokenspeed_scheduler_pb2.TensorData(
+        mm_inputs = tokenspeed_scheduler_pb2.MultimodalInputs(
+            items=[
+                tokenspeed_scheduler_pb2.MultimodalItem(
+                    modality=tokenspeed_scheduler_pb2.IMAGE,
+                    content_hash=b"hash",
+                    encoder_input=tokenspeed_scheduler_pb2.TensorData(
                         shape=[1],
-                        dtype="uint32",
+                        dtype="float32",
                         shm=tokenspeed_scheduler_pb2.ShmHandle(
                             name=name,
                             offset=0,
@@ -144,18 +134,34 @@ def test_mm_inputs_rejects_model_specific_reusing_preserved_encoder_shm(monkeypa
                             owner_id="smg:test",
                         ),
                     ),
-                },
-                placeholders=[
-                    tokenspeed_scheduler_pb2.PlaceholderRange(offset=0, length=1),
-                ],
-            ),
-        ]
-    )
-    servicer = object.__new__(TokenSpeedSchedulerServicer)
+                    model_specific_tensors={
+                        "image_grid_thw": tokenspeed_scheduler_pb2.TensorData(
+                            shape=[1],
+                            dtype="uint32",
+                            shm=tokenspeed_scheduler_pb2.ShmHandle(
+                                name=name,
+                                offset=0,
+                                nbytes=4,
+                                owner_id="smg:test",
+                            ),
+                        ),
+                    },
+                    placeholders=[
+                        tokenspeed_scheduler_pb2.PlaceholderRange(offset=0, length=1),
+                    ],
+                ),
+            ]
+        )
+        servicer = object.__new__(TokenSpeedSchedulerServicer)
 
-    with pytest.raises(ValueError, match="must not share SHM segments"):
-        servicer._mm_inputs_from_itemized_proto(mm_inputs)
-    assert not os.path.exists(path)
+        with pytest.raises(ValueError, match="must not share SHM segments"):
+            servicer._mm_inputs_from_itemized_proto(mm_inputs)
+        assert not os.path.exists(path)
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 def test_tensor_from_proto_rejects_shm_length_mismatch_before_read():
