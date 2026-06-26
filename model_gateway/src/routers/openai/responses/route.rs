@@ -147,6 +147,7 @@ pub(in crate::routers::openai) async fn route_responses(
             );
         }
     };
+    super::normalize_response_input_for_upstream(&mut payload);
 
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {

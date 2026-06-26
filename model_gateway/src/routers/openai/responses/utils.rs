@@ -217,6 +217,34 @@ pub(super) fn insert_optional_value<T: Serialize>(
     }
 }
 
+/// Normalize locally persisted Responses input before forwarding it upstream.
+///
+/// Client-visible MCP output items carry `error` as a string, while upstream
+/// replay input currently rejects that shape. The field is optional for replay,
+/// so omit string/null errors rather than changing the public output contract.
+pub(crate) fn normalize_response_input_for_upstream(payload: &mut Value) {
+    let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for item in items {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        let item_type = obj.get("type").and_then(Value::as_str);
+        if !matches!(item_type, Some("mcp_call" | "mcp_list_tools")) {
+            continue;
+        }
+
+        if obj
+            .get("error")
+            .is_some_and(|error| error.is_string() || error.is_null())
+        {
+            obj.remove("error");
+        }
+    }
+}
+
 /// Convert a single ResponseTool back to its original JSON representation.
 ///
 /// Handles MCP tools (with server metadata), web_search, web_search_preview,
@@ -1336,5 +1364,52 @@ mod tests {
             conv.get("id").unwrap().is_string(),
             "conversation.id must be a plain string, got {conv:?}"
         );
+    }
+
+    #[test]
+    fn normalize_response_input_for_upstream_omits_string_mcp_errors() {
+        let mut payload = json!({
+            "input": [
+                {
+                    "type": "mcp_call",
+                    "id": "mcp_1",
+                    "arguments": "{}",
+                    "name": "ask_question",
+                    "server_label": "deepwiki",
+                    "error": "server unreachable",
+                    "status": "failed"
+                },
+                {
+                    "type": "mcp_list_tools",
+                    "id": "mcpl_1",
+                    "server_label": "brave",
+                    "tools": [],
+                    "error": null
+                },
+                {
+                    "type": "mcp_call",
+                    "id": "mcp_2",
+                    "arguments": "{}",
+                    "name": "ask_question",
+                    "server_label": "deepwiki",
+                    "error": { "message": "already normalized" }
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": []
+                }
+            ]
+        });
+
+        normalize_response_input_for_upstream(&mut payload);
+
+        assert!(payload["input"][0].get("error").is_none());
+        assert!(payload["input"][1].get("error").is_none());
+        assert_eq!(
+            payload["input"][2]["error"],
+            json!({ "message": "already normalized" })
+        );
+        assert!(payload["input"][3].get("error").is_none());
     }
 }
