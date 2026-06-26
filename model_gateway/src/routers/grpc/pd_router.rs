@@ -9,7 +9,9 @@ use openai_protocol::{
 use tracing::debug;
 
 use super::{
-    context::SharedComponents, multimodal::MultimodalComponents, pipeline::RequestPipeline,
+    context::SharedComponents,
+    multimodal::{MmTransportConfig, MultimodalComponents},
+    pipeline::RequestPipeline,
 };
 use crate::{
     app_context::AppContext,
@@ -56,13 +58,18 @@ impl GrpcPDRouter {
             .clone();
 
         // Create multimodal components (best-effort; non-fatal if initialization fails)
-        let multimodal = match MultimodalComponents::new(ctx.multimodal_config_registry.clone()) {
-            Ok(mc) => Some(Arc::new(mc)),
-            Err(e) => {
-                tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
-                None
-            }
-        };
+        let mm_transport = MmTransportConfig::resolve(
+            ctx.router_config.multimodal_tensor_transport.as_deref(),
+            ctx.router_config.multimodal_shm_min_bytes,
+        );
+        let multimodal =
+            match MultimodalComponents::new(ctx.multimodal_config_registry.clone(), mm_transport) {
+                Ok(mc) => Some(Arc::new(mc)),
+                Err(e) => {
+                    tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
+                    None
+                }
+            };
 
         // Create shared components for pipeline
         let shared_components = Arc::new(SharedComponents {

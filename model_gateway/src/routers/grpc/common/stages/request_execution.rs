@@ -569,7 +569,8 @@ impl RequestExecutionStage {
         debug!("vLLM PD: prefill completed, sending decode request");
 
         // Decode reuses proto_request as-is; same request_id as the prefill leg is
-        // load-bearing for NIXL P/D correlation on vLLM < 0.13
+        // load-bearing for NIXL P/D correlation on vLLM < 0.13. Multimodal is inline
+        // for PD, so decode keeps its inputs for the recompute path.
         let mut decode_request = proto_request;
         if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
             decode_request.set_data_parallel_rank(rank as i32);

@@ -664,6 +664,18 @@ pub struct WorkerSpec {
     /// Falls back to the global `load_monitor_interval_secs` from router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_monitor_interval_secs: Option<u64>,
+
+    /// Per-worker multimodal tensor transport override (`inline` | `shm` | `auto`).
+    /// When set, overrides the router-level `multimodal_tensor_transport` default
+    /// for this worker (e.g. force `shm` for a co-located worker, `inline` for a
+    /// remote one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_tensor_transport: Option<String>,
+
+    /// Per-worker minimum multimodal tensor size (bytes) before the SHM transport
+    /// is used. When set, overrides the router-level `multimodal_shm_min_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_shm_min_bytes: Option<usize>,
 }
 
 impl WorkerSpec {
@@ -694,6 +706,8 @@ impl WorkerSpec {
             resilience: ResilienceUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
+            multimodal_tensor_transport: None,
+            multimodal_shm_min_bytes: None,
         }
     }
 }

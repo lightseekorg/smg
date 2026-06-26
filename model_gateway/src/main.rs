@@ -281,6 +281,17 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Load Monitoring")]
     engine_metrics: bool,
 
+    /// Multimodal tensor transport mode: `inline` (default), `shm` (same-host
+    /// /dev/shm), or `auto` (shm only when the worker shares /dev/shm). A
+    /// per-worker `WorkerSpec.multimodal_tensor_transport` overrides this.
+    #[arg(long, value_parser = ["inline", "shm", "auto"], help_heading = "Multimodal")]
+    multimodal_tensor_transport: Option<String>,
+
+    /// Minimum multimodal tensor size (bytes) before the SHM transport is used.
+    /// Overridable per worker via `WorkerSpec.multimodal_shm_min_bytes`.
+    #[arg(long, help_heading = "Multimodal")]
+    multimodal_shm_min_bytes: Option<usize>,
+
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
     #[arg(
@@ -1275,6 +1286,8 @@ impl CliArgs {
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
             .engine_metrics(self.engine_metrics)
+            .multimodal_tensor_transport(self.multimodal_tensor_transport.clone())
+            .multimodal_shm_min_bytes(self.multimodal_shm_min_bytes)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)

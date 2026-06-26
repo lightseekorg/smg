@@ -18,7 +18,7 @@ use super::{
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
-    multimodal::MultimodalComponents,
+    multimodal::{MmTransportConfig, MultimodalComponents},
     pipeline::RequestPipeline,
     regular::responses,
 };
@@ -70,14 +70,22 @@ impl GrpcRouter {
         let worker_registry = ctx.worker_registry.clone();
         let _policy_registry = ctx.policy_registry.clone();
 
+        // Resolve the global multimodal tensor-transport config once (router config
+        // → SMG_MM_* env → built-in default); per-worker specs override it later.
+        let mm_transport = MmTransportConfig::resolve(
+            ctx.router_config.multimodal_tensor_transport.as_deref(),
+            ctx.router_config.multimodal_shm_min_bytes,
+        );
+
         // Create multimodal components (best-effort; non-fatal if initialization fails)
-        let multimodal = match MultimodalComponents::new(ctx.multimodal_config_registry.clone()) {
-            Ok(mc) => Some(Arc::new(mc)),
-            Err(e) => {
-                tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
-                None
-            }
-        };
+        let multimodal =
+            match MultimodalComponents::new(ctx.multimodal_config_registry.clone(), mm_transport) {
+                Ok(mc) => Some(Arc::new(mc)),
+                Err(e) => {
+                    tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
+                    None
+                }
+            };
 
         // Create shared components for pipeline
         let shared_components = Arc::new(SharedComponents {

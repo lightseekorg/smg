@@ -212,6 +212,16 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn multimodal_tensor_transport(mut self, mode: Option<String>) -> Self {
+        self.config.multimodal_tensor_transport = mode;
+        self
+    }
+
+    pub fn multimodal_shm_min_bytes(mut self, bytes: Option<usize>) -> Self {
+        self.config.multimodal_shm_min_bytes = bytes;
+        self
+    }
+
     // ==================== Rate Limiting ====================
 
     pub fn max_concurrent_requests(mut self, max: i32) -> Self {
