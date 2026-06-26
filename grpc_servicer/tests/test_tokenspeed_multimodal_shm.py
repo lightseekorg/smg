@@ -1,11 +1,13 @@
 import os
 
 import pytest
-import torch
 from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
-from smg_grpc_servicer.tokenspeed import servicer as servicer_module
-from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
-from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
+
+torch = pytest.importorskip("torch")
+shm_transport = pytest.importorskip("tokenspeed.runtime.multimodal.shm_transport")
+servicer_module = pytest.importorskip("smg_grpc_servicer.tokenspeed.servicer")
+ShmTensorHandle = shm_transport.ShmTensorHandle
+TokenSpeedSchedulerServicer = servicer_module.TokenSpeedSchedulerServicer
 
 
 def _require_writable_dev_shm():
