@@ -1175,30 +1175,24 @@ fn assemble_tokenspeed(
     let mut mm_placeholders_by_item = mm_placeholders_by_item.into_iter();
     let mut pending_items: Vec<PendingTokenSpeedItem<'_>> = Vec::with_capacity(item_count);
     for item_index in 0..item_count {
-        let item_encoder_input = match encoder_input_for_item(
+        let item_encoder_input = encoder_input_for_item(
             &intermediate.preprocessed,
             &intermediate.field_layouts,
             &flat_spans,
             item_index,
-        ) {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
+        )?;
         let model_specific_started = log_timing.then(Instant::now);
-        let model_specific_tensors = match serialize_model_specific_for_item(
+        let model_specific_tensors = serialize_model_specific_for_item(
             &intermediate.preprocessed.model_specific,
             &intermediate.field_layouts,
             &flat_spans,
             item_index,
-        ) {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
+        )?;
         let model_specific_serialize_ms =
             model_specific_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-        let mm_placeholders = mm_placeholders_by_item
-            .next()
-            .expect("placeholder item count validated above");
+        let mm_placeholders = mm_placeholders_by_item.next().ok_or_else(|| {
+            anyhow::anyhow!("missing placeholders for multimodal item {item_index}")
+        })?;
         let content_hash =
             content_hash_for_item(intermediate.modality, &intermediate, item_index);
 
@@ -1389,7 +1383,7 @@ fn item_spans_from_model_specific_sizes(
                 push_item_span(&mut spans, &mut start, len as usize)?;
             }
         }
-        _ => unreachable!("flat sizes value type validated above"),
+        _ => anyhow::bail!("unsupported flat sizes value type"),
     }
     Ok(spans)
 }
