@@ -1300,14 +1300,23 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         Ok(result)
     }
 
-    fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {
-        // Calculate resized dimensions
-        let (new_height, new_width) = match self.smart_resize(height as usize, width as usize) {
-            Ok((h, w)) => (h, w),
-            Err(_) => {
-                // Fallback: use minimum size
-                let factor = self.get_factor();
-                (factor, factor)
+    fn calculate_num_tokens(
+        &self,
+        width: u32,
+        height: u32,
+        config: &PreProcessorConfig,
+    ) -> usize {
+        let fallback_size = || {
+            let factor = self.get_factor();
+            (factor, factor)
+        };
+        let (new_height, new_width) = if config.do_resize.unwrap_or(true) {
+            self.smart_resize(height as usize, width as usize)
+                .unwrap_or_else(|_| fallback_size())
+        } else {
+            match self.validate_unresized_patch_dimensions(height as usize, width as usize) {
+                Ok(()) => (height as usize, width as usize),
+                Err(_) => fallback_size(),
             }
         };
 
@@ -1393,6 +1402,27 @@ mod tests {
             }
         }
         DynamicImage::ImageRgb8(image)
+    }
+
+    #[test]
+    fn test_calculate_num_tokens_honors_do_resize_false() {
+        let processor = QwenVLProcessorBase::new(create_test_config());
+        let config = PreProcessorConfig {
+            do_resize: Some(false),
+            ..Default::default()
+        };
+
+        let tokens = processor.calculate_num_tokens(84, 56, &config);
+        let (grid_t, grid_h, grid_w) = processor.calculate_grid_thw(56, 84, 1);
+
+        assert_eq!(
+            tokens,
+            processor.calculate_tokens_from_grid(grid_t, grid_h, grid_w)
+        );
+        assert_ne!(
+            tokens,
+            processor.calculate_num_tokens(84, 56, &PreProcessorConfig::default())
+        );
     }
 
     #[test]

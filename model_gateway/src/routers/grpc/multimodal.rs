@@ -1158,7 +1158,14 @@ fn assemble_tokenspeed(
         &intermediate.field_layouts,
         item_count,
     )?;
-    let mm_placeholders_by_item = placeholders_for_items(&intermediate.placeholders, patch_offsets);
+    validate_tokenspeed_item_spans(
+        intermediate.preprocessed.as_ref(),
+        &intermediate.field_layouts,
+        &flat_spans,
+        item_count,
+    )?;
+    let mm_placeholders_by_item =
+        placeholders_for_items(&intermediate.placeholders, patch_offsets);
     anyhow::ensure!(
         mm_placeholders_by_item.len() == item_count,
         "precomputed multimodal assembly placeholder item count mismatch: modality={}, placeholder_item_count={}, item_count={item_count}",
@@ -1406,6 +1413,94 @@ fn push_item_span(
         .checked_add(len)
         .ok_or_else(|| anyhow::anyhow!("flat size offset overflow"))?;
     Ok(())
+}
+
+fn validate_tokenspeed_item_spans(
+    preprocessed: &PreprocessedEncoderInputs,
+    field_layouts: &HashMap<String, FieldLayout>,
+    flat_spans: &FlatItemSpans,
+    item_count: usize,
+) -> Result<()> {
+    let encoder_first_dim = *preprocessed
+        .encoder_input
+        .shape()
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("encoder_input tensor must have a first dimension"))?;
+    let encoder_layout = field_layouts
+        .get("pixel_values")
+        .unwrap_or(&FieldLayout::Batched);
+    validate_tokenspeed_layout_first_dim(
+        "pixel_values",
+        encoder_layout,
+        encoder_first_dim,
+        flat_spans,
+        item_count,
+    )?;
+
+    for (key, value) in &preprocessed.model_specific {
+        let Some(layout) = field_layouts.get(key) else {
+            continue;
+        };
+        let first_dim = model_specific_first_dim(key, value)?;
+        validate_tokenspeed_layout_first_dim(key, layout, first_dim, flat_spans, item_count)?;
+    }
+
+    Ok(())
+}
+
+fn validate_tokenspeed_layout_first_dim(
+    tensor_key: &str,
+    layout: &FieldLayout,
+    first_dim: usize,
+    flat_spans: &FlatItemSpans,
+    item_count: usize,
+) -> Result<()> {
+    match layout {
+        FieldLayout::Batched => {
+            anyhow::ensure!(
+                first_dim == item_count,
+                "batched tensor {tensor_key} first dimension mismatch: first_dim={first_dim}, item_count={item_count}"
+            );
+        }
+        FieldLayout::Flat { sizes_key } => {
+            let spans = flat_spans
+                .get(sizes_key)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing flat spans for sizes tensor {sizes_key}")
+                })?;
+            let span_total = spans.iter().try_fold(0usize, |acc, (_, len)| {
+                acc.checked_add(*len)
+                    .ok_or_else(|| anyhow::anyhow!("flat span total overflow for {tensor_key}"))
+            })?;
+            anyhow::ensure!(
+                span_total == first_dim,
+                "flat tensor {tensor_key} first dimension mismatch: span_total={span_total}, first_dim={first_dim}, sizes_key={sizes_key}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn model_specific_first_dim(key: &str, value: &ModelSpecificValue) -> Result<usize> {
+    match value {
+        ModelSpecificValue::Tensor { shape, .. }
+        | ModelSpecificValue::IntTensor { shape, .. }
+        | ModelSpecificValue::UintTensor { shape, .. } => shape
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!("model_specific tensor {key} must have a first dimension")
+            }),
+        ModelSpecificValue::IntVec(values) => Ok(values.len()),
+        ModelSpecificValue::UintVec(values) => Ok(values.len()),
+        ModelSpecificValue::FloatVec(values) => Ok(values.len()),
+        ModelSpecificValue::TupleVec(values) => Ok(values.len()),
+        ModelSpecificValue::Int(_)
+        | ModelSpecificValue::Float(_)
+        | ModelSpecificValue::Bool(_) => {
+            anyhow::bail!("model_specific value {key} has no first dimension")
+        }
+    }
 }
 
 fn flat_item_span(
@@ -2818,6 +2913,59 @@ mod tests {
             flat_item_span(&spans, "patches_per_image", 1).unwrap(),
             (2, 3)
         );
+    }
+
+    #[test]
+    fn test_validate_tokenspeed_item_spans_rejects_flat_under_consumption() {
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(IxDyn(&[4, 2]), vec![0.0; 8]).unwrap(),
+            feature_token_counts: vec![1, 1],
+            item_sizes: vec![(1, 1), (1, 1)],
+            model_specific: HashMap::from([(
+                "patches_per_image".to_string(),
+                ModelSpecificValue::UintTensor {
+                    data: vec![2, 1],
+                    shape: vec![2],
+                },
+            )]),
+        };
+        let field_layouts = HashMap::from([
+            (
+                "pixel_values".to_string(),
+                FieldLayout::flat("patches_per_image"),
+            ),
+            ("patches_per_image".to_string(), FieldLayout::Batched),
+        ]);
+        let flat_spans =
+            flat_item_spans(&preprocessed.model_specific, &field_layouts, 2).unwrap();
+
+        let error =
+            validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("flat tensor pixel_values first dimension mismatch"));
+    }
+
+    #[test]
+    fn test_validate_tokenspeed_item_spans_rejects_batched_extra_rows() {
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![0.0; 6]).unwrap(),
+            feature_token_counts: vec![1, 1],
+            item_sizes: vec![(1, 1), (1, 1)],
+            model_specific: HashMap::new(),
+        };
+        let field_layouts = HashMap::new();
+        let flat_spans = HashMap::new();
+
+        let error =
+            validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("batched tensor pixel_values first dimension mismatch"));
     }
 
     #[test]

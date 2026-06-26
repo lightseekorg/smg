@@ -315,13 +315,12 @@ impl MediaConnector {
 
         let bytes = Bytes::from(fs::read(&canonical).await?);
         let bytes_for_hash = bytes.clone();
-        let bytes_for_decode = bytes.clone();
         let hash = async move {
             task::spawn_blocking(move || crate::hasher::hash_video(&bytes_for_hash))
                 .await
                 .map_err(MediaConnectorError::Blocking)
         };
-        let decode = decode_video_frames(bytes_for_decode, cfg);
+        let decode = decode_video_frames_from_path(&canonical, bytes.len(), Some(&bytes), cfg);
         let (hash, decoded) = tokio::try_join!(hash, decode)?;
 
         Ok(Arc::new(video_clip_from_decoded(
@@ -368,10 +367,14 @@ impl MediaConnector {
     ) -> Result<Arc<VideoClip>, MediaConnectorError> {
         validate_video_fetch_config(cfg)?;
         let bytes_for_hash = bytes.clone();
-        let hash = task::spawn_blocking(move || crate::hasher::hash_video(&bytes_for_hash))
-            .await
-            .map_err(MediaConnectorError::Blocking)?;
-        let decoded = decode_video_frames(bytes.clone(), cfg).await?;
+        let bytes_for_decode = bytes.clone();
+        let hash = async move {
+            task::spawn_blocking(move || crate::hasher::hash_video(&bytes_for_hash))
+                .await
+                .map_err(MediaConnectorError::Blocking)
+        };
+        let decode = decode_video_frames(bytes_for_decode, cfg);
+        let (hash, decoded) = tokio::try_join!(hash, decode)?;
 
         Ok(Arc::new(video_clip_from_decoded(decoded, bytes, source, hash)))
     }

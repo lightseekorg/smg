@@ -959,6 +959,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         video_token_id = None
         total_started = time.perf_counter() if LOG_MM_TIMING else None
         deferred_shm_unlinks: set[str] = set()
+        preserved_encoder_shm_names: set[str] = set()
+        completed = False
 
         try:
             for item_proto in mm_inputs.items:
@@ -973,6 +975,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                     cast_to=model_dtype,
                     deferred_unlink_names=deferred_shm_unlinks,
                 )
+                if isinstance(feature, ShmTensorHandle):
+                    preserved_encoder_shm_names.add(feature.shm_name)
                 feature_elapsed_ms = (
                     (time.perf_counter() - feature_started) * 1000
                     if feature_started is not None
@@ -996,15 +1000,21 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                         model_dtype,
                     )
                 model_started = time.perf_counter() if LOG_MM_TIMING else None
-                model_specific_data = {
-                    name: self._tensor_from_proto(
+                model_specific_data = {}
+                for name, tensor_data in item_proto.model_specific_tensors.items():
+                    if tensor_data.WhichOneof("payload") == "shm":
+                        model_shm_name = self._validated_shm_name(tensor_data.shm.name)
+                        if model_shm_name in preserved_encoder_shm_names:
+                            raise ValueError(
+                                "model-specific tensors must not share SHM segments "
+                                "with preserved encoder_input handles"
+                            )
+                    model_specific_data[name] = self._tensor_from_proto(
                         tensor_data,
                         cast_to=model_dtype,
                         unlink_after_read=False,
                         deferred_unlink_names=deferred_shm_unlinks,
                     )
-                    for name, tensor_data in item_proto.model_specific_tensors.items()
-                }
                 model_elapsed_ms = (
                     (time.perf_counter() - model_started) * 1000
                     if model_started is not None
@@ -1066,6 +1076,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                     len(items),
                     (time.perf_counter() - total_started) * 1000,
                 )
+            completed = True
             return MultimodalInputs(
                 mm_items=items,
                 im_token_id=im_token_id,
@@ -1073,6 +1084,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 pad_values_ready=True,
             )
         finally:
+            if not completed:
+                deferred_shm_unlinks.update(preserved_encoder_shm_names)
             self._unlink_deferred_shm(deferred_shm_unlinks)
 
     @staticmethod
