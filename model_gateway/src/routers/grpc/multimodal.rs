@@ -1881,7 +1881,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn local_shm_namespace_id_resolves_on_linux() {
         // /proc/.../boot_id and /dev/shm both exist on the Linux CI/runtime
         // image, so the token must resolve to `<boot_id>:<st_dev>`. If it ever
