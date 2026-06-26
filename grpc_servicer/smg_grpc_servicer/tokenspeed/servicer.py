@@ -1181,9 +1181,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         else:
             np_dtype = np.dtype(tensor_data.dtype)
             expected = math.prod(shape) * np_dtype.itemsize
-        TokenSpeedSchedulerServicer._validate_shm_nbytes_before_read(
-            tensor_data, shape, expected
-        )
+        TokenSpeedSchedulerServicer._validate_shm_nbytes_before_read(tensor_data, shape, expected)
         raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(
             tensor_data,
             unlink_after_read=unlink_after_read,
