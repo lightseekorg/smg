@@ -960,116 +960,120 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         total_started = time.perf_counter() if LOG_MM_TIMING else None
         deferred_shm_unlinks: set[str] = set()
 
-        for item_proto in mm_inputs.items:
-            item_started = time.perf_counter() if LOG_MM_TIMING else None
-            modality = self._modality_from_proto(item_proto.modality)
-            if not item_proto.HasField("encoder_input"):
-                raise ValueError("MultimodalItem must include encoder_input")
+        try:
+            for item_proto in mm_inputs.items:
+                item_started = time.perf_counter() if LOG_MM_TIMING else None
+                modality = self._modality_from_proto(item_proto.modality)
+                if not item_proto.HasField("encoder_input"):
+                    raise ValueError("MultimodalItem must include encoder_input")
 
-            feature_started = time.perf_counter() if LOG_MM_TIMING else None
-            feature = self._feature_from_proto(
-                item_proto.encoder_input,
-                cast_to=model_dtype,
-                deferred_unlink_names=deferred_shm_unlinks,
-            )
-            feature_elapsed_ms = (
-                (time.perf_counter() - feature_started) * 1000
-                if feature_started is not None
-                else None
-            )
-            if LOG_MM_TENSOR_DATA:
-                encoder_input = item_proto.encoder_input
-                payload = encoder_input.WhichOneof("payload")
-                inline_nbytes = len(encoder_input.inline) if payload == "inline" else None
-                logger.info(
-                    "Multimodal encoder_input received: modality=%s proto_dtype=%s "
-                    "shape=%s payload=%s inline_nbytes=%s feature_type=%s "
-                    "torch_dtype=%s cast_to=%s",
-                    modality,
-                    encoder_input.dtype,
-                    list(encoder_input.shape),
-                    payload,
-                    inline_nbytes,
-                    type(feature).__name__,
-                    feature.dtype,
-                    model_dtype,
-                )
-            model_started = time.perf_counter() if LOG_MM_TIMING else None
-            model_specific_data = {
-                name: self._tensor_from_proto(
-                    tensor_data,
+                feature_started = time.perf_counter() if LOG_MM_TIMING else None
+                feature = self._feature_from_proto(
+                    item_proto.encoder_input,
                     cast_to=model_dtype,
-                    unlink_after_read=False,
                     deferred_unlink_names=deferred_shm_unlinks,
                 )
-                for name, tensor_data in item_proto.model_specific_tensors.items()
-            }
-            model_elapsed_ms = (
-                (time.perf_counter() - model_started) * 1000 if model_started is not None else None
-            )
-            self._validate_item_tensor_consistency(modality, model_specific_data)
+                feature_elapsed_ms = (
+                    (time.perf_counter() - feature_started) * 1000
+                    if feature_started is not None
+                    else None
+                )
+                if LOG_MM_TENSOR_DATA:
+                    encoder_input = item_proto.encoder_input
+                    payload = encoder_input.WhichOneof("payload")
+                    inline_nbytes = len(encoder_input.inline) if payload == "inline" else None
+                    logger.info(
+                        "Multimodal encoder_input received: modality=%s proto_dtype=%s "
+                        "shape=%s payload=%s inline_nbytes=%s feature_type=%s "
+                        "torch_dtype=%s cast_to=%s",
+                        modality,
+                        encoder_input.dtype,
+                        list(encoder_input.shape),
+                        payload,
+                        inline_nbytes,
+                        type(feature).__name__,
+                        feature.dtype,
+                        model_dtype,
+                    )
+                model_started = time.perf_counter() if LOG_MM_TIMING else None
+                model_specific_data = {
+                    name: self._tensor_from_proto(
+                        tensor_data,
+                        cast_to=model_dtype,
+                        unlink_after_read=False,
+                        deferred_unlink_names=deferred_shm_unlinks,
+                    )
+                    for name, tensor_data in item_proto.model_specific_tensors.items()
+                }
+                model_elapsed_ms = (
+                    (time.perf_counter() - model_started) * 1000
+                    if model_started is not None
+                    else None
+                )
+                self._validate_item_tensor_consistency(modality, model_specific_data)
 
-            offsets, token_count, offset_ends, offset_prefix = (
-                self._offsets_from_proto_placeholders(item_proto.placeholders)
-            )
-
-            content_hash = bytes(item_proto.content_hash)
-            mm_item = MultimodalDataItem(
-                modality=modality,
-                feature=feature,
-                model_specific_data=model_specific_data,
-                offsets=offsets,
-                token_count=token_count,
-                hash=int.from_bytes(content_hash[:8], "little") if content_hash else None,
-                offset_ends=offset_ends,
-                offset_prefix=offset_prefix,
-            )
-            mm_item.set_pad_value()
-            items.append(mm_item)
-
-            if LOG_MM_TIMING and item_started is not None:
-                encoder_input = item_proto.encoder_input
-                logger.info(
-                    "mm_timing item_build_ms modality=%s elapsed=%.3f "
-                    "feature_ms=%.3f model_specific_ms=%.3f payload=%s "
-                    "proto_dtype=%s shape=%s feature_type=%s tensors=%s",
-                    modality.name,
-                    (time.perf_counter() - item_started) * 1000,
-                    feature_elapsed_ms,
-                    model_elapsed_ms,
-                    encoder_input.WhichOneof("payload"),
-                    encoder_input.dtype,
-                    list(encoder_input.shape),
-                    type(feature).__name__,
-                    sorted(model_specific_data.keys()),
+                offsets, token_count, offset_ends, offset_prefix = (
+                    self._offsets_from_proto_placeholders(item_proto.placeholders)
                 )
 
-            if item_proto.HasField("placeholder_token_id"):
-                placeholder_token_id = int(item_proto.placeholder_token_id)
-                if modality == Modality.IMAGE:
-                    im_token_id = self._merge_placeholder_token_id(
-                        im_token_id, placeholder_token_id, modality
-                    )
-                elif modality == Modality.VIDEO:
-                    video_token_id = self._merge_placeholder_token_id(
-                        video_token_id, placeholder_token_id, modality
+                content_hash = bytes(item_proto.content_hash)
+                mm_item = MultimodalDataItem(
+                    modality=modality,
+                    feature=feature,
+                    model_specific_data=model_specific_data,
+                    offsets=offsets,
+                    token_count=token_count,
+                    hash=int.from_bytes(content_hash[:8], "little") if content_hash else None,
+                    offset_ends=offset_ends,
+                    offset_prefix=offset_prefix,
+                )
+                mm_item.set_pad_value()
+                items.append(mm_item)
+
+                if LOG_MM_TIMING and item_started is not None:
+                    encoder_input = item_proto.encoder_input
+                    logger.info(
+                        "mm_timing item_build_ms modality=%s elapsed=%.3f "
+                        "feature_ms=%.3f model_specific_ms=%.3f payload=%s "
+                        "proto_dtype=%s shape=%s feature_type=%s tensors=%s",
+                        modality.name,
+                        (time.perf_counter() - item_started) * 1000,
+                        feature_elapsed_ms,
+                        model_elapsed_ms,
+                        encoder_input.WhichOneof("payload"),
+                        encoder_input.dtype,
+                        list(encoder_input.shape),
+                        type(feature).__name__,
+                        sorted(model_specific_data.keys()),
                     )
 
-        if not items:
-            raise ValueError("MultimodalInputs.items is empty")
-        if LOG_MM_TIMING and total_started is not None:
-            logger.info(
-                "mm_timing mm_inputs_build_ms items=%d elapsed=%.3f",
-                len(items),
-                (time.perf_counter() - total_started) * 1000,
+                if item_proto.HasField("placeholder_token_id"):
+                    placeholder_token_id = int(item_proto.placeholder_token_id)
+                    if modality == Modality.IMAGE:
+                        im_token_id = self._merge_placeholder_token_id(
+                            im_token_id, placeholder_token_id, modality
+                        )
+                    elif modality == Modality.VIDEO:
+                        video_token_id = self._merge_placeholder_token_id(
+                            video_token_id, placeholder_token_id, modality
+                        )
+
+            if not items:
+                raise ValueError("MultimodalInputs.items is empty")
+            if LOG_MM_TIMING and total_started is not None:
+                logger.info(
+                    "mm_timing mm_inputs_build_ms items=%d elapsed=%.3f",
+                    len(items),
+                    (time.perf_counter() - total_started) * 1000,
+                )
+            return MultimodalInputs(
+                mm_items=items,
+                im_token_id=im_token_id,
+                video_token_id=video_token_id,
+                pad_values_ready=True,
             )
-        self._unlink_deferred_shm(deferred_shm_unlinks)
-        return MultimodalInputs(
-            mm_items=items,
-            im_token_id=im_token_id,
-            video_token_id=video_token_id,
-            pad_values_ready=True,
-        )
+        finally:
+            self._unlink_deferred_shm(deferred_shm_unlinks)
 
     @staticmethod
     def _modality_from_proto(modality: int) -> Modality:
@@ -1158,6 +1162,15 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         copied so it never aliases the transient proto bytes.
         """
         shape = list(tensor_data.shape)
+        if tensor_data.dtype == "bfloat16":
+            expected = math.prod(shape) * np.dtype(np.uint16).itemsize
+            np_dtype = None
+        else:
+            np_dtype = np.dtype(tensor_data.dtype)
+            expected = math.prod(shape) * np_dtype.itemsize
+        TokenSpeedSchedulerServicer._validate_shm_nbytes_before_read(
+            tensor_data, shape, expected
+        )
         raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(
             tensor_data,
             unlink_after_read=unlink_after_read,
@@ -1166,7 +1179,6 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         if tensor_data.dtype == "bfloat16":
             # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
-            expected = math.prod(shape) * np.dtype(np.uint16).itemsize
             if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for bfloat16 shape={shape}: "
@@ -1176,18 +1188,31 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 torch.bfloat16
             )
         else:
-            dtype = np.dtype(tensor_data.dtype)
-            expected = math.prod(shape) * dtype.itemsize
             if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for dtype={tensor_data.dtype}, "
                     f"shape={shape}: expected {expected}, got {len(raw)}"
                 )
-            t = torch.from_numpy(np.frombuffer(raw, dtype=dtype).reshape(shape))
+            t = torch.from_numpy(np.frombuffer(raw, dtype=np_dtype).reshape(shape))
 
         if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
             return t.to(cast_to)
         return t.clone()
+
+    @staticmethod
+    def _validate_shm_nbytes_before_read(
+        tensor_data: tokenspeed_scheduler_pb2.TensorData,
+        shape: list[int],
+        expected: int,
+    ) -> None:
+        if tensor_data.WhichOneof("payload") != "shm":
+            return
+        nbytes = int(tensor_data.shm.nbytes)
+        if nbytes != expected:
+            raise ValueError(
+                f"TensorData.shm byte length mismatch for dtype={tensor_data.dtype}, "
+                f"shape={shape}: expected {expected}, got {nbytes}"
+            )
 
     @staticmethod
     def _feature_from_proto(

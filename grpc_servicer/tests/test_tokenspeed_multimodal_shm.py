@@ -8,6 +8,11 @@ from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
 from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
 
 
+def _require_writable_dev_shm():
+    if not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK):
+        pytest.skip("/dev/shm is not available or writable")
+
+
 def test_feature_from_proto_preserves_offset_shm_handle():
     tensor = tokenspeed_scheduler_pb2.TensorData(
         shape=[3, 4],
@@ -47,6 +52,7 @@ def test_feature_from_proto_rejects_offset_shm_length_mismatch():
 
 
 def test_feature_from_proto_cast_defers_shared_shm_unlink(monkeypatch):
+    _require_writable_dev_shm()
     monkeypatch.setattr(servicer_module, "UNLINK_MM_SHM_AFTER_READ", True)
     name = f"smg-tokenspeed-test-cast-{os.getpid()}"
     path = os.path.join("/dev/shm", name)
@@ -100,6 +106,22 @@ def test_feature_from_proto_cast_defers_shared_shm_unlink(monkeypatch):
             os.unlink(path)
         except FileNotFoundError:
             pass
+
+
+def test_tensor_from_proto_rejects_shm_length_mismatch_before_read():
+    tensor = tokenspeed_scheduler_pb2.TensorData(
+        shape=[3, 4],
+        dtype="float32",
+        shm=tokenspeed_scheduler_pb2.ShmHandle(
+            name="smg-tokenspeed-test-does-not-need-to-exist",
+            offset=0,
+            nbytes=4,
+            owner_id="smg:test",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="byte length mismatch"):
+        TokenSpeedSchedulerServicer._tensor_from_proto(tensor)
 
 
 def test_offsets_from_proto_placeholders_validates_and_builds_offsets_once():

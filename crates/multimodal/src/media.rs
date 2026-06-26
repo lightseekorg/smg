@@ -510,9 +510,9 @@ fn validate_video_fetch_config(cfg: VideoFetchConfig) -> Result<(), MediaConnect
             "min_frames must be less than or equal to max_frames".to_string(),
         ));
     }
-    if cfg.sample_fps <= 0.0 {
+    if !cfg.sample_fps.is_finite() || cfg.sample_fps <= 0.0 {
         return Err(MediaConnectorError::VideoDecode(
-            "sample_fps must be greater than 0".to_string(),
+            "sample_fps must be finite and greater than 0".to_string(),
         ));
     }
     Ok(())
