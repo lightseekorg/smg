@@ -271,7 +271,7 @@ impl QwenVLProcessorBase {
                 actual: vec![height, width],
             });
         }
-        if height % factor != 0 || width % factor != 0 {
+        if !height.is_multiple_of(factor) || !width.is_multiple_of(factor) {
             return Err(TransformError::InvalidShape {
                 expected: format!("height and width divisible by factor ({factor})"),
                 actual: vec![height, width],
@@ -1812,7 +1812,7 @@ mod tests {
                 VideoFrameRgb {
                     width: rgb.width() as usize,
                     height: rgb.height() as usize,
-                    data: std::borrow::Cow::Borrowed(rgb.as_raw()),
+                    data: Cow::Borrowed(rgb.as_raw()),
                 }
             })
             .collect::<Vec<_>>();
