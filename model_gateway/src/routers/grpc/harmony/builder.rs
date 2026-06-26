@@ -281,21 +281,12 @@ impl HarmonyBuilder {
 
         let selection_text = self.extract_selection_text(&all_messages);
 
-        // Chat API: the *client* executes tools, so let the model emit ALL tool
-        // calls in one turn (parallel function calling) instead of stopping at
-        // the first <|call|>. Drop <|call|> (HARMONY_CALL_TOKEN) from the stop
-        // set, keeping <|return|>: generation then flows
-        // analysis<|end|> -> call_1<|call|> -> call_2<|call|> -> final<|return|>
-        // (stop), and `HarmonyParserAdapter::parse_messages` collects every tool
-        // call. (The Responses/agentic path keeps <|call|> as a stop because SMG
-        // executes the tools itself in a loop and must yield after each call.)
-        const HARMONY_CALL_TOKEN: u32 = 200012; // <|call|>
+        // Get stop tokens for Harmony assistant actions (<|return|> and <|call|>)
         let stop_token_ids: Vec<u32> = self
             .encoding
             .stop_tokens_for_assistant_actions()
             .into_iter()
             .flat_map(|set| set.into_iter())
-            .filter(|&token_id| token_id != HARMONY_CALL_TOKEN)
             .collect();
 
         Ok(HarmonyBuildOutput {
@@ -1190,43 +1181,6 @@ mod tests {
             !BUILTIN_TOOLS.contains(&"image_generation"),
             "image_generation must not be advertised as a gpt-oss builtin; \
              it is rendered as a function tool instead",
-        );
-    }
-
-    /// Chat API drops the `<|call|>` stop token (so gpt-oss can emit parallel
-    /// tool calls in one turn — the client executes them), while the
-    /// Responses/agentic path keeps it (SMG executes tools in a loop and must
-    /// yield after each call). Regression for BFCL `parallel*` scoring 0.
-    #[test]
-    fn chat_drops_call_stop_token_responses_keeps_it() {
-        use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
-        const CALL: u32 = 200012; // <|call|>
-        const RETURN: u32 = 200002; // <|return|>
-        let builder = HarmonyBuilder::new();
-
-        let chat = ChatCompletionRequest {
-            messages: vec![ChatMessage::User {
-                content: MessageContent::Text("hi".to_string()),
-                name: None,
-            }],
-            ..Default::default()
-        };
-        let chat_out = builder.build_from_chat(&chat).expect("build_from_chat");
-        assert!(
-            !chat_out.stop_token_ids.contains(&CALL),
-            "Chat must drop <|call|> so parallel tool calls aren't cut off after the first",
-        );
-        assert!(
-            chat_out.stop_token_ids.contains(&RETURN),
-            "Chat must keep <|return|> as a stop token",
-        );
-
-        let resp_out = builder
-            .build_from_responses(&ResponsesRequest::default())
-            .expect("build_from_responses");
-        assert!(
-            resp_out.stop_token_ids.contains(&CALL),
-            "Responses/agentic path must keep <|call|> (SMG executes tools in a loop)",
         );
     }
 
