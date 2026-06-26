@@ -173,13 +173,15 @@ impl Router {
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
-        let idx = policy.select_worker(
+        let idx = self.policy_registry.select_worker(
+            &policy,
             &available,
             &SelectWorkerInfo {
                 request_text: text,
                 tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                 headers,
                 hash_ring,
+                leg: crate::policies::WorkerLeg::Single,
             },
         )?;
 
@@ -566,13 +568,15 @@ impl Router {
 
         let policy = self.policy_registry.get_policy_or_default(model_id);
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
-        let idx = match policy.select_worker(
+        let idx = match self.policy_registry.select_worker(
+            &policy,
             &available,
             &SelectWorkerInfo {
                 request_text: Some(&text),
                 tokens: None,
                 headers,
                 hash_ring,
+                leg: crate::policies::WorkerLeg::Single,
             },
         ) {
             Some(i) => i,

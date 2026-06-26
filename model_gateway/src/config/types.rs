@@ -17,6 +17,9 @@ pub struct RouterConfig {
     #[serde(default)]
     pub connection_mode: ConnectionMode,
     pub policy: PolicyConfig,
+    /// Per-request sticky-routing override (honors `X-SMG-Routing-Key`).
+    #[serde(default)]
+    pub routing_key_override: RoutingKeyOverrideConfig,
     pub host: String,
     pub port: u16,
     /// Dedicated port for the isolated Kubernetes liveness/readiness/health
@@ -301,6 +304,34 @@ pub enum ManualAssignmentMode {
     MinLoad,
     /// Select worker with minimum active routing keys
     MinGroup,
+}
+
+/// Per-request sticky-routing override: when `X-SMG-Routing-Key` is present, any
+/// eligible policy routes via manual sticky-map semantics. Reuses the manual
+/// policy knobs for the sticky map; eviction defaults match the manual policy so
+/// config-file users with only `enabled: true` still get TTL eviction (no leak).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingKeyOverrideConfig {
+    /// When false, policies are used unchanged.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_manual_eviction_interval_secs")]
+    pub eviction_interval_secs: u64,
+    #[serde(default = "default_manual_max_idle_secs")]
+    pub max_idle_secs: u64,
+    #[serde(default)]
+    pub assignment_mode: ManualAssignmentMode,
+}
+
+impl Default for RoutingKeyOverrideConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            eviction_interval_secs: default_manual_eviction_interval_secs(),
+            max_idle_secs: default_manual_max_idle_secs(),
+            assignment_mode: ManualAssignmentMode::default(),
+        }
+    }
 }
 
 /// Policy configuration for routing
@@ -659,6 +690,7 @@ impl Default for RouterConfig {
                 worker_urls: vec![],
             },
             policy: PolicyConfig::Random,
+            routing_key_override: RoutingKeyOverrideConfig::default(),
             host: "0.0.0.0".to_string(),
             port: 3001,
             health_check_port: None,

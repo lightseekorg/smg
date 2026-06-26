@@ -153,14 +153,17 @@ impl WorkerSelectionStage {
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
-        // Select worker using the policy
-        let idx = policy.select_worker(
+        // Select worker via the registry (applies the routing-key sticky override
+        // when enabled; otherwise delegates to the configured policy).
+        let idx = self.policy_registry.select_worker(
+            &policy,
             &available,
             &SelectWorkerInfo {
                 request_text: text,
                 tokens,
                 headers,
                 hash_ring,
+                leg: crate::policies::WorkerLeg::Single,
             },
         )?;
         let selected = available[idx].clone();
@@ -267,14 +270,22 @@ impl WorkerSelectionStage {
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
-        let info = SelectWorkerInfo {
+        // Prefill and decode are separate pools; tag each leg so the routing-key
+        // override keys its sticky map per leg (a key sticks independently).
+        let mut info = SelectWorkerInfo {
             request_text: text,
             tokens,
             headers,
             hash_ring,
+            leg: crate::policies::WorkerLeg::Prefill,
         };
-        let prefill_idx = policy.select_worker(&available_prefill, &info)?;
-        let decode_idx = policy.select_worker(&available_decode, &info)?;
+        let prefill_idx = self
+            .policy_registry
+            .select_worker(&policy, &available_prefill, &info)?;
+        info.leg = crate::policies::WorkerLeg::Decode;
+        let decode_idx = self
+            .policy_registry
+            .select_worker(&policy, &available_decode, &info)?;
 
         let model = model_id;
         let policy_name = policy.name();

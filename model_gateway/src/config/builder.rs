@@ -5,7 +5,8 @@ use smg_mcp::McpConfig;
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
+    RetryConfig, RouterConfig, RoutingKeyOverrideConfig, RoutingMode, TokenizerCacheConfig,
+    TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -523,6 +524,11 @@ impl RouterConfigBuilder {
 
     pub fn dp_aware(mut self, enable: bool) -> Self {
         self.config.dp_aware = enable;
+        self
+    }
+
+    pub fn routing_key_override(mut self, config: RoutingKeyOverrideConfig) -> Self {
+        self.config.routing_key_override = config;
         self
     }
 

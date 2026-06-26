@@ -7,7 +7,7 @@ use smg::{
         validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,
         DiscoveryConfig, HealthCheckConfig, HistoryBackend, ManualAssignmentMode, MetricsConfig,
         OracleConfig, PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig,
-        RoutingMode, SchemaConfig, TokenizerCacheConfig, TraceConfig,
+        RoutingKeyOverrideConfig, RoutingMode, SchemaConfig, TokenizerCacheConfig, TraceConfig,
     },
     observability::{
         metrics::PrometheusConfig,
@@ -238,6 +238,11 @@ struct CliArgs {
     /// Enable data parallelism aware scheduling
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
     dp_aware: bool,
+
+    /// Honor X-SMG-Routing-Key for sticky routing on any policy (reuses the
+    /// manual eviction/idle/assignment knobs for the sticky map)
+    #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
+    routing_key_override: bool,
 
     /// Enable IGW (Inference Gateway) mode for multi-model support
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
@@ -965,10 +970,6 @@ impl CliArgs {
         }))
     }
 
-    #[expect(
-        clippy::panic,
-        reason = "unreachable: clap value_parser restricts valid assignment modes"
-    )]
     fn parse_policy(&self, policy_str: &str) -> PolicyConfig {
         match policy_str {
             "random" => PolicyConfig::Random,
@@ -1000,14 +1001,22 @@ impl CliArgs {
             "manual" => PolicyConfig::Manual {
                 eviction_interval_secs: self.eviction_interval,
                 max_idle_secs: self.max_idle_secs,
-                assignment_mode: match self.assignment_mode.as_str() {
-                    "random" => ManualAssignmentMode::Random,
-                    "min_load" => ManualAssignmentMode::MinLoad,
-                    "min_group" => ManualAssignmentMode::MinGroup,
-                    other => panic!("Unknown assignment mode: {other}"),
-                },
+                assignment_mode: Self::parse_assignment_mode(&self.assignment_mode),
             },
             _ => PolicyConfig::RoundRobin,
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "unreachable: clap value_parser restricts valid assignment modes"
+    )]
+    fn parse_assignment_mode(mode: &str) -> ManualAssignmentMode {
+        match mode {
+            "random" => ManualAssignmentMode::Random,
+            "min_load" => ManualAssignmentMode::MinLoad,
+            "min_group" => ManualAssignmentMode::MinGroup,
+            other => panic!("Unknown assignment mode: {other}"),
         }
     }
 
@@ -1340,6 +1349,12 @@ impl CliArgs {
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
             .dp_aware(self.dp_aware)
+            .routing_key_override(RoutingKeyOverrideConfig {
+                enabled: self.routing_key_override,
+                eviction_interval_secs: self.eviction_interval,
+                max_idle_secs: self.max_idle_secs,
+                assignment_mode: Self::parse_assignment_mode(&self.assignment_mode),
+            })
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
             .enable_wasm(self.enable_wasm)
