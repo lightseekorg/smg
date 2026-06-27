@@ -137,8 +137,11 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 // ---------------------------------------------------------------------------
 // JSON helpers (mirror V3.2)
 // ---------------------------------------------------------------------------
+// Python's `to_json` is `json.dumps(value, ensure_ascii=False)`: spaced
+// separators, raw UTF-8. Compact `serde_json::to_string` would change the
+// prompt bytes vLLM trained on.
 fn to_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+    crate::json_dumps::to_string(value)
 }
 fn tools_from_openai_format(tools: &[Value]) -> Vec<Value> {
     tools
@@ -161,14 +164,19 @@ fn tool_calls_from_openai_format(tool_calls: &[Value]) -> Vec<Value> {
 
 /// V4 differs from V3.2: when `arguments` fails to JSON-parse, the upstream
 /// wraps the raw string in `{"arguments": <raw>}` instead of erroring.
+///
+/// `arguments` may arrive as a JSON *string* (raw OpenAI tool_calls) or as an
+/// already-parsed object — `model_gateway`'s `process_tool_call_arguments`
+/// converts the string into a dict before the chat template runs. Reading only
+/// `as_str()` silently dropped object-form args, which erased every historical
+/// tool call's parameters in multi-turn prompts.
 fn encode_arguments_to_dsml(tool_call: &Value) -> String {
-    let arguments_str = tool_call
-        .get("arguments")
-        .and_then(|v| v.as_str())
-        .unwrap_or("{}");
-    let arguments: Value = match serde_json::from_str(arguments_str) {
-        Ok(v) => v,
-        Err(_) => json!({ "arguments": arguments_str }),
+    let arguments: Value = match tool_call.get("arguments") {
+        Some(Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or_else(|_| json!({ "arguments": s }))
+        }
+        Some(v) if v.is_object() => v.clone(),
+        _ => json!({}),
     };
     let obj = match arguments.as_object() {
         Some(obj) => obj,
@@ -781,6 +789,37 @@ mod tests {
         )));
         assert!(out.contains(&format!("</{DSML_TOKEN}{TOOL_CALLS_BLOCK_NAME}>")));
         assert!(out.ends_with(EOS_TOKEN));
+    }
+    #[test]
+    fn object_form_tool_call_arguments_render_params() {
+        // `model_gateway`'s `process_tool_call_arguments` converts the OpenAI
+        // arguments *string* into a dict before the chat template runs, so the
+        // encoder receives object-form arguments. It must render them, not drop
+        // them — dropping erased every historical tool call's parameters in
+        // multi-turn prompts and made the model loop (re-calling tools forever).
+        let msgs = [
+            user("call my tool"),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": { "query": "deepseek", "limit": 5 }
+                        }
+                    }
+                ]
+            }),
+        ];
+        let out = encode_messages(&msgs, ThinkingMode::Chat, &EncodeParams::default()).unwrap();
+        assert!(out.contains(&format!(
+            "<{DSML_TOKEN}parameter name=\"query\" string=\"true\">deepseek</{DSML_TOKEN}parameter>"
+        )));
+        assert!(out.contains(&format!(
+            "<{DSML_TOKEN}parameter name=\"limit\" string=\"false\">5</{DSML_TOKEN}parameter>"
+        )));
     }
     #[test]
     fn unknown_role_errors() {

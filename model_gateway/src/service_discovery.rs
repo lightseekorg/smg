@@ -1286,8 +1286,9 @@ mod tests {
             router_config: router_config.clone(),
             rate_limiter: Some(Arc::new(TokenBucket::new(1000, 1000))),
             worker_registry: worker_registry.clone(),
-            policy_registry: Arc::new(crate::policies::PolicyRegistry::new(
+            policy_registry: Arc::new(crate::policies::PolicyRegistry::with_override(
                 router_config.policy.clone(),
+                router_config.routing_key_override.clone(),
             )),
             reasoning_parser_factory: None,
             tool_parser_factory: None,

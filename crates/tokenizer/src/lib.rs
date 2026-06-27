@@ -7,6 +7,7 @@ pub mod encoders;
 pub mod eos;
 pub mod factory;
 pub mod hub;
+pub(crate) mod json_dumps;
 pub mod mock;
 pub mod registry;
 pub mod sequence;

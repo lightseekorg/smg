@@ -12,7 +12,8 @@ use crate::{
 /// `param_name -> declared JSON-schema type` for the named function (empty if the
 /// function or its `properties` are absent). Lets XML-style parsers coerce by the
 /// declared type instead of guessing from text (e.g. keep a numeric-looking
-/// `string` as a string).
+/// `string` as a string). Only scalar `type` is read; unions/nullable schemas
+/// have no single type, so they fall back to the caller's inference.
 pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<String, String> {
     let mut types = HashMap::new();
     let Some(tool) = tools.iter().find(|t| t.function.name == func_name) else {
@@ -33,23 +34,25 @@ pub fn param_types_for_function(tools: &[Tool], func_name: &str) -> HashMap<Stri
     types
 }
 
-/// Coerce a raw value by its declared JSON-schema type. `string` is kept verbatim;
-/// numeric/boolean/structured types are parsed. `None` (unknown type or parse
-/// failure) means the caller should fall back to its own inference.
+/// Coerce a raw value by its declared JSON-schema type. For `string`, a JSON
+/// string literal (`"4"`) is unwrapped while bare text (`4`, `true`) is kept
+/// verbatim; other types are parsed. `None` (unknown type or parse failure)
+/// means the caller should infer.
 pub fn coerce_by_schema_type(text: &str, declared_type: Option<&str>) -> Option<Value> {
     match declared_type? {
-        "string" => Some(Value::String(text.to_string())),
+        "string" => Some(Value::String(
+            serde_json::from_str::<String>(text).unwrap_or_else(|_| text.to_string()),
+        )),
         "integer" => text
             .trim()
             .parse::<i64>()
             .ok()
             .map(|n| Value::Number(n.into())),
-        "number" => text
-            .trim()
-            .parse::<f64>()
+        // Parse as JSON so large integers keep their precision (a plain f64 parse
+        // would round e.g. 9007199254740993).
+        "number" => serde_json::from_str::<Value>(text.trim())
             .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number),
+            .filter(Value::is_number),
         "boolean" => match text.trim() {
             "true" | "True" => Some(Value::Bool(true)),
             "false" | "False" => Some(Value::Bool(false)),
@@ -621,5 +624,44 @@ mod tests {
             normalized.get("arguments").unwrap(),
             &serde_json::json!({"key": "value"})
         );
+    }
+
+    #[test]
+    fn test_coerce_by_schema_type() {
+        use serde_json::json;
+        // string: numeric/bool/array-looking text stays a string; a JSON string
+        // literal is unwrapped.
+        assert_eq!(coerce_by_schema_type("4", Some("string")), Some(json!("4")));
+        assert_eq!(
+            coerce_by_schema_type("true", Some("string")),
+            Some(json!("true"))
+        );
+        assert_eq!(
+            coerce_by_schema_type("[60,30]", Some("string")),
+            Some(json!("[60,30]"))
+        );
+        assert_eq!(
+            coerce_by_schema_type("\"4\"", Some("string")),
+            Some(json!("4"))
+        );
+
+        assert_eq!(coerce_by_schema_type("4", Some("integer")), Some(json!(4)));
+        assert_eq!(
+            coerce_by_schema_type("true", Some("boolean")),
+            Some(json!(true))
+        );
+        assert_eq!(
+            coerce_by_schema_type("[60,30]", Some("array")),
+            Some(json!([60, 30]))
+        );
+        // number keeps integer precision (no f64 rounding).
+        assert_eq!(
+            coerce_by_schema_type("9007199254740993", Some("number")),
+            Some(json!(9007199254740993i64))
+        );
+
+        // unknown type / value that fails to parse -> None (caller infers)
+        assert_eq!(coerce_by_schema_type("4", None), None);
+        assert_eq!(coerce_by_schema_type("abc", Some("integer")), None);
     }
 }

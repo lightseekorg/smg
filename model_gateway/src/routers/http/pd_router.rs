@@ -843,22 +843,24 @@ impl PDRouter {
         // Get cached hash ring for consistent hashing
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
-        let prefill = Self::pick_worker_by_policy_arc(
+        let prefill = self.pick_worker_by_policy_arc(
             &prefill_workers,
-            &*prefill_policy,
+            &prefill_policy,
             request_text,
             headers,
             hash_ring.clone(),
             "prefill",
+            crate::policies::WorkerLeg::Prefill,
         )?;
 
-        let decode = Self::pick_worker_by_policy_arc(
+        let decode = self.pick_worker_by_policy_arc(
             &decode_workers,
-            &*decode_policy,
+            &decode_policy,
             request_text,
             headers,
             hash_ring,
             "decode",
+            crate::policies::WorkerLeg::Decode,
         )?;
 
         // Record worker selection metrics (Layer 3)
@@ -879,13 +881,19 @@ impl PDRouter {
         Ok((prefill, decode))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "HTTP PD worker pick threads policy + request context + leg"
+    )]
     fn pick_worker_by_policy_arc(
+        &self,
         workers: &[Arc<dyn Worker>],
-        policy: &dyn LoadBalancingPolicy,
+        policy: &Arc<dyn LoadBalancingPolicy>,
         request_text: Option<&str>,
         headers: Option<&HeaderMap>,
         hash_ring: Option<Arc<HashRing>>,
         worker_type: &str,
+        leg: crate::policies::WorkerLeg,
     ) -> Result<Arc<dyn Worker>, String> {
         if workers.is_empty() {
             return Err(format!(
@@ -905,14 +913,17 @@ impl PDRouter {
             ));
         }
 
-        let selected_idx = policy
+        let selected_idx = self
+            .policy_registry
             .select_worker(
+                policy,
                 &available_workers,
                 &SelectWorkerInfo {
                     request_text,
                     tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                     headers,
                     hash_ring,
+                    leg,
                 },
             )
             .ok_or_else(|| {

@@ -368,6 +368,7 @@ struct Router {
     host: String,
     port: u16,
     health_check_port: Option<u16>,
+    routing_key_override: bool,
     worker_urls: Vec<String>,
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
@@ -504,6 +505,19 @@ impl Router {
         })
     }
 
+    fn parse_assignment_mode(&self) -> Result<config::ManualAssignmentMode, config::ConfigError> {
+        match self.assignment_mode.as_str() {
+            "random" => Ok(config::ManualAssignmentMode::Random),
+            "min_load" => Ok(config::ManualAssignmentMode::MinLoad),
+            "min_group" => Ok(config::ManualAssignmentMode::MinGroup),
+            other => Err(config::ConfigError::InvalidValue {
+                field: "assignment_mode".to_string(),
+                value: other.to_string(),
+                reason: "expected 'random', 'min_load', or 'min_group'".to_string(),
+            }),
+        }
+    }
+
     pub fn to_router_config(&self) -> config::ConfigResult<config::RouterConfig> {
         use config::{
             DiscoveryConfig, MetricsConfig, PolicyConfig as ConfigPolicyConfig, RoutingMode,
@@ -541,18 +555,7 @@ impl Router {
                 PolicyType::Manual => ConfigPolicyConfig::Manual {
                     eviction_interval_secs: self.eviction_interval_secs,
                     max_idle_secs: self.max_idle_secs,
-                    assignment_mode: match self.assignment_mode.as_str() {
-                        "random" => config::ManualAssignmentMode::Random,
-                        "min_load" => config::ManualAssignmentMode::MinLoad,
-                        "min_group" => config::ManualAssignmentMode::MinGroup,
-                        other => {
-                            return Err(config::ConfigError::InvalidValue {
-                                field: "assignment_mode".to_string(),
-                                value: other.to_string(),
-                                reason: "expected 'random', 'min_load', or 'min_group'".to_string(),
-                            });
-                        }
-                    },
+                    assignment_mode: self.parse_assignment_mode()?,
                 },
                 PolicyType::ConsistentHashing => ConfigPolicyConfig::ConsistentHashing,
                 PolicyType::PrefixHash => ConfigPolicyConfig::PrefixHash {
@@ -756,6 +759,12 @@ impl Router {
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .enable_wasm(self.enable_wasm)
             .dp_aware(self.dp_aware)
+            .routing_key_override(config::RoutingKeyOverrideConfig {
+                enabled: self.routing_key_override,
+                eviction_interval_secs: self.eviction_interval_secs,
+                max_idle_secs: self.max_idle_secs,
+                assignment_mode: self.parse_assignment_mode()?,
+            })
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
             .igw(self.enable_igw)
@@ -890,6 +899,7 @@ impl Router {
         // positional argument keeps its index for callers that construct
         // `_Router(...)` positionally. See the struct-field note above.
         health_check_port = None,
+        routing_key_override = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1009,6 +1019,7 @@ impl Router {
         // Appended last to match the `#[pyo3(signature)]` order above and
         // preserve positional-argument compatibility.
         health_check_port: Option<u16>,
+        routing_key_override: bool,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1028,6 +1039,7 @@ impl Router {
             host,
             port,
             health_check_port,
+            routing_key_override,
             worker_urls,
             policy,
             worker_startup_timeout_secs,
