@@ -191,6 +191,22 @@ fn test_function_call_function_variant_normalizes() {
     );
 }
 
+#[test]
+fn test_min_tokens_zero_is_valid() {
+    let req = ChatCompletionRequest {
+        model: "test-model".to_string(),
+        messages: vec![ChatMessage::User {
+            content: MessageContent::Text("hello".to_string()),
+            name: None,
+        }],
+        min_tokens: Some(0),
+        max_completion_tokens: Some(1),
+        ..Default::default()
+    };
+
+    assert!(req.validate().is_ok());
+}
+
 // Stream options validation tests
 
 #[test]

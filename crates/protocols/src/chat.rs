@@ -259,7 +259,7 @@ pub struct ChatCompletionRequest {
     pub min_p: Option<f32>,
 
     /// Minimum number of tokens to generate
-    #[validate(range(min = 1))]
+    #[validate(range(min = 0))]
     pub min_tokens: Option<u32>,
 
     /// Repetition penalty for reducing repetitive text
