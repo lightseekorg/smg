@@ -134,9 +134,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                 item_modality = Modality.VIDEO
                 grid_key = "video_grid_thw"
             else:
-                raise ValueError(
-                    f"encode request modality={item_proto.modality} is not supported"
-                )
+                raise ValueError(f"encode request modality={item_proto.modality} is not supported")
 
             grid = model_specific.get(grid_key)
             if grid is None:
