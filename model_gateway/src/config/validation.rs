@@ -805,6 +805,15 @@ impl ConfigValidator {
             });
         }
 
+        if let RoutingMode::EncodePrefillDecode { decode_policy, .. } = &config.mode {
+            let effective_decode_policy = decode_policy.as_ref().unwrap_or(&config.policy);
+            if matches!(effective_decode_policy, PolicyConfig::Bucket { .. }) {
+                return Err(ConfigError::IncompatibleConfig {
+                    reason: "Decode policy should not be allowed to be bucket".to_string(),
+                });
+            }
+        }
+
         if !has_service_discovery {
             if let PolicyConfig::PowerOfTwo { .. } = &config.policy {
                 let worker_count = config.mode.worker_count();
@@ -874,12 +883,6 @@ impl ConfigValidator {
                         reason:
                             "Power-of-two policy for decode requires at least 2 decode workers"
                                 .to_string(),
-                    });
-                }
-
-                if matches!(effective_decode_policy, PolicyConfig::Bucket { .. }) {
-                    return Err(ConfigError::IncompatibleConfig {
-                        reason: "Decode policy should not be allowed to be bucket".to_string(),
                     });
                 }
             }
