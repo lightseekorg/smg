@@ -647,7 +647,7 @@ impl Metrics {
         .increment(1);
     }
 
-    /// Record one multimodal tensor sent over `path` ("inline"|"shm") for `runtime`.
+    /// Record one multimodal tensor sent over `path` ("inline"|"shm"|"remote") for `runtime`.
     pub fn record_mm_tensor(runtime: &'static str, path: &'static str, nbytes: usize) {
         counter!("smg_mm_tensors_total", "runtime" => runtime, "path" => path).increment(1);
         counter!("smg_mm_tensor_bytes_total", "runtime" => runtime, "path" => path)

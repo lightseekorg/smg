@@ -452,6 +452,74 @@ mod tests {
         }
     }
 
+    // Per-image-independence guard for the smg gateway pixel cache (EPD P1): the
+    // cache stores one entry per image and reassembles requests from per-image
+    // payloads, which is only sound if preprocessing image i is independent of the
+    // other images in the batch. This asserts that a batched preprocess equals the
+    // concatenation of per-image preprocesses (encoder_input rows, grid_thw rows,
+    // and feature_token_counts). If a processor ever introduces cross-image work,
+    // this fails and the cache assumption must be revisited.
+    #[test]
+    fn per_image_preprocess_equals_batched_slices() {
+        use ndarray::{Axis, Slice};
+
+        let processor = Qwen3VLProcessor::new();
+        let config = PreProcessorConfig {
+            image_mean: Some(QWEN3_MEAN.to_vec()),
+            image_std: Some(QWEN3_STD.to_vec()),
+            ..Default::default()
+        };
+
+        let image_a = create_test_image(640, 480, Rgb([100, 110, 120]));
+        let image_b = create_test_image(420, 560, Rgb([10, 200, 90]));
+
+        let batched = processor
+            .preprocess(&[image_a.clone(), image_b.clone()], &config)
+            .unwrap();
+        let single_a = processor.preprocess(&[image_a], &config).unwrap();
+        let single_b = processor.preprocess(&[image_b], &config).unwrap();
+
+        // Feature token counts line up per image.
+        assert_eq!(
+            batched.feature_token_counts,
+            vec![
+                single_a.feature_token_counts[0],
+                single_b.feature_token_counts[0]
+            ]
+        );
+
+        // encoder_input rows: batch == [single_a rows ++ single_b rows].
+        let pa = single_a.encoder_input.shape()[0];
+        let pb = single_b.encoder_input.shape()[0];
+        assert_eq!(batched.encoder_input.shape()[0], pa + pb);
+        assert_eq!(
+            batched
+                .encoder_input
+                .slice_axis(Axis(0), Slice::from(0..pa))
+                .to_owned(),
+            single_a.encoder_input
+        );
+        assert_eq!(
+            batched
+                .encoder_input
+                .slice_axis(Axis(0), Slice::from(pa..pa + pb))
+                .to_owned(),
+            single_b.encoder_input
+        );
+
+        // image_grid_thw rows: batch == [single_a row ++ single_b row].
+        let grid = |inputs: &PreprocessedEncoderInputs| match inputs
+            .model_specific
+            .get("image_grid_thw")
+        {
+            Some(ModelSpecificValue::IntTensor { data, .. }) => data.clone(),
+            other => panic!("expected image_grid_thw IntTensor, got {other:?}"),
+        };
+        let mut expected_grid = grid(&single_a);
+        expected_grid.extend(grid(&single_b));
+        assert_eq!(grid(&batched), expected_grid);
+    }
+
     #[test]
     fn test_qwen3_vl_preprocess_video() {
         let processor = Qwen3VLProcessor::new();

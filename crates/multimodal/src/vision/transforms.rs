@@ -151,7 +151,8 @@ fn build_planar_tensor(
     bias: [f32; 3],
 ) -> Array3<f32> {
     let pixels = h * w;
-    let mut data = vec![0.0f32; 3 * pixels];
+    // Pooled: this large per-image buffer is the data plane's hottest allocation.
+    let mut data = crate::vision::scratch::take_f32(3 * pixels);
     let (r_plane, rest) = data.split_at_mut(pixels);
     let (g_plane, b_plane) = rest.split_at_mut(pixels);
 

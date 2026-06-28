@@ -25,6 +25,7 @@ use llm_multimodal::{
 mod assemble;
 mod config;
 mod detect;
+mod pixel_cache;
 mod process;
 mod serialize;
 mod transport;

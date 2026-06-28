@@ -19,6 +19,7 @@ default = ["grpc-client"]
 grpc-client = []
 grpc-server = []
 opencv-video = ["llm-multimodal/opencv-video"]
+mm-rdma = ["dep:nixl-sys"]
 
 vendored-openssl = ["openssl/vendored"]
 
@@ -35,6 +36,9 @@ name = "amg"
 path = "src/main.rs"
 
 [dependencies]
+# Multimodal RDMA pixel transport. Optional because nixl-sys runs bindgen at
+# build time; ordinary gateway builds should not require a NIXL/clang setup.
+nixl-sys = { version = "0.10.1", features = ["stub-api"], optional = true }
 # Workspace dependencies (simple)
 anyhow.workspace = true
 async-trait.workspace = true
@@ -43,6 +47,7 @@ chrono.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 http.workspace = true
+lru.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
 prost-types.workspace = true

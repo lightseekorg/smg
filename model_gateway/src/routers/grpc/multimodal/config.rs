@@ -11,6 +11,8 @@ use llm_multimodal::{
 };
 use tracing::{debug, warn};
 
+use super::pixel_cache::{pixel_cache_from_env, PixelCache};
+
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
 pub(crate) struct MultimodalModelConfig {
@@ -202,6 +204,8 @@ pub(crate) struct MultimodalComponents {
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
+    /// Optional host-DRAM cache of preprocessed per-image encoder inputs.
+    pub pixel_cache: Option<Arc<PixelCache>>,
 }
 
 impl MultimodalComponents {
@@ -220,6 +224,7 @@ impl MultimodalComponents {
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
+            pixel_cache: pixel_cache_from_env(),
         })
     }
 }

@@ -104,10 +104,11 @@ impl PreparedEncodeItem {
                 shm_min_bytes,
                 cleanup_on_drop,
             } => {
-                let item = item
+                let mut item = item
                     .take()
                     .ok_or_else(|| "encode item was already dispatched".to_string())?;
                 *cleanup_on_drop = false;
+                item.encoder_input = item.encoder_input.try_export_nixl_remote(bootstrap_room);
                 let request = tokenspeed_encoder::EncodeRequest {
                     request_id: format!("encode-{}", Uuid::now_v7()),
                     mm_inputs: Some(

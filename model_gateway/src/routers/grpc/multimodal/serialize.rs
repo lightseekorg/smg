@@ -489,6 +489,9 @@ mod tests {
             TokenSpeedTensorStorage::Inline(_) => {
                 panic!("expected SHM at/above the threshold when /dev/shm is writable")
             }
+            TokenSpeedTensorStorage::Remote(_) => {
+                panic!("unexpected remote payload in the SHM threshold test")
+            }
         }
     }
 }
