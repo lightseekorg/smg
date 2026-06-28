@@ -13,6 +13,7 @@ pub mod channel;
 pub mod mlx_engine;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
+pub mod tokenspeed_encoder;
 pub mod tokenspeed_scheduler;
 pub mod trtllm_service;
 pub mod vllm_engine;
@@ -26,6 +27,7 @@ pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{
     proto as sglang_proto, SglangGenerateRequestOptions, SglangSchedulerClient,
 };
+pub use tokenspeed_encoder::{tokenspeed_encoder_proto, TokenSpeedEncoderClient};
 pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 use tonic::metadata::MetadataMap;
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};

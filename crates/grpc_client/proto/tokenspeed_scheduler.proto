@@ -8,10 +8,11 @@ import "common.proto";
 
 // TokenSpeed scheduler gRPC service. Self-contained wire definition apart
 // from the cross-engine admin messages in smg.grpc.common (flush/profile).
-// Trimmed to text+multimodal generation (no embed, no PD-disaggregated, no
-// LoRA, no hidden-state forwarding). Multimodal carries preprocessed
-// tensors only — image fetch + per-model preprocess happen in the
-// gateway (see crates/multimodal).
+// Trimmed to text+multimodal generation (no embed, no LoRA, no hidden-state
+// forwarding). Multimodal carries preprocessed tensors only — image fetch +
+// per-model preprocess happen in the gateway (see crates/multimodal). EPD: a
+// prefill request may carry `EncodeBootstrapInfo` so its image embeddings
+// arrive from an encode worker over Mooncake (see tokenspeed_encoder.proto).
 service TokenSpeedScheduler {
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -107,6 +108,58 @@ message GenerateRequest {
   // Preprocessed multimodal payload. Absent for text-only requests.
   MultimodalInputs mm_inputs = 9;
 
+  // EPD: present when this request's image embeddings arrive from an encode
+  // worker over Mooncake instead of being computed here. The worker waits for
+  // the embedding keyed by `bootstrap_room` rather than running the vision
+  // tower. Absent for non-disaggregated (aggregated) requests.
+  optional EncodeBootstrapInfo encode_bootstrap_info = 10;
+
+  // PD: present when prefill and decode run on separate workers and hand the KV
+  // cache off over Mooncake. The gateway sends the SAME params to both the
+  // prefill and decode worker; they meet at (`bootstrap_host`, `bootstrap_port`)
+  // keyed by `bootstrap_room`. Absent for aggregated (single-worker) requests.
+  optional KvBootstrapInfo kv_bootstrap_info = 11;
+}
+
+// EPD encode->prefill pairing handed to a prefill worker. Each multimodal item
+// is encoded independently and may live on a different encode worker, so the
+// bootstrap info carries one entry per item. The prefill sets up one Mooncake
+// receiver per item (keyed by that item's `bootstrap_room`) and discovers the
+// item's encode worker at (`bootstrap_host`, `bootstrap_port`) -- the encode
+// worker is the data source that hosts the bootstrap server.
+message EncodeBootstrapInfo {
+  repeated EncodeItemBootstrapInfo items = 1;
+}
+
+// One multimodal item's encode->prefill rendezvous. The matching encode worker
+// is told the same `bootstrap_room` for this item and ships its embedding to
+// this prefill over Mooncake; the prefill discovers that worker's bootstrap
+// server at (`bootstrap_host`, `bootstrap_port`).
+message EncodeItemBootstrapInfo {
+  // Index of the item within this request's mm_inputs.items, so the prefill
+  // writes the received embedding onto the right item.
+  uint32 item_index = 1;
+  // The encode worker's bootstrap server (data-source side), not the prefill's.
+  string bootstrap_host = 2;
+  int32 bootstrap_port = 3;
+  // 63-bit rendezvous id: minted random per image by the gateway with no
+  // in-flight dedup, so the space must be wide enough that the birthday
+  // collision rate is negligible even with many independent gateways and
+  // thousands of concurrent rooms (int32's 2^31 collides every few days under
+  // load, silently cross-wiring one image's embedding onto another's room).
+  int64 bootstrap_room = 4;
+}
+
+// PD prefill->decode KV rendezvous. The prefill worker is the KV data source:
+// it hosts the bootstrap server at (`bootstrap_host`, `bootstrap_port`) and the
+// decode worker discovers it there, keyed by `bootstrap_room`. The gateway
+// mints one room per request and sends identical params to both workers.
+message KvBootstrapInfo {
+  string bootstrap_host = 1;
+  int32 bootstrap_port = 2;
+  // 63-bit rendezvous id (see EncodeItemBootstrapInfo.bootstrap_room): minted
+  // random per request with no dedup, so the space must stay wide.
+  int64 bootstrap_room = 3;
 }
 
 message TokenizedInput {

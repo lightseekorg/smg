@@ -68,10 +68,12 @@ def _grpc_server_options(max_message_bytes: int) -> list[tuple[str, int]]:
     return [
         ("grpc.max_send_message_length", max_message_bytes),
         ("grpc.max_receive_message_length", max_message_bytes),
-        # Allow gateway keepalive pings during long prefill / non-streaming
-        # requests while keeping ping-strike enforcement enabled.
-        ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
-        ("grpc.keepalive_permit_without_calls", 1),
+        # Long EPD requests can spend minutes without sending DATA frames while
+        # the Rust client still sends HTTP/2 keepalive pings.
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+        ("grpc.http2.max_pings_without_data", 0),
+        ("grpc.http2.max_ping_strikes", 0),
+        ("grpc.keepalive_permit_without_calls", True),
     ]
 
 
@@ -92,17 +94,63 @@ async def serve_grpc(server_args: ServerArgs) -> None:
         scheduler_info=scheduler_info,
     )
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    discovery_servicer = None
 
-    servicer = TokenSpeedSchedulerServicer(
-        async_llm=async_llm,
-        server_args=server_args,
-        scheduler_info=scheduler_info,
-        health_servicer=health_servicer,
-    )
-    tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(servicer, server)
+    if server_args.disaggregation_mode == "encode":
+        # EPD encode worker: serve the vision-only encode loop via the encoder
+        # service. ALSO mount the scheduler service so the gateway's generic
+        # worker discovery (HealthCheck + GetModelInfo + GetServerInfo, all over
+        # the TokenSpeedScheduler stub) can reach this worker and register it.
+        # Note: mounting the scheduler service means the unconditional startup
+        # warmup (stub.Generate) would route to the scheduler Generate path and
+        # drive the LM, which can SIGUSR1-kill the encode TP group -- encode
+        # workers must run with TOKENSPEED_SKIP_GRPC_WARMUP=1 (or warmup must be
+        # guarded to skip in encode mode). HealthCheck short-circuits to a
+        # shallow probe for disaggregation roles, so it won't drive the LM.
+        from smg_grpc_proto.generated import (
+            tokenspeed_encoder_pb2,
+            tokenspeed_encoder_pb2_grpc,
+        )
+
+        from smg_grpc_servicer.tokenspeed.encoder_servicer import (
+            TokenSpeedEncoderServicer,
+        )
+
+        servicer = TokenSpeedEncoderServicer(
+            async_llm=async_llm,
+            server_args=server_args,
+            scheduler_info=scheduler_info,
+            health_servicer=health_servicer,
+        )
+        tokenspeed_encoder_pb2_grpc.add_TokenSpeedEncoderServicer_to_server(servicer, server)
+
+        discovery_servicer = TokenSpeedSchedulerServicer(
+            async_llm=async_llm,
+            server_args=server_args,
+            scheduler_info=scheduler_info,
+            health_servicer=health_servicer,
+        )
+        tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(
+            discovery_servicer, server
+        )
+
+        primary_service = tokenspeed_encoder_pb2.DESCRIPTOR.services_by_name[
+            "TokenSpeedEncoder"
+        ].full_name
+    else:
+        servicer = TokenSpeedSchedulerServicer(
+            async_llm=async_llm,
+            server_args=server_args,
+            scheduler_info=scheduler_info,
+            health_servicer=health_servicer,
+        )
+        tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(servicer, server)
+        primary_service = tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name[
+            "TokenSpeedScheduler"
+        ].full_name
 
     service_names = (
-        tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name["TokenSpeedScheduler"].full_name,
+        primary_service,
         "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
@@ -144,6 +192,11 @@ async def serve_grpc(server_args: ServerArgs) -> None:
             await servicer.shutdown()
         except Exception:  # noqa: BLE001
             logger.exception("servicer.shutdown() raised")
+        if discovery_servicer is not None:
+            try:
+                await discovery_servicer.shutdown()
+            except Exception:  # noqa: BLE001
+                logger.exception("discovery_servicer.shutdown() raised")
         await server.stop(5.0)
         if warmup_thread.is_alive():
             warmup_thread.join(timeout=5.0)
@@ -160,6 +213,14 @@ def _wait_and_warmup(
     """
     if os.getenv("TOKENSPEED_SKIP_GRPC_WARMUP", "0").lower() in ("1", "true", "yes"):
         logger.info("TOKENSPEED_SKIP_GRPC_WARMUP=1 — skipping warmup")
+        health_servicer.set_serving()
+        return
+
+    if server_args.disaggregation_mode == "encode":
+        # Encode workers run the vision tower only — no LM. The warmup's
+        # stub.Generate would route through the scheduler Generate path and drive
+        # the LM, SIGUSR1-killing the encode TP group. Skip it for this role.
+        logger.info("encode role — skipping Generate warmup (no LM)")
         health_servicer.set_serving()
         return
 

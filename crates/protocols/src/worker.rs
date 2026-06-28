@@ -39,6 +39,9 @@ pub enum WorkerType {
     Prefill,
     /// Decode worker for PD disaggregated mode.
     Decode,
+    /// Encode worker for EPD disaggregated mode: runs the vision tower and
+    /// ships image embeddings to a prefill worker over Mooncake.
+    Encode,
 }
 
 impl std::fmt::Display for WorkerType {
@@ -47,6 +50,7 @@ impl std::fmt::Display for WorkerType {
             WorkerType::Regular => write!(f, "regular"),
             WorkerType::Prefill => write!(f, "prefill"),
             WorkerType::Decode => write!(f, "decode"),
+            WorkerType::Encode => write!(f, "encode"),
         }
     }
 }
@@ -61,6 +65,8 @@ impl std::str::FromStr for WorkerType {
             Ok(WorkerType::Prefill)
         } else if s.eq_ignore_ascii_case("decode") {
             Ok(WorkerType::Decode)
+        } else if s.eq_ignore_ascii_case("encode") {
+            Ok(WorkerType::Encode)
         } else {
             Err(format!("Unknown worker type: {s}"))
         }

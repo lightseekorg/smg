@@ -673,13 +673,13 @@ async fn process_multimodal_parts(
             .unwrap_or_else(|| model_config.preprocessor_config.clone()),
         _ => model_config.preprocessor_config.clone(),
     };
+    let preprocess_started = Instant::now();
+
     let registry = components.vision_processor_registry.clone();
     let model_id_owned = model_id.to_string();
     let model_type_owned = model_type.map(String::from);
     let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
     let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
-
-    let preprocess_started = Instant::now();
     let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
@@ -954,6 +954,29 @@ pub(crate) async fn assemble_multimodal_data(
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
 ) -> Result<MultimodalData> {
+    assemble_multimodal_data_impl(intermediate, client, workers, false).await
+}
+
+/// Assemble multimodal data for a prefill request whose item embeddings will
+/// arrive out-of-band from encode workers.
+pub(crate) async fn assemble_multimodal_data_after_encode(
+    intermediate: MultimodalIntermediate,
+    client: &GrpcClient,
+    workers: Option<&WorkerSelection>,
+) -> Result<MultimodalData> {
+    assemble_multimodal_data_impl(intermediate, client, workers, true).await
+}
+
+#[expect(
+    clippy::unreachable,
+    reason = "MLX multimodal rejected by caller before reaching here"
+)]
+async fn assemble_multimodal_data_impl(
+    intermediate: MultimodalIntermediate,
+    client: &GrpcClient,
+    workers: Option<&WorkerSelection>,
+    omit_prefill_pixels: bool,
+) -> Result<MultimodalData> {
     match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
             GrpcClient::Sglang(_) => {
@@ -969,9 +992,10 @@ pub(crate) async fn assemble_multimodal_data(
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
             GrpcClient::TokenSpeed(_) => {
-                let options = tokenspeed_assembly_options(precomputed.modality, workers);
+                let options =
+                    tokenspeed_assembly_options(precomputed.modality, workers, omit_prefill_pixels);
                 let pending = tokio::task::spawn_blocking(move || {
-                    assemble_tokenspeed_with_options(precomputed, options)
+                    assemble_tokenspeed_with_options(&precomputed, options)
                         .map(PendingTokenSpeedAssembly::new)
                 })
                 .await
@@ -1091,32 +1115,35 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
     TrtllmMultimodalData { image_data }
 }
 
-#[cfg(test)]
-fn assemble_tokenspeed(
-    intermediate: PrecomputedMultimodalIntermediate,
+pub(crate) fn assemble_tokenspeed(
+    intermediate: &PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
 ) -> Result<TokenSpeedMultimodalData> {
-    let options = tokenspeed_assembly_options(intermediate.modality, workers);
+    let options = tokenspeed_assembly_options(intermediate.modality, workers, skip_pixel_values);
     assemble_tokenspeed_with_options(intermediate, options)
 }
 
 struct TokenSpeedAssemblyOptions {
     shm_enabled: bool,
     encoder_input_dtype: String,
+    skip_pixel_values: bool,
 }
 
 fn tokenspeed_assembly_options(
     modality: Modality,
     workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
 ) -> TokenSpeedAssemblyOptions {
     TokenSpeedAssemblyOptions {
         shm_enabled: resolve_tokenspeed_shm_enabled(workers),
         encoder_input_dtype: tokenspeed_encoder_input_dtype(modality, workers),
+        skip_pixel_values,
     }
 }
 
 fn assemble_tokenspeed_with_options(
-    intermediate: PrecomputedMultimodalIntermediate,
+    intermediate: &PrecomputedMultimodalIntermediate,
     options: TokenSpeedAssemblyOptions,
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
@@ -1124,6 +1151,7 @@ fn assemble_tokenspeed_with_options(
     let TokenSpeedAssemblyOptions {
         shm_enabled,
         encoder_input_dtype,
+        skip_pixel_values,
     } = options;
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let patch_offsets = intermediate
@@ -1139,7 +1167,7 @@ fn assemble_tokenspeed_with_options(
         Modality::ImageEmbeds => TokenSpeedModality::Image,
     };
 
-    let item_count = precomputed_multimodal_item_count(&intermediate)?;
+    let item_count = precomputed_multimodal_item_count(intermediate)?;
     // Build items imperatively so that if any step fails partway we can unlink
     // the /dev/shm segments already created for prior items' encoder inputs
     // (and this item's, once created). `?`/`collect` would drop those
@@ -1147,23 +1175,30 @@ fn assemble_tokenspeed_with_options(
     // cleanup, leaking files until the next sweep.
     let mut items: Vec<TokenSpeedMultimodalItem> = Vec::with_capacity(item_count);
     for item_index in 0..item_count {
-        let item_encoder_input = match encoder_input_for_item(
-            &intermediate.preprocessed,
-            &intermediate.field_layouts,
-            item_index,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                cleanup_tokenspeed_items_encoder_shm(&items, None);
-                return Err(error);
-            }
-        };
         let encoder_input_started = Instant::now();
-        let encoder_input = serialize_array_as_tokenspeed_tensor(
-            &item_encoder_input,
-            &encoder_input_dtype,
-            shm_enabled,
-        );
+        // EPD prefill: the embedding arrives over Mooncake and this item's
+        // encoder_input is stripped downstream (clear_mm_pixel_values), so skip
+        // the per-item slice + serialize entirely when skip_pixel_values is set.
+        let encoder_input = if skip_pixel_values {
+            TokenSpeedTensor::inline(Vec::new(), Vec::new(), encoder_input_dtype.clone())
+        } else {
+            let item_encoder_input = match encoder_input_for_item(
+                &intermediate.preprocessed,
+                &intermediate.field_layouts,
+                item_index,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    cleanup_tokenspeed_items_encoder_shm(&items, None);
+                    return Err(error);
+                }
+            };
+            serialize_array_as_tokenspeed_tensor(
+                &item_encoder_input,
+                &encoder_input_dtype,
+                shm_enabled,
+            )
+        };
         let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
         let model_specific_started = Instant::now();
         let model_specific_tensors = match serialize_model_specific_for_item(
@@ -1182,7 +1217,7 @@ fn assemble_tokenspeed_with_options(
         let model_specific_serialize_ms = model_specific_started.elapsed().as_secs_f64() * 1000.0;
         let mm_placeholders =
             placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
-        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, item_index);
+        let content_hash = content_hash_for_item(intermediate.modality, intermediate, item_index);
 
         if log_timing {
             info!(
@@ -1253,6 +1288,15 @@ fn precomputed_multimodal_item_count(
         intermediate.modality
     );
     Ok(item_count)
+}
+
+pub(crate) fn precomputed_encode_routing_hashes(
+    intermediate: &PrecomputedMultimodalIntermediate,
+) -> Result<Vec<Vec<u8>>> {
+    let item_count = precomputed_multimodal_item_count(intermediate)?;
+    Ok((0..item_count)
+        .map(|item_index| content_hash_for_item(intermediate.modality, intermediate, item_index))
+        .collect())
 }
 
 fn encoder_input_for_item<'a>(
@@ -1655,7 +1699,11 @@ fn tokenspeed_encoder_input_dtype(modality: Modality, workers: Option<&WorkerSel
     if let Some(dtype) = tokenspeed_encoder_input_dtype_from_worker(workers) {
         return dtype;
     }
-    "float32".to_string()
+    // Default to bf16 on the wire: the engine casts encoder_input to the model
+    // dtype (bf16) at the ViT regardless, so this is numerically identical to f32
+    // while halving the gateway->encode payload (the EPD throughput limiter).
+    // Override per-modality via SMG_TOKENSPEED_*_ENCODER_INPUT_DTYPE.
+    "bfloat16".to_string()
 }
 
 fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
@@ -1687,7 +1735,7 @@ fn cached_env_dtype(cell: &'static OnceLock<Option<String>>, name: &str) -> Opti
 fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>) -> Option<String> {
     let worker = match workers? {
         WorkerSelection::Single { worker } => worker,
-        WorkerSelection::Dual { prefill, .. } => prefill,
+        WorkerSelection::Disaggregated { prefill, .. } => prefill,
     };
     worker
         .metadata()
@@ -1757,11 +1805,30 @@ fn worker_shares_dev_shm(workers: Option<&WorkerSelection>) -> bool {
     let Some(local) = local_shm_namespace_id() else {
         return false;
     };
-    let worker = match workers {
-        Some(WorkerSelection::Single { worker }) => worker,
-        Some(WorkerSelection::Dual { prefill, .. }) => prefill,
-        None => return false,
-    };
+    match workers {
+        Some(WorkerSelection::Single { worker }) => worker_matches_shm_namespace(worker, local),
+        Some(WorkerSelection::Disaggregated {
+            encode_assignments,
+            prefill,
+            ..
+        }) => {
+            if let Some(encode_assignments) = encode_assignments {
+                // EPD: encoder_input (pixels) ships gateway -> encode worker, so SHM
+                // is safe only if every encode worker assigned in this request shares
+                // the gateway's /dev/shm. A mixed local/remote fan-out must fall back
+                // to inline/RDMA rather than giving a remote worker an unreadable SHM handle.
+                encode_assignments
+                    .iter()
+                    .all(|assignment| worker_matches_shm_namespace(&assignment.worker, local))
+            } else {
+                worker_matches_shm_namespace(prefill, local)
+            }
+        }
+        None => false,
+    }
+}
+
+fn worker_matches_shm_namespace(worker: &Arc<dyn crate::worker::Worker>, local: &str) -> bool {
     worker
         .metadata()
         .spec
@@ -2263,13 +2330,14 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];
         assert_eq!(first.modality, TokenSpeedModality::Image);
         assert_eq!(first.encoder_input.shape, vec![2, 2]);
-        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<f32>());
+        // bf16 is the default TokenSpeed encoder_input wire dtype (2 bytes/elem).
+        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<u16>());
         assert_eq!(first.mm_placeholders, vec![(10, 2)]);
         assert_eq!(
             first.content_hash,
@@ -2369,13 +2437,14 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];
         assert_eq!(first.modality, TokenSpeedModality::Video);
         assert_eq!(first.encoder_input.shape, vec![2, 2]);
-        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<f32>());
+        // bf16 is the default TokenSpeed encoder_input wire dtype (2 bytes/elem).
+        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<u16>());
         assert_eq!(first.mm_placeholders, vec![(30, 2)]);
         assert_eq!(
             first.content_hash,

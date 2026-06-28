@@ -12,7 +12,9 @@ use tracing::{debug, warn};
 
 use crate::{
     routers::grpc::{
-        context::{RequestType, WorkerSelection},
+        context::{ClientSelection, RequestType, WorkerSelection},
+        epd_encode::{self, EncodePlan},
+        multimodal::MultimodalIntermediate,
         proto_wrapper::ProtoGenerateRequest,
     },
     worker::{
@@ -89,7 +91,7 @@ pub(crate) fn sampling_defaults_for_request(
 ) -> Option<SamplingDefaults> {
     let worker = match workers? {
         WorkerSelection::Single { worker } => worker,
-        WorkerSelection::Dual { decode, .. } => decode,
+        WorkerSelection::Disaggregated { decode, .. } => decode,
     };
     let json = worker
         .metadata()
@@ -251,6 +253,26 @@ fn apply_tokenspeed_sampling_defaults(
     apply_opt!(repetition_penalty);
 }
 
+pub(crate) fn plan_epd_encode(
+    intermediate: &MultimodalIntermediate,
+    clients: &ClientSelection,
+    workers: Option<&WorkerSelection>,
+) -> anyhow::Result<Option<EncodePlan>> {
+    if workers
+        .and_then(WorkerSelection::encode_assignments)
+        .is_none_or(|assignments| assignments.is_empty())
+    {
+        return Ok(None);
+    }
+
+    let plan = epd_encode::build_plan_from_intermediate(intermediate, Some(clients), workers)?;
+    if plan.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(plan))
+    }
+}
+
 /// Inject PD bootstrap metadata for SGLang if needed.
 ///
 /// SGLang uses DisaggregatedParams with bootstrap host/port/room.
@@ -259,7 +281,7 @@ pub(crate) fn maybe_inject_pd_metadata(
     request: &mut ProtoGenerateRequest,
     workers: &WorkerSelection,
 ) {
-    if let WorkerSelection::Dual {
+    if let WorkerSelection::Disaggregated {
         prefill,
         runtime_type,
         ..
@@ -294,4 +316,43 @@ fn inject_sglang_bootstrap_metadata(
         "Injected bootstrap metadata: host={}, port={}, room={}",
         hostname, bootstrap_port, room_id
     );
+}
+
+/// Inject prefill->decode rendezvous params for backends that carry them in the
+/// generate request.
+///
+/// The gateway mints one room per request and sends identical params to both the
+/// prefill and decode worker (`execute_prefill_decode_dispatch` clones the request after
+/// this stage). Host/port name the PREFILL worker's Mooncake bootstrap server
+/// (the KV data source); the decode worker discovers it there by `bootstrap_room`.
+/// This KV leg is independent of any per-item encode->prefill bootstrap info.
+pub(crate) fn maybe_inject_pd_rendezvous(
+    request: &mut ProtoGenerateRequest,
+    workers: &WorkerSelection,
+) {
+    // The KV bootstrap leg is identical for plain PD and EPD; EPD just layers
+    // encode assignments on the disaggregated worker selection.
+    let (prefill, runtime_type) = match workers {
+        WorkerSelection::Disaggregated {
+            prefill,
+            runtime_type,
+            ..
+        } => (prefill, runtime_type),
+        WorkerSelection::Single { .. } => return,
+    };
+    if *runtime_type == RuntimeType::TokenSpeed {
+        let metadata = prefill.metadata();
+        let hostname = metadata.bootstrap_host();
+        let bootstrap_port = metadata.bootstrap_port().unwrap_or(DEFAULT_BOOTSTRAP_PORT);
+        // 63-bit room: no dedup, keep the space wide so the birthday collision
+        // rate stays negligible. See the proto field doc.
+        let room_id = rand::rng().random_range(0..i64::MAX);
+
+        request.set_kv_bootstrap_info(hostname.to_string(), bootstrap_port as i32, room_id);
+
+        debug!(
+            "Injected PD rendezvous: host={}, port={}, room={}",
+            hostname, bootstrap_port, room_id
+        );
+    }
 }

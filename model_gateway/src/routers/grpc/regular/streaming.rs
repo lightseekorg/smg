@@ -47,7 +47,7 @@ use crate::{
     },
 };
 
-/// Shared streaming processor for both single and dual dispatch modes
+/// Shared streaming processor for both single and prefill/decode dispatch modes
 #[derive(Clone)]
 pub(crate) struct StreamingProcessor {
     tool_parser_factory: ToolParserFactory,
@@ -143,7 +143,7 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 prefill,
                 decode,
                 pd_timing,
@@ -156,7 +156,7 @@ impl StreamingProcessor {
                 )]
                 tokio::spawn(async move {
                     let result = processor
-                        .process_dual_streaming_chunks(
+                        .process_prefill_decode_streaming_chunks(
                             prefill,
                             *decode,
                             dispatch,
@@ -211,7 +211,7 @@ impl StreamingProcessor {
         .await
     }
 
-    /// Inner implementation shared by single-mode and PD-dual streaming.
+    /// Inner implementation shared by single-mode and PD prefill/decode streaming.
     /// `pd_timing` is `Some` only in PD mode and yields honest PD TTFT
     /// (prefill start to first decode token).
     #[expect(clippy::too_many_arguments)]
@@ -652,9 +652,9 @@ impl StreamingProcessor {
         Ok(())
     }
 
-    /// Process dual streaming chunks (prefill + decode) - PD mode
+    /// Process prefill/decode streaming chunks (prefill + decode) - PD mode
     #[expect(clippy::too_many_arguments)]
-    pub async fn process_dual_streaming_chunks(
+    pub async fn process_prefill_decode_streaming_chunks(
         &self,
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
@@ -752,7 +752,7 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 prefill,
                 decode,
                 pd_timing,
@@ -764,7 +764,7 @@ impl StreamingProcessor {
                     reason = "streaming task is fire-and-forget; client disconnect terminates it"
                 )]
                 tokio::spawn(async move {
-                    let result = Self::process_generate_streaming_dual(
+                    let result = Self::process_generate_prefill_decode_streaming(
                         tokenizer, prefill, *decode, ctx, &tx, pd_timing,
                     )
                     .await;
@@ -905,8 +905,8 @@ impl StreamingProcessor {
         Ok(())
     }
 
-    /// Process dual streaming for generate endpoint (PD mode with logprobs support)
-    async fn process_generate_streaming_dual(
+    /// Process prefill/decode streaming for generate endpoint (PD mode with logprobs support)
+    async fn process_generate_prefill_decode_streaming(
         tokenizer: Arc<dyn Tokenizer>,
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
@@ -1585,7 +1585,7 @@ impl StreamingProcessor {
                     // No data: [DONE] — Anthropic uses message_stop instead
                 });
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
                 prefill,
                 decode,
@@ -1599,7 +1599,7 @@ impl StreamingProcessor {
                 )]
                 tokio::spawn(async move {
                     let result = processor
-                        .process_dual_messages_streaming_chunks(
+                        .process_prefill_decode_messages_streaming_chunks(
                             prefill,
                             *decode,
                             dispatch,
@@ -2257,12 +2257,12 @@ impl StreamingProcessor {
         Ok(())
     }
 
-    /// Process dual streaming chunks for Messages API (PD mode).
+    /// Process prefill/decode streaming chunks for Messages API (PD mode).
     ///
     /// Consumes prefill stream then delegates to
     /// [`Self::process_messages_streaming_chunks`] with the decode stream.
     #[expect(clippy::too_many_arguments)]
-    pub async fn process_dual_messages_streaming_chunks(
+    pub async fn process_prefill_decode_messages_streaming_chunks(
         &self,
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
@@ -2348,7 +2348,7 @@ impl StreamingProcessor {
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 });
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
                 prefill,
                 decode,
@@ -2361,7 +2361,7 @@ impl StreamingProcessor {
                 )]
                 tokio::spawn(async move {
                     let result = processor
-                        .process_dual_completion_streaming_chunks(
+                        .process_prefill_decode_completion_streaming_chunks(
                             prefill,
                             *decode,
                             dispatch,
@@ -2731,10 +2731,10 @@ impl StreamingProcessor {
         Ok(())
     }
 
-    /// PD dual-dispatch variant: consume prefill stream, then delegate decode
+    /// PD prefill/decode variant: consume prefill stream, then delegate decode
     /// stream to [`Self::process_completion_streaming_chunks`].
     #[expect(clippy::too_many_arguments)]
-    async fn process_dual_completion_streaming_chunks(
+    async fn process_prefill_decode_completion_streaming_chunks(
         &self,
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,

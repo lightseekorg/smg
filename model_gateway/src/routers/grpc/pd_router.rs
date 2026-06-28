@@ -23,7 +23,10 @@ use crate::{
     worker::{ConnectionMode, WorkerRegistry, WorkerType},
 };
 
-/// gRPC PD (Prefill-Decode) router implementation for SGLang
+/// gRPC disaggregated prefill/decode router router. Serves both PD (prefill-decode) and
+/// EPD (encode-prefill-decode): the two differ only in which pipelines are built
+/// (`new` vs `new_epd`) and the `router_type` label. All routing/retry logic and
+/// the prefill+decode dispatch are shared.
 #[derive(Clone)]
 pub struct GrpcPDRouter {
     worker_registry: Arc<WorkerRegistry>,
@@ -32,6 +35,8 @@ pub struct GrpcPDRouter {
     completion_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
     retry_config: RetryConfig,
+    /// Router-type label for metrics/introspection ("grpc_pd" or "grpc_epd").
+    router_type: &'static str,
 }
 
 impl GrpcPDRouter {
@@ -104,10 +109,82 @@ impl GrpcPDRouter {
             completion_pipeline,
             shared_components,
             retry_config: ctx.router_config.effective_retry_config(),
+            router_type: "grpc_pd",
         })
     }
 
-    /// Main route_generate implementation with PD dual dispatch
+    /// Create a new gRPC EPD (encode-prefill-decode) router.
+    ///
+    /// Identical to [`Self::new`] except the chat/generate and messages
+    /// pipelines plan encode-worker jobs during request building, and all
+    /// pipelines dispatch through `ExecutionPlan::EncodePrefillDecode`.
+    /// Completion is text-only so it has no encode jobs but still uses the EPD
+    /// execution path.
+    pub fn new_epd(ctx: &Arc<AppContext>) -> Result<Self, String> {
+        let worker_registry = ctx.worker_registry.clone();
+        let policy_registry = ctx.policy_registry.clone();
+        let tokenizer_registry = ctx.tokenizer_registry.clone();
+
+        let reasoning_parser_factory = ctx
+            .reasoning_parser_factory
+            .as_ref()
+            .ok_or_else(|| "gRPC EPD router requires reasoning parser factory".to_string())?
+            .clone();
+        let tool_parser_factory = ctx
+            .tool_parser_factory
+            .as_ref()
+            .ok_or_else(|| "gRPC EPD router requires tool parser factory".to_string())?
+            .clone();
+
+        let multimodal = match MultimodalComponents::new(ctx.multimodal_config_registry.clone()) {
+            Ok(mc) => Some(Arc::new(mc)),
+            Err(e) => {
+                tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
+                None
+            }
+        };
+
+        let shared_components = Arc::new(SharedComponents {
+            tokenizer_registry: tokenizer_registry.clone(),
+            tool_parser_factory: tool_parser_factory.clone(),
+            reasoning_parser_factory: reasoning_parser_factory.clone(),
+            configured_tool_parser: ctx.configured_tool_parser.clone(),
+            multimodal,
+        });
+
+        let pipeline = RequestPipeline::new_epd(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            ctx.configured_tool_parser.clone(),
+            ctx.configured_reasoning_parser.clone(),
+        );
+
+        let messages_pipeline = RequestPipeline::new_messages_epd(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            ctx.configured_tool_parser.clone(),
+            ctx.configured_reasoning_parser.clone(),
+        );
+
+        let completion_pipeline =
+            RequestPipeline::new_completion_epd(worker_registry.clone(), policy_registry.clone());
+
+        Ok(GrpcPDRouter {
+            worker_registry,
+            pipeline,
+            messages_pipeline,
+            completion_pipeline,
+            shared_components,
+            retry_config: ctx.router_config.effective_retry_config(),
+            router_type: "grpc_epd",
+        })
+    }
+
+    /// Main route_generate implementation with PD prefill/decode dispatch
     async fn route_generate_impl(
         &self,
         headers: Option<&HeaderMap>,
@@ -174,7 +251,7 @@ impl GrpcPDRouter {
         .await
     }
 
-    /// Main route_messages implementation with PD dual dispatch
+    /// Main route_messages implementation with PD prefill/decode dispatch
     async fn route_messages_impl(
         &self,
         headers: Option<&HeaderMap>,
@@ -241,7 +318,7 @@ impl GrpcPDRouter {
         .await
     }
 
-    /// Main route_completion implementation with PD dual dispatch
+    /// Main route_completion implementation with PD prefill/decode dispatch
     async fn route_completion_impl(
         &self,
         headers: Option<&HeaderMap>,
@@ -307,7 +384,7 @@ impl GrpcPDRouter {
         .await
     }
 
-    /// Main route_chat implementation with PD dual dispatch
+    /// Main route_chat implementation with PD prefill/decode dispatch
     async fn route_chat_impl(
         &self,
         headers: Option<&HeaderMap>,
@@ -449,6 +526,6 @@ impl RouterTrait for GrpcPDRouter {
     }
 
     fn router_type(&self) -> &'static str {
-        "grpc_pd"
+        self.router_type
     }
 }

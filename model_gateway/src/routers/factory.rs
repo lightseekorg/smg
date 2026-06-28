@@ -41,6 +41,7 @@ pub mod router_ids {
     pub const HTTP_GEMINI: RouterId = RouterId::new("http-gemini");
     pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
     pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
+    pub const GRPC_EPD: RouterId = RouterId::new("grpc-epd");
 }
 
 /// Factory for creating router instances based on configuration
@@ -57,6 +58,18 @@ impl RouterFactory {
                     decode_policy,
                     ..
                 } => Self::create_grpc_pd_router(
+                    prefill_policy.as_ref(),
+                    decode_policy.as_ref(),
+                    &ctx.router_config.policy,
+                    ctx,
+                ),
+                RoutingMode::EncodePrefillDecode {
+                    encode_policy,
+                    prefill_policy,
+                    decode_policy,
+                    ..
+                } => Self::create_grpc_epd_router(
+                    encode_policy.as_ref(),
                     prefill_policy.as_ref(),
                     decode_policy.as_ref(),
                     &ctx.router_config.policy,
@@ -86,6 +99,9 @@ impl RouterFactory {
                         ctx,
                     )
                     .await
+                }
+                RoutingMode::EncodePrefillDecode { .. } => {
+                    Err("EPD mode requires gRPC connection_mode and TokenSpeed".to_string())
                 }
                 RoutingMode::OpenAI { .. } => Self::create_openai_router(ctx).await,
                 RoutingMode::Anthropic { .. } => Self::create_anthropic_router(ctx).await,
@@ -155,6 +171,36 @@ impl RouterFactory {
         ctx.policy_registry.set_prefill_policy(prefill_policy);
         ctx.policy_registry.set_decode_policy(decode_policy);
         let router = GrpcPDRouter::new(ctx)?;
+
+        Ok(Box::new(router))
+    }
+
+    /// Create a gRPC EPD (encode-prefill-decode) router with injected policy.
+    ///
+    /// Mirrors [`Self::create_grpc_pd_router`]: encode/prefill/decode policies
+    /// are set before routing goes through the EPD pipelines via
+    /// [`GrpcPDRouter::new_epd`]. Encode defaults to consistent hashing over
+    /// each item's content hash.
+    pub fn create_grpc_epd_router(
+        encode_policy_config: Option<&PolicyConfig>,
+        prefill_policy_config: Option<&PolicyConfig>,
+        decode_policy_config: Option<&PolicyConfig>,
+        main_policy_config: &PolicyConfig,
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let default_encode_policy = PolicyConfig::ConsistentHashing;
+        let encode_policy = PolicyFactory::create_from_config(
+            encode_policy_config.unwrap_or(&default_encode_policy),
+        );
+        let prefill_policy =
+            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+        let decode_policy =
+            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+
+        ctx.policy_registry.set_encode_policy(encode_policy);
+        ctx.policy_registry.set_prefill_policy(prefill_policy);
+        ctx.policy_registry.set_decode_policy(decode_policy);
+        let router = GrpcPDRouter::new_epd(ctx)?;
 
         Ok(Box::new(router))
     }
@@ -229,6 +275,11 @@ impl RouterFactory {
                 router_ids::GRPC_PD,
                 "gRPC PD",
                 Self::create_grpc_pd_router(None, None, policy, ctx),
+            ),
+            (
+                router_ids::GRPC_EPD,
+                "gRPC EPD",
+                Self::create_grpc_epd_router(None, None, None, policy, ctx),
             ),
             (
                 router_ids::HTTP_OPENAI,

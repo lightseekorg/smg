@@ -36,6 +36,17 @@ use smg_grpc_client::{
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
 
+/// Backend-neutral encode->prefill bootstrap info for one multimodal item.
+///
+/// Backend wrappers translate this into their own proto shape when supported.
+#[derive(Clone, Debug)]
+pub(crate) struct EncodeItemBootstrapInfo {
+    pub item_index: u32,
+    pub bootstrap_host: String,
+    pub bootstrap_port: i32,
+    pub bootstrap_room: i64,
+}
+
 // =====================
 // Multimodal Data
 // =====================
@@ -260,7 +271,8 @@ impl TrtllmMultimodalData {
 }
 
 impl TokenSpeedMultimodalData {
-    /// Convert to TokenSpeed proto MultimodalInputs.
+    /// Convert to TokenSpeed proto MultimodalInputs. The EPD prefill leg drops
+    /// each item's encoder_input afterward via `clear_mm_pixel_values`.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
         let shm_enabled = self.shm_enabled;
         let items = self
@@ -286,6 +298,8 @@ impl TokenSpeedMultimodalItem {
             .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled)))
             .collect::<HashMap<_, _>>();
 
+        let encoder_input = Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled));
+
         tokenspeed::MultimodalItem {
             modality: match self.modality {
                 TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
@@ -293,7 +307,7 @@ impl TokenSpeedMultimodalItem {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled)),
+            encoder_input,
             model_specific_tensors,
             placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -994,17 +1008,21 @@ impl ProtoGenerateRequest {
         self.clone()
     }
 
-    /// Strip multimodal inputs from the request.
+    /// Drop raw multimodal encoder tensors while keeping item metadata.
     ///
-    /// Used for the decode worker in PD disaggregation — the decode worker only
-    /// needs the KV cache from prefill, not the image pixel data. This avoids
-    /// transmitting ~40MB of pixel tensors to a worker that ignores them.
-    pub fn clear_mm_inputs(&mut self) {
+    /// Used by the EPD prefill leg: image embeddings arrive from encode workers,
+    /// but prefill still needs placeholders/model-specific metadata to slot them.
+    pub fn clear_mm_pixel_values(&mut self) {
         match self {
             Self::Sglang(req) => req.mm_inputs = None,
             Self::Vllm(req) => req.mm_inputs = None,
-            Self::TokenSpeed(req) => req.mm_inputs = None,
-            // TRT-LLM and MLX protos have no mm_inputs field
+            Self::TokenSpeed(req) => {
+                if let Some(mm) = req.mm_inputs.as_mut() {
+                    for item in &mut mm.items {
+                        item.encoder_input = None;
+                    }
+                }
+            }
             Self::Trtllm(_) | Self::Mlx(_) => {}
         }
     }
@@ -1065,6 +1083,64 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.kv_transfer_params_json = Some(json),
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params_json called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Set encode->prefill bootstrap info for backends that receive image embeddings
+    /// out-of-band from encode workers.
+    pub(crate) fn set_encode_bootstrap_info(&mut self, items: Vec<EncodeItemBootstrapInfo>) {
+        match self {
+            Self::TokenSpeed(req) => {
+                let items = items
+                    .into_iter()
+                    .map(|item| tokenspeed::EncodeItemBootstrapInfo {
+                        item_index: item.item_index,
+                        bootstrap_host: item.bootstrap_host,
+                        bootstrap_port: item.bootstrap_port,
+                        bootstrap_room: item.bootstrap_room,
+                    })
+                    .collect();
+                req.encode_bootstrap_info = Some(tokenspeed::EncodeBootstrapInfo { items });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!(
+                    "set_encode_bootstrap_info called on a backend without encode bootstrap info, ignoring"
+                );
+            }
+        }
+    }
+
+    /// Clear prefill-only encode bootstrap info from the decode-side request.
+    pub(crate) fn clear_encode_bootstrap_info(&mut self) {
+        match self {
+            Self::TokenSpeed(req) => req.encode_bootstrap_info = None,
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {}
+        }
+    }
+
+    /// Set the PD prefill->decode KV rendezvous params (TokenSpeed only).
+    ///
+    /// The gateway sends identical params to both the prefill and decode worker:
+    /// the prefill hosts the Mooncake bootstrap server at (`bootstrap_host`,
+    /// `bootstrap_port`) and the decode worker discovers it there, keyed by
+    /// `bootstrap_room`.
+    pub fn set_kv_bootstrap_info(
+        &mut self,
+        bootstrap_host: String,
+        bootstrap_port: i32,
+        bootstrap_room: i64,
+    ) {
+        match self {
+            Self::TokenSpeed(req) => {
+                req.kv_bootstrap_info = Some(tokenspeed::KvBootstrapInfo {
+                    bootstrap_host,
+                    bootstrap_port,
+                    bootstrap_room,
+                });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!("set_kv_bootstrap_info called on non-TokenSpeed request, ignoring");
             }
         }
     }

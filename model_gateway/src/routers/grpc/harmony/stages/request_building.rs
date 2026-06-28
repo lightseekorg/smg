@@ -11,8 +11,11 @@ use crate::routers::{
     grpc::{
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, PreparationOutput, RequestContext, RequestType},
-        proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
+        context::{
+            ClientSelection, ExecutionPlan, ExecutionPlanKind, PreparationOutput, RequestContext,
+            RequestType,
+        },
+        proto_wrapper::ProtoGenerateRequest,
     },
 };
 
@@ -22,12 +25,16 @@ use crate::routers::{
 /// Unlike regular request building, this uses token_ids directly (Harmony encoding handles messages).
 pub(crate) struct HarmonyRequestBuildingStage {
     inject_pd_metadata: bool,
+    plan_kind: ExecutionPlanKind,
 }
 
 impl HarmonyRequestBuildingStage {
     /// Create a new Harmony request building stage
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, plan_kind: ExecutionPlanKind) -> Self {
+        Self {
+            inject_pd_metadata,
+            plan_kind,
+        }
     }
 }
 
@@ -70,7 +77,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         })?;
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
         // Generate request_id based on request type
@@ -389,7 +396,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
+        ctx.state.execution_plan =
+            Some(ExecutionPlan::generate(self.plan_kind, proto_request, None));
         Ok(None)
     }
 

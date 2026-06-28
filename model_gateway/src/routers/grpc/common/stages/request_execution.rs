@@ -1,9 +1,10 @@
-//! Request execution stage: Execute gRPC requests (single or dual dispatch)
+//! Request execution stage: execute gRPC requests from an execution plan.
 
 use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::response::Response;
+use futures::future::join_all;
 use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
@@ -13,9 +14,10 @@ use crate::{
         error,
         grpc::{
             context::{
-                ClientSelection, ExecutionResult, LoadGuards, PdTiming, RequestContext,
-                WorkerSelection,
+                ClientSelection, ExecutionPlan, ExecutionResult, LoadGuards, PdTiming,
+                RequestContext, WorkerSelection,
             },
+            epd_encode::EncodeDispatchPlan,
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
                 ProtoStream,
@@ -116,34 +118,24 @@ fn mooncake_decode_params(transfer_id: &str, engine_id: &str, host: &str, port: 
     .to_string()
 }
 
-/// Request execution stage: Execute gRPC requests (single or dual dispatch)
-pub(crate) struct RequestExecutionStage {
-    mode: ExecutionMode,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ExecutionMode {
-    /// Regular mode: single worker execution
-    Single,
-    /// PD mode: dual dispatch to prefill + decode workers
-    DualDispatch,
-}
+/// Request execution stage: execute the plan produced by request building.
+pub(crate) struct RequestExecutionStage;
 
 impl RequestExecutionStage {
-    pub fn new(mode: ExecutionMode) -> Self {
-        Self { mode }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 #[async_trait]
 impl PipelineStage for RequestExecutionStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        let proto_request = ctx.state.proto_request.take().ok_or_else(|| {
+        let execution_plan = ctx.state.execution_plan.take().ok_or_else(|| {
             error!(
                 function = "RequestExecutionStage::execute",
-                "Proto request not built"
+                "Execution plan not built"
             );
-            error::internal_error("proto_request_not_built", "Proto request not built")
+            error::internal_error("execution_plan_not_built", "Execution plan not built")
         })?;
 
         let clients = ctx.state.clients.as_mut().ok_or_else(|| {
@@ -176,10 +168,8 @@ impl PipelineStage for RequestExecutionStage {
         let dispatch = ctx.state.dispatch.as_ref();
         let request_id = dispatch.map(|d| d.request_id.as_str()).unwrap_or("unknown");
         let model = dispatch.map(|d| d.model.as_str()).unwrap_or("unknown");
-        let request_type = match &proto_request {
-            ProtoRequest::Generate(_) => "generate",
-            ProtoRequest::Embed(_) => "embed",
-        };
+        let request_type = execution_plan.request_type();
+        let mode = execution_plan.mode_label();
 
         // Create OTEL span for gRPC request execution
         let span = info_span!(
@@ -188,55 +178,31 @@ impl PipelineStage for RequestExecutionStage {
             request_type,
             request_id = %request_id,
             model = %model,
-            mode = ?self.mode,
+            mode = %mode,
         );
 
         let result = async {
-            match proto_request {
-                ProtoRequest::Generate(req) => match self.mode {
-                    ExecutionMode::Single => self.execute_single(req, clients, workers).await,
-                    ExecutionMode::DualDispatch => {
-                        // Dispatch based on runtime type:
-                        // - SGLang: parallel dual dispatch with bootstrap metadata
-                        // - vLLM: sequential prefill-then-decode with kv_transfer_params relay
-                        let runtime_type = workers.pd_runtime_type();
-                        match runtime_type {
-                            Some(RuntimeType::Vllm) => {
-                                self.execute_sequential_pd(req, clients, workers, model)
-                                    .await
-                            }
-                            Some(RuntimeType::Sglang) => {
-                                self.execute_dual_dispatch(req, clients, workers).await
-                            }
-                            Some(RuntimeType::Trtllm)
-                            | Some(RuntimeType::Mlx)
-                            | Some(RuntimeType::TokenSpeed)
-                            | Some(RuntimeType::External)
-                            | Some(RuntimeType::Unspecified) => {
-                                error!(
-                                    function = "RequestExecutionStage::execute",
-                                    runtime_type = ?runtime_type,
-                                    "Runtime does not support PD disaggregated mode"
-                                );
-                                Err(error::bad_request(
-                                    "runtime_pd_not_supported",
-                                    "This runtime does not support PD disaggregated mode",
-                                ))
-                            }
-                            None => {
-                                error!(
-                                    function = "RequestExecutionStage::execute",
-                                    "PD mode requires dual worker selection"
-                                );
-                                Err(error::internal_error(
-                                    "pd_mode_requires_dual_workers",
-                                    "PD mode requires dual worker selection",
-                                ))
-                            }
-                        }
+            match execution_plan {
+                ExecutionPlan::Single(request) => match request {
+                    ProtoRequest::Generate(req) => self.execute_single(req, clients, workers).await,
+                    ProtoRequest::Embed(req) => {
+                        self.execute_single_embed(req, clients, workers).await
                     }
                 },
-                ProtoRequest::Embed(req) => self.execute_single_embed(req, clients, workers).await,
+                ExecutionPlan::PrefillDecode(req) => {
+                    self.execute_disaggregated_dispatch(req, clients, workers, model)
+                        .await
+                }
+                ExecutionPlan::EncodePrefillDecode {
+                    request,
+                    encode_dispatch,
+                } => {
+                    // Request building already injected the encode bootstrap info
+                    // into the prefill request. Dispatch the matching encode
+                    // jobs here, with the prefill+decode leg.
+                    self.execute_epd_dispatch(request, clients, workers, model, encode_dispatch)
+                        .await
+                }
             }
         }
         .instrument(span)
@@ -253,6 +219,110 @@ impl PipelineStage for RequestExecutionStage {
 }
 
 impl RequestExecutionStage {
+    async fn execute_disaggregated_dispatch(
+        &self,
+        proto_request: ProtoGenerateRequest,
+        clients: &mut ClientSelection,
+        workers: &WorkerSelection,
+        model: &str,
+    ) -> Result<ExecutionResult, Response> {
+        // Dispatch based on runtime type:
+        // - SGLang: parallel prefill/decode dispatch with bootstrap metadata
+        // - vLLM: sequential prefill-then-decode with kv_transfer_params relay
+        let runtime_type = workers.disaggregated_runtime_type();
+        match runtime_type {
+            Some(RuntimeType::Vllm) => {
+                self.execute_sequential_pd(proto_request, clients, workers, model)
+                    .await
+            }
+            Some(RuntimeType::Sglang) | Some(RuntimeType::TokenSpeed) => {
+                // These runtimes carry bootstrap rendezvous in the request
+                // and use parallel prefill/decode dispatch.
+                self.execute_prefill_decode_dispatch(proto_request, clients, workers)
+                    .await
+            }
+            Some(RuntimeType::Trtllm)
+            | Some(RuntimeType::Mlx)
+            | Some(RuntimeType::External)
+            | Some(RuntimeType::Unspecified) => {
+                error!(
+                    function = "RequestExecutionStage::execute",
+                    runtime_type = ?runtime_type,
+                    "Runtime does not support PD disaggregated mode"
+                );
+                Err(error::bad_request(
+                    "runtime_pd_not_supported",
+                    "This runtime does not support PD disaggregated mode",
+                ))
+            }
+            None => {
+                error!(
+                    function = "RequestExecutionStage::execute",
+                    "PD mode requires disaggregated worker selection"
+                );
+                Err(error::internal_error(
+                    "pd_mode_requires_disaggregated_workers",
+                    "PD mode requires disaggregated worker selection",
+                ))
+            }
+        }
+    }
+
+    async fn execute_epd_dispatch(
+        &self,
+        proto_request: ProtoGenerateRequest,
+        clients: &mut ClientSelection,
+        workers: &WorkerSelection,
+        model: &str,
+        encode_dispatch: Option<EncodeDispatchPlan>,
+    ) -> Result<ExecutionResult, Response> {
+        if let Some(encode_dispatch) = encode_dispatch {
+            self.spawn_encode_dispatch(encode_dispatch);
+        }
+        self.execute_disaggregated_dispatch(proto_request, clients, workers, model)
+            .await
+    }
+
+    fn spawn_encode_dispatch(&self, encode_dispatch: EncodeDispatchPlan) {
+        if encode_dispatch.is_empty() {
+            return;
+        }
+
+        let num_encode_items = encode_dispatch.len();
+        let sends: Vec<_> = encode_dispatch
+            .into_jobs()
+            .into_iter()
+            .map(|job| tokio::spawn(async move { job.dispatch().await }))
+            .collect();
+
+        debug!(
+            num_encode_items,
+            "EPD encode dispatch issued with prefill/decode"
+        );
+
+        tokio::spawn(async move {
+            for join_res in join_all(sends).await {
+                match join_res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(message)) => {
+                        error!(
+                            function = "RequestExecutionStage::execute_epd_dispatch",
+                            error = %message,
+                            "Backend encode dispatch failed after EPD dispatch; embedding-receive timeout will abort the request"
+                        );
+                    }
+                    Err(join_err) => {
+                        error!(
+                            function = "RequestExecutionStage::execute_epd_dispatch",
+                            error = %join_err,
+                            "Encode dispatch task panicked after EPD dispatch"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     async fn execute_single(
         &self,
         mut proto_request: ProtoGenerateRequest,
@@ -262,11 +332,11 @@ impl RequestExecutionStage {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
                 function = "execute_single",
-                "Expected single client but got dual"
+                "Expected single client but got disaggregated"
             );
             error::internal_error(
-                "expected_single_client_got_dual",
-                "Expected single client but got dual",
+                "expected_single_client_got_disaggregated",
+                "Expected single client but got disaggregated",
             )
         })?;
 
@@ -297,11 +367,11 @@ impl RequestExecutionStage {
         let client = clients.single_mut().ok_or_else(|| {
             error!(
                 function = "execute_single_embed",
-                "Expected single client but got dual"
+                "Expected single client but got disaggregated"
             );
             error::internal_error(
-                "expected_single_client_got_dual",
-                "Expected single client but got dual",
+                "expected_single_client_got_disaggregated",
+                "Expected single client but got disaggregated",
             )
         })?;
 
@@ -319,29 +389,35 @@ impl RequestExecutionStage {
         Ok(ExecutionResult::Embedding { response: complete })
     }
 
-    async fn execute_dual_dispatch(
+    async fn execute_prefill_decode_dispatch(
         &self,
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
     ) -> Result<ExecutionResult, Response> {
-        let runtime = workers.pd_runtime_type().map(|r| r.as_str()).unwrap_or("");
-        let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
+        let runtime = workers
+            .disaggregated_runtime_type()
+            .map(|r| r.as_str())
+            .unwrap_or("");
+        let (prefill_client, decode_client) = clients.disaggregated_mut().ok_or_else(|| {
             error!(
-                function = "execute_dual_dispatch",
-                "Expected dual clients but got single"
+                function = "execute_prefill_decode_dispatch",
+                "Expected disaggregated clients but got single"
             );
             error::internal_error(
-                "expected_dual_clients_got_single",
-                "Expected dual clients but got single",
+                "expected_disaggregated_clients_got_single",
+                "Expected disaggregated clients but got single",
             )
         })?;
 
         let mut prefill_request = proto_request.clone_inner();
-        // Strip multimodal data from decode request — the decode worker only
-        // needs the KV cache from prefill, not the pixel tensors (~40MB saved).
+        // Decode consumes the KV handoff from prefill, but TokenSpeed still
+        // needs multimodal metadata to pad placeholders and compute MRoPE in
+        // the same way as prefill. Drop raw pixels and prefill-only encode
+        // rooms, but keep the per-item metadata.
         let mut decode_request = proto_request;
-        decode_request.clear_mm_inputs();
+        decode_request.clear_encode_bootstrap_info();
+        decode_request.clear_mm_pixel_values();
         if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
             prefill_request.set_data_parallel_rank(rank as i32);
         }
@@ -359,7 +435,7 @@ impl RequestExecutionStage {
         );
 
         // Record circuit breaker outcomes (client errors don't count as failures)
-        workers.record_dual_outcomes(
+        workers.record_prefill_decode_outcomes(
             prefill_result.cb_status_code(),
             decode_result.cb_status_code(),
         );
@@ -371,7 +447,7 @@ impl RequestExecutionStage {
                 metrics_labels::CONNECTION_GRPC,
                 metrics_labels::ERROR_BACKEND,
             );
-            error!(function = "execute_dual_dispatch", error = %e, "Prefill worker failed to start");
+            error!(function = "execute_prefill_decode_dispatch", error = %e, "Prefill worker failed to start");
             e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
         })?;
 
@@ -382,14 +458,14 @@ impl RequestExecutionStage {
                 metrics_labels::CONNECTION_GRPC,
                 metrics_labels::ERROR_BACKEND,
             );
-            error!(function = "execute_dual_dispatch", error = %e, "Decode worker failed to start");
+            error!(function = "execute_prefill_decode_dispatch", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
                 format!("Decode worker failed to start: {}", e.message()),
             )
         })?;
 
-        Ok(ExecutionResult::Dual {
+        Ok(ExecutionResult::PrefillDecode {
             prefill: prefill_stream,
             decode: Box::new(decode_stream),
             pd_timing: PdTiming {
@@ -412,15 +488,18 @@ impl RequestExecutionStage {
         workers: &WorkerSelection,
         model: &str,
     ) -> Result<ExecutionResult, Response> {
-        let runtime = workers.pd_runtime_type().map(|r| r.as_str()).unwrap_or("");
-        let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
+        let runtime = workers
+            .disaggregated_runtime_type()
+            .map(|r| r.as_str())
+            .unwrap_or("");
+        let (prefill_client, decode_client) = clients.disaggregated_mut().ok_or_else(|| {
             error!(
                 function = "execute_sequential_pd",
-                "Expected dual clients but got single"
+                "Expected disaggregated clients but got single"
             );
             error::internal_error(
-                "expected_dual_clients_got_single",
-                "Expected dual clients but got single",
+                "expected_disaggregated_clients_got_single",
+                "Expected disaggregated clients but got single",
             )
         })?;
 
