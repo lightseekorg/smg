@@ -10,9 +10,10 @@ use crate::routers::{
     grpc::{
         client::GenerateRequestBuildOptions,
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, PreparationOutput, RequestContext},
-        multimodal::assemble_multimodal_data,
-        proto_wrapper::ProtoRequest,
+        context::{
+            ClientSelection, ExecutionPlan, ExecutionPlanKind, PreparationOutput, RequestContext,
+        },
+        multimodal::{assemble_multimodal_data, assemble_multimodal_data_after_encode},
         utils,
     },
 };
@@ -22,11 +23,15 @@ use crate::routers::{
 /// Extracts chat-specific request building logic from the old unified RequestBuildingStage.
 pub(crate) struct ChatRequestBuildingStage {
     inject_pd_metadata: bool,
+    plan_kind: ExecutionPlanKind,
 }
 
 impl ChatRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, plan_kind: ExecutionPlanKind) -> Self {
+        Self {
+            inject_pd_metadata,
+            plan_kind,
+        }
     }
 }
 
@@ -55,10 +60,10 @@ impl PipelineStage for ChatRequestBuildingStage {
 
         let chat_request = ctx.chat_request_arc();
 
-        // Get client for building request (use prefill client if PD mode)
+        // Get client for building request (use prefill client in disaggregated mode)
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
         let PreparationOutput::Chat {
@@ -85,11 +90,27 @@ impl PipelineStage for ChatRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data now that the backend is known.
+        // In EPD, request building also mints the encode->prefill rooms and
+        // carries the encode dispatch plan into the execution plan.
+        let mut encode_plan = None;
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| {
-                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                let planned_encode =
+                    helpers::plan_epd_encode(&intermediate, clients, ctx.state.workers.as_ref())?;
+                let is_encode_routed = planned_encode.is_some();
+                encode_plan = planned_encode;
+
+                if is_encode_routed {
+                    assemble_multimodal_data_after_encode(
+                        intermediate,
+                        builder_client,
+                        ctx.state.workers.as_ref(),
+                    )
+                } else {
+                    assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                }
             })
             .transpose()
             .map_err(|e| {
@@ -136,7 +157,30 @@ impl PipelineStage for ChatRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
+        // EPD: request building minted the per-item encode bootstrap info and
+        // planned the encode-worker dispatch. Inject the bootstrap info into the
+        // prefill request; the dispatch plan stays attached to ExecutionPlan.
+        let encode_dispatch = if let Some(plan) = encode_plan {
+            let (bootstrap_info, dispatch) = plan.into_parts();
+            proto_request.set_encode_bootstrap_info(bootstrap_info);
+            proto_request.clear_mm_pixel_values();
+            Some(dispatch)
+        } else {
+            None
+        };
+
+        // EPD: inject the prefill->decode KV rendezvous for backends that carry it
+        // in the request. Runs before execute_prefill_decode_dispatch clones the request, so
+        // both prefill and decode carry the same room.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);
+        }
+
+        ctx.state.execution_plan = Some(ExecutionPlan::generate(
+            self.plan_kind,
+            proto_request,
+            encode_dispatch,
+        ));
         Ok(None)
     }
 

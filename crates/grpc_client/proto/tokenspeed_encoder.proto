@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package tokenspeed.grpc.encoder;
+
+import "tokenspeed_scheduler.proto";
+
+// TokenSpeed EPD encode-stage gRPC service. The gateway ships preprocessed
+// multimodal tensors to a vision-tower-only encode worker; the worker runs the
+// tower and pushes the resulting image embeddings to a prefill worker over
+// Mooncake, keyed per item by bootstrap_room. The gateway never sees the
+// embeddings — it only triggers the encode and assigns each item its room.
+//
+// Per-item fan-out: a single request's items may be split across several
+// encode workers for parallelism. The current TokenSpeed encode worker accepts
+// exactly one multimodal item and one bootstrap room per EncodeRequest, so the
+// gateway sends one RPC per assigned item. The prefill that holds the matching
+// EncodeItemBootstrapInfo discovers this worker (the data source hosts the bootstrap
+// server), so the worker needs no prefill address here.
+service TokenSpeedEncoder {
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+}
+
+message EncodeRequest {
+  string request_id = 1;
+
+  // This worker's assigned multimodal item — the same tensor shape the scheduler
+  // Generate path carries. The encode worker runs the vision tower on it; it
+  // does not fetch or preprocess (that already happened in the gateway).
+  tokenspeed.grpc.scheduler.MultimodalInputs mm_inputs = 2;
+
+  // Mooncake pairing for the item in mm_inputs.items. The field is repeated for
+  // wire compatibility with future grouped requests, but current workers require
+  // exactly one entry matching the single item.
+  repeated EncodeItemAssignment items = 3;
+}
+
+// One item's room assignment for this encode worker. bootstrap_room is the
+// rendezvous id shared with the prefill's EncodeItemBootstrapInfo. The prefill owns
+// the receive buffer and comes to this worker to register it, so the worker
+// needs only the room here, not any prefill address.
+message EncodeItemAssignment {
+  // 63-bit rendezvous id, identical to the prefill's EncodeItemBootstrapInfo
+  // .bootstrap_room for this item (see that field for why it is not int32).
+  int64 bootstrap_room = 1;
+}
+
+message EncodeResponse {
+  // Set once the encode request is accepted (enqueued). The embedding transfer
+  // then proceeds asynchronously over Mooncake, independent of this response.
+  bool accepted = 1;
+}

@@ -122,19 +122,24 @@ impl HarmonyStreamingProcessor {
                     let _ = tx.send(Ok(SseEncoder::done()));
                 });
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
                 prefill,
                 decode,
                 ..
             } => {
                 tokio::spawn(async move {
-                    let result =
-                        Self::process_dual_stream(prefill, *decode, dispatch, chat_request, &tx)
-                            .await;
+                    let result = Self::process_prefill_decode_stream(
+                        prefill,
+                        *decode,
+                        dispatch,
+                        chat_request,
+                        &tx,
+                    )
+                    .await;
 
                     if let Err(e) = result {
-                        error!("Harmony dual streaming error: {}", e);
+                        error!("Harmony prefill/decode streaming error: {}", e);
                         utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
@@ -176,8 +181,8 @@ impl HarmonyStreamingProcessor {
         .await
     }
 
-    /// Process streaming chunks from dual streams (prefill + decode)
-    async fn process_dual_stream(
+    /// Process streaming chunks from prefill/decode streams (prefill + decode)
+    async fn process_prefill_decode_stream(
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
@@ -216,9 +221,9 @@ impl HarmonyStreamingProcessor {
 
     /// Process the decode phase of a Chat Completion stream.
     ///
-    /// Shared between single-stream and dual-stream modes. The `prompt_tokens`
+    /// Shared between single-stream and prefill/decode stream modes. The `prompt_tokens`
     /// and `cached_tokens` maps may be pre-populated from a prefill phase
-    /// (dual stream) or empty (single stream). Values from `Complete` messages
+    /// (prefill/decode stream) or empty (single stream). Values from `Complete` messages
     /// are inserted only if not already present.
     async fn process_chat_decode_stream(
         mut decode_stream: ProtoStream,
@@ -524,14 +529,14 @@ impl HarmonyStreamingProcessor {
                 debug!("Processing Responses API single stream mode");
                 Self::process_decode_stream(stream, emitter, tx, session, format_registry, 0).await
             }
-            context::ExecutionResult::Dual {
+            context::ExecutionResult::PrefillDecode {
                 // TODO(#1781 follow-up): thread pd_timing for honest PD TTFT
                 prefill,
                 decode,
                 ..
             } => {
-                debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(
+                debug!("Processing Responses API prefill/decode stream mode");
+                Self::process_responses_prefill_decode_stream(
                     prefill,
                     *decode,
                     emitter,
@@ -547,7 +552,7 @@ impl HarmonyStreamingProcessor {
         }
     }
 
-    async fn process_responses_dual_stream(
+    async fn process_responses_prefill_decode_stream(
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
@@ -606,7 +611,7 @@ impl HarmonyStreamingProcessor {
         let mut tool_call_tracking: HashMap<usize, (usize, String, Option<ResponseFormat>)> =
             HashMap::new();
 
-        // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)
+        // Metadata from Complete message; seed cached_tokens from prefill phase (prefill/decode stream)
         let mut finish_reason: String;
         let mut finalized_analysis: Option<String> = None;
         let mut prompt_tokens: u32 = 0;
