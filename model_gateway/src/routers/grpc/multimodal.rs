@@ -1086,7 +1086,7 @@ pub(crate) fn assemble_tokenspeed(
     // Resolve the multimodal tensor transport once per request: `shm` always on,
     // `auto` only when the worker is verified to share /dev/shm (matching
     // namespace token), otherwise inline. See `worker_shares_dev_shm`.
-    let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
+    let shm_enabled = resolve_tokenspeed_shm_enabled(workers, skip_pixel_values);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
     let patch_offsets = intermediate
@@ -1700,16 +1700,20 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
 }
 
 /// Resolve whether large multimodal tensors should use the SHM transport for
-/// this request. `shm` = always (legacy explicit opt-in); `auto` = only when the
-/// worker is known to share SMG's `/dev/shm`; anything else (including unset or
-/// `inline`) keeps the inline gRPC path.
-fn resolve_tokenspeed_shm_enabled(workers: Option<&WorkerSelection>) -> bool {
+/// this request. `shm` and `auto` require the receiving worker leg to share
+/// SMG's `/dev/shm`; anything else (including unset or `inline`) keeps the
+/// inline gRPC path.
+fn resolve_tokenspeed_shm_enabled(
+    workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
+) -> bool {
     let mode = tokenspeed_mm_tensor_transport_mode();
     log_tokenspeed_transport_config_once(&mode);
     match mode.as_str() {
         // SHM only ever happens when SMG can actually write /dev/shm.
-        "shm" => tokenspeed_shm_dev_writable(),
-        "auto" => worker_shares_dev_shm(workers) && tokenspeed_shm_dev_writable(),
+        "shm" | "auto" => {
+            worker_shares_dev_shm(workers, skip_pixel_values) && tokenspeed_shm_dev_writable()
+        }
         "" | "inline" => false,
         other => {
             log_unknown_tokenspeed_transport_once(other);
@@ -1741,7 +1745,7 @@ fn log_unknown_tokenspeed_transport_once(value: &str) {
 }
 
 /// Whether the worker is *verified* to share SMG's `/dev/shm`, making the SHM
-/// transport safe under `auto`.
+/// transport safe for this payload.
 ///
 /// Rather than inferring locality from the worker URL (TCP loopback proves only
 /// network locality, not a shared `/dev/shm`), the worker advertises its
@@ -1754,7 +1758,7 @@ fn log_unknown_tokenspeed_transport_once(value: &str) {
 /// underlying superblock is the same). We compare the worker's token to ours:
 /// equal ⇒ shared. A missing/empty token or any mismatch is treated as
 /// non-sharing, so `auto` safely falls back to inline.
-fn worker_shares_dev_shm(workers: Option<&WorkerSelection>) -> bool {
+fn worker_shares_dev_shm(workers: Option<&WorkerSelection>, skip_pixel_values: bool) -> bool {
     let Some(local) = local_shm_namespace_id() else {
         return false;
     };
@@ -1763,19 +1767,22 @@ fn worker_shares_dev_shm(workers: Option<&WorkerSelection>) -> bool {
         Some(WorkerSelection::Disaggregated {
             encode_assignments,
             prefill,
+            decode,
             ..
         }) => {
-            if let Some(encode_assignments) = encode_assignments {
-                // EPD: encoder_input (pixels) ships gateway -> encode worker, so SHM
-                // is safe only if every encode worker assigned in this request shares
-                // the gateway's /dev/shm. A mixed local/remote fan-out must fall back
-                // to inline/RDMA rather than giving a remote worker an unreadable SHM handle.
-                encode_assignments
-                    .iter()
-                    .all(|assignment| worker_matches_shm_namespace(&assignment.worker, local))
-            } else {
-                worker_matches_shm_namespace(prefill, local)
+            if !skip_pixel_values {
+                if let Some(encode_assignments) = encode_assignments {
+                    // EPD: encoder_input (pixels) ships gateway -> encode worker, so SHM
+                    // is safe only if every encode worker assigned in this request shares
+                    // the gateway's /dev/shm. A mixed local/remote fan-out must fall back
+                    // to inline/RDMA rather than giving a remote worker an unreadable SHM handle.
+                    return encode_assignments
+                        .iter()
+                        .all(|assignment| worker_matches_shm_namespace(&assignment.worker, local));
+                }
             }
+            worker_matches_shm_namespace(prefill, local)
+                && worker_matches_shm_namespace(decode, local)
         }
         None => false,
     }

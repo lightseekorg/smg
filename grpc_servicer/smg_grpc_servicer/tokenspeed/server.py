@@ -77,6 +77,17 @@ def _grpc_server_options(max_message_bytes: int) -> list[tuple[str, int]]:
     ]
 
 
+class TokenSpeedEncodeDiscoveryServicer(TokenSpeedSchedulerServicer):
+    """Scheduler discovery surface for encode-only workers."""
+
+    async def Generate(self, request, context):
+        await context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "Generate is unavailable on TokenSpeed encode workers",
+        )
+        yield tokenspeed_scheduler_pb2.GenerateResponse()
+
+
 async def serve_grpc(server_args: ServerArgs) -> None:
     """Run the TokenSpeed gRPC server until a shutdown signal is received."""
 
@@ -98,15 +109,10 @@ async def serve_grpc(server_args: ServerArgs) -> None:
 
     if server_args.disaggregation_mode == "encode":
         # EPD encode worker: serve the vision-only encode loop via the encoder
-        # service. ALSO mount the scheduler service so the gateway's generic
-        # worker discovery (HealthCheck + GetModelInfo + GetServerInfo, all over
-        # the TokenSpeedScheduler stub) can reach this worker and register it.
-        # Note: mounting the scheduler service means the unconditional startup
-        # warmup (stub.Generate) would route to the scheduler Generate path and
-        # drive the LM, which can SIGUSR1-kill the encode TP group -- encode
-        # workers must run with TOKENSPEED_SKIP_GRPC_WARMUP=1 (or warmup must be
-        # guarded to skip in encode mode). HealthCheck short-circuits to a
-        # shallow probe for disaggregation roles, so it won't drive the LM.
+        # service. ALSO mount a discovery-only scheduler surface so the
+        # gateway's generic worker discovery (HealthCheck + GetModelInfo +
+        # GetServerInfo, all over the TokenSpeedScheduler stub) can reach this
+        # worker and register it.
         from smg_grpc_proto.generated import (
             tokenspeed_encoder_pb2,
             tokenspeed_encoder_pb2_grpc,
@@ -124,7 +130,7 @@ async def serve_grpc(server_args: ServerArgs) -> None:
         )
         tokenspeed_encoder_pb2_grpc.add_TokenSpeedEncoderServicer_to_server(servicer, server)
 
-        discovery_servicer = TokenSpeedSchedulerServicer(
+        discovery_servicer = TokenSpeedEncodeDiscoveryServicer(
             async_llm=async_llm,
             server_args=server_args,
             scheduler_info=scheduler_info,

@@ -795,6 +795,16 @@ impl ConfigValidator {
 
         let has_service_discovery = config.discovery.as_ref().is_some_and(|d| d.enabled);
 
+        if let RoutingMode::EncodePrefillDecode {
+            encode_policy: Some(PolicyConfig::LeastLoad { .. }),
+            ..
+        } = &config.mode
+        {
+            return Err(ConfigError::IncompatibleConfig {
+                reason: "Least-load policy is not supported for encode workers".to_string(),
+            });
+        }
+
         if !has_service_discovery {
             if let PolicyConfig::PowerOfTwo { .. } = &config.policy {
                 let worker_count = config.mode.worker_count();
@@ -846,25 +856,28 @@ impl ConfigValidator {
                 ..
             } = &config.mode
             {
-                if let Some(PolicyConfig::PowerOfTwo { .. }) = prefill_policy {
-                    if prefill_urls.len() < 2 {
-                        return Err(ConfigError::IncompatibleConfig {
-                            reason: "Power-of-two policy for prefill requires at least 2 prefill workers".to_string(),
-                        });
-                    }
+                let effective_prefill_policy = prefill_policy.as_ref().unwrap_or(&config.policy);
+                let effective_decode_policy = decode_policy.as_ref().unwrap_or(&config.policy);
+
+                if matches!(effective_prefill_policy, PolicyConfig::PowerOfTwo { .. })
+                    && prefill_urls.len() < 2
+                {
+                    return Err(ConfigError::IncompatibleConfig {
+                        reason: "Power-of-two policy for prefill requires at least 2 prefill workers".to_string(),
+                    });
                 }
 
-                if let Some(PolicyConfig::PowerOfTwo { .. }) = decode_policy {
-                    if decode_urls.len() < 2 {
-                        return Err(ConfigError::IncompatibleConfig {
-                            reason:
-                                "Power-of-two policy for decode requires at least 2 decode workers"
-                                    .to_string(),
-                        });
-                    }
+                if matches!(effective_decode_policy, PolicyConfig::PowerOfTwo { .. })
+                    && decode_urls.len() < 2
+                {
+                    return Err(ConfigError::IncompatibleConfig {
+                        reason:
+                            "Power-of-two policy for decode requires at least 2 decode workers"
+                                .to_string(),
+                    });
                 }
 
-                if let Some(PolicyConfig::Bucket { .. }) = decode_policy {
+                if matches!(effective_decode_policy, PolicyConfig::Bucket { .. }) {
                     return Err(ConfigError::IncompatibleConfig {
                         reason: "Decode policy should not be allowed to be bucket".to_string(),
                     });
