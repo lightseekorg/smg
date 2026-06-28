@@ -194,10 +194,22 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             # cheap zmq send back ON the loop -- send_to_scheduler is a
             # zmq.asyncio socket whose send() needs the running loop (and this
             # keeps it single-writer).
-            payload = await asyncio.to_thread(self._parse_and_pickle, request, bootstrap_room)
-            await self.async_llm.engine_core_client.send_to_scheduler.send(payload)
+            try:
+                payload = await asyncio.to_thread(self._parse_and_pickle, request, bootstrap_room)
+                await self.async_llm.engine_core_client.send_to_scheduler.send(payload)
+            except ValueError as e:
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            except Exception as e:  # noqa: BLE001
+                logger.exception("TokenSpeed encode ingest failed")
+                await context.abort(grpc.StatusCode.INTERNAL, str(e))
         else:
-            self._ingest(request, bootstrap_room)
+            try:
+                self._ingest(request, bootstrap_room)
+            except ValueError as e:
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            except Exception as e:  # noqa: BLE001
+                logger.exception("TokenSpeed encode ingest failed")
+                await context.abort(grpc.StatusCode.INTERNAL, str(e))
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
 
     def _build_encode_request(self, request, bootstrap_room):
