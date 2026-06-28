@@ -12,7 +12,7 @@ use tracing::{error, warn};
 use super::PipelineStage;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo},
+    policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo, WorkerLeg},
     routers::{
         error,
         grpc::{
@@ -227,7 +227,7 @@ impl WorkerSelectionStage {
                 tokens,
                 headers,
                 hash_ring,
-                leg: crate::policies::WorkerLeg::Single,
+                leg: WorkerLeg::Single,
             },
         )?;
         let selected = available[idx].clone();
@@ -344,12 +344,12 @@ impl WorkerSelectionStage {
             tokens,
             headers,
             hash_ring,
-            leg: crate::policies::WorkerLeg::Prefill,
+            leg: WorkerLeg::Prefill,
         };
         let prefill_idx = self
             .policy_registry
             .select_worker(&policy, &available_prefill, &info)?;
-        info.leg = crate::policies::WorkerLeg::Decode;
+        info.leg = WorkerLeg::Decode;
         let decode_idx = self
             .policy_registry
             .select_worker(&policy, &available_decode, &info)?;
@@ -491,13 +491,15 @@ impl WorkerSelectionStage {
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
-        let info = SelectWorkerInfo {
+        let mut info = SelectWorkerInfo {
             request_text: text,
             tokens,
             headers,
             hash_ring: hash_ring.clone(),
+            leg: WorkerLeg::Prefill,
         };
         let prefill_idx = prefill_policy.select_worker(&available_prefill, &info)?;
+        info.leg = WorkerLeg::Decode;
         let decode_idx = decode_policy.select_worker(&available_decode, &info)?;
 
         let encode_assignments = assign_encode_workers(
@@ -570,6 +572,7 @@ fn assign_encode_workers(
                 tokens: None,
                 headers: Some(&routing_headers),
                 hash_ring: hash_ring.clone(),
+                leg: WorkerLeg::Single,
             };
             let worker_idx = policy.select_worker(encode_workers, &info)?;
             let worker = encode_workers[worker_idx].clone();
