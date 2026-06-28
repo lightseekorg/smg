@@ -277,13 +277,17 @@ impl RequestExecutionStage {
         encode_dispatch: Option<EncodeDispatchPlan>,
     ) -> Result<ExecutionResult, Response> {
         if let Some(encode_dispatch) = encode_dispatch {
-            self.spawn_encode_dispatch(encode_dispatch);
+            Self::spawn_encode_dispatch(encode_dispatch);
         }
         self.execute_disaggregated_dispatch(proto_request, clients, workers, model)
             .await
     }
 
-    fn spawn_encode_dispatch(&self, encode_dispatch: EncodeDispatchPlan) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "EPD encode dispatch is intentionally supervised in the background while the prefill leg blocks on embedding receive."
+    )]
+    fn spawn_encode_dispatch(encode_dispatch: EncodeDispatchPlan) {
         if encode_dispatch.is_empty() {
             return;
         }

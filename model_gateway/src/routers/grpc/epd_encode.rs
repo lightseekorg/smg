@@ -130,15 +130,12 @@ impl PreparedEncodeItem {
 
 impl Drop for PreparedEncodeItem {
     fn drop(&mut self) {
-        match self {
-            Self::TokenSpeed {
-                item: Some(item),
-                cleanup_on_drop: true,
-                ..
-            } => {
-                cleanup_tokenspeed_items_encoder_shm(std::slice::from_ref(item), None);
-            }
-            _ => {}
+        if let Self::TokenSpeed {
+            item: Some(item),
+            cleanup_on_drop: true,
+            ..
+        } = self {
+            cleanup_tokenspeed_items_encoder_shm(std::slice::from_ref(item), None);
         }
     }
 }
@@ -187,7 +184,7 @@ fn build_plan(
     let mut jobs = Vec::with_capacity(items.len());
     for (global_index, (item, assignment)) in items
         .into_iter()
-        .zip(encode_assignments.into_iter())
+        .zip(encode_assignments)
         .enumerate()
     {
         if assignment.item_index != global_index {
@@ -239,7 +236,9 @@ pub(crate) fn prepare_items(
             "EPD encode is not implemented for {} backend",
             backend_name(prefill)
         )),
-        _ => Err(anyhow!("Encode planning requires EPD client selection")),
+        ClientSelection::Single { .. } => {
+            Err(anyhow!("Encode planning requires EPD client selection"))
+        }
     }
 }
 
