@@ -21,6 +21,7 @@ from smg_grpc_proto.generated import (
     tokenspeed_encoder_pb2_grpc,
 )
 
+from smg_grpc_servicer.tokenspeed.rdma_pixel import RdmaPixelPuller
 from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
 
 if TYPE_CHECKING:
@@ -78,6 +79,11 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # Spatial merge factor for post-merge token counts (Qwen vision default 2).
         self._merge_size = self._resolve_merge_size()
 
+        self._rdma_pixel_puller = RdmaPixelPuller(
+            agent_name=f"smg-encode-{self._bootstrap_host}-{self._bootstrap_port}",
+            log_prefix="EPD RDMA",
+        )
+
         self.async_llm.auto_create_handle_loop()
         logger.info("TokenSpeedEncoderServicer initialized")
 
@@ -86,7 +92,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         vision_config = getattr(hf_config, "vision_config", None)
         return int(getattr(vision_config, "spatial_merge_size", 2) or 2)
 
-    def _items_from_proto(self, mm_inputs):
+    def _items_from_proto(self, mm_inputs, bootstrap_room: int = 0):
         """Reconstruct the engine MultimodalDataItem(s) for the encode worker.
 
         Unlike the prefill leg, the encode worker NEEDS each item's encoder_input
@@ -110,14 +116,28 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             # the 19-77MB pixels. The content hash is computed on the real bytes
             # before the swap and pre-set on the item.
             td = item_proto.encoder_input
-            feature = TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
-            feat_hash = None
-            if self._pixel_shm:
-                from tokenspeed.runtime.multimodal.hash import hash_feature
-                from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
+            if td.WhichOneof("payload") == "remote":
+                # EPD RDMA: pull pixels from the gateway's exported NIXL memory.
+                # With EPD_PIXEL_SHM, the received slot is published directly to
+                # scheduler SHM so the scheduler ingest path still avoids pickle
+                # copies of the full pixel tensor.
+                feature, feat_hash = self._rdma_pixel_puller.feature_from_remote(
+                    td,
+                    explicit_room=bootstrap_room,
+                    cast_to=model_dtype,
+                    publish_shm=self._pixel_shm,
+                )
+            else:
+                feature = TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
+                feat_hash = None
+                if self._pixel_shm:
+                    from tokenspeed.runtime.multimodal.hash import hash_feature
+                    from tokenspeed.runtime.multimodal.shm_transport import (
+                        ShmTensorHandle,
+                    )
 
-                feat_hash = hash_feature(feature)
-                feature = ShmTensorHandle.publish(feature)
+                    feat_hash = hash_feature(feature)
+                    feature = ShmTensorHandle.publish(feature)
             model_specific = {
                 name: TokenSpeedSchedulerServicer._tensor_from_proto(t, cast_to=model_dtype)
                 for name, t in item_proto.model_specific_tensors.items()
@@ -190,7 +210,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
 
     def _build_encode_request(self, request, bootstrap_room):
         """Proto -> engine EncodeRequest (the expensive per-image parse)."""
-        items = self._items_from_proto(request.mm_inputs)
+        items = self._items_from_proto(request.mm_inputs, bootstrap_room)
 
         EncodeRequest = _lazy_encode_request()
         return EncodeRequest(

@@ -156,7 +156,9 @@ impl KimiK25Processor {
         let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
         let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
 
-        let mut data = vec![0.0f32; 3 * canvas_pixels];
+        // Pooled: this per-image CHW buffer (tens of MB) is recycled by the
+        // caller after patch extraction, keeping its pages mapped and hot.
+        let mut data = crate::vision::scratch::take_f32(3 * canvas_pixels);
         let (r_plane, rest) = data.split_at_mut(canvas_pixels);
         let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
 
@@ -193,17 +195,15 @@ impl KimiK25Processor {
     ///
     /// Uses row-based `copy_from_slice` instead of per-element indexing so the
     /// compiler can auto-vectorize the inner copy.
-    fn extract_patches(tensor: &Array3<f32>, patch_size: usize) -> Vec<f32> {
+    /// Append this image's patches directly into `out` (no per-image intermediate
+    /// Vec): `out` is the pooled batch buffer pre-sized for the whole request.
+    fn extract_patches_into(tensor: &Array3<f32>, patch_size: usize, out: &mut Vec<f32>) {
         let channels = tensor.shape()[0];
         let height = tensor.shape()[1];
         let width = tensor.shape()[2];
 
         let grid_h = height / patch_size;
         let grid_w = width / patch_size;
-        let num_patches = grid_h * grid_w;
-        let patch_features = channels * patch_size * patch_size;
-
-        let mut patches = Vec::with_capacity(num_patches * patch_features);
 
         // Get contiguous slice for direct row addressing
         let flat = tensor.as_standard_layout();
@@ -223,13 +223,11 @@ impl KimiK25Processor {
                     let plane_offset = c * height * width;
                     for ph in 0..patch_size {
                         let row_start = plane_offset + (h_start + ph) * width + w_start;
-                        patches.extend_from_slice(&data[row_start..row_start + patch_size]);
+                        out.extend_from_slice(&data[row_start..row_start + patch_size]);
                     }
                 }
             }
         }
-
-        patches
     }
 }
 
@@ -255,7 +253,18 @@ impl VisionPreProcessor for KimiK25Processor {
         let mean = config.get_image_mean();
         let std = config.get_image_std();
 
-        let mut all_patches: Vec<f32> = Vec::new();
+        // Pre-size the pooled batch buffer exactly (patch_features per patch =
+        // 3 * patch_size^2; this is the data plane's hottest allocation).
+        let patch_features = 3 * self.patch_size * self.patch_size;
+        let mut estimated_total = 0usize;
+        for image in images {
+            let (w, h) = image.dimensions();
+            let cfg = self.compute_resize_config(w as usize, h as usize);
+            let grid_h = (cfg.new_height + cfg.pad_height) / self.patch_size;
+            let grid_w = (cfg.new_width + cfg.pad_width) / self.patch_size;
+            estimated_total += grid_h * grid_w * patch_features;
+        }
+        let mut all_patches: Vec<f32> = crate::vision::scratch::take_f32_cap(estimated_total);
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
         let mut feature_token_counts = Vec::with_capacity(images.len());
@@ -280,8 +289,11 @@ impl VisionPreProcessor for KimiK25Processor {
             let num_patches = grid_h * grid_w;
             feature_token_counts.push(cfg.num_tokens);
 
-            let patches = Self::extract_patches(&tensor, self.patch_size);
-            all_patches.extend(patches);
+            // Patchify directly into the pooled batch buffer, then recycle the
+            // CHW tensor's storage (standard layout, offset 0) for the next image.
+            Self::extract_patches_into(&tensor, self.patch_size, &mut all_patches);
+            let (storage, _offset) = tensor.into_raw_vec_and_offset();
+            crate::vision::scratch::give_f32(storage);
             patches_per_image.push(num_patches as i64);
         }
 

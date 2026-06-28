@@ -27,12 +27,14 @@ use llm_multimodal::{
     PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
+use lru::LruCache;
 use ndarray::{ArrayD, Axis, Slice};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
+use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::routers::grpc::{
@@ -72,6 +74,164 @@ fn log_mm_timing_enabled() -> bool {
     std::env::var("SMG_LOG_MM_TIMING")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+// Host-DRAM LRU cache of preprocessed per-image encoder inputs for the gateway
+// multimodal path. Disabled by default (`SMG_MM_PIXEL_CACHE_MB` unset / 0).
+
+/// Identifies a preprocessed image output. Hashing raw image bytes alone is not
+/// enough because the same bytes preprocess differently under another model config.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct PixelCacheKey {
+    /// blake3 hex digest of the raw encoded image bytes (`ImageFrame.hash`).
+    pub image_hash: String,
+    /// Stable hash of model identity/config for this deployment.
+    pub config_fingerprint: u64,
+}
+
+/// Cached per-image vision processor output before backend-specific serialization.
+#[derive(Debug)]
+pub(crate) struct CachedPreprocessedItem {
+    pub preprocessed: PreprocessedEncoderInputs,
+}
+
+impl CachedPreprocessedItem {
+    fn heap_bytes(&self) -> usize {
+        preprocessed_heap_bytes(&self.preprocessed)
+    }
+}
+
+fn preprocessed_heap_bytes(preprocessed: &PreprocessedEncoderInputs) -> usize {
+    let model_specific: usize = preprocessed
+        .model_specific
+        .iter()
+        .map(|(key, value)| key.len() + model_specific_value_heap_bytes(value))
+        .sum();
+    preprocessed.encoder_input.len() * size_of::<f32>()
+        + preprocessed.encoder_input.ndim() * size_of::<usize>()
+        + preprocessed.feature_token_counts.len() * size_of::<usize>()
+        + preprocessed.item_sizes.len() * size_of::<(u32, u32)>()
+        + model_specific
+}
+
+fn model_specific_value_heap_bytes(value: &ModelSpecificValue) -> usize {
+    match value {
+        ModelSpecificValue::Tensor { data, shape } => {
+            data.len() * size_of::<f32>() + shape.len() * size_of::<usize>()
+        }
+        ModelSpecificValue::IntTensor { data, shape } => {
+            data.len() * size_of::<i64>() + shape.len() * size_of::<usize>()
+        }
+        ModelSpecificValue::UintTensor { data, shape } => {
+            data.len() * size_of::<u32>() + shape.len() * size_of::<usize>()
+        }
+        ModelSpecificValue::Int(_) => size_of::<i64>(),
+        ModelSpecificValue::Float(_) => size_of::<f64>(),
+        ModelSpecificValue::IntVec(values) => values.len() * size_of::<i64>(),
+        ModelSpecificValue::UintVec(values) => values.len() * size_of::<u32>(),
+        ModelSpecificValue::FloatVec(values) => values.len() * size_of::<f32>(),
+        ModelSpecificValue::TupleVec(values) => values.len() * size_of::<(u32, u32)>(),
+        ModelSpecificValue::Bool(_) => size_of::<bool>(),
+    }
+}
+
+const PIXEL_CACHE_KEY_OVERHEAD: usize = 128;
+
+struct PixelCacheInner {
+    map: LruCache<PixelCacheKey, Arc<CachedPreprocessedItem>>,
+    cur_bytes: usize,
+    max_bytes: usize,
+}
+
+/// Thread-safe, byte-budgeted LRU of per-image vision processor outputs.
+pub(crate) struct PixelCache {
+    inner: Mutex<PixelCacheInner>,
+}
+
+impl PixelCache {
+    pub(crate) fn new(max_bytes: usize) -> Self {
+        Self {
+            inner: Mutex::new(PixelCacheInner {
+                map: LruCache::unbounded(),
+                cur_bytes: 0,
+                max_bytes,
+            }),
+        }
+    }
+
+    pub(crate) fn get(&self, key: &PixelCacheKey) -> Option<Arc<CachedPreprocessedItem>> {
+        let mut inner = self.inner.lock();
+        inner.map.get(key).cloned()
+    }
+
+    pub(crate) fn insert(&self, key: PixelCacheKey, value: Arc<CachedPreprocessedItem>) {
+        let entry_bytes = value.heap_bytes() + PIXEL_CACHE_KEY_OVERHEAD;
+        let mut inner = self.inner.lock();
+        if entry_bytes > inner.max_bytes {
+            return;
+        }
+        let PixelCacheInner {
+            map,
+            cur_bytes,
+            max_bytes,
+        } = &mut *inner;
+        if let Some(previous) = map.put(key, value) {
+            *cur_bytes = cur_bytes.saturating_sub(previous.heap_bytes() + PIXEL_CACHE_KEY_OVERHEAD);
+        }
+        *cur_bytes += entry_bytes;
+        while *cur_bytes > *max_bytes {
+            match map.pop_lru() {
+                Some((_, evicted)) => {
+                    *cur_bytes =
+                        cur_bytes.saturating_sub(evicted.heap_bytes() + PIXEL_CACHE_KEY_OVERHEAD);
+                }
+                None => break,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn current_bytes(&self) -> usize {
+        self.inner.lock().cur_bytes
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().map.len()
+    }
+}
+
+pub(crate) fn pixel_cache_from_env() -> Option<Arc<PixelCache>> {
+    static CACHE: OnceLock<Option<Arc<PixelCache>>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mb = std::env::var("SMG_MM_PIXEL_CACHE_MB")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if mb == 0 {
+                return None;
+            }
+            let max_bytes = mb.saturating_mul(1024 * 1024);
+            tracing::info!(
+                target: "smg::request",
+                cache_mb = mb,
+                "multimodal pixel_values cache enabled (host DRAM, preprocessed encoder inputs)"
+            );
+            Some(Arc::new(PixelCache::new(max_bytes)))
+        })
+        .clone()
+}
+
+pub(crate) fn config_fingerprint(tokenizer_id: &str, config: &serde_json::Value) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(tokenizer_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(config.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(head)
 }
 
 impl MultimodalConfigRegistry {
@@ -245,6 +405,8 @@ pub(crate) struct MultimodalComponents {
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
+    /// Optional host-DRAM cache of preprocessed per-image encoder inputs.
+    pub pixel_cache: Option<Arc<PixelCache>>,
 }
 
 impl MultimodalComponents {
@@ -263,6 +425,7 @@ impl MultimodalComponents {
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
+            pixel_cache: pixel_cache_from_env(),
         })
     }
 }
@@ -675,77 +838,93 @@ async fn process_multimodal_parts(
     };
     let preprocess_started = Instant::now();
 
-    let registry = components.vision_processor_registry.clone();
-    let model_id_owned = model_id.to_string();
-    let model_type_owned = model_type.map(String::from);
-    let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
-    let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
-    let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
-        let processor = registry
-            .find(&model_id_owned, model_type_owned.as_deref())
-            .ok_or_else(|| {
-                anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
-            })?;
+    let preprocessed: PreprocessedEncoderInputs = if let (Some(cache), Modality::Image, 1) =
+        (components.pixel_cache.clone(), modality, images.len())
+    {
+        preprocess_image_cached(
+            cache,
+            &images[0],
+            components.vision_processor_registry.clone(),
+            model_id.to_string(),
+            model_type.map(String::from),
+            pp_config,
+            config_fingerprint(tokenizer_id, &model_config.config),
+        )
+        .await?
+    } else {
+        let registry = components.vision_processor_registry.clone();
+        let model_id_owned = model_id.to_string();
+        let model_type_owned = model_type.map(String::from);
+        let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
+        let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
+        let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
+            let processor = registry
+                .find(&model_id_owned, model_type_owned.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
+                })?;
 
-        match modality {
-            Modality::Image => {
-                // Extract DynamicImages inside the blocking closure so the expensive
-                // clone happens off the tokio async runtime.
-                let raw_images: Vec<image::DynamicImage> = images_for_preprocess
-                    .iter()
-                    .map(|f| f.image.clone())
-                    .collect();
-                processor
-                    .preprocess(&raw_images, &pp_config)
-                    .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
-            }
-            Modality::Video => {
-                let video = videos_for_preprocess
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
-
-                if !video.frames().is_empty() {
-                    return processor
-                        .preprocess_video(video.frames(), &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
+            match modality {
+                Modality::Image => {
+                    // Extract DynamicImages inside the blocking closure so the expensive
+                    // clone happens off the tokio async runtime.
+                    let raw_images: Vec<image::DynamicImage> = images_for_preprocess
+                        .iter()
+                        .map(|f| f.image.clone())
+                        .collect();
+                    processor
+                        .preprocess(&raw_images, &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
                 }
+                Modality::Video => {
+                    let video = videos_for_preprocess
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
 
-                if let Some(rgb_video) = video.rgb_video() {
-                    match rgb_video.frame_refs() {
-                        Ok(frame_refs) => {
-                            match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
-                                Ok(preprocessed) => return Ok(preprocessed),
-                                Err(error) => {
-                                    warn!(
-                                        error = %error,
-                                        "RGB video preprocessing fast path failed; falling back to materialized frames"
-                                    );
+                    if !video.frames().is_empty() {
+                        return processor
+                            .preprocess_video(video.frames(), &pp_config)
+                            .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
+                    }
+
+                    if let Some(rgb_video) = video.rgb_video() {
+                        match rgb_video.frame_refs() {
+                            Ok(frame_refs) => {
+                                match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
+                                    Ok(preprocessed) => return Ok(preprocessed),
+                                    Err(error) => {
+                                        warn!(
+                                            error = %error,
+                                            "RGB video preprocessing fast path failed; falling back to materialized frames"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        Err(error) => {
-                            warn!(
-                                error = %error,
-                                "RGB video frame refs are invalid; falling back to materialized frames"
-                            );
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    "RGB video frame refs are invalid; falling back to materialized frames"
+                                );
+                            }
                         }
                     }
-                }
 
-                let frames = video
-                    .materialized_frames()
-                    .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
-                processor
-                    .preprocess_video(&frames, &pp_config)
-                    .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
+                    let frames = video
+                        .materialized_frames()
+                        .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
+                    processor
+                        .preprocess_video(&frames, &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
+                }
+                _ => Err(anyhow::anyhow!(
+                    "Unsupported modality for preprocessing: {modality}"
+                )),
             }
-            _ => Err(anyhow::anyhow!(
-                "Unsupported modality for preprocessing: {modality}"
-            )),
-        }
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
+        preprocessed
+    };
     let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
 
     debug!(
@@ -845,6 +1024,61 @@ async fn process_multimodal_parts(
         expanded_token_ids: expanded.token_ids,
         intermediate,
     })
+}
+
+/// Pixel-cache image preprocessing for single-image requests.
+async fn preprocess_image_cached(
+    cache: Arc<PixelCache>,
+    image: &Arc<ImageFrame>,
+    registry: Arc<VisionProcessorRegistry>,
+    model_id: String,
+    model_type: Option<String>,
+    pp_config: PreProcessorConfig,
+    fingerprint: u64,
+) -> Result<PreprocessedEncoderInputs> {
+    let key = PixelCacheKey {
+        image_hash: image.hash.clone(),
+        config_fingerprint: fingerprint,
+    };
+    if let Some(cached) = cache.get(&key) {
+        return Ok(cached.preprocessed.clone());
+    }
+
+    let preprocessed = preprocess_image_batch(
+        registry,
+        model_id,
+        model_type,
+        pp_config,
+        std::slice::from_ref(image),
+    )
+    .await?;
+    cache.insert(
+        key,
+        Arc::new(CachedPreprocessedItem {
+            preprocessed: preprocessed.clone(),
+        }),
+    );
+    Ok(preprocessed)
+}
+
+async fn preprocess_image_batch(
+    registry: Arc<VisionProcessorRegistry>,
+    model_id: String,
+    model_type: Option<String>,
+    pp_config: PreProcessorConfig,
+    images: &[Arc<ImageFrame>],
+) -> Result<PreprocessedEncoderInputs> {
+    let raw_images: Vec<image::DynamicImage> = images.iter().map(|f| f.image.clone()).collect();
+    tokio::task::spawn_blocking(move || {
+        let processor = registry
+            .find(&model_id, model_type.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("No vision processor found for model: {model_id}"))?;
+        processor
+            .preprocess(&raw_images, &pp_config)
+            .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))?
 }
 
 /// Output of token expansion, containing both full structural and patch-only ranges.
@@ -1939,6 +2173,87 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn pixel_cache_item(token_count: usize, payload: usize) -> Arc<CachedPreprocessedItem> {
+        Arc::new(CachedPreprocessedItem {
+            preprocessed: PreprocessedEncoderInputs {
+                encoder_input: ArrayD::from_elem(IxDyn(&[1, payload]), token_count as f32),
+                feature_token_counts: vec![token_count],
+                item_sizes: vec![(payload as u32, 1)],
+                model_specific: HashMap::new(),
+            },
+        })
+    }
+
+    fn pixel_cache_key(hash: &str) -> PixelCacheKey {
+        PixelCacheKey {
+            image_hash: hash.to_string(),
+            config_fingerprint: 7,
+        }
+    }
+
+    #[test]
+    fn pixel_cache_hit_returns_shared_arc() {
+        let cache = PixelCache::new(1024 * 1024);
+        let value = pixel_cache_item(10, 64);
+        cache.insert(pixel_cache_key("a"), value.clone());
+        let got = cache.get(&pixel_cache_key("a")).expect("hit");
+        assert_eq!(got.preprocessed.feature_token_counts, vec![10]);
+        assert!(Arc::ptr_eq(&got, &value));
+        assert!(cache.get(&pixel_cache_key("missing")).is_none());
+    }
+
+    #[test]
+    fn pixel_cache_key_distinguishes_fingerprint() {
+        let cache = PixelCache::new(1024 * 1024);
+        let mut k_other_model = pixel_cache_key("a");
+        k_other_model.config_fingerprint = 99;
+        cache.insert(pixel_cache_key("a"), pixel_cache_item(1, 8));
+        cache.insert(k_other_model.clone(), pixel_cache_item(3, 8));
+        assert_eq!(
+            cache
+                .get(&pixel_cache_key("a"))
+                .unwrap()
+                .preprocessed
+                .feature_token_counts,
+            vec![1]
+        );
+        assert_eq!(
+            cache
+                .get(&k_other_model)
+                .unwrap()
+                .preprocessed
+                .feature_token_counts,
+            vec![3]
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn pixel_cache_evicts_lru_when_over_budget() {
+        let entry = pixel_cache_item(1, 4096).heap_bytes() + PIXEL_CACHE_KEY_OVERHEAD;
+        let budget = entry * 2 + entry / 2;
+        let cache = PixelCache::new(budget);
+        cache.insert(pixel_cache_key("a"), pixel_cache_item(1, 4096));
+        cache.insert(pixel_cache_key("b"), pixel_cache_item(2, 4096));
+        assert!(cache.get(&pixel_cache_key("a")).is_some());
+        assert!(cache.get(&pixel_cache_key("b")).is_some());
+        assert!(cache.get(&pixel_cache_key("a")).is_some());
+        cache.insert(pixel_cache_key("c"), pixel_cache_item(3, 4096));
+        assert!(cache.get(&pixel_cache_key("a")).is_some());
+        assert!(cache.get(&pixel_cache_key("b")).is_none());
+        assert!(cache.get(&pixel_cache_key("c")).is_some());
+        assert!(cache.current_bytes() <= budget);
+    }
+
+    #[test]
+    fn pixel_cache_oversized_entry_is_bypassed() {
+        let cache = PixelCache::new(32);
+        cache.insert(pixel_cache_key("huge"), pixel_cache_item(1, 1024));
+        assert!(cache.get(&pixel_cache_key("huge")).is_none());
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.current_bytes(), 0);
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

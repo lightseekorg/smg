@@ -18,6 +18,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use rand::RngExt;
 use smg_grpc_client::{
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
@@ -132,9 +133,9 @@ pub struct TensorBytes {
     pub dtype: String,
 }
 
-/// TokenSpeed tensor with storage that can be either inline bytes or an
-/// already-published SHM handle. The latter lets SMG serialize large encoder
-/// inputs directly into SHM instead of building a temporary Vec<u8> first.
+/// TokenSpeed tensor with an explicit payload transport. Inline, SHM, and
+/// remote descriptors all converge here before becoming generated proto fields,
+/// so stages do not need to mutate `TensorData` oneofs directly.
 #[derive(Debug, Clone)]
 pub struct TokenSpeedTensor {
     pub storage: TokenSpeedTensorStorage,
@@ -146,6 +147,7 @@ pub struct TokenSpeedTensor {
 pub enum TokenSpeedTensorStorage {
     Inline(Vec<u8>),
     Shm(tokenspeed::ShmHandle),
+    Remote(tokenspeed::RemoteTensorHandle),
 }
 
 impl TokenSpeedTensor {
@@ -165,10 +167,58 @@ impl TokenSpeedTensor {
         }
     }
 
+    pub fn remote(handle: tokenspeed::RemoteTensorHandle, shape: Vec<u32>, dtype: String) -> Self {
+        Self {
+            storage: TokenSpeedTensorStorage::Remote(handle),
+            shape,
+            dtype,
+        }
+    }
+
+    pub fn try_export_nixl_remote(self, room: i64) -> Self {
+        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+            return self;
+        }
+
+        let Self {
+            storage,
+            shape,
+            dtype,
+        } = self;
+        let data = match storage {
+            TokenSpeedTensorStorage::Inline(data) => data,
+            storage => {
+                return Self {
+                    storage,
+                    shape,
+                    dtype,
+                };
+            }
+        };
+        if data.is_empty() {
+            return Self::inline(data, shape, dtype);
+        }
+
+        let nbytes = data.len() as u64;
+        match crate::routers::grpc::mm_rdma::export_pixel_buffer(room, data) {
+            Ok(descriptor) => Self::remote(
+                tokenspeed::RemoteTensorHandle {
+                    transport: "nixl".to_string(),
+                    descriptor,
+                    nbytes,
+                },
+                shape,
+                dtype,
+            ),
+            Err(data) => Self::inline(data, shape, dtype),
+        }
+    }
+
     pub fn nbytes(&self) -> usize {
         match &self.storage {
             TokenSpeedTensorStorage::Inline(data) => data.len(),
             TokenSpeedTensorStorage::Shm(handle) => handle.nbytes as usize,
+            TokenSpeedTensorStorage::Remote(handle) => handle.nbytes as usize,
         }
     }
 }
@@ -268,6 +318,23 @@ impl TrtllmMultimodalData {
 }
 
 impl TokenSpeedMultimodalData {
+    /// Export inline encoder-input payloads over NIXL for normal TokenSpeed
+    /// Generate requests (single-worker and PD prefill legs). EPD encode uses
+    /// its own room-matched export path because the room must also be injected
+    /// into the encode->prefill handshake.
+    pub fn try_export_encoder_inputs_nixl_remote(mut self) -> Self {
+        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+            return self;
+        }
+        for item in &mut self.items {
+            let room = rand::rng().random_range(0..i64::MAX);
+            let placeholder = TokenSpeedTensor::inline(Vec::new(), Vec::new(), String::new());
+            let encoder_input = std::mem::replace(&mut item.encoder_input, placeholder);
+            item.encoder_input = encoder_input.try_export_nixl_remote(room);
+        }
+        self
+    }
+
     /// Convert to TokenSpeed proto MultimodalInputs. The EPD prefill leg drops
     /// each item's encoder_input afterward via `clear_mm_pixel_values`.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
@@ -329,6 +396,10 @@ fn tokenspeed_tensor_to_proto(
         TokenSpeedTensorStorage::Shm(handle) => {
             Metrics::record_mm_tensor("tokenspeed", "shm", handle.nbytes as usize);
             tokenspeed::tensor_data::Payload::Shm(handle)
+        }
+        TokenSpeedTensorStorage::Remote(handle) => {
+            Metrics::record_mm_tensor("tokenspeed", "remote", handle.nbytes as usize);
+            tokenspeed::tensor_data::Payload::Remote(handle)
         }
     };
 
@@ -1950,6 +2021,42 @@ mod tests {
                 assert_eq!(handle.nbytes, 8);
             }
             _ => panic!("expected shm TensorData payload"),
+        }
+    }
+
+    #[test]
+    fn tokenspeed_remote_encoder_input_into_proto_uses_remote_payload() {
+        let proto = TokenSpeedMultimodalData {
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Image,
+                encoder_input: TokenSpeedTensor::remote(
+                    tokenspeed::RemoteTensorHandle {
+                        transport: "nixl".to_string(),
+                        descriptor: vec![1, 2, 3],
+                        nbytes: 8,
+                    },
+                    vec![1, 2],
+                    "bfloat16".to_string(),
+                ),
+                model_specific_tensors: HashMap::new(),
+                placeholder_token_id: Some(151655),
+                mm_placeholders: vec![(4, 2)],
+                content_hash: vec![7; 32],
+            }],
+            shm_enabled: true,
+        }
+        .into_proto();
+
+        let tensor = proto.items[0].encoder_input.as_ref().unwrap();
+        assert_eq!(tensor.shape, vec![1, 2]);
+        assert_eq!(tensor.dtype, "bfloat16");
+        match tensor.payload.as_ref() {
+            Some(tokenspeed::tensor_data::Payload::Remote(handle)) => {
+                assert_eq!(handle.transport, "nixl");
+                assert_eq!(handle.descriptor, vec![1, 2, 3]);
+                assert_eq!(handle.nbytes, 8);
+            }
+            _ => panic!("expected remote TensorData payload"),
         }
     }
 
