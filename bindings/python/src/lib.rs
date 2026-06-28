@@ -480,6 +480,7 @@ struct Router {
     /// breaking external Python callers that pass `_Router(...)` positionally.
     drain_settle_secs: u64,
     enable_wasm: bool,
+    encode_selector: HashMap<String, String>,
 }
 
 impl Router {
@@ -607,7 +608,7 @@ impl Router {
                 port: self.service_discovery_port,
                 check_interval_secs: 60,
                 selector: self.selector.clone(),
-                encode_selector: HashMap::new(),
+                encode_selector: self.encode_selector.clone(),
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
@@ -901,6 +902,7 @@ impl Router {
         // `_Router(...)` positionally. See the struct-field note above.
         health_check_port = None,
         routing_key_override = false,
+        encode_selector = HashMap::new(),
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1021,6 +1023,7 @@ impl Router {
         // preserve positional-argument compatibility.
         health_check_port: Option<u16>,
         routing_key_override: bool,
+        encode_selector: HashMap<String, String>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1149,6 +1152,7 @@ impl Router {
             mesh_peer_urls,
             drain_settle_secs,
             enable_wasm,
+            encode_selector,
         })
     }
 
@@ -1183,7 +1187,7 @@ impl Router {
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
                 disaggregated_mode: self.pd_disaggregation,
-                encode_selector: HashMap::new(),
+                encode_selector: self.encode_selector.clone(),
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),

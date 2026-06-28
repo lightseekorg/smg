@@ -6,8 +6,9 @@
 
 use anyhow::{anyhow, Result};
 use rand::RngExt;
-use smg_grpc_client::tokenspeed_encoder::{
-    tokenspeed_encoder_proto as tokenspeed_encoder, TokenSpeedEncoderClient,
+use smg_grpc_client::{
+    tokenspeed_encoder::{tokenspeed_encoder_proto as tokenspeed_encoder, TokenSpeedEncoderClient},
+    tokenspeed_proto,
 };
 use uuid::Uuid;
 
@@ -120,11 +121,18 @@ impl PreparedEncodeItem {
                     .as_ref()
                     .map(collect_tokenspeed_multimodal_inputs_shm_handles)
                     .unwrap_or_default();
-                let result = send_tokenspeed_encode_rpc(endpoint, request).await;
-                cleanup_tokenspeed_shm_handles(&shm_handles);
-                result
+                let _shm_guard = TokenSpeedShmCleanupGuard(shm_handles);
+                send_tokenspeed_encode_rpc(endpoint, request).await
             }
         }
+    }
+}
+
+struct TokenSpeedShmCleanupGuard(Vec<tokenspeed_proto::ShmHandle>);
+
+impl Drop for TokenSpeedShmCleanupGuard {
+    fn drop(&mut self) {
+        cleanup_tokenspeed_shm_handles(&self.0);
     }
 }
 

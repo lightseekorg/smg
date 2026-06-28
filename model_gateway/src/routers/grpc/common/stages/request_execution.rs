@@ -270,7 +270,7 @@ impl RequestExecutionStage {
 
     async fn execute_epd_dispatch(
         &self,
-        proto_request: ProtoGenerateRequest,
+        mut proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
         model: &str,
@@ -279,6 +279,7 @@ impl RequestExecutionStage {
         if let Some(encode_dispatch) = encode_dispatch {
             Self::spawn_encode_dispatch(encode_dispatch);
         }
+        proto_request.clear_mm_pixel_values();
         self.execute_disaggregated_dispatch(proto_request, clients, workers, model)
             .await
     }

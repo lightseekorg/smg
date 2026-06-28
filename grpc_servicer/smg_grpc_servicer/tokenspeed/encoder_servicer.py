@@ -19,6 +19,7 @@ import grpc
 from smg_grpc_proto.generated import (
     tokenspeed_encoder_pb2,
     tokenspeed_encoder_pb2_grpc,
+    tokenspeed_scheduler_pb2,
 )
 
 from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
@@ -123,17 +124,31 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                 for name, t in item_proto.model_specific_tensors.items()
             }
 
-            grid = model_specific.get("image_grid_thw")
+            if item_proto.modality in (
+                tokenspeed_scheduler_pb2.IMAGE,
+                tokenspeed_scheduler_pb2.MODALITY_UNSPECIFIED,
+            ):
+                item_modality = Modality.IMAGE
+                grid_key = "image_grid_thw"
+            elif item_proto.modality == tokenspeed_scheduler_pb2.VIDEO:
+                item_modality = Modality.VIDEO
+                grid_key = "video_grid_thw"
+            else:
+                raise ValueError(
+                    f"encode request modality={item_proto.modality} is not supported"
+                )
+
+            grid = model_specific.get(grid_key)
             if grid is None:
                 # Tolerate the legacy "grid_thws" key (older gateway builds emit it on
                 # the encode RPC); mirrors the engine kimi_k25 _grid() helper's tolerance.
                 grid = model_specific.get("grid_thws")
             if grid is None:
                 raise ValueError(
-                    "encode request is missing image_grid_thw/grid_thws; "
+                    f"encode request is missing {grid_key}/grid_thws; "
                     f"have keys={sorted(model_specific.keys())}"
                 )
-            # grid is [num_images, 3] = (t, h, w) in patch units, per image.
+            # grid is [num_media, 3] = (t, h, w) in patch units, per item.
             merge = self._merge_size
             offsets = []
             cursor = 0
@@ -144,7 +159,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                 cursor += span
 
             item = MultimodalDataItem(
-                modality=Modality.IMAGE,
+                modality=item_modality,
                 hash=feat_hash,
                 feature=feature,
                 model_specific_data=model_specific,
@@ -180,10 +195,9 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             # images; the GIL is released in the tensor copy/cast), then the
             # cheap zmq send back ON the loop -- send_to_scheduler is a
             # zmq.asyncio socket whose send() needs the running loop (and this
-            # keeps it single-writer). Fire-and-forget like the legacy
-            # send_pyobj (the returned Future is intentionally dropped).
+            # keeps it single-writer).
             payload = await asyncio.to_thread(self._parse_and_pickle, request, bootstrap_room)
-            self.async_llm.engine_core_client.send_to_scheduler.send(payload)
+            await self.async_llm.engine_core_client.send_to_scheduler.send(payload)
         else:
             self._ingest(request, bootstrap_room)
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)

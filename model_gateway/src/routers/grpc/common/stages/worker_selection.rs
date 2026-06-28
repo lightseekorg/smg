@@ -382,8 +382,8 @@ impl WorkerSelectionStage {
     ///
     /// Mirrors `select_pd_pair` but also assigns each multimodal item to an
     /// encode worker. prefill+decode are selected as a normal PD pair. All pools
-    /// are filtered to a single runtime (the prefill pool's first runtime), so
-    /// EPD is only viable when encode/prefill/decode share a runtime.
+    /// are filtered to a runtime shared by the selected encode/prefill/decode
+    /// legs.
     fn select_encode_prefill_decode_workers(
         &self,
         model_id: &str,
@@ -435,14 +435,28 @@ impl WorkerSelectionStage {
             return None;
         }
 
-        // Determine the runtime type from prefill workers; disaggregated legs
-        // must share a runtime. Encode workers only participate when the request
-        // actually has encode items.
-        let target_runtime = all_prefill.first()?.metadata().spec.runtime_type;
+        // Disaggregated legs must share a runtime. Pick a runtime that has at
+        // least one available worker in every required EPD pool instead of
+        // blindly using the first prefill runtime.
+        let Some(target_runtime) = all_prefill
+            .iter()
+            .map(|w| w.metadata().spec.runtime_type)
+            .find(|runtime| {
+                all_decode
+                    .iter()
+                    .any(|w| w.metadata().spec.runtime_type == *runtime)
+                    && (!needs_encode
+                        || all_encode
+                            .iter()
+                            .any(|w| w.metadata().spec.runtime_type == *runtime))
+            })
+        else {
+            warn!("No available encode/prefill/decode worker set with a shared runtime");
+            return None;
+        };
 
         let mixed = all_prefill
             .iter()
-            .skip(1)
             .chain(all_decode.iter())
             .any(|w| w.metadata().spec.runtime_type != target_runtime)
             || (needs_encode
@@ -498,9 +512,13 @@ impl WorkerSelectionStage {
             hash_ring: hash_ring.clone(),
             leg: WorkerLeg::Prefill,
         };
-        let prefill_idx = prefill_policy.select_worker(&available_prefill, &info)?;
+        let prefill_idx =
+            self.policy_registry
+                .select_worker(&prefill_policy, &available_prefill, &info)?;
         info.leg = WorkerLeg::Decode;
-        let decode_idx = decode_policy.select_worker(&available_decode, &info)?;
+        let decode_idx =
+            self.policy_registry
+                .select_worker(&decode_policy, &available_decode, &info)?;
 
         let encode_assignments = assign_encode_workers(
             &available_encode,
