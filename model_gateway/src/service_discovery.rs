@@ -315,7 +315,7 @@ impl PodInfo {
             None
         };
 
-        let bootstrap_port = if matches!(pod_type, Some(PodType::Encode | PodType::Prefill)) {
+        let bootstrap_port = if matches!(&pod_type, Some(PodType::Encode | PodType::Prefill)) {
             if let Some(config) = config {
                 pod.metadata
                     .annotations
