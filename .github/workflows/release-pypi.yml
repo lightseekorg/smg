@@ -162,10 +162,18 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Hermetic Python so twine pulls a modern `packaging` (>= 24.2); the
+      # runner's system packaging can't parse Metadata 2.4 (PEP 639
+      # License-Expression/License-File) and rejects the wheels.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Upload to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
         run: |
-          pip install twine
+          pip install -U twine
           twine upload dist/* --verbose
