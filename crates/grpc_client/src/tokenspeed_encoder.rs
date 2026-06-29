@@ -57,8 +57,7 @@ pub struct TokenSpeedEncoderClient {
 
 impl TokenSpeedEncoderClient {
     /// Connect reusing a cached `Channel` for `endpoint` (see [`channel_cache`]).
-    /// Use this on the per-request hot path; [`Self::connect`] always opens a
-    /// fresh connection. The lock is never held across the connect `await`, so a
+    /// The lock is never held across the connect `await`, so a
     /// rare concurrent first-connect may build two channels for the same endpoint
     /// — harmless: the first cached wins and the extra is dropped.
     pub async fn connect_cached(

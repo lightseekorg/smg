@@ -165,7 +165,6 @@ impl PipelineStage for MessageRequestBuildingStage {
         let encode_dispatch = if let Some(plan) = encode_plan {
             let (bootstrap_info, dispatch) = plan.into_parts();
             proto_request.set_encode_bootstrap_info(bootstrap_info);
-            proto_request.clear_mm_pixel_values();
             Some(dispatch)
         } else {
             None

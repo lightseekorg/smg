@@ -288,7 +288,7 @@ struct CliArgs {
     decode_policy: Option<String>,
 
     /// Specific policy for encode nodes in EPD mode. Defaults to consistent_hashing.
-    #[arg(long, value_parser = ["random", "round_robin", "least_load", "consistent_hashing"], help_heading = "PD Disaggregation")]
+    #[arg(long, value_parser = ["random", "round_robin", "consistent_hashing"], help_heading = "PD Disaggregation")]
     encode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup and registration

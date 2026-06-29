@@ -190,8 +190,7 @@ impl PipelineStage for RequestExecutionStage {
                     }
                 },
                 ExecutionPlan::PrefillDecode(req) => {
-                    self.execute_disaggregated_dispatch(req, clients, workers, model)
-                        .await
+                    self.execute_pd_dispatch(req, clients, workers, model).await
                 }
                 ExecutionPlan::EncodePrefillDecode {
                     request,
@@ -219,7 +218,7 @@ impl PipelineStage for RequestExecutionStage {
 }
 
 impl RequestExecutionStage {
-    async fn execute_disaggregated_dispatch(
+    async fn execute_pd_dispatch(
         &self,
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
@@ -238,7 +237,7 @@ impl RequestExecutionStage {
             Some(RuntimeType::Sglang) | Some(RuntimeType::TokenSpeed) => {
                 // These runtimes carry bootstrap rendezvous in the request
                 // and use parallel prefill/decode dispatch.
-                self.execute_prefill_decode_dispatch(proto_request, clients, workers)
+                self.execute_parallel_pd(proto_request, clients, workers)
                     .await
             }
             Some(RuntimeType::Trtllm)
@@ -280,7 +279,7 @@ impl RequestExecutionStage {
             Self::spawn_encode_dispatch(encode_dispatch);
         }
         proto_request.clear_mm_pixel_values();
-        self.execute_disaggregated_dispatch(proto_request, clients, workers, model)
+        self.execute_pd_dispatch(proto_request, clients, workers, model)
             .await
     }
 
@@ -394,7 +393,7 @@ impl RequestExecutionStage {
         Ok(ExecutionResult::Embedding { response: complete })
     }
 
-    async fn execute_prefill_decode_dispatch(
+    async fn execute_parallel_pd(
         &self,
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
@@ -406,7 +405,7 @@ impl RequestExecutionStage {
             .unwrap_or("");
         let (prefill_client, decode_client) = clients.disaggregated_mut().ok_or_else(|| {
             error!(
-                function = "execute_prefill_decode_dispatch",
+                function = "execute_parallel_pd",
                 "Expected disaggregated clients but got single"
             );
             error::internal_error(
@@ -452,8 +451,11 @@ impl RequestExecutionStage {
                 metrics_labels::CONNECTION_GRPC,
                 metrics_labels::ERROR_BACKEND,
             );
-            error!(function = "execute_prefill_decode_dispatch", error = %e, "Prefill worker failed to start");
-            e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
+            error!(function = "execute_parallel_pd", error = %e, "Prefill worker failed to start");
+            e.to_http_error(
+                "prefill_worker_failed_to_start",
+                format!("Prefill worker failed to start: {}", e.message()),
+            )
         })?;
 
         // Handle decode result
@@ -463,7 +465,7 @@ impl RequestExecutionStage {
                 metrics_labels::CONNECTION_GRPC,
                 metrics_labels::ERROR_BACKEND,
             );
-            error!(function = "execute_prefill_decode_dispatch", error = %e, "Decode worker failed to start");
+            error!(function = "execute_parallel_pd", error = %e, "Decode worker failed to start");
             e.to_http_error(
                 "decode_worker_failed_to_start",
                 format!("Decode worker failed to start: {}", e.message()),

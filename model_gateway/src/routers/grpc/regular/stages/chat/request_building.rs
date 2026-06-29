@@ -163,14 +163,13 @@ impl PipelineStage for ChatRequestBuildingStage {
         let encode_dispatch = if let Some(plan) = encode_plan {
             let (bootstrap_info, dispatch) = plan.into_parts();
             proto_request.set_encode_bootstrap_info(bootstrap_info);
-            proto_request.clear_mm_pixel_values();
             Some(dispatch)
         } else {
             None
         };
 
         // EPD: inject the prefill->decode KV rendezvous for backends that carry it
-        // in the request. Runs before execute_prefill_decode_dispatch clones the request, so
+        // in the request. Runs before execute_parallel_pd clones the request, so
         // both prefill and decode carry the same room.
         if let Some(workers) = ctx.state.workers.as_ref() {
             helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);

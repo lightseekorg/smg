@@ -322,7 +322,7 @@ fn inject_sglang_bootstrap_metadata(
 /// generate request.
 ///
 /// The gateway mints one room per request and sends identical params to both the
-/// prefill and decode worker (`execute_prefill_decode_dispatch` clones the request after
+/// prefill and decode worker (`execute_parallel_pd` clones the request after
 /// this stage). Host/port name the PREFILL worker's Mooncake bootstrap server
 /// (the KV data source); the decode worker discovers it there by `bootstrap_room`.
 /// This KV leg is independent of any per-item encode->prefill bootstrap info.

@@ -142,7 +142,8 @@ impl Drop for PreparedEncodeItem {
             item: Some(item),
             cleanup_on_drop: true,
             ..
-        } = self {
+        } = self
+        {
             cleanup_tokenspeed_items_encoder_shm(std::slice::from_ref(item), None);
         }
     }
@@ -190,10 +191,7 @@ fn build_plan(
 
     let mut bootstrap_info = Vec::with_capacity(items.len());
     let mut jobs = Vec::with_capacity(items.len());
-    for (global_index, (item, assignment)) in items
-        .into_iter()
-        .zip(encode_assignments)
-        .enumerate()
+    for (global_index, (item, assignment)) in items.into_iter().zip(encode_assignments).enumerate()
     {
         if assignment.item_index != global_index {
             return Err(anyhow!(

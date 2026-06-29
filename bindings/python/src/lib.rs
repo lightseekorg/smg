@@ -481,6 +481,9 @@ struct Router {
     drain_settle_secs: u64,
     enable_wasm: bool,
     encode_selector: HashMap<String, String>,
+    epd_disaggregation: bool,
+    encode_urls: Option<Vec<(String, Option<u16>)>>,
+    encode_policy: Option<PolicyType>,
 }
 
 impl Router {
@@ -577,6 +580,27 @@ impl Router {
         } else if matches!(self.backend, BackendType::Anthropic) {
             RoutingMode::Anthropic {
                 worker_urls: self.worker_urls.clone(),
+            }
+        } else if self.epd_disaggregation {
+            RoutingMode::EncodePrefillDecode {
+                encode_urls: self.encode_urls.clone().unwrap_or_default(),
+                prefill_urls: self.prefill_urls.clone().unwrap_or_default(),
+                decode_urls: self.decode_urls.clone().unwrap_or_default(),
+                encode_policy: self
+                    .encode_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .transpose()?,
+                prefill_policy: self
+                    .prefill_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .transpose()?,
+                decode_policy: self
+                    .decode_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .transpose()?,
             }
         } else if self.pd_disaggregation {
             RoutingMode::PrefillDecode {
@@ -903,6 +927,9 @@ impl Router {
         health_check_port = None,
         routing_key_override = false,
         encode_selector = HashMap::new(),
+        epd_disaggregation = false,
+        encode_urls = None,
+        encode_policy = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1024,8 +1051,17 @@ impl Router {
         health_check_port: Option<u16>,
         routing_key_override: bool,
         encode_selector: HashMap<String, String>,
+        epd_disaggregation: bool,
+        encode_urls: Option<Vec<(String, Option<u16>)>>,
+        encode_policy: Option<PolicyType>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
+
+        if let Some(ref encode_urls) = encode_urls {
+            for (url, _) in encode_urls {
+                all_urls.push(url.clone());
+            }
+        }
 
         if let Some(ref prefill_urls) = prefill_urls {
             for (url, _) in prefill_urls {
@@ -1153,6 +1189,9 @@ impl Router {
             drain_settle_secs,
             enable_wasm,
             encode_selector,
+            epd_disaggregation,
+            encode_urls,
+            encode_policy,
         })
     }
 
@@ -1186,7 +1225,7 @@ impl Router {
                 check_interval: std::time::Duration::from_secs(60),
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
-                disaggregated_mode: self.pd_disaggregation,
+                disaggregated_mode: self.pd_disaggregation || self.epd_disaggregation,
                 encode_selector: self.encode_selector.clone(),
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
