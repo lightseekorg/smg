@@ -12,12 +12,7 @@ use bytes::Bytes;
 #[cfg(feature = "opencv-video")]
 use opencv::{core::Mat, imgproc, prelude::*, videoio};
 use reqwest::Client;
-use tokio::{
-    fs,
-    io::AsyncReadExt,
-    process::Command,
-    task, time,
-};
+use tokio::{fs, io::AsyncReadExt, process::Command, task, time};
 use tracing::info;
 use url::Url;
 
@@ -228,8 +223,7 @@ impl MediaConnector {
 
         let data = data.trim();
         let decoded = decode_base64_data_url_payload(data).await?;
-        self.decode_video(decoded, cfg, VideoSource::DataUrl)
-            .await
+        self.decode_video(decoded, cfg, VideoSource::DataUrl).await
     }
 
     async fn fetch_file(
@@ -351,11 +345,7 @@ impl MediaConnector {
         let image = decode_image(bytes.clone()).await?;
 
         Ok(Arc::new(ImageFrame::new(
-            image,
-            bytes,
-            detail,
-            source,
-            hash,
+            image, bytes, detail, source, hash,
         )))
     }
 
@@ -376,7 +366,9 @@ impl MediaConnector {
         let decode = decode_video_frames(bytes_for_decode, cfg);
         let (hash, decoded) = tokio::try_join!(hash, decode)?;
 
-        Ok(Arc::new(video_clip_from_decoded(decoded, bytes, source, hash)))
+        Ok(Arc::new(video_clip_from_decoded(
+            decoded, bytes, source, hash,
+        )))
     }
 }
 
@@ -394,14 +386,16 @@ async fn decode_image(bytes: Bytes) -> Result<image::DynamicImage, MediaConnecto
     // a few pixel levels, which the vision encoder amplifies into an embedding
     // shift. Non-JPEG inputs and any turbojpeg failure fall back to the `image`
     // crate.
-    task::spawn_blocking(move || -> Result<image::DynamicImage, MediaConnectorError> {
-        if let Some(img) = crate::jpeg_turbo::decode_jpeg_rgb(&bytes) {
-            return Ok(img);
-        }
-        let cursor = std::io::Cursor::new(bytes);
-        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
-        Ok(reader.decode()?)
-    })
+    task::spawn_blocking(
+        move || -> Result<image::DynamicImage, MediaConnectorError> {
+            if let Some(img) = crate::jpeg_turbo::decode_jpeg_rgb(&bytes) {
+                return Ok(img);
+            }
+            let cursor = std::io::Cursor::new(bytes);
+            let reader = image::ImageReader::new(cursor).with_guessed_format()?;
+            Ok(reader.decode()?)
+        },
+    )
     .await
     .map_err(MediaConnectorError::Blocking)?
 }
@@ -861,13 +855,7 @@ async fn decode_video_with_ffmpeg(
         let started = video_decode_timing_started();
         match decode_video_with_ffmpeg_raw(input_path, cfg, metadata).await {
             Ok(rgb_video) => {
-                log_video_decode_backend_timing(
-                    "ffmpeg_raw_file",
-                    started,
-                    input_bytes,
-                    cfg,
-                    None,
-                );
+                log_video_decode_backend_timing("ffmpeg_raw_file", started, input_bytes, cfg, None);
                 return Ok(DecodedVideoFrames::Rgb(rgb_video));
             }
             Err(error) => {
@@ -885,13 +873,7 @@ async fn decode_video_with_ffmpeg(
     let started = video_decode_timing_started();
     match decode_video_with_ffmpeg_png(input_path, cfg, duration_seconds).await {
         Ok(frames) => {
-            log_video_decode_backend_timing(
-                "ffmpeg_png_file",
-                started,
-                input_bytes,
-                cfg,
-                None,
-            );
+            log_video_decode_backend_timing("ffmpeg_png_file", started, input_bytes, cfg, None);
             Ok(DecodedVideoFrames::Images(frames))
         }
         Err(error) => {
@@ -1014,7 +996,12 @@ async fn run_video_command_output_with_stdout_capacity(
 ) -> Result<Output, MediaConnectorError> {
     let child = spawn_video_command(command, program)?;
     let timeout = video_process_timeout();
-    match time::timeout(timeout, collect_video_command_output(child, stdout_capacity)).await {
+    match time::timeout(
+        timeout,
+        collect_video_command_output(child, stdout_capacity),
+    )
+    .await
+    {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => Err(MediaConnectorError::Io(error)),
         Err(_) => Err(MediaConnectorError::VideoDecode(format!(
@@ -1521,8 +1508,7 @@ fn parse_mp4_mvhd_duration_seconds(payload: &[u8]) -> Option<f64> {
     if duration_end > payload.len() || timescale_end > payload.len() {
         return None;
     }
-    let timescale =
-        u32::from_be_bytes(payload[timescale_offset..timescale_end].try_into().ok()?);
+    let timescale = u32::from_be_bytes(payload[timescale_offset..timescale_end].try_into().ok()?);
     if timescale == 0 {
         return None;
     }
@@ -1532,7 +1518,10 @@ fn parse_mp4_mvhd_duration_seconds(payload: &[u8]) -> Option<f64> {
         u64::from_be_bytes(payload[duration_offset..duration_end].try_into().ok()?) as f64
     };
     let seconds = duration / timescale as f64;
-    seconds.is_finite().then_some(seconds).filter(|value| *value > 0.0)
+    seconds
+        .is_finite()
+        .then_some(seconds)
+        .filter(|value| *value > 0.0)
 }
 
 fn split_png_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, MediaConnectorError> {

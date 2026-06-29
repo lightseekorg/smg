@@ -449,8 +449,11 @@ pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
         return 1;
     }
     static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
-    let avail = *AVAILABLE_PARALLELISM
-        .get_or_init(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let avail = *AVAILABLE_PARALLELISM.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
     (out_rows / cfg.min_rows_per_thread)
         .min(avail)
         .clamp(1, cfg.max_threads)

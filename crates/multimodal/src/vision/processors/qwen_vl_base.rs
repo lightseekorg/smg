@@ -639,8 +639,7 @@ impl QwenVLProcessorBase {
         let pr_blocks = grid_h / merge_size;
         let pc_blocks = grid_w / merge_size;
         let n_blocks = pr_blocks * pc_blocks;
-        let block_out =
-            merge_size * merge_size * 3 * temporal_patch_size * patch_size * patch_size;
+        let block_out = merge_size * merge_size * 3 * temporal_patch_size * patch_size * patch_size;
         let base_idx = *out_idx;
         let patch_values = n_blocks.checked_mul(block_out).ok_or_else(|| {
             TransformError::ShapeError("Qwen video patch output size overflow".to_string())
@@ -962,11 +961,13 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                     "Qwen image patch buffer size overflow: patches={num_patches}, features={patch_features}"
                 ))
             })?;
-            total_patch_values = total_patch_values.checked_add(patch_values).ok_or_else(|| {
-                TransformError::ShapeError(
-                    "Qwen image patch buffer total size overflow".to_string(),
-                )
-            })?;
+            total_patch_values = total_patch_values
+                .checked_add(patch_values)
+                .ok_or_else(|| {
+                    TransformError::ShapeError(
+                        "Qwen image patch buffer total size overflow".to_string(),
+                    )
+                })?;
             image_plans.push(QwenImagePlan {
                 target_width: tw32,
                 target_height: th32,
@@ -1107,8 +1108,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             for tp in 0..temporal_patch_size {
                 let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
                 let frame = &frames[idx];
-                let needs_resize =
-                    do_resize && (frame.width() != tw32 || frame.height() != th32);
+                let needs_resize = do_resize && (frame.width() != tw32 || frame.height() != th32);
                 if needs_resize {
                     let (width, height, data) =
                         resize_dynamic_frame_to_raw(frame, tw32, th32, filter);
@@ -1300,12 +1300,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         Ok(result)
     }
 
-    fn calculate_num_tokens(
-        &self,
-        width: u32,
-        height: u32,
-        config: &PreProcessorConfig,
-    ) -> usize {
+    fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let fallback_size = || {
             let factor = self.get_factor();
             (factor, factor)
@@ -1446,8 +1441,11 @@ mod tests {
         let actual = result.encoder_input.as_slice_memory_order().unwrap();
 
         let resized = resize_bicubic_pil(&image, target_w as u32, target_h as u32);
-        let tensor =
-            to_tensor_and_normalize(&resized, &processor.default_mean(), &processor.default_std());
+        let tensor = to_tensor_and_normalize(
+            &resized,
+            &processor.default_mean(),
+            &processor.default_std(),
+        );
         let (grid_t, grid_h, grid_w) = processor.calculate_grid_thw(target_h, target_w, 1);
         let mut expected = Vec::new();
         processor
@@ -1470,8 +1468,11 @@ mod tests {
         let image = create_sized_pattern_frame(7, 9, 3);
         let (target_h, target_w) = processor.smart_resize(9, 7).unwrap();
         let resized = resize_bicubic_pil(&image, target_w as u32, target_h as u32);
-        let tensor =
-            to_tensor_and_normalize(&resized, &processor.default_mean(), &processor.default_std());
+        let tensor = to_tensor_and_normalize(
+            &resized,
+            &processor.default_mean(),
+            &processor.default_std(),
+        );
         let (grid_t, grid_h, grid_w) = processor.calculate_grid_thw(target_h, target_w, 1);
         let mut expected = Vec::new();
         processor
@@ -1487,7 +1488,10 @@ mod tests {
         let pr_blocks = grid_h / merge_size;
         let pc_blocks = grid_w / merge_size;
         let n_blocks = pr_blocks * pc_blocks;
-        assert!(n_blocks > 1, "test must exercise multiple image patch blocks");
+        assert!(
+            n_blocks > 1,
+            "test must exercise multiple image patch blocks"
+        );
         let block_out = merge_size * merge_size * 3 * temporal_patch_size * patch_size * patch_size;
         let mean = processor.default_mean();
         let std = processor.default_std();
@@ -1829,7 +1833,10 @@ mod tests {
         let pr_blocks = grid_h / merge_size;
         let pc_blocks = grid_w / merge_size;
         let n_blocks = pr_blocks * pc_blocks;
-        assert!(n_blocks > 1, "test must exercise multiple video patch blocks");
+        assert!(
+            n_blocks > 1,
+            "test must exercise multiple video patch blocks"
+        );
         let block_out = merge_size * merge_size * 3 * frames.len() * patch_size * patch_size;
         let mean = processor.default_mean();
         let std = processor.default_std();

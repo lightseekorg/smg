@@ -548,9 +548,7 @@ fn sweep_orphan_tokenspeed_shm_once() {
 // encoder_input handles are materialized by TokenSpeed's multimodal planner.
 pub(crate) fn write_tokenspeed_shm_with(
     nbytes: usize,
-    write_fn: impl FnOnce(
-        &mut CountingWriter<BufWriter<std::fs::File>>,
-    ) -> std::io::Result<()>,
+    write_fn: impl FnOnce(&mut CountingWriter<BufWriter<std::fs::File>>) -> std::io::Result<()>,
 ) -> std::io::Result<tokenspeed::ShmHandle> {
     sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();

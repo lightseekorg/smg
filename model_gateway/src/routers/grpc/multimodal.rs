@@ -736,15 +736,17 @@ async fn process_multimodal_parts(
 
                 if let Some(rgb_video) = video.rgb_video() {
                     match rgb_video.frame_refs() {
-                        Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
-                            Ok(preprocessed) => return Ok(preprocessed),
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    "RGB video preprocessing fast path failed; falling back to materialized frames"
-                                );
+                        Ok(frame_refs) => {
+                            match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
+                                Ok(preprocessed) => return Ok(preprocessed),
+                                Err(error) => {
+                                    warn!(
+                                        error = %error,
+                                        "RGB video preprocessing fast path failed; falling back to materialized frames"
+                                    );
+                                }
                             }
-                        },
+                        }
                         Err(error) => {
                             warn!(
                                 error = %error,
@@ -774,18 +776,19 @@ async fn process_multimodal_parts(
             .placeholder_token_for(&metadata, modality)
             .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
         let search_token_id = tokenizer.token_to_id(&placeholder_token);
-        let placeholder_token_id: Option<u32> =
-            match spec.placeholder_token_id_for(&metadata, modality) {
-                Ok(id) => Some(id as u32),
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        ?search_token_id,
-                        "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
-                    );
-                    search_token_id
-                }
-            };
+        let placeholder_token_id: Option<u32> = match spec
+            .placeholder_token_id_for(&metadata, modality)
+        {
+            Ok(id) => Some(id as u32),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    ?search_token_id,
+                    "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
+                );
+                search_token_id
+            }
+        };
         Ok((search_token_id, placeholder_token_id))
     })();
 
@@ -1065,7 +1068,8 @@ fn ensure_image_only(
 
 fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
-    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed.model_specific);
+    let model_specific_tensors =
+        serialize_model_specific(&intermediate.preprocessed.model_specific);
     let image_data = intermediate
         .images
         .iter()
@@ -1095,7 +1099,8 @@ fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMul
 
 fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
-    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed.model_specific);
+    let model_specific_tensors =
+        serialize_model_specific(&intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
     let mm_placeholders = intermediate
         .placeholders
@@ -1164,8 +1169,7 @@ fn assemble_tokenspeed(
         &flat_spans,
         item_count,
     )?;
-    let mm_placeholders_by_item =
-        placeholders_for_items(&intermediate.placeholders, patch_offsets);
+    let mm_placeholders_by_item = placeholders_for_items(&intermediate.placeholders, patch_offsets);
     anyhow::ensure!(
         mm_placeholders_by_item.len() == item_count,
         "precomputed multimodal assembly placeholder item count mismatch: modality={}, placeholder_item_count={}, item_count={item_count}",
@@ -1193,8 +1197,7 @@ fn assemble_tokenspeed(
         let mm_placeholders = mm_placeholders_by_item.next().ok_or_else(|| {
             anyhow::anyhow!("missing placeholders for multimodal item {item_index}")
         })?;
-        let content_hash =
-            content_hash_for_item(intermediate.modality, &intermediate, item_index);
+        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, item_index);
 
         pending_items.push(PendingTokenSpeedItem {
             encoder_input: item_encoder_input,
@@ -1397,11 +1400,7 @@ fn push_item_span_from_i64(
     push_item_span(spans, start, len)
 }
 
-fn push_item_span(
-    spans: &mut Vec<(usize, usize)>,
-    start: &mut usize,
-    len: usize,
-) -> Result<()> {
+fn push_item_span(spans: &mut Vec<(usize, usize)>, start: &mut usize, len: usize) -> Result<()> {
     spans.push((*start, len));
     *start = (*start)
         .checked_add(len)
@@ -1457,11 +1456,9 @@ fn validate_tokenspeed_layout_first_dim(
             );
         }
         FieldLayout::Flat { sizes_key } => {
-            let spans = flat_spans
-                .get(sizes_key)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("missing flat spans for sizes tensor {sizes_key}")
-                })?;
+            let spans = flat_spans.get(sizes_key).ok_or_else(|| {
+                anyhow::anyhow!("missing flat spans for sizes tensor {sizes_key}")
+            })?;
             let span_total = spans.iter().try_fold(0usize, |acc, (_, len)| {
                 acc.checked_add(*len)
                     .ok_or_else(|| anyhow::anyhow!("flat span total overflow for {tensor_key}"))
@@ -1479,19 +1476,14 @@ fn model_specific_first_dim(key: &str, value: &ModelSpecificValue) -> Result<usi
     match value {
         ModelSpecificValue::Tensor { shape, .. }
         | ModelSpecificValue::IntTensor { shape, .. }
-        | ModelSpecificValue::UintTensor { shape, .. } => shape
-            .first()
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!("model_specific tensor {key} must have a first dimension")
-            }),
+        | ModelSpecificValue::UintTensor { shape, .. } => shape.first().copied().ok_or_else(|| {
+            anyhow::anyhow!("model_specific tensor {key} must have a first dimension")
+        }),
         ModelSpecificValue::IntVec(values) => Ok(values.len()),
         ModelSpecificValue::UintVec(values) => Ok(values.len()),
         ModelSpecificValue::FloatVec(values) => Ok(values.len()),
         ModelSpecificValue::TupleVec(values) => Ok(values.len()),
-        ModelSpecificValue::Int(_)
-        | ModelSpecificValue::Float(_)
-        | ModelSpecificValue::Bool(_) => {
+        ModelSpecificValue::Int(_) | ModelSpecificValue::Float(_) | ModelSpecificValue::Bool(_) => {
             anyhow::bail!("model_specific value {key} has no first dimension")
         }
     }
@@ -1551,9 +1543,7 @@ fn serialize_model_specific_for_item(
                 let (start, len) = flat_item_span(flat_spans, sizes_key, item_index)?;
                 let item_value = value
                     .slice_first_dim(start, len)
-                    .with_context(|| {
-                        format!("failed to slice flat model_specific tensor {key}")
-                    })?;
+                    .with_context(|| format!("failed to slice flat model_specific tensor {key}"))?;
                 model_specific_to_tensor_bytes(&item_value)
             }
             None => model_specific_to_tensor_bytes(value),
@@ -2156,10 +2146,7 @@ where
     }
 }
 
-fn serialize_array_view_as_u16_bytes<F>(
-    encoder_input: &ArrayViewD<'_, f32>,
-    convert: F,
-) -> Vec<u8>
+fn serialize_array_view_as_u16_bytes<F>(encoder_input: &ArrayViewD<'_, f32>, convert: F) -> Vec<u8>
 where
     F: Fn(f32) -> u16 + Copy,
 {
@@ -2238,10 +2225,7 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
 /// this request. `shm` = always (legacy explicit opt-in); `auto` = only when the
 /// worker is known to share SMG's `/dev/shm`; anything else (including unset or
 /// `inline`) keeps the inline gRPC path.
-fn resolve_tokenspeed_shm_enabled(
-    modality: Modality,
-    workers: Option<&WorkerSelection>,
-) -> bool {
+fn resolve_tokenspeed_shm_enabled(modality: Modality, workers: Option<&WorkerSelection>) -> bool {
     let configured_mode = tokenspeed_mm_tensor_transport_mode();
     let mode = effective_tokenspeed_transport_mode(modality, &configured_mode);
     log_tokenspeed_transport_config_once(&configured_mode, &mode, modality);
@@ -2257,10 +2241,7 @@ fn resolve_tokenspeed_shm_enabled(
     }
 }
 
-fn effective_tokenspeed_transport_mode(
-    modality: Modality,
-    configured_mode: &str,
-) -> String {
+fn effective_tokenspeed_transport_mode(modality: Modality, configured_mode: &str) -> String {
     if !configured_mode.is_empty() {
         return configured_mode.to_string();
     }
@@ -2527,11 +2508,10 @@ mod tests {
     use openai_protocol::common::{ImageUrl, VideoUrl};
     use tempfile::TempDir;
 
+    use super::*;
     use crate::routers::grpc::proto_wrapper::{
         cleanup_tokenspeed_shm_handles, TokenSpeedTensorStorage,
     };
-
-    use super::*;
 
     #[test]
     #[cfg(target_os = "linux")]
@@ -2899,10 +2879,7 @@ mod tests {
 
         let spans = flat_item_spans(&model_specific, &field_layouts, 3).unwrap();
 
-        assert_eq!(
-            spans["patches_per_image"],
-            vec![(0, 2), (2, 3), (5, 1)]
-        );
+        assert_eq!(spans["patches_per_image"], vec![(0, 2), (2, 3), (5, 1)]);
         assert_eq!(
             flat_item_span(&spans, "patches_per_image", 1).unwrap(),
             (2, 3)
@@ -2930,12 +2907,10 @@ mod tests {
             ),
             ("patches_per_image".to_string(), FieldLayout::Batched),
         ]);
-        let flat_spans =
-            flat_item_spans(&preprocessed.model_specific, &field_layouts, 2).unwrap();
+        let flat_spans = flat_item_spans(&preprocessed.model_specific, &field_layouts, 2).unwrap();
 
-        let error =
-            validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
-                .unwrap_err();
+        let error = validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
+            .unwrap_err();
 
         assert!(error
             .to_string()
@@ -2953,9 +2928,8 @@ mod tests {
         let field_layouts = HashMap::new();
         let flat_spans = HashMap::new();
 
-        let error =
-            validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
-                .unwrap_err();
+        let error = validate_tokenspeed_item_spans(&preprocessed, &field_layouts, &flat_spans, 2)
+            .unwrap_err();
 
         assert!(error
             .to_string()
@@ -3326,10 +3300,9 @@ mod tests {
 
     #[test]
     fn model_specific_tensor_bytes_are_little_endian() {
-        let float_tensor = model_specific_to_tensor_bytes(&ModelSpecificValue::FloatVec(vec![
-            1.0_f32, -2.0_f32,
-        ]))
-        .unwrap();
+        let float_tensor =
+            model_specific_to_tensor_bytes(&ModelSpecificValue::FloatVec(vec![1.0_f32, -2.0_f32]))
+                .unwrap();
         let int_tensor =
             model_specific_to_tensor_bytes(&ModelSpecificValue::IntVec(vec![1_i64, -2_i64]))
                 .unwrap();
@@ -3337,15 +3310,21 @@ mod tests {
             model_specific_to_tensor_bytes(&ModelSpecificValue::UintVec(vec![1_u32, 0x11223344]))
                 .unwrap();
 
-        assert_eq!(float_tensor.data, vec![0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0]);
+        assert_eq!(
+            float_tensor.data,
+            vec![0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0]
+        );
         assert_eq!(
             int_tensor.data,
             vec![
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff,
+                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff,
             ]
         );
-        assert_eq!(uint_tensor.data, vec![0x01, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(
+            uint_tensor.data,
+            vec![0x01, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11]
+        );
     }
 
     // ------------------------------------------------------------------
