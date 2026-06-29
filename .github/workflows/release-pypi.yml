@@ -21,7 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu, macos, windows]
-        target: [x86_64, aarch64]
+        # aarch64 is added via the `include` entries below so the linux build can
+        # pin a newer manylinux image; the base manylinux2014 toolchain is too old
+        # to compile aws-lc-sys for aarch64 (no stdatomic.h / no armv8.4 -march).
+        target: [x86_64]
         manylinux: [auto]
         include:
           - os: ubuntu
@@ -40,6 +43,9 @@ jobs:
           - os: ubuntu
             platform: linux
             target: aarch64
+            # manylinux2014's aarch64 cross-gcc is too old for aws-lc-sys 0.41;
+            # 2_28 (AlmaLinux 8) has stdatomic.h + armv8.4 support.
+            manylinux: "2_28"
           # musllinux
           - os: ubuntu
             platform: linux
