@@ -20,6 +20,5 @@ mod utils;
 // Re-exported for openai::mcp::tool_handler (cross-module dependency)
 pub(crate) use accumulator::StreamingResponseAccumulator;
 pub(crate) use common::{extract_output_index, get_event_type};
-pub(crate) use utils::normalize_response_input_for_upstream;
 pub use non_streaming::handle_non_streaming_response;
 pub use streaming::handle_streaming_response;

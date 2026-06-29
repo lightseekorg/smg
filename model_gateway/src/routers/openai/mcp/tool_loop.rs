@@ -34,7 +34,6 @@ use crate::{
             },
         },
         error,
-        openai::responses::normalize_response_input_for_upstream,
     },
 };
 
@@ -399,8 +398,6 @@ pub(crate) fn build_resume_payload(
 
     obj.insert("stream".to_string(), Value::Bool(is_streaming));
     obj.insert("store".to_string(), Value::Bool(false));
-
-    normalize_response_input_for_upstream(&mut payload);
 
     Ok(payload)
 }
@@ -1298,9 +1295,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        build_resume_payload, build_transformed_mcp_call_item,
-        extract_openai_response_output_items, is_internal_mcp_response_item,
-        mcp_list_tools_bindings_to_emit, ResponseInput, ToolLoopState,
+        build_transformed_mcp_call_item, extract_openai_response_output_items,
+        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
+        ToolLoopState,
     };
     use crate::routers::common::openai_bridge::ResponseFormat;
 
@@ -1485,40 +1482,6 @@ mod tests {
             bindings_to_emit,
             vec![("deepwiki_ask".to_string(), "server-ask".to_string())]
         );
-    }
-
-    #[test]
-    fn build_resume_payload_omits_string_mcp_errors_from_history() {
-        let payload = build_resume_payload(
-            &json!({"model": "gpt-5.4"}),
-            &[
-                json!({
-                    "type": "mcp_call",
-                    "id": "mcp_1",
-                    "arguments": "{}",
-                    "name": "ask_question",
-                    "server_label": "deepwiki",
-                    "error": "server unreachable",
-                    "status": "failed"
-                }),
-                json!({
-                    "type": "mcp_list_tools",
-                    "id": "mcpl_1",
-                    "server_label": "brave",
-                    "tools": [],
-                    "error": null
-                }),
-            ],
-            &ResponseInput::Text("hello".to_string()),
-            &json!([]),
-            true,
-        )
-        .expect("resume payload");
-
-        assert!(payload["input"][1].get("error").is_none());
-        assert!(payload["input"][2].get("error").is_none());
-        assert_eq!(payload["stream"], true);
-        assert_eq!(payload["store"], false);
     }
 
     #[test]
