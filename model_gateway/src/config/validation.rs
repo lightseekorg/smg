@@ -451,14 +451,12 @@ impl ConfigValidator {
 
     fn validate_encode_policy(policy: &PolicyConfig) -> ConfigResult<()> {
         match policy {
-            PolicyConfig::Random
-            | PolicyConfig::RoundRobin
-            | PolicyConfig::LeastLoad { .. }
-            | PolicyConfig::ConsistentHashing => Ok(()),
+            PolicyConfig::Random | PolicyConfig::RoundRobin | PolicyConfig::ConsistentHashing => {
+                Ok(())
+            }
             _ => Err(ConfigError::IncompatibleConfig {
-                reason:
-                    "Encode policy supports random, round_robin, least_load, or consistent_hashing"
-                        .to_string(),
+                reason: "Encode policy supports random, round_robin, or consistent_hashing"
+                    .to_string(),
             }),
         }
     }
@@ -795,16 +793,6 @@ impl ConfigValidator {
 
         let has_service_discovery = config.discovery.as_ref().is_some_and(|d| d.enabled);
 
-        if let RoutingMode::EncodePrefillDecode {
-            encode_policy: Some(PolicyConfig::LeastLoad { .. }),
-            ..
-        } = &config.mode
-        {
-            return Err(ConfigError::IncompatibleConfig {
-                reason: "Least-load policy is not supported for encode workers".to_string(),
-            });
-        }
-
         if let RoutingMode::EncodePrefillDecode { decode_policy, .. } = &config.mode {
             let effective_decode_policy = decode_policy.as_ref().unwrap_or(&config.policy);
             if matches!(effective_decode_policy, PolicyConfig::Bucket { .. }) {
@@ -872,7 +860,9 @@ impl ConfigValidator {
                     && prefill_urls.len() < 2
                 {
                     return Err(ConfigError::IncompatibleConfig {
-                        reason: "Power-of-two policy for prefill requires at least 2 prefill workers".to_string(),
+                        reason:
+                            "Power-of-two policy for prefill requires at least 2 prefill workers"
+                                .to_string(),
                     });
                 }
 
@@ -880,9 +870,8 @@ impl ConfigValidator {
                     && decode_urls.len() < 2
                 {
                     return Err(ConfigError::IncompatibleConfig {
-                        reason:
-                            "Power-of-two policy for decode requires at least 2 decode workers"
-                                .to_string(),
+                        reason: "Power-of-two policy for decode requires at least 2 decode workers"
+                            .to_string(),
                     });
                 }
             }
@@ -1302,6 +1291,24 @@ mod tests {
             PolicyConfig::Random,
         );
         assert!(ConfigValidator::validate(&invalid_cache_aware).is_err());
+
+        let invalid_least_load = RouterConfig::new(
+            RoutingMode::EncodePrefillDecode {
+                encode_urls: vec![("http://encode:8000".to_string(), None)],
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                encode_policy: Some(PolicyConfig::LeastLoad {
+                    load_check_interval_secs: 5,
+                    kv_pressure_weight: 0.15,
+                    mean_prefill_tokens: 1024,
+                    default_throughput: 2000.0,
+                }),
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::Random,
+        );
+        assert!(ConfigValidator::validate(&invalid_least_load).is_err());
     }
 
     #[test]
