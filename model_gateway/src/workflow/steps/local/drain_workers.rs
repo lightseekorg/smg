@@ -147,6 +147,7 @@ mod tests {
 
         Arc::new(AppContext {
             client: reqwest::Client::new(),
+            streaming_client: reqwest::Client::new(),
             router_config: router_config.clone(),
             rate_limiter: Some(Arc::new(TokenBucket::new(1000, 1000))),
             worker_registry: Arc::clone(&registry),

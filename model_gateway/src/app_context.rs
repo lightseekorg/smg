@@ -50,6 +50,7 @@ impl std::error::Error for AppContextBuildError {}
 #[derive(Clone)]
 pub struct AppContext {
     pub client: Client,
+    pub streaming_client: Client,
     pub router_config: RouterConfig,
     pub rate_limiter: Option<Arc<TokenBucket>>,
     pub tokenizer_registry: Arc<TokenizerRegistry>,
@@ -90,6 +91,7 @@ impl std::fmt::Debug for AppContext {
 
 pub struct AppContextBuilder {
     client: Option<Client>,
+    streaming_client: Option<Client>,
     router_config: Option<RouterConfig>,
     rate_limiter: Option<Arc<TokenBucket>>,
     tokenizer_registry: Option<Arc<TokenizerRegistry>>,
@@ -143,6 +145,7 @@ impl AppContextBuilder {
     pub fn new() -> Self {
         Self {
             client: None,
+            streaming_client: None,
             router_config: None,
             rate_limiter: None,
             tokenizer_registry: None,
@@ -167,7 +170,15 @@ impl AppContextBuilder {
     }
 
     pub fn client(mut self, client: Client) -> Self {
+        if self.streaming_client.is_none() {
+            self.streaming_client = Some(client.clone());
+        }
         self.client = Some(client);
+        self
+    }
+
+    pub fn streaming_client(mut self, streaming_client: Client) -> Self {
+        self.streaming_client = Some(streaming_client);
         self
     }
 
@@ -336,6 +347,9 @@ impl AppContextBuilder {
             client: self
                 .client
                 .ok_or(AppContextBuildError::MissingField("client"))?,
+            streaming_client: self
+                .streaming_client
+                .ok_or(AppContextBuildError::MissingField("streaming_client"))?,
             router_config,
             rate_limiter: self.rate_limiter,
             tokenizer_registry: self
@@ -413,7 +427,7 @@ impl AppContextBuilder {
 
     /// Create HTTP client with TLS/mTLS configuration
     fn with_client(mut self, config: &RouterConfig, timeout_secs: u64) -> Result<Self, String> {
-        // FIXME: Current implementation creates a single HTTP client for all workers.
+        // FIXME: Current implementation creates shared HTTP clients for all workers.
         // This works well for single security domain deployments where all workers share
         // the same CA and can accept the same client certificate.
         //
@@ -429,15 +443,31 @@ impl AppContextBuilder {
         // Use rustls TLS backend when TLS/mTLS is configured (client cert or CA certs provided).
         // This ensures proper PKCS#8 key format support. For plain HTTP workers, use default
         // backend to avoid unnecessary TLS initialization overhead.
+        let client =
+            Self::build_worker_http_client(config, Some(Duration::from_secs(timeout_secs)))?;
+        let streaming_client = Self::build_worker_http_client(config, None)?;
+
+        self.client = Some(client);
+        self.streaming_client = Some(streaming_client);
+        Ok(self)
+    }
+
+    fn build_worker_http_client(
+        config: &RouterConfig,
+        total_timeout: Option<Duration>,
+    ) -> Result<Client, String> {
         let has_tls_config = config.client_identity.is_some() || !config.ca_certificates.is_empty();
 
         let mut client_builder = Client::builder()
             .pool_idle_timeout(Some(Duration::from_secs(50)))
             .pool_max_idle_per_host(500)
-            .timeout(Duration::from_secs(timeout_secs))
             .connect_timeout(Duration::from_secs(10))
             .tcp_nodelay(true)
             .tcp_keepalive(Some(Duration::from_secs(30)));
+
+        if let Some(total_timeout) = total_timeout {
+            client_builder = client_builder.timeout(total_timeout);
+        }
 
         // Force rustls backend when TLS is configured
         if has_tls_config {
@@ -466,12 +496,9 @@ impl AppContextBuilder {
             );
         }
 
-        let client = client_builder
+        client_builder
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-
-        self.client = Some(client);
-        Ok(self)
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))
     }
 
     /// Create rate limiter based on config
@@ -696,6 +723,14 @@ impl Default for AppContextBuilder {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use bytes::Bytes;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::{sleep, Duration},
+    };
+
     use super::*;
     use crate::config::types::PolicyConfig;
 
@@ -716,6 +751,86 @@ mod tests {
             .with_kv_event_monitor(&config)
             .kv_event_monitor
             .is_some()
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
+    async fn serve_slow_chunked_response(pause: Duration) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept connection");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("write response headers");
+            socket
+                .write_all(b"6\r\nhello \r\n")
+                .await
+                .expect("write first response chunk");
+            sleep(pause).await;
+            socket
+                .write_all(b"5\r\nworld\r\n0\r\n\r\n")
+                .await
+                .expect("write final response chunk");
+        });
+        Ok(format!("http://{addr}/"))
+    }
+
+    #[tokio::test]
+    async fn streaming_client_has_no_total_body_timeout() -> Result<()> {
+        let config = RouterConfig::default();
+        let pause = Duration::from_millis(150);
+
+        let timed_url = serve_slow_chunked_response(pause).await?;
+        let timed_client =
+            AppContextBuilder::build_worker_http_client(&config, Some(Duration::from_millis(50)))
+                .map_err(anyhow::Error::msg)?;
+        let timed_response = timed_client.get(timed_url).send().await?;
+        let timed_error = timed_response
+            .bytes()
+            .await
+            .expect_err("client with total timeout should fail while reading body");
+        assert!(timed_error.is_timeout());
+
+        let streaming_url = serve_slow_chunked_response(pause).await?;
+        let streaming_client = AppContextBuilder::build_worker_http_client(&config, None)
+            .map_err(anyhow::Error::msg)?;
+        let body = streaming_client
+            .get(streaming_url)
+            .send()
+            .await?
+            .bytes()
+            .await?;
+        assert_eq!(body, Bytes::from_static(b"hello world"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_does_not_overwrite_explicit_streaming_client() -> Result<()> {
+        let config = RouterConfig::default();
+
+        let explicit_streaming_client = AppContextBuilder::build_worker_http_client(&config, None)
+            .map_err(anyhow::Error::msg)?;
+        let timeout_client =
+            AppContextBuilder::build_worker_http_client(&config, Some(Duration::from_millis(50)))
+                .map_err(anyhow::Error::msg)?;
+
+        let builder = AppContextBuilder::new()
+            .streaming_client(explicit_streaming_client)
+            .client(timeout_client);
+
+        let streaming_client = builder
+            .streaming_client
+            .expect("explicit streaming client should be preserved");
+        let url = serve_slow_chunked_response(Duration::from_millis(150)).await?;
+        let body = streaming_client.get(url).send().await?.bytes().await?;
+
+        assert_eq!(body, Bytes::from_static(b"hello world"));
+        Ok(())
     }
 
     /// The #1794-relevant guarantee: passthrough never starts the KV-event

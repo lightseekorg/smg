@@ -576,6 +576,14 @@ impl ConfigValidator {
             });
         }
 
+        if config.stream_idle_timeout_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "stream_idle_timeout_secs".to_string(),
+                value: config.stream_idle_timeout_secs.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
         if config.queue_size > 0 && config.queue_timeout_secs == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "queue_timeout_secs".to_string(),
@@ -1251,6 +1259,24 @@ mod tests {
         );
 
         assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_stream_idle_timeout() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.stream_idle_timeout_secs = 0;
+
+        let result = ConfigValidator::validate(&config);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "stream_idle_timeout_secs"
+        ));
     }
 
     #[test]

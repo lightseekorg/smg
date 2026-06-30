@@ -194,6 +194,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn stream_idle_timeout_secs(mut self, timeout: u64) -> Self {
+        self.config.stream_idle_timeout_secs = timeout;
+        self
+    }
+
     pub fn worker_startup_timeout_secs(mut self, timeout: u64) -> Self {
         self.config.worker_startup_timeout_secs = timeout;
         self

@@ -21,8 +21,10 @@ pub(crate) struct RouterContext {
     pub mcp_orchestrator: Arc<McpOrchestrator>,
     pub mcp_format_registry: FormatRegistry,
     pub http_client: reqwest::Client,
+    pub streaming_http_client: reqwest::Client,
     pub worker_registry: Arc<WorkerRegistry>,
     pub request_timeout: Duration,
+    pub stream_idle_timeout: Duration,
 }
 
 /// Per-request input that flows through handler functions.

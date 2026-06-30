@@ -11,11 +11,13 @@ use std::{borrow::Cow, io, sync::Arc};
 
 use axum::{
     body::Body,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -37,11 +39,16 @@ use super::{
         rewrite_streaming_block,
     },
 };
-use crate::routers::common::openai_bridge::{self, mcp_response_item_id, ResponseFormat};
+use crate::routers::common::{
+    openai_bridge::{self, mcp_response_item_id, ResponseFormat},
+    stream_timeout::{
+        StreamBodyReadError, StreamDeadline, StreamTimeoutKind, MAX_STREAM_ERROR_BODY_SIZE,
+    },
+};
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::{
-    observability::metrics::Metrics,
+    observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
             header_utils::{
@@ -52,6 +59,7 @@ use crate::{
             sse::SseEncoder,
         },
         error,
+        grpc::utils::error_type_from_status,
         openai::{
             context::{RequestContext, StreamingEventContext, StreamingRequest},
             mcp::{
@@ -61,7 +69,19 @@ use crate::{
             },
         },
     },
+    worker::Worker,
 };
+
+fn record_regular_worker_outcome(worker: &dyn Worker, status: StatusCode) {
+    worker.record_outcome(status.as_u16());
+    if status.is_server_error() {
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            error_type_from_status(status),
+        );
+    }
+}
 
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
@@ -529,10 +549,12 @@ pub(super) fn send_final_response_event(
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    worker: &Arc<dyn crate::worker::Worker>,
+    worker: &Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
     let mut request_builder = client.post(&req.url).json(&req.payload);
     let provider = ApiProvider::from_url(&req.url);
     let auth_header = provider.extract_auth_header(headers, worker.api_key());
@@ -540,13 +562,22 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     request_builder = request_builder.header("Accept", "text/event-stream");
 
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            worker.record_outcome(502);
+    let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
+    let response = match stream_deadline.until_total(request_builder.send()).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(err)) => {
+            record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                stream_deadline.message(StreamTimeoutKind::Total),
             )
                 .into_response();
         }
@@ -556,18 +587,35 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    worker.record_outcome(status.as_u16());
-
     if !status.is_success() {
-        let error_body = response
-            .text()
+        let mut error_stream = response.bytes_stream();
+        let error_body = match stream_deadline
+            .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
             .await
-            .unwrap_or_else(|err| format!("Failed to read upstream error body: {err}"));
+        {
+            Ok(body) => {
+                record_regular_worker_outcome(worker.as_ref(), status_code);
+                body
+            }
+            Err(StreamBodyReadError::Timeout(timeout)) => {
+                record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    stream_deadline.message(timeout),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                record_regular_worker_outcome(worker.as_ref(), status_code);
+                stream_deadline.body_read_error_message(&err)
+            }
+        };
         let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
 
-    let preserved_headers = preserve_response_headers(response.headers());
+    let mut preserved_headers = preserve_response_headers(response.headers());
+    preserved_headers.remove(CONTENT_LENGTH);
     let mut upstream_stream = response.bytes_stream();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -576,6 +624,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
+    let worker_for_stream = worker.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -583,16 +632,27 @@ pub(super) async fn handle_simple_streaming_passthrough(
     )]
     tokio::spawn(async move {
         let mut accumulator = StreamingResponseAccumulator::new();
-        let mut upstream_failed = false;
+        let mut stream_failure_status = None;
         let mut receiver_connected = true;
         let mut chunk_processor = ChunkProcessor::new();
 
-        while let Some(chunk_result) = upstream_stream.next().await {
+        'stream_loop: loop {
+            let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                Ok(Some(chunk_result)) => chunk_result,
+                Ok(None) => break,
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                    break;
+                }
+            };
             match chunk_result {
                 Ok(chunk) => {
                     chunk_processor.push_chunk(&chunk);
 
                     while let Some(raw_block) = chunk_processor.next_block() {
+                        let (_, raw_data) = parse_sse_block(&raw_block);
+                        let is_done = raw_data.as_ref() == "[DONE]";
                         let block_cow = match rewrite_streaming_block(
                             &raw_block,
                             &original_request,
@@ -602,7 +662,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             None => Cow::Borrowed(raw_block.as_str()),
                         };
 
-                        if should_store {
+                        if should_store && !is_done {
                             accumulator.ingest_block(&block_cow);
                         }
 
@@ -616,6 +676,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
                         if !receiver_connected && !should_store {
                             break;
                         }
+                        if is_done {
+                            break 'stream_loop;
+                        }
                     }
 
                     if !receiver_connected && !should_store {
@@ -623,7 +686,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     }
                 }
                 Err(err) => {
-                    upstream_failed = true;
+                    stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                     let io_err = io::Error::other(err);
                     let _ = tx.send(Err(io_err));
                     break;
@@ -631,7 +694,10 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
         }
 
-        if should_store && !upstream_failed {
+        let effective_status = stream_failure_status.unwrap_or(status_code);
+        record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+
+        if should_store && stream_failure_status.is_none() {
             if chunk_processor.has_remaining() {
                 accumulator.ingest_block(&chunk_processor.take_remaining());
             }
@@ -683,14 +749,17 @@ pub(super) async fn handle_simple_streaming_passthrough(
 /// Handle streaming WITH MCP tool call interception and execution
 pub(super) fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
-    worker_api_key: Option<String>,
+    worker: Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
     format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
     let payload = req.payload;
+    let worker_api_key = worker.api_key().cloned();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(true);
@@ -736,6 +805,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sse_encoder = SseEncoder::new();
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
+        let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
         let list_tools_bindings = mcp_list_tools_bindings_to_emit(
             &state.existing_mcp_list_tools_labels,
             session.mcp_servers(),
@@ -752,14 +822,25 @@ pub(super) fn handle_streaming_with_tool_interception(
             provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
+            if stream_deadline.is_total_elapsed() {
+                let _ = tx.send(Ok(stream_deadline.sse_error_event(StreamTimeoutKind::Total)));
+                return;
+            }
+
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
             request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
             request_builder = request_builder.header("Accept", "text/event-stream");
 
-            let response = match request_builder.send().await {
-                Ok(r) => r,
-                Err(e) => {
+            let response_result = if is_first_iteration {
+                stream_deadline.until_total(request_builder.send()).await
+            } else {
+                stream_deadline.until_activity(request_builder.send()).await
+            };
+            let response = match response_result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
                     let _ = send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -768,11 +849,31 @@ pub(super) fn handle_streaming_with_tool_interception(
                     );
                     return;
                 }
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                    return;
+                }
             };
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let status_code = StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut error_stream = response.bytes_stream();
+                let body = match stream_deadline
+                    .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(StreamBodyReadError::Timeout(timeout)) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        return;
+                    }
+                    Err(err) => stream_deadline.body_read_error_message(&err),
+                };
+                record_regular_worker_outcome(worker.as_ref(), status_code);
                 let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
@@ -783,6 +884,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                 return;
             }
 
+            let status = StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut upstream_stream = response.bytes_stream();
             let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
             if let Some(ref id) = preserved_response_id {
@@ -792,7 +895,16 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
 
-            while let Some(chunk_result) = upstream_stream.next().await {
+            'model_stream: loop {
+                let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                    Ok(Some(chunk_result)) => chunk_result,
+                    Ok(None) => break,
+                    Err(timeout) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        return;
+                    }
+                };
                 match chunk_result {
                     Ok(chunk) => {
                         chunk_processor.push_chunk(&chunk);
@@ -803,6 +915,14 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                             if data.is_empty() {
                                 continue;
+                            }
+
+                            if data.as_ref() == "[DONE]" {
+                                let done_block = format!("{raw_block}\n\n");
+                                if tx.send(Ok(Bytes::from(done_block))).is_err() {
+                                    return;
+                                }
+                                break 'model_stream;
                             }
 
                             // Process through handler
@@ -933,6 +1053,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
                         let _ = send_sse_event(
                             &tx,
                             &mut sse_encoder,
@@ -951,6 +1072,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
             // If no tool calls, we're done - stream is complete
             if !tool_calls_detected {
+                record_regular_worker_outcome(worker.as_ref(), status);
                 if !send_final_response_event(
                     &handler,
                     &tx,
@@ -1005,6 +1127,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                 return;
             }
 
+            record_regular_worker_outcome(worker.as_ref(), status);
+
             // Execute tools
             let pending_calls = handler.take_pending_calls();
 
@@ -1039,7 +1163,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             // hosted-tool overrides (e.g. image_generation size/quality) are
             // merged into dispatch args before MCP execution. The request-level
             // `user` is also forwarded into hosted-tool dispatch args.
-            if !execute_streaming_tool_calls(
+            let tool_execution_result = Box::pin(execute_streaming_tool_calls(
                 pending_calls,
                 &session,
                 &format_registry,
@@ -1049,9 +1173,19 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &original_request.model,
                 original_request.tools.as_deref().unwrap_or(&[]),
                 original_request.user.as_deref(),
-            )
-            .await
-            {
+                stream_deadline,
+            ))
+            .await;
+
+            let should_continue = match tool_execution_result {
+                Ok(should_continue) => should_continue,
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    return;
+                }
+            };
+
+            if !should_continue {
                 return;
             }
 
@@ -1132,7 +1266,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         _ => None,
     };
 
-    let client = ctx.components.client().clone();
+    let client = ctx.components.streaming_client().clone();
     let req = match ctx.into_streaming_context() {
         Ok(r) => r,
         Err(msg) => {
@@ -1146,7 +1280,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
 
     handle_streaming_with_tool_interception(
         &client,
-        worker.api_key().cloned(),
+        worker.clone(),
         headers.as_ref(),
         req,
         &mcp_orchestrator,

@@ -424,6 +424,10 @@ struct CliArgs {
     #[arg(long, default_value_t = 1800, help_heading = "Request Handling")]
     request_timeout_secs: u64,
 
+    /// Maximum time a streaming response may go without yielding a chunk
+    #[arg(long, default_value_t = 300, help_heading = "Request Handling")]
+    stream_idle_timeout_secs: u64,
+
     /// Grace period in seconds to wait for in-flight requests during shutdown
     #[arg(long, default_value_t = 180, help_heading = "Request Handling")]
     shutdown_grace_period_secs: u64,
@@ -1386,6 +1390,7 @@ impl CliArgs {
             .runtime_worker_threads(self.runtime_worker_threads)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
+            .stream_idle_timeout_secs(self.stream_idle_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
@@ -1833,6 +1838,25 @@ mod tests {
             server_config.runtime_worker_threads,
             Some(3),
             "runtime_worker_threads must reach ServerConfig via to_server_config"
+        );
+    }
+
+    /// `--stream-idle-timeout-secs` must reach `RouterConfig` and survive nesting
+    /// into `ServerConfig.router_config`, matching the other router-level flags.
+    #[test]
+    fn stream_idle_timeout_secs_flows_into_both_configs() {
+        let cli = cli_args_from(&["--stream-idle-timeout-secs", "45"]);
+
+        let router_config = cli.to_router_config(vec![], vec![]).unwrap();
+        assert_eq!(
+            router_config.stream_idle_timeout_secs, 45,
+            "stream_idle_timeout_secs must reach RouterConfig via to_router_config"
+        );
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.router_config.stream_idle_timeout_secs, 45,
+            "stream_idle_timeout_secs must survive into ServerConfig via to_server_config"
         );
     }
 

@@ -289,6 +289,66 @@ pub fn parse_block(block: &str) -> Option<SseFrame<'_>> {
     parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
+/// Update a rolling tail of raw SSE bytes and return whether the stream is
+/// currently positioned at an event boundary.
+pub fn update_event_boundary(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let suffix = if bytes.len() > 4 {
+        &bytes[bytes.len() - 4..]
+    } else {
+        bytes
+    };
+    let mut window = Vec::with_capacity(tail.len() + suffix.len());
+    window.extend_from_slice(tail);
+    window.extend_from_slice(suffix);
+
+    let start = window.len().saturating_sub(4);
+    tail.clear();
+    tail.extend_from_slice(&window[start..]);
+
+    let mut offset = 0;
+    let mut at_boundary = false;
+    while let Some((pos, len)) = find_frame_boundary(&window[offset..]) {
+        let end = offset + pos + len;
+        at_boundary = end == window.len();
+        offset = end;
+    }
+    at_boundary
+}
+
+/// Feed raw SSE bytes into a decoder and return whether a complete `[DONE]`
+/// sentinel was observed.
+pub fn observe_done_event(decoder: &mut SseDecoder, bytes: &[u8]) -> bool {
+    if decoder.push(bytes).is_err() {
+        return false;
+    }
+
+    let mut saw_done = false;
+    while let Some(frame) = decoder.next_frame() {
+        if frame.is_ok_and(|frame| frame.is_done()) {
+            saw_done = true;
+        }
+    }
+    decoder.compact();
+    saw_done
+}
+
+/// Feed raw SSE bytes into a decoder and return whether a complete event with
+/// the requested `event:` type was observed.
+pub fn observe_event_type(decoder: &mut SseDecoder, bytes: &[u8], event_type: &str) -> bool {
+    if decoder.push(bytes).is_err() {
+        return false;
+    }
+
+    let mut saw_event = false;
+    while let Some(frame) = decoder.next_frame() {
+        if frame.is_ok_and(|frame| frame.event_type.as_deref() == Some(event_type)) {
+            saw_event = true;
+        }
+    }
+    decoder.compact();
+    saw_event
+}
+
 // ============================================================================
 // Shared helpers
 // ============================================================================
@@ -532,6 +592,42 @@ mod tests {
         let json_str = serde_json::to_string(&val).unwrap();
         let expected = format!("event: content_block_start\ndata: {json_str}\n\n");
         assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn update_event_boundary_detects_split_boundaries() {
+        let mut tail = Vec::new();
+
+        assert!(!update_event_boundary(&mut tail, b"data: he"));
+        assert!(!update_event_boundary(&mut tail, b"llo\n"));
+        assert!(update_event_boundary(&mut tail, b"\n"));
+
+        assert!(!update_event_boundary(&mut tail, b"data: next\r\n"));
+        assert!(update_event_boundary(&mut tail, b"\r\n"));
+    }
+
+    #[test]
+    fn observe_done_event_detects_split_done_frame() {
+        let mut decoder = SseDecoder::new();
+
+        assert!(!observe_done_event(&mut decoder, b"data: [DO"));
+        assert!(observe_done_event(&mut decoder, b"NE]\n\n"));
+    }
+
+    #[test]
+    fn observe_event_type_detects_split_terminal_event() {
+        let mut decoder = SseDecoder::new();
+
+        assert!(!observe_event_type(
+            &mut decoder,
+            b"event: message_stop\nda",
+            "message_stop"
+        ));
+        assert!(observe_event_type(
+            &mut decoder,
+            b"ta: {\"type\":\"message_stop\"}\n\n",
+            "message_stop"
+        ));
     }
 
     // --- SseDecoder tests ---
