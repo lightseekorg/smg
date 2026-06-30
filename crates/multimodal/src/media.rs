@@ -38,6 +38,16 @@ static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
 static OPENCV_DECODER_THREADS_OVERRIDE: OnceLock<Option<i32>> = OnceLock::new();
 #[cfg(feature = "opencv-video")]
 const MAX_OPENCV_DECODER_THREADS: usize = 8;
+#[cfg(feature = "opencv-video")]
+const OPENCV_DECODE_BURST_COALESCE: Duration = Duration::from_millis(5);
+#[cfg(feature = "opencv-video")]
+const OPENCV_LOW_CONCURRENCY_LIMIT: usize = 8;
+#[cfg(feature = "opencv-video")]
+const OPENCV_LOW_CONCURRENCY_CPU_MULTIPLIER: usize = 2;
+#[cfg(feature = "opencv-video")]
+const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_NUMERATOR: usize = 6;
+#[cfg(feature = "opencv-video")]
+const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_DENOMINATOR: usize = 7;
 
 use super::{
     error::MediaConnectorError,
@@ -824,9 +834,9 @@ impl ActiveOpenCvDecode {
         ACTIVE_OPENCV_DECODES.fetch_add(1, Ordering::AcqRel);
         if opencv_decoder_threads_override().is_none() {
             // Let a burst of decode tasks become visible before dividing the
-            // CPU budget. This avoids every request independently selecting
-            // the single-request thread count and oversubscribing the host.
-            std::thread::sleep(Duration::from_millis(5));
+            // CPU budget. The fixed window also covers blocking-pool ramp-up,
+            // where arrivals may briefly appear stable before the full burst.
+            std::thread::sleep(OPENCV_DECODE_BURST_COALESCE);
         }
         Self {
             count: ACTIVE_OPENCV_DECODES.load(Ordering::Acquire),
@@ -874,21 +884,31 @@ fn adaptive_opencv_decoder_threads(available_cpus: usize, active_decodes: usize)
     let available_cpus = available_cpus.max(1);
     let active_decodes = active_decodes.max(1);
 
-    if active_decodes <= 8 {
-        // A small number of frame-threaded decoders benefits from modest CPU
-        // oversubscription. Once decodes fill the available CPUs, one thread
-        // each avoids scheduler overhead at the C8 boundary.
-        if active_decodes == 8 && available_cpus <= active_decodes {
-            return 1;
-        }
-        let max_threads = if active_decodes <= 2 { 16 } else { 8 };
-        return (available_cpus.saturating_mul(2) / active_decodes).clamp(1, max_threads) as i32;
+    // Once eight or more independent decoders fill the CPU quota, codec-level
+    // threading only adds scheduler contention.
+    if active_decodes >= OPENCV_LOW_CONCURRENCY_LIMIT && active_decodes >= available_cpus {
+        return 1;
     }
 
-    // At higher concurrency, independent decoders already expose enough
-    // parallelism. Leave roughly one seventh of CPUs for non-decoder work.
-    let decoder_budget = available_cpus.saturating_mul(6).div_ceil(7).max(1);
-    (decoder_budget / active_decodes).clamp(1, MAX_OPENCV_DECODER_THREADS) as i32
+    let (decoder_budget, max_threads) = if active_decodes <= OPENCV_LOW_CONCURRENCY_LIMIT {
+        let max_threads = if active_decodes <= 2 { 16 } else { 8 };
+        (
+            available_cpus.saturating_mul(OPENCV_LOW_CONCURRENCY_CPU_MULTIPLIER),
+            max_threads,
+        )
+    } else {
+        // Independent decoders supply request-level parallelism at high
+        // concurrency. Reserve roughly one seventh of the CPU quota for frame
+        // copies, request handling, and other non-decoder work.
+        (
+            available_cpus
+                .saturating_mul(OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_NUMERATOR)
+                .div_ceil(OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_DENOMINATOR),
+            MAX_OPENCV_DECODER_THREADS,
+        )
+    };
+
+    (decoder_budget.max(1) / active_decodes).clamp(1, max_threads) as i32
 }
 
 #[cfg(feature = "opencv-video")]
@@ -2000,7 +2020,9 @@ mod tests {
         assert_eq!(super::adaptive_opencv_decoder_threads(4, 2), 4);
         assert_eq!(super::adaptive_opencv_decoder_threads(8, 4), 4);
         assert_eq!(super::adaptive_opencv_decoder_threads(8, 8), 1);
+        assert_eq!(super::adaptive_opencv_decoder_threads(8, 9), 1);
         assert_eq!(super::adaptive_opencv_decoder_threads(16, 8), 4);
+        assert_eq!(super::adaptive_opencv_decoder_threads(16, 16), 1);
         assert_eq!(super::adaptive_opencv_decoder_threads(224, 8), 8);
         assert_eq!(super::adaptive_opencv_decoder_threads(224, 32), 6);
         assert_eq!(super::adaptive_opencv_decoder_threads(8, 32), 1);
