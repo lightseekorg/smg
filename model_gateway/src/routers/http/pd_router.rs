@@ -1,15 +1,19 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::Request,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
-use memchr::memmem;
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{GenerationRequest, InputIds, StringOrArray},
@@ -21,7 +25,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -37,7 +41,10 @@ use crate::{
         common::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
-            sse::SseEncoder,
+            sse::{self, SseEncoder},
+            stream_timeout::{
+                StreamBodyReadError, StreamDeadline, StreamTimeoutKind, MAX_STREAM_ERROR_BODY_SIZE,
+            },
         },
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
@@ -51,6 +58,9 @@ pub struct PDRouter {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
     pub client: Client,
+    pub streaming_client: Client,
+    pub stream_timeout: Duration,
+    pub stream_idle_timeout: Duration,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
 }
@@ -64,6 +74,16 @@ struct PDRequestContext<'a> {
     request_text: Option<String>,
     model_id: &'a str,
     headers: Option<HeaderMap>,
+}
+
+enum PDDispatchError {
+    Transport(String),
+    StreamingTimeout(StreamTimeoutKind),
+}
+
+enum PrefillBodyReadError {
+    Read(String),
+    Timeout(StreamTimeoutKind),
 }
 
 impl PDRouter {
@@ -167,6 +187,9 @@ impl PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
             policy_registry: Arc::clone(&ctx.policy_registry),
             client: ctx.client.clone(),
+            streaming_client: ctx.streaming_client.clone(),
+            stream_timeout: Duration::from_secs(ctx.router_config.request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(ctx.router_config.stream_idle_timeout_secs),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
         })
@@ -417,6 +440,7 @@ impl PDRouter {
                             );
                         }
 
+                        let context_is_stream = context.is_stream;
                         let response = self
                             .execute_dual_dispatch_internal(
                                 headers,
@@ -429,22 +453,8 @@ impl PDRouter {
                             .await;
 
                         let status = response.status();
-                        prefill.record_outcome(status.as_u16());
-                        decode.record_outcome(status.as_u16());
-
-                        // Record worker errors for server errors (5xx)
-                        if status.is_server_error() {
-                            let error_type = error_type_from_status(status);
-                            Metrics::record_worker_error(
-                                metrics_labels::WORKER_PREFILL,
-                                metrics_labels::CONNECTION_HTTP,
-                                error_type,
-                            );
-                            Metrics::record_worker_error(
-                                metrics_labels::WORKER_DECODE,
-                                metrics_labels::CONNECTION_HTTP,
-                                error_type,
-                            );
+                        if !context_is_stream || !status.is_success() {
+                            record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), status);
                         }
 
                         response
@@ -496,22 +506,33 @@ impl PDRouter {
         context: &PDRequestContext<'_>,
         decode: Arc<dyn Worker>,
         load_guards: Vec<WorkerLoadGuard>,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let status = res.status();
 
         if context.is_stream {
             // Handle streaming error response
             let response_headers = header_utils::preserve_response_headers(res.headers());
-            let error_payload = match res.bytes().await {
+            let mut error_stream = res.bytes_stream();
+            let error_payload = match stream_deadline
+                .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
+                .await
+            {
                 Ok(error_body) => {
-                    if let Ok(error_json) = serde_json::from_slice::<Value>(&error_body) {
+                    if let Ok(error_json) = serde_json::from_str::<Value>(&error_body) {
                         json!({ "message": error_json, "status": status.as_u16() })
                     } else {
-                        json!({ "message": String::from_utf8_lossy(&error_body).to_string(), "status": status.as_u16() })
+                        json!({ "message": error_body, "status": status.as_u16() })
                     }
                 }
-                Err(e) => {
-                    json!({ "message": format!("Decode server error: {}", e), "status": status.as_u16() })
+                Err(StreamBodyReadError::Timeout(timeout)) => {
+                    return error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(timeout),
+                    );
+                }
+                Err(err) => {
+                    json!({ "message": format!("Decode server error: {}", stream_deadline.body_read_error_message(&err)), "status": status.as_u16() })
                 }
             };
 
@@ -522,14 +543,16 @@ impl PDRouter {
             let error_stream = tokio_stream::once(Ok(Bytes::from(sse_data)));
 
             let decode_url = decode.url().to_string();
-            self.create_streaming_response(
+            Self::create_streaming_response(
                 error_stream,
                 status,
                 None,
                 context.return_logprob,
                 Some(decode_url),
                 Some(response_headers),
+                None,
                 load_guards,
+                stream_deadline,
             )
         } else {
             // Handle non-streaming error response
@@ -631,8 +654,13 @@ impl PDRouter {
             headers,
             false,
         );
+        let decode_client = if context.is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
         let decode_request = self.build_post_with_headers(
-            &self.client,
+            decode_client,
             decode.as_ref(),
             context.route,
             &decode_json_request,
@@ -659,13 +687,30 @@ impl PDRouter {
         // decode head. Recorded on the success path only.
         let runtime = prefill.metadata().spec.runtime_type.as_str();
         let dispatch_start = Instant::now();
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
         let prefill_fut = async {
-            let resp = prefill_request.send().await?;
-            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+            let send_result = if context.is_stream {
+                stream_deadline
+                    .until_total(prefill_request.send())
+                    .await
+                    .map_err(PDDispatchError::StreamingTimeout)?
+            } else {
+                prefill_request.send().await
+            };
+            let resp = send_result.map_err(|e| PDDispatchError::Transport(e.to_string()))?;
+            Ok::<_, PDDispatchError>((dispatch_start.elapsed(), resp))
         };
         let decode_fut = async {
-            let resp = decode_request.send().await?;
-            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+            let send_result = if context.is_stream {
+                stream_deadline
+                    .until_total(decode_request.send())
+                    .await
+                    .map_err(PDDispatchError::StreamingTimeout)?
+            } else {
+                decode_request.send().await
+            };
+            let resp = send_result.map_err(|e| PDDispatchError::Transport(e.to_string()))?;
+            Ok::<_, PDDispatchError>((dispatch_start.elapsed(), resp))
         };
         let pd_result = tokio::try_join!(prefill_fut, decode_fut);
 
@@ -674,7 +719,14 @@ impl PDRouter {
         let ((prefill_head_elapsed, prefill_response), (decode_head_elapsed, decode_response)) =
             match pd_result {
                 Ok(pair) => pair,
-                Err(e) => {
+                Err(PDDispatchError::StreamingTimeout(timeout)) => {
+                    error!("PD request exceeded streaming header timeout");
+                    return error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(timeout),
+                    );
+                }
+                Err(PDDispatchError::Transport(e)) => {
                     error!("PD request transport error, both sides aborted: {e}");
                     // Don't record_outcome here — the caller (execute_dual_dispatch)
                     // records outcomes from the response status after we return.
@@ -698,7 +750,13 @@ impl PDRouter {
             );
 
             return self
-                .handle_decode_error_response(decode_response, &context, decode, load_guards)
+                .handle_decode_error_response(
+                    decode_response,
+                    &context,
+                    decode,
+                    load_guards,
+                    stream_deadline,
+                )
                 .await;
         }
 
@@ -716,7 +774,12 @@ impl PDRouter {
         // Process prefill response
         let prefill_drain_start = Instant::now();
         let prefill_body = match self
-            .process_prefill_response(prefill_response, prefill.url(), context.return_logprob)
+            .process_prefill_response(
+                prefill_response,
+                prefill.url(),
+                context.return_logprob,
+                context.is_stream.then_some(stream_deadline),
+            )
             .await
         {
             Ok((_, body)) => body,
@@ -746,14 +809,16 @@ impl PDRouter {
             let response_headers =
                 header_utils::preserve_response_headers(decode_response.headers());
 
-            self.create_streaming_response(
+            Self::create_streaming_response(
                 decode_response.bytes_stream(),
                 status,
                 prefill_logprobs,
                 context.return_logprob,
                 None,
                 Some(response_headers),
+                Some((prefill.clone(), decode.clone())),
                 load_guards,
+                stream_deadline,
             )
         } else {
             // Non-streaming response
@@ -939,23 +1004,21 @@ impl PDRouter {
     }
 
     #[expect(clippy::too_many_arguments)]
-    #[expect(
-        clippy::unused_self,
-        reason = "method on PDRouter for consistent API; may use self in future"
-    )]
     fn create_streaming_response(
-        &self,
         stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
         status: StatusCode,
         prefill_logprobs: Option<Value>,
         return_logprob: bool,
         decode_url: Option<String>,
         headers: Option<HeaderMap>,
+        outcome_workers: Option<(Arc<dyn Worker>, Arc<dyn Worker>)>,
         load_guards: Vec<WorkerLoadGuard>,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         use crate::worker::AttachedBody;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        const STREAM_RELAY_BUFFER: usize = 32;
+        let (tx, rx) = mpsc::channel(STREAM_RELAY_BUFFER);
 
         #[expect(
             clippy::disallowed_methods,
@@ -965,17 +1028,27 @@ impl PDRouter {
             futures_util::pin_mut!(stream);
             // Reusable SSE encoder for the logprob-merge re-encode path.
             let mut encoder = SseEncoder::new();
-            // Whether the next chunk begins at an SSE line boundary (i.e. the
-            // previous chunk ended with an EOL); used to anchor the [DONE]
-            // sentinel detection when the match sits at the start of a chunk.
-            let mut at_line_start = true;
-            while let Some(chunk_result) = stream.next().await {
+            let mut done_decoder = sse::SseDecoder::new();
+            let mut boundary_tail = Vec::new();
+            let mut at_event_boundary = true;
+            let mut stream_failure_status = None;
+            loop {
+                let chunk_result = match stream_deadline.next(&mut stream).await {
+                    Ok(Some(chunk_result)) => chunk_result,
+                    Ok(None) => break,
+                    Err(timeout) => {
+                        stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                        if at_event_boundary {
+                            let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
+                        } else {
+                            let _ = tx.send(Err(stream_deadline.message(timeout))).await;
+                        }
+                        break;
+                    }
+                };
                 match chunk_result {
                     Ok(chunk) => {
-                        let is_done = Self::chunk_contains_done_event(&chunk, at_line_start);
-                        if let Some(&last) = chunk.last() {
-                            at_line_start = last == b'\n' || last == b'\r';
-                        }
+                        let is_done = sse::observe_done_event(&mut done_decoder, chunk.as_ref());
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(
@@ -988,7 +1061,9 @@ impl PDRouter {
                             chunk
                         };
 
-                        if tx.send(Ok(result)).is_err() {
+                        at_event_boundary =
+                            sse::update_event_boundary(&mut boundary_tail, result.as_ref());
+                        if tx.send(Ok(result)).await.is_err() {
                             break;
                         }
 
@@ -1000,20 +1075,26 @@ impl PDRouter {
                         if let Some(ref url) = decode_url {
                             error!("Stream error from decode server {}: {}", url, e);
                         }
-                        let _ = tx.send(Err(format!("Stream error: {e}")));
+                        stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                        let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                         break;
                     }
                 }
             }
+            if let Some((prefill, decode)) = outcome_workers {
+                let effective_status = stream_failure_status.unwrap_or(status);
+                record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), effective_status);
+            }
         });
 
-        let stream = UnboundedReceiverStream::new(rx);
+        let stream = ReceiverStream::new(rx);
         let body = Body::from_stream(stream);
 
         let mut response = Response::new(body);
         *response.status_mut() = status;
 
         let mut response_headers = headers.unwrap_or_default();
+        response_headers.remove(CONTENT_LENGTH);
         response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         *response.headers_mut() = response_headers;
 
@@ -1085,6 +1166,7 @@ impl PDRouter {
         prefill_response: reqwest::Response,
         prefill_url: &str,
         return_logprob: bool,
+        stream_deadline: Option<StreamDeadline>,
     ) -> Result<(StatusCode, Option<Bytes>), Response> {
         let prefill_status = StatusCode::from_u16(prefill_response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1092,10 +1174,16 @@ impl PDRouter {
         // Check if prefill succeeded
         if !prefill_status.is_success() {
             // Get error body from prefill
-            let error_msg = prefill_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown prefill error".to_string());
+            let error_msg = match Self::read_prefill_body(prefill_response, stream_deadline).await {
+                Ok(body) => String::from_utf8_lossy(&body).into_owned(),
+                Err(PrefillBodyReadError::Read(e)) => {
+                    warn!("Failed to read prefill error body: {}", e);
+                    "Unknown prefill error".to_string()
+                }
+                Err(PrefillBodyReadError::Timeout(timeout)) => {
+                    return Err(Self::prefill_timeout_response(stream_deadline, timeout));
+                }
+            };
 
             error!(
                 "Prefill server returned error status prefill_url={} status={} body={}",
@@ -1134,24 +1222,69 @@ impl PDRouter {
 
         // Read prefill body if needed for logprob merging
         let prefill_body = if return_logprob {
-            match prefill_response.bytes().await {
+            match Self::read_prefill_body(prefill_response, stream_deadline).await {
                 Ok(body) => Some(body),
-                Err(e) => {
+                Err(PrefillBodyReadError::Read(e)) => {
                     warn!("Failed to read prefill response body for logprobs: {}", e);
                     None
+                }
+                Err(PrefillBodyReadError::Timeout(timeout)) => {
+                    return Err(Self::prefill_timeout_response(stream_deadline, timeout));
                 }
             }
         } else {
             // For non-logprob requests, just consume the response without storing
             debug!("Consuming prefill response body (non-logprob request)");
-            match prefill_response.bytes().await {
+            match Self::read_prefill_body(prefill_response, stream_deadline).await {
                 Ok(_) => debug!("Prefill response consumed successfully"),
-                Err(e) => warn!("Error consuming prefill response: {}", e),
+                Err(PrefillBodyReadError::Read(e)) => {
+                    warn!("Error consuming prefill response: {}", e);
+                }
+                Err(PrefillBodyReadError::Timeout(timeout)) => {
+                    return Err(Self::prefill_timeout_response(stream_deadline, timeout));
+                }
             }
             None
         };
 
         Ok((prefill_status, prefill_body))
+    }
+
+    fn prefill_timeout_response(
+        stream_deadline: Option<StreamDeadline>,
+        timeout: StreamTimeoutKind,
+    ) -> Response {
+        let Some(stream_deadline) = stream_deadline else {
+            warn!("Prefill body read timed out without an active stream deadline");
+            return error::gateway_timeout(
+                "streaming_timeout",
+                "Streaming request exceeded configured timeout",
+            );
+        };
+        error::gateway_timeout("streaming_timeout", stream_deadline.message(timeout))
+    }
+
+    async fn read_prefill_body(
+        prefill_response: reqwest::Response,
+        stream_deadline: Option<StreamDeadline>,
+    ) -> Result<Bytes, PrefillBodyReadError> {
+        let Some(stream_deadline) = stream_deadline else {
+            return prefill_response
+                .bytes()
+                .await
+                .map_err(|e| PrefillBodyReadError::Read(e.to_string()));
+        };
+
+        let mut stream = prefill_response.bytes_stream();
+        let mut body = Vec::new();
+        loop {
+            match stream_deadline.next(&mut stream).await {
+                Ok(Some(Ok(chunk))) => body.extend_from_slice(&chunk),
+                Ok(Some(Err(e))) => return Err(PrefillBodyReadError::Read(e.to_string())),
+                Ok(None) => return Ok(Bytes::from(body)),
+                Err(timeout) => return Err(PrefillBodyReadError::Timeout(timeout)),
+            }
+        }
     }
 
     #[expect(
@@ -1212,50 +1345,6 @@ impl PDRouter {
         false
     }
 
-    /// Line-anchored detection of the SSE `data: [DONE]` terminal event in a
-    /// raw upstream chunk: a match must start at a line boundary and be
-    /// immediately followed by a complete empty-line event delimiter within
-    /// the same chunk. Payload text that merely contains those bytes never
-    /// qualifies — real EOL bytes cannot occur inside a `data:` payload
-    /// (JSON escapes them). Requiring the full delimiter also rejects
-    /// multi-line events like `data: [DONE]\ndata: x\n\n`, whose joined data
-    /// is not exactly `[DONE]`.
-    ///
-    /// `at_line_start` says whether `chunk` begins at a line boundary. A
-    /// sentinel or delimiter split across chunks is never treated as
-    /// terminal — every byte is still forwarded and the relay then ends via
-    /// upstream EOF, so deferring is always safe while a false positive
-    /// kills a live stream.
-    fn chunk_contains_done_event(chunk: &[u8], at_line_start: bool) -> bool {
-        const DONE_EVENT: &[u8] = b"data: [DONE]";
-        // Length of the EOL sequence at `bytes[pos..]`: 2 for \r\n, 1 for a
-        // bare \r or \n, 0 if none.
-        fn eol_len_at(bytes: &[u8], pos: usize) -> usize {
-            match bytes.get(pos) {
-                Some(b'\r') => 1 + usize::from(bytes.get(pos + 1) == Some(&b'\n')),
-                Some(b'\n') => 1,
-                _ => 0,
-            }
-        }
-        let mut from = 0;
-        while let Some(pos) = memmem::find(&chunk[from..], DONE_EVENT) {
-            let start = from + pos;
-            let anchored = match start.checked_sub(1) {
-                None => at_line_start,
-                Some(prev) => chunk[prev] == b'\n' || chunk[prev] == b'\r',
-            };
-            if anchored {
-                let line_end = start + DONE_EVENT.len();
-                let eol1 = eol_len_at(chunk, line_end);
-                if eol1 > 0 && eol_len_at(chunk, line_end + eol1) > 0 {
-                    return true;
-                }
-            }
-            from = start + 1;
-        }
-        false
-    }
-
     // Simple helper to merge logprobs in streaming responses
     // Optimized to reduce allocations in the merge path
     fn merge_streaming_logprobs(
@@ -1299,6 +1388,25 @@ impl PDRouter {
 
         // Re-serialize via the shared encoder (reuses its buffer across chunks).
         encoder.encode_data(&decode_json).map_err(|_| ())
+    }
+}
+
+fn record_pd_worker_outcome(prefill: &dyn Worker, decode: &dyn Worker, status: StatusCode) {
+    prefill.record_outcome(status.as_u16());
+    decode.record_outcome(status.as_u16());
+
+    if status.is_server_error() {
+        let error_type = error_type_from_status(status);
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_PREFILL,
+            metrics_labels::CONNECTION_HTTP,
+            error_type,
+        );
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_DECODE,
+            metrics_labels::CONNECTION_HTTP,
+            error_type,
+        );
     }
 }
 
@@ -1532,6 +1640,8 @@ impl RouterTrait for PDRouter {
 
 #[cfg(test)]
 mod tests {
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
     use super::*;
     use crate::{
         config::PolicyConfig,
@@ -1546,6 +1656,9 @@ mod tests {
             worker_registry,
             policy_registry,
             client: Client::new(),
+            streaming_client: Client::new(),
+            stream_timeout: Duration::from_secs(1800),
+            stream_idle_timeout: Duration::from_secs(300),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
         }
@@ -1562,64 +1675,6 @@ mod tests {
         };
         worker.set_status(status);
         Box::new(worker)
-    }
-
-    #[test]
-    fn test_done_event_detection() {
-        // Production-incident payload: a delta whose arguments contained the
-        // literal sentinel text; the old substring scan treated it as
-        // terminal and silently killed the stream.
-        let incident: &[u8] = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"// data: [DONE]\"}}]}}]}\n\n";
-        // (chunk, chunk begins at a line boundary, expected, case)
-        let cases: &[(&[u8], bool, bool, &str)] = &[
-            (b"data: [DONE]\n\n", true, true, "standalone sentinel"),
-            (
-                b"data: {\"x\":1}\n\ndata: [DONE]\n\n",
-                true,
-                true,
-                "sentinel after a data event",
-            ),
-            (b"data: [DONE]\r\n\r\n", true, true, "CRLF endings"),
-            (
-                b"\ndata: [DONE]\n\n",
-                false,
-                true,
-                "line boundary inside the chunk",
-            ),
-            (incident, true, false, "sentinel text inside a JSON payload"),
-            (
-                b"data: [DONE]{\"x\":1}\n\n",
-                true,
-                false,
-                "line continues with payload",
-            ),
-            (b"data: [DONE]\n\n", false, false, "chunk starts mid-line"),
-            (
-                b"data: [DONE]",
-                true,
-                false,
-                "possibly a split payload line: defer",
-            ),
-            (
-                b"data: [DONE]\n",
-                true,
-                false,
-                "event delimiter incomplete: defer",
-            ),
-            (
-                b"data: [DONE]\ndata: x\n\n",
-                true,
-                false,
-                "one event, joined data is not [DONE]",
-            ),
-        ];
-        for (chunk, at_line_start, expected, case) in cases {
-            assert_eq!(
-                PDRouter::chunk_contains_done_event(chunk, *at_line_start),
-                *expected,
-                "{case}"
-            );
-        }
     }
 
     #[test]
@@ -1769,7 +1824,13 @@ mod tests {
         ];
 
         let response = router
-            .handle_decode_error_response(decode_response, &context, decode, load_guards)
+            .handle_decode_error_response(
+                decode_response,
+                &context,
+                decode,
+                load_guards,
+                StreamDeadline::new(router.stream_timeout, router.stream_idle_timeout),
+            )
             .await;
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1829,14 +1890,16 @@ mod tests {
             assert_eq!(prefill_ref.load(), 1);
             assert_eq!(decode_ref.load(), 1);
 
-            let response = router.create_streaming_response(
+            let response = PDRouter::create_streaming_response(
                 stream.map(Ok),
                 StatusCode::OK,
                 None,
                 false,
                 None,
                 None,
+                None,
                 guards,
+                StreamDeadline::new(router.stream_timeout, router.stream_idle_timeout),
             );
 
             // Guards are now attached to response body, so load should be 1

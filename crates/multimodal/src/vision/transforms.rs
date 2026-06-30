@@ -515,7 +515,12 @@ fn pil_h_band_rgb(
             let mut blue = half;
             let source_start = source_x * 3;
             let source_end = (source_x + source_columns) * 3;
-            for (pixel, &coefficient) in row[source_start..source_end].chunks_exact(3).zip(kernel) {
+            for (pixel, &coefficient) in row[source_start..source_end]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(kernel)
+            {
                 red += pixel[0] as i64 * coefficient;
                 green += pixel[1] as i64 * coefficient;
                 blue += pixel[2] as i64 * coefficient;

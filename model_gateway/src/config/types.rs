@@ -35,6 +35,9 @@ pub struct RouterConfig {
     pub runtime_worker_threads: Option<usize>,
     pub max_payload_size: usize,
     pub request_timeout_secs: u64,
+    /// Maximum time a streaming response may go without yielding a chunk.
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
     #[serde(default = "default_load_monitor_interval_secs")]
@@ -206,6 +209,10 @@ pub struct TokenizerCacheConfig {
 
 fn default_load_monitor_interval_secs() -> u64 {
     10
+}
+
+fn default_stream_idle_timeout_secs() -> u64 {
+    300
 }
 
 fn default_enable_l0() -> bool {
@@ -769,8 +776,9 @@ impl Default for RouterConfig {
             port: 3001,
             health_check_port: None,
             runtime_worker_threads: None,
-            max_payload_size: 536_870_912,     // 512MB
-            request_timeout_secs: 1800,        // 30 minutes
+            max_payload_size: 536_870_912, // 512MB
+            request_timeout_secs: 1800,    // 30 minutes
+            stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
@@ -913,6 +921,7 @@ mod tests {
         assert_eq!(config.port, 3001);
         assert_eq!(config.max_payload_size, 536_870_912);
         assert_eq!(config.request_timeout_secs, 1800);
+        assert_eq!(config.stream_idle_timeout_secs, 300);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
         assert_eq!(config.load_monitor_interval_secs, 10);
