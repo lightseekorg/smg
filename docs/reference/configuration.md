@@ -952,7 +952,8 @@ per-tensor file lifecycle overhead.
 | `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
 | `SMG_MM_PREPROCESS_PAR_MIN_BYTES` | `524288` | Minimum output size before CPU image/video preprocessing splits work across helper threads. |
 | `SMG_MM_PREPROCESS_PAR_MIN_ROWS` | `32` | Minimum output rows or block bands per helper thread for CPU multimodal preprocessing. |
-| `SMG_MM_PREPROCESS_PAR_MAX_THREADS` | `8` | Maximum helper threads spawned per image/video preprocessing pass. Raise for large single requests; keep lower for high-concurrency TTFT. |
+| `SMG_MM_PREPROCESS_PAR_MAX_THREADS` | `8` | Maximum shared-pool workers used by one image/video preprocessing pass. Raise for large single requests; keep lower for high-concurrency TTFT. |
+| `SMG_MM_PREPROCESS_POOL_THREADS` | `min(available CPUs, 64)` | Total workers shared across concurrent CPU multimodal preprocessing passes. |
 | `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
 
 The TokenSpeed gRPC servicer (worker side) reads two companion variables:
