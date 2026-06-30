@@ -164,6 +164,61 @@ def test_mm_inputs_rejects_model_specific_reusing_preserved_encoder_shm(monkeypa
             pass
 
 
+def test_mm_inputs_constructor_failure_unlinks_preserved_encoder_shm(monkeypatch):
+    _require_writable_dev_shm()
+    monkeypatch.setattr(servicer_module, "UNLINK_MM_SHM_AFTER_READ", True)
+    name = f"smg-tokenspeed-test-constructor-failure-{os.getpid()}"
+    path = os.path.join("/dev/shm", name)
+
+    class FakeMultimodalDataItem:
+        def __init__(self, **_kwargs):
+            pass
+
+        def set_pad_value(self):
+            pass
+
+    def fail_multimodal_inputs(**_kwargs):
+        raise RuntimeError("constructor failed")
+
+    monkeypatch.setattr(servicer_module, "MultimodalDataItem", FakeMultimodalDataItem)
+    monkeypatch.setattr(servicer_module, "MultimodalInputs", fail_multimodal_inputs)
+
+    try:
+        with open(path, "wb") as f:
+            f.write(torch.tensor([1.0], dtype=torch.float32).numpy().tobytes())
+
+        mm_inputs = tokenspeed_scheduler_pb2.MultimodalInputs(
+            items=[
+                tokenspeed_scheduler_pb2.MultimodalItem(
+                    modality=tokenspeed_scheduler_pb2.IMAGE,
+                    encoder_input=tokenspeed_scheduler_pb2.TensorData(
+                        shape=[1],
+                        dtype="float32",
+                        shm=tokenspeed_scheduler_pb2.ShmHandle(
+                            name=name,
+                            offset=0,
+                            nbytes=4,
+                            owner_id="smg:test",
+                        ),
+                    ),
+                    placeholders=[
+                        tokenspeed_scheduler_pb2.PlaceholderRange(offset=0, length=1),
+                    ],
+                ),
+            ]
+        )
+        servicer = object.__new__(TokenSpeedSchedulerServicer)
+
+        with pytest.raises(RuntimeError, match="constructor failed"):
+            servicer._mm_inputs_from_itemized_proto(mm_inputs)
+        assert not os.path.exists(path)
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def test_tensor_from_proto_rejects_shm_length_mismatch_before_read():
     tensor = tokenspeed_scheduler_pb2.TensorData(
         shape=[3, 4],
@@ -177,6 +232,17 @@ def test_tensor_from_proto_rejects_shm_length_mismatch_before_read():
     )
 
     with pytest.raises(ValueError, match="byte length mismatch"):
+        TokenSpeedSchedulerServicer._tensor_from_proto(tensor)
+
+
+def test_tensor_from_proto_normalizes_invalid_dtype_to_value_error():
+    tensor = tokenspeed_scheduler_pb2.TensorData(
+        shape=[1],
+        dtype="not-a-real-dtype",
+        inline=b"",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported TensorData dtype"):
         TokenSpeedSchedulerServicer._tensor_from_proto(tensor)
 
 

@@ -684,6 +684,12 @@ fn decode_video_with_opencv_file(
         // Skip-decode the frames between the current position and `idx` so the
         // following `read` lands on `idx` without a decoder flush/seek.
         while decoded_pos + 1 < idx as i64 {
+            if started.elapsed() >= timeout {
+                return Err(MediaConnectorError::VideoDecode(format!(
+                    "OpenCV timed out after {:.3} seconds",
+                    timeout.as_secs_f64()
+                )));
+            }
             if !capture.grab().map_err(opencv_decode_error)? {
                 return Err(MediaConnectorError::VideoDecode(format!(
                     "OpenCV could not grab intervening frame to reach sampled frame {idx}"

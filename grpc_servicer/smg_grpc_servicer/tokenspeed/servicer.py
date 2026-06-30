@@ -1076,13 +1076,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                     len(items),
                     (time.perf_counter() - total_started) * 1000,
                 )
-            completed = True
-            return MultimodalInputs(
+            result = MultimodalInputs(
                 mm_items=items,
                 im_token_id=im_token_id,
                 video_token_id=video_token_id,
                 pad_values_ready=True,
             )
+            completed = True
+            return result
         finally:
             if not completed:
                 deferred_shm_unlinks.update(preserved_encoder_shm_names)
@@ -1179,7 +1180,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             expected = math.prod(shape) * np.dtype(np.uint16).itemsize
             np_dtype = None
         else:
-            np_dtype = np.dtype(tensor_data.dtype)
+            try:
+                np_dtype = np.dtype(tensor_data.dtype)
+            except TypeError as exc:
+                raise ValueError(
+                    f"Unsupported TensorData dtype: {tensor_data.dtype!r}"
+                ) from exc
             expected = math.prod(shape) * np_dtype.itemsize
         TokenSpeedSchedulerServicer._validate_shm_nbytes_before_read(tensor_data, shape, expected)
         raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(
