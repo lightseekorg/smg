@@ -442,8 +442,26 @@ fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
     .as_ref()
 }
 
-pub(crate) fn prewarm_preprocess_pool() {
+#[doc(hidden)]
+pub fn prewarm_preprocess_pool() {
     let _ = preprocess_pool();
+}
+
+#[doc(hidden)]
+pub fn run_in_preprocess_pool<OP, R>(op: OP) -> R
+where
+    OP: FnOnce() -> R + Send,
+    R: Send,
+{
+    match preprocess_pool() {
+        Some(pool) => pool.install(op),
+        None => op(),
+    }
+}
+
+#[doc(hidden)]
+pub fn preprocess_parallelism(output_bytes: usize, work_items: usize) -> usize {
+    par_threads(output_bytes, work_items)
 }
 
 pub(crate) fn par_scope<'scope, OP, R>(op: OP) -> R
@@ -463,8 +481,8 @@ fn par_config() -> &'static ParConfig {
         min_bytes: env_usize("SMG_MM_PREPROCESS_PAR_MIN_BYTES", 1 << 19),
         min_rows_per_thread: env_usize("SMG_MM_PREPROCESS_PAR_MIN_ROWS", 32).max(1),
         // Preprocessing already runs in the blocking worker pool. Keep each
-        // item from spawning too many additional OS threads at high request
-        // concurrency; large single inputs can opt up via env.
+        // item from monopolizing too many shared preprocessing workers at
+        // high request concurrency; large single inputs can opt up via env.
         max_threads: env_usize("SMG_MM_PREPROCESS_PAR_MAX_THREADS", 8).max(1),
     })
 }

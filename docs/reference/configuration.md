@@ -950,10 +950,10 @@ per-tensor file lifecycle overhead.
 |---------------------|---------|-------------|
 | `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | image/audio: `inline`; video: `auto` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). When unset, image/audio stay inline while video uses `auto` to avoid the high-throughput video gRPC byte-copy path on colocated workers without hurting image TTFT. In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. No locality configuration is needed. |
 | `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
-| `SMG_MM_PREPROCESS_PAR_MIN_BYTES` | `524288` | Minimum output size before CPU image/video preprocessing splits work across helper threads. |
-| `SMG_MM_PREPROCESS_PAR_MIN_ROWS` | `32` | Minimum output rows or block bands per helper thread for CPU multimodal preprocessing. |
-| `SMG_MM_PREPROCESS_PAR_MAX_THREADS` | `8` | Maximum shared-pool workers used by one image/video preprocessing pass. Raise for large single requests; keep lower for high-concurrency TTFT. |
-| `SMG_MM_PREPROCESS_POOL_THREADS` | `min(available CPUs, 64)` | Total workers shared across concurrent CPU multimodal preprocessing passes. |
+| `SMG_MM_PREPROCESS_PAR_MIN_BYTES` | `524288` | Minimum output size before CPU multimodal preprocessing or encoder dtype conversion splits work across workers. |
+| `SMG_MM_PREPROCESS_PAR_MIN_ROWS` | `32` | Minimum output rows, block bands, or tensor values per worker. |
+| `SMG_MM_PREPROCESS_PAR_MAX_THREADS` | `8` | Maximum shared-pool workers used by one multimodal CPU pass. Raise for large single requests; keep lower for high-concurrency TTFT. |
+| `SMG_MM_PREPROCESS_POOL_THREADS` | `min(available CPUs, 64)` | Total workers shared across concurrent CPU multimodal preprocessing and tensor serialization. |
 | `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
 
 The TokenSpeed gRPC servicer (worker side) reads two companion variables:

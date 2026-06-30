@@ -32,9 +32,8 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            par_scope, par_threads, pil_to_filter, prewarm_preprocess_pool, resize,
-            resize_bicubic_pil, resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes,
-            TransformError,
+            par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
+            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, TransformError,
         },
     },
 };
@@ -153,7 +152,6 @@ pub struct QwenVLProcessorBase {
 impl QwenVLProcessorBase {
     /// Create a new processor with the given configuration.
     pub fn new(config: QwenVLConfig) -> Self {
-        prewarm_preprocess_pool();
         Self { config }
     }
 
