@@ -7,6 +7,7 @@ use axum::{
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use futures_util::StreamExt;
 use memchr::memmem;
 use openai_protocol::{
@@ -518,7 +519,7 @@ impl PDRouter {
                 "data: {}\n\n",
                 serde_json::to_string(&json!({ "error": error_payload })).unwrap_or_default()
             );
-            let error_stream = tokio_stream::once(Ok(axum::body::Bytes::from(sse_data)));
+            let error_stream = tokio_stream::once(Ok(Bytes::from(sse_data)));
 
             let decode_url = decode.url().to_string();
             self.create_streaming_response(
@@ -944,7 +945,7 @@ impl PDRouter {
     )]
     fn create_streaming_response(
         &self,
-        stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+        stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
         status: StatusCode,
         prefill_logprobs: Option<Value>,
         return_logprob: bool,
@@ -1012,13 +1013,26 @@ impl PDRouter {
         AttachedBody::wrap_response(response, load_guards)
     }
 
+    /// Build a non-streaming PD response with `Content-Type: application/json`.
+    ///
+    /// Axum's `(StatusCode, Bytes).into_response()` defaults to
+    /// `application/octet-stream`, which breaks OpenAI-style JSON clients.
+    fn non_stream_pd_json_response(status: StatusCode, body: Bytes) -> Response {
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+    }
+
     // Helper to process non-streaming decode response with logprob merging
     async fn process_non_streaming_response(
         &self,
         res: reqwest::Response,
         status: StatusCode,
         return_logprob: bool,
-        prefill_body: Option<bytes::Bytes>,
+        prefill_body: Option<Bytes>,
     ) -> Response {
         let response = res.bytes().await;
         let decode_body = match response {
@@ -1030,11 +1044,11 @@ impl PDRouter {
         };
 
         if !return_logprob {
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         }
 
         let Some(prefill_body) = prefill_body else {
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         };
 
         // Merge logprobs from prefill and decode
@@ -1043,17 +1057,17 @@ impl PDRouter {
             serde_json::from_slice::<Value>(&decode_body),
         ) else {
             warn!("Failed to parse responses for logprob merging");
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         };
 
         Self::merge_logprobs_in_json(&prefill_json, &mut decode_json);
 
         // Return merged response
         match serde_json::to_vec(&decode_json) {
-            Ok(body) => (status, body).into_response(),
+            Ok(body) => Self::non_stream_pd_json_response(status, Bytes::from(body)),
             Err(e) => {
                 error!("Failed to serialize merged response: {}", e);
-                (status, decode_body).into_response()
+                Self::non_stream_pd_json_response(status, decode_body)
             }
         }
     }
@@ -1064,7 +1078,7 @@ impl PDRouter {
         prefill_response: reqwest::Response,
         prefill_url: &str,
         return_logprob: bool,
-    ) -> Result<(StatusCode, Option<bytes::Bytes>), Response> {
+    ) -> Result<(StatusCode, Option<Bytes>), Response> {
         let prefill_status = StatusCode::from_u16(prefill_response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -1197,7 +1211,7 @@ impl PDRouter {
         prefill_logprobs: Option<&Value>,
         decode_chunk: &[u8],
         encoder: &mut SseEncoder,
-    ) -> Result<bytes::Bytes, ()> {
+    ) -> Result<Bytes, ()> {
         // Skip non-data chunks
         let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
         if !chunk_str.starts_with("data: ") || chunk_str.contains("[DONE]") {
@@ -1710,7 +1724,7 @@ mod tests {
             assert_eq!(prefill_ref.load(), 1);
             assert_eq!(decode_ref.load(), 1);
 
-            tx.send(bytes::Bytes::from("test data")).unwrap();
+            tx.send(Bytes::from("test data")).unwrap();
 
             sleep(Duration::from_millis(10)).await;
 
