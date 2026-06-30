@@ -26,4 +26,5 @@ pub mod openai_bridge;
 pub mod persistence_utils;
 pub mod retry;
 pub mod sse;
+pub mod stream_timeout;
 pub mod worker_selection;

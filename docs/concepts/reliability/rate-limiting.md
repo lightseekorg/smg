@@ -111,6 +111,7 @@ smg \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--request-timeout-secs` | `1800` (30 min) | Maximum time for a request to complete |
+| `--stream-idle-timeout-secs` | `300` (5 min) | Maximum time a streaming response may go without yielding a chunk |
 | `--queue-timeout-secs` | `60` | Maximum time a request waits in queue |
 | `--worker-startup-timeout-secs` | `1800` (30 min) | Timeout for worker startup/model loading |
 

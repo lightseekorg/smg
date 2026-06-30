@@ -1,13 +1,15 @@
 //! Chat completion routing for the OpenAI router.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
-use futures_util::StreamExt;
 use openai_protocol::chat::ChatCompletionRequest;
 use serde_json::to_value;
 use tokio::sync::mpsc;
@@ -26,6 +28,7 @@ use crate::{
         common::{
             header_utils::{apply_provider_headers, extract_auth_header},
             retry::{is_retryable_status, RetryExecutor},
+            stream_timeout::{StreamDeadline, StreamTimeoutKind},
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
         error,
@@ -146,10 +149,21 @@ pub(super) async fn route_chat(
     )]
     let payload_ref = ctx.payload().expect("Payload not prepared");
     let payload_json = Arc::new(payload_ref.json.clone());
-    let client = ctx.components.client().clone();
     let headers_cloned = Arc::new(ctx.headers().cloned());
     let worker_api_key = Arc::new(worker.api_key().cloned());
     let is_streaming = ctx.is_streaming();
+    let stream_timeout =
+        Duration::from_secs(deps.shared_components.router_config.request_timeout_secs);
+    let stream_idle_timeout = Duration::from_secs(
+        deps.shared_components
+            .router_config
+            .stream_idle_timeout_secs,
+    );
+    let client = if is_streaming {
+        ctx.components.streaming_client().clone()
+    } else {
+        ctx.components.client().clone()
+    };
 
     let response = RetryExecutor::execute_response_with_retry(
         deps.retry_config,
@@ -171,14 +185,33 @@ pub(super) async fn route_chat(
                     req = req.header("Accept", "text/event-stream");
                 }
 
-                let resp = match req.send().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        worker.record_outcome(503);
-                        return error::service_unavailable(
-                            "upstream_error",
-                            format!("Failed to contact upstream: {e}"),
-                        );
+                let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
+                let resp = if is_streaming {
+                    match stream_deadline.until_total(req.send()).await {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            worker.record_outcome(503);
+                            return error::service_unavailable(
+                                "upstream_error",
+                                format!("Failed to contact upstream: {e}"),
+                            );
+                        }
+                        Err(_) => {
+                            worker.record_outcome(504);
+                            let message = stream_deadline.message(StreamTimeoutKind::Total);
+                            return error::gateway_timeout("streaming_timeout", message);
+                        }
+                    }
+                } else {
+                    match req.send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            worker.record_outcome(503);
+                            return error::service_unavailable(
+                                "upstream_error",
+                                format!("Failed to contact upstream: {e}"),
+                            );
+                        }
                     }
                 };
 
@@ -197,7 +230,15 @@ pub(super) async fn route_chat(
                     #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
                     tokio::spawn(async move {
                         let mut s = stream;
-                        while let Some(chunk) = s.next().await {
+                        loop {
+                            let chunk = match stream_deadline.next(&mut s).await {
+                                Ok(Some(chunk)) => chunk,
+                                Ok(None) => break,
+                                Err(timeout) => {
+                                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                                    break;
+                                }
+                            };
                             match chunk {
                                 Ok(bytes) => {
                                     if tx.send(Ok(bytes)).is_err() {

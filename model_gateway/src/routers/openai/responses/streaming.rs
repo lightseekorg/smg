@@ -15,7 +15,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -37,7 +36,12 @@ use super::{
         rewrite_streaming_block,
     },
 };
-use crate::routers::common::openai_bridge::{self, mcp_response_item_id, ResponseFormat};
+use crate::routers::common::{
+    openai_bridge::{self, mcp_response_item_id, ResponseFormat},
+    stream_timeout::{
+        StreamBodyReadError, StreamDeadline, StreamTimeoutKind, MAX_STREAM_ERROR_BODY_SIZE,
+    },
+};
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::{
@@ -533,6 +537,8 @@ pub(super) async fn handle_simple_streaming_passthrough(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
     let mut request_builder = client.post(&req.url).json(&req.payload);
     let provider = ApiProvider::from_url(&req.url);
     let auth_header = provider.extract_auth_header(headers, worker.api_key());
@@ -540,13 +546,22 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     request_builder = request_builder.header("Accept", "text/event-stream");
 
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(err) => {
+    let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
+    let response = match stream_deadline.until_total(request_builder.send()).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(err)) => {
             worker.record_outcome(502);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            worker.record_outcome(504);
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                stream_deadline.message(StreamTimeoutKind::Total),
             )
                 .into_response();
         }
@@ -559,10 +574,21 @@ pub(super) async fn handle_simple_streaming_passthrough(
     worker.record_outcome(status.as_u16());
 
     if !status.is_success() {
-        let error_body = response
-            .text()
+        let mut error_stream = response.bytes_stream();
+        let error_body = match stream_deadline
+            .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
             .await
-            .unwrap_or_else(|err| format!("Failed to read upstream error body: {err}"));
+        {
+            Ok(body) => body,
+            Err(StreamBodyReadError::Timeout(timeout)) => {
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    stream_deadline.message(timeout),
+                )
+                    .into_response();
+            }
+            Err(err) => stream_deadline.body_read_error_message(&err),
+        };
         let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
@@ -587,7 +613,16 @@ pub(super) async fn handle_simple_streaming_passthrough(
         let mut receiver_connected = true;
         let mut chunk_processor = ChunkProcessor::new();
 
-        while let Some(chunk_result) = upstream_stream.next().await {
+        loop {
+            let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                Ok(Some(chunk_result)) => chunk_result,
+                Ok(None) => break,
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    upstream_failed = true;
+                    break;
+                }
+            };
             match chunk_result {
                 Ok(chunk) => {
                     chunk_processor.push_chunk(&chunk);
@@ -690,6 +725,8 @@ pub(super) fn handle_streaming_with_tool_interception(
     format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
     let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -736,6 +773,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sse_encoder = SseEncoder::new();
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
+        let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
         let list_tools_bindings = mcp_list_tools_bindings_to_emit(
             &state.existing_mcp_list_tools_labels,
             session.mcp_servers(),
@@ -752,14 +790,19 @@ pub(super) fn handle_streaming_with_tool_interception(
             provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
+            if stream_deadline.is_total_elapsed() {
+                let _ = tx.send(Ok(stream_deadline.sse_error_event(StreamTimeoutKind::Total)));
+                return;
+            }
+
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
             request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
             request_builder = request_builder.header("Accept", "text/event-stream");
 
-            let response = match request_builder.send().await {
-                Ok(r) => r,
-                Err(e) => {
+            let response = match stream_deadline.until_total(request_builder.send()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     let _ = send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -768,11 +811,26 @@ pub(super) fn handle_streaming_with_tool_interception(
                     );
                     return;
                 }
+                Err(_) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(StreamTimeoutKind::Total)));
+                    return;
+                }
             };
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let mut error_stream = response.bytes_stream();
+                let body = match stream_deadline
+                    .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(StreamBodyReadError::Timeout(timeout)) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        return;
+                    }
+                    Err(err) => stream_deadline.body_read_error_message(&err),
+                };
                 let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
@@ -792,7 +850,15 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
 
-            while let Some(chunk_result) = upstream_stream.next().await {
+            loop {
+                let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                    Ok(Some(chunk_result)) => chunk_result,
+                    Ok(None) => break,
+                    Err(timeout) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        return;
+                    }
+                };
                 match chunk_result {
                     Ok(chunk) => {
                         chunk_processor.push_chunk(&chunk);
@@ -1132,7 +1198,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         _ => None,
     };
 
-    let client = ctx.components.client().clone();
+    let client = ctx.components.streaming_client().clone();
     let req = match ctx.into_streaming_context() {
         Ok(r) => r,
         Err(msg) => {

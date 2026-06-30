@@ -16,7 +16,10 @@ use tracing::{debug, error, info, warn};
 use super::utils::{read_response_body_limited, should_propagate_header, ReadBodyResult};
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::error,
+    routers::{
+        common::stream_timeout::{StreamBodyReadError, StreamDeadline, MAX_STREAM_ERROR_BODY_SIZE},
+        error,
+    },
     worker::Worker,
 };
 
@@ -47,11 +50,14 @@ pub(crate) async fn send_request(
     url: &str,
     headers: &HeaderMap,
     request: &CreateMessageRequest,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<reqwest::Response, Response> {
     debug!(url = %url, "Sending request to worker");
 
-    let mut builder = http_client.post(url).json(request).timeout(timeout);
+    let mut builder = http_client.post(url).json(request);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
     for (key, value) in headers {
         builder = builder.header(key, value);
     }
@@ -183,6 +189,71 @@ pub(crate) async fn handle_error_response(
     );
 
     (status, body).into_response()
+}
+
+/// Handle a non-success streaming response under the active streaming deadline.
+pub(crate) async fn handle_streaming_error_response(
+    response: reqwest::Response,
+    model_id: &str,
+    start_time: Instant,
+    stream_deadline: StreamDeadline,
+) -> Response {
+    let status = response.status();
+    let mut stream = response.bytes_stream();
+
+    let body = match stream_deadline
+        .read_text_limited(&mut stream, MAX_STREAM_ERROR_BODY_SIZE)
+        .await
+    {
+        Ok(body) if body.is_empty() => format!("Backend returned error: {status}"),
+        Ok(body) => body,
+        Err(StreamBodyReadError::Timeout(timeout)) => {
+            record_error_metrics(model_id, start_time, "streaming_timeout");
+            return error::gateway_timeout("streaming_timeout", stream_deadline.message(timeout));
+        }
+        Err(StreamBodyReadError::TooLarge { .. }) => {
+            warn!(
+                model = %model_id,
+                max_size = %MAX_STREAM_ERROR_BODY_SIZE,
+                "Error response body too large"
+            );
+            format!("Backend returned error: {status} (response too large)")
+        }
+        Err(err) => {
+            let message = stream_deadline.body_read_error_message(&err);
+            warn!(model = %model_id, error = %message, "Failed to read error response body");
+            format!("Backend returned error: {status}")
+        }
+    };
+
+    warn!(
+        model = %model_id,
+        status = %status,
+        body_preview = %body.chars().take(200).collect::<String>(),
+        "Backend error"
+    );
+
+    record_error_metrics(model_id, start_time, metrics_labels::ERROR_BACKEND);
+    (status, body).into_response()
+}
+
+fn record_error_metrics(model_id: &str, start_time: Instant, error_type: &'static str) {
+    Metrics::record_router_duration(
+        metrics_labels::ROUTER_HTTP,
+        metrics_labels::BACKEND_EXTERNAL,
+        metrics_labels::CONNECTION_HTTP,
+        model_id,
+        "messages",
+        start_time.elapsed(),
+    );
+    Metrics::record_router_error(
+        metrics_labels::ROUTER_HTTP,
+        metrics_labels::BACKEND_EXTERNAL,
+        metrics_labels::CONNECTION_HTTP,
+        model_id,
+        "messages",
+        error_type,
+    );
 }
 
 // ============================================================================

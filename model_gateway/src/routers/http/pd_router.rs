@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -8,7 +11,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use memchr::memmem;
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
@@ -38,6 +40,9 @@ use crate::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
             sse::SseEncoder,
+            stream_timeout::{
+                StreamBodyReadError, StreamDeadline, StreamTimeoutKind, MAX_STREAM_ERROR_BODY_SIZE,
+            },
         },
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
@@ -51,6 +56,9 @@ pub struct PDRouter {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
     pub client: Client,
+    pub streaming_client: Client,
+    pub stream_timeout: Duration,
+    pub stream_idle_timeout: Duration,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
 }
@@ -167,6 +175,9 @@ impl PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
             policy_registry: Arc::clone(&ctx.policy_registry),
             client: ctx.client.clone(),
+            streaming_client: ctx.streaming_client.clone(),
+            stream_timeout: Duration::from_secs(ctx.router_config.request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(ctx.router_config.stream_idle_timeout_secs),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
         })
@@ -496,22 +507,33 @@ impl PDRouter {
         context: &PDRequestContext<'_>,
         decode: Arc<dyn Worker>,
         load_guards: Vec<WorkerLoadGuard>,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let status = res.status();
 
         if context.is_stream {
             // Handle streaming error response
             let response_headers = header_utils::preserve_response_headers(res.headers());
-            let error_payload = match res.bytes().await {
+            let mut error_stream = res.bytes_stream();
+            let error_payload = match stream_deadline
+                .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
+                .await
+            {
                 Ok(error_body) => {
-                    if let Ok(error_json) = serde_json::from_slice::<Value>(&error_body) {
+                    if let Ok(error_json) = serde_json::from_str::<Value>(&error_body) {
                         json!({ "message": error_json, "status": status.as_u16() })
                     } else {
-                        json!({ "message": String::from_utf8_lossy(&error_body).to_string(), "status": status.as_u16() })
+                        json!({ "message": error_body, "status": status.as_u16() })
                     }
                 }
-                Err(e) => {
-                    json!({ "message": format!("Decode server error: {}", e), "status": status.as_u16() })
+                Err(StreamBodyReadError::Timeout(timeout)) => {
+                    return error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(timeout),
+                    );
+                }
+                Err(err) => {
+                    json!({ "message": format!("Decode server error: {}", stream_deadline.body_read_error_message(&err)), "status": status.as_u16() })
                 }
             };
 
@@ -522,7 +544,7 @@ impl PDRouter {
             let error_stream = tokio_stream::once(Ok(Bytes::from(sse_data)));
 
             let decode_url = decode.url().to_string();
-            self.create_streaming_response(
+            Self::create_streaming_response(
                 error_stream,
                 status,
                 None,
@@ -530,6 +552,7 @@ impl PDRouter {
                 Some(decode_url),
                 Some(response_headers),
                 load_guards,
+                stream_deadline,
             )
         } else {
             // Handle non-streaming error response
@@ -631,8 +654,13 @@ impl PDRouter {
             headers,
             false,
         );
+        let decode_client = if context.is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
         let decode_request = self.build_post_with_headers(
-            &self.client,
+            decode_client,
             decode.as_ref(),
             context.route,
             &decode_json_request,
@@ -659,13 +687,22 @@ impl PDRouter {
         // decode head. Recorded on the success path only.
         let runtime = prefill.metadata().spec.runtime_type.as_str();
         let dispatch_start = Instant::now();
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
         let prefill_fut = async {
-            let resp = prefill_request.send().await?;
-            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+            let resp = prefill_request.send().await.map_err(|e| e.to_string())?;
+            Ok::<_, String>((dispatch_start.elapsed(), resp))
         };
         let decode_fut = async {
-            let resp = decode_request.send().await?;
-            Ok::<_, reqwest::Error>((dispatch_start.elapsed(), resp))
+            let send_result = if context.is_stream {
+                stream_deadline
+                    .until_total(decode_request.send())
+                    .await
+                    .map_err(|_| stream_deadline.message(StreamTimeoutKind::Total))?
+            } else {
+                decode_request.send().await
+            };
+            let resp = send_result.map_err(|e| e.to_string())?;
+            Ok::<_, String>((dispatch_start.elapsed(), resp))
         };
         let pd_result = tokio::try_join!(prefill_fut, decode_fut);
 
@@ -698,7 +735,13 @@ impl PDRouter {
             );
 
             return self
-                .handle_decode_error_response(decode_response, &context, decode, load_guards)
+                .handle_decode_error_response(
+                    decode_response,
+                    &context,
+                    decode,
+                    load_guards,
+                    stream_deadline,
+                )
                 .await;
         }
 
@@ -746,7 +789,7 @@ impl PDRouter {
             let response_headers =
                 header_utils::preserve_response_headers(decode_response.headers());
 
-            self.create_streaming_response(
+            Self::create_streaming_response(
                 decode_response.bytes_stream(),
                 status,
                 prefill_logprobs,
@@ -754,6 +797,7 @@ impl PDRouter {
                 None,
                 Some(response_headers),
                 load_guards,
+                stream_deadline,
             )
         } else {
             // Non-streaming response
@@ -939,12 +983,7 @@ impl PDRouter {
     }
 
     #[expect(clippy::too_many_arguments)]
-    #[expect(
-        clippy::unused_self,
-        reason = "method on PDRouter for consistent API; may use self in future"
-    )]
     fn create_streaming_response(
-        &self,
         stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
         status: StatusCode,
         prefill_logprobs: Option<Value>,
@@ -952,6 +991,7 @@ impl PDRouter {
         decode_url: Option<String>,
         headers: Option<HeaderMap>,
         load_guards: Vec<WorkerLoadGuard>,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         use crate::worker::AttachedBody;
 
@@ -965,7 +1005,15 @@ impl PDRouter {
             futures_util::pin_mut!(stream);
             // Reusable SSE encoder for the logprob-merge re-encode path.
             let mut encoder = SseEncoder::new();
-            while let Some(chunk_result) = stream.next().await {
+            loop {
+                let chunk_result = match stream_deadline.next(&mut stream).await {
+                    Ok(Some(chunk_result)) => chunk_result,
+                    Ok(None) => break,
+                    Err(timeout) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        break;
+                    }
+                };
                 match chunk_result {
                     Ok(chunk) => {
                         let is_done = memmem::find(&chunk, b"data: [DONE]").is_some();
@@ -1501,6 +1549,9 @@ mod tests {
             worker_registry,
             policy_registry,
             client: Client::new(),
+            streaming_client: Client::new(),
+            stream_timeout: Duration::from_secs(1800),
+            stream_idle_timeout: Duration::from_secs(300),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
         }
@@ -1650,7 +1701,13 @@ mod tests {
         ];
 
         let response = router
-            .handle_decode_error_response(decode_response, &context, decode, load_guards)
+            .handle_decode_error_response(
+                decode_response,
+                &context,
+                decode,
+                load_guards,
+                StreamDeadline::new(router.stream_timeout, router.stream_idle_timeout),
+            )
             .await;
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1710,7 +1767,7 @@ mod tests {
             assert_eq!(prefill_ref.load(), 1);
             assert_eq!(decode_ref.load(), 1);
 
-            let response = router.create_streaming_response(
+            let response = PDRouter::create_streaming_response(
                 stream.map(Ok),
                 StatusCode::OK,
                 None,
@@ -1718,6 +1775,7 @@ mod tests {
                 None,
                 None,
                 guards,
+                StreamDeadline::new(router.stream_timeout, router.stream_idle_timeout),
             );
 
             // Guards are now attached to response body, so load should be 1

@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -42,6 +45,7 @@ use crate::{
         common::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
+            stream_timeout::{StreamDeadline, StreamTimeoutKind},
         },
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
@@ -55,6 +59,9 @@ pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
+    streaming_client: Client,
+    stream_timeout: Duration,
+    stream_idle_timeout: Duration,
     retry_config: RetryConfig,
 }
 
@@ -64,6 +71,9 @@ impl std::fmt::Debug for Router {
             .field("worker_registry", &self.worker_registry)
             .field("policy_registry", &self.policy_registry)
             .field("client", &self.client)
+            .field("streaming_client", &self.streaming_client)
+            .field("stream_timeout", &self.stream_timeout)
+            .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("retry_config", &self.retry_config)
             .finish()
     }
@@ -80,6 +90,9 @@ impl Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
+            streaming_client: ctx.streaming_client.clone(),
+            stream_timeout: Duration::from_secs(ctx.router_config.request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(ctx.router_config.stream_idle_timeout_secs),
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -617,7 +630,12 @@ impl Router {
         };
 
         let endpoint_url = worker.endpoint_url(route);
-        let mut request_builder = self.client.post(&endpoint_url).multipart(form);
+        let client = if is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        let mut request_builder = client.post(&endpoint_url).multipart(form);
 
         if let Some(key) = worker.api_key().cloned() {
             let mut auth_header = String::with_capacity(7 + key.len());
@@ -642,7 +660,38 @@ impl Router {
             }
         }
 
-        let res = match request_builder.send().await {
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
+        let send_result = if is_stream {
+            match stream_deadline.until_total(request_builder.send()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let err_resp = error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(StreamTimeoutKind::Total),
+                    );
+                    let err_status = err_resp.status();
+                    worker.record_outcome(err_status.as_u16());
+                    Metrics::record_router_upstream_response(
+                        metrics_labels::ROUTER_HTTP,
+                        err_status.as_u16(),
+                        extract_error_code_from_response(&err_resp),
+                    );
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_HTTP,
+                        metrics_labels::BACKEND_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        model_id,
+                        endpoint,
+                        error_type_from_status(err_status),
+                    );
+                    return err_resp;
+                }
+            }
+        } else {
+            request_builder.send().await
+        };
+
+        let res = match send_result {
             Ok(res) => res,
             Err(e) => {
                 error!(
@@ -723,7 +772,16 @@ impl Router {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stream_failed = false;
-                while let Some(chunk) = stream.next().await {
+                loop {
+                    let chunk = match stream_deadline.next(&mut stream).await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(timeout) => {
+                            let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
+                            stream_failed = true;
+                            break;
+                        }
+                    };
                     match chunk {
                         Ok(bytes) => {
                             if tx.send(Ok(bytes)).await.is_err() {
@@ -869,7 +927,12 @@ impl Router {
             }
         };
 
-        let mut request_builder = self.client.post(&endpoint_url).json(&json_val);
+        let client = if is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        let mut request_builder = client.post(&endpoint_url).json(&json_val);
 
         if let Some(key) = api_key {
             // Pre-allocate string with capacity to avoid reallocation
@@ -887,7 +950,22 @@ impl Router {
             }
         }
 
-        let res = match request_builder.send().await {
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
+        let send_result = if is_stream {
+            match stream_deadline.until_total(request_builder.send()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(StreamTimeoutKind::Total),
+                    );
+                }
+            }
+        } else {
+            request_builder.send().await
+        };
+
+        let res = match send_result {
             Ok(res) => res,
             Err(e) => {
                 error!(
@@ -920,7 +998,15 @@ impl Router {
             )]
             tokio::spawn(async move {
                 let mut stream = stream;
-                while let Some(chunk) = stream.next().await {
+                loop {
+                    let chunk = match stream_deadline.next(&mut stream).await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(timeout) => {
+                            let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                            break;
+                        }
+                    };
                     match chunk {
                         Ok(bytes) => {
                             if tx.send(Ok(bytes)).is_err() {
@@ -1274,6 +1360,9 @@ mod tests {
             worker_registry,
             policy_registry,
             client: Client::new(),
+            streaming_client: Client::new(),
+            stream_timeout: Duration::from_secs(1800),
+            stream_idle_timeout: Duration::from_secs(300),
             retry_config: RetryConfig::default(),
         }
     }
