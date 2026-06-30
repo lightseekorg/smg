@@ -3,14 +3,22 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Output, Stdio},
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
 #[cfg(feature = "opencv-video")]
-use opencv::{core::Mat, imgproc, prelude::*, videoio};
+use opencv::{
+    core::{Mat, Vector},
+    imgproc,
+    prelude::*,
+    videoio,
+};
 use reqwest::Client;
 use tokio::{fs, process::Command, task, time};
 use tracing::info;
@@ -22,6 +30,14 @@ static VIDEO_DECODE_BACKEND: OnceLock<Option<String>> = OnceLock::new();
 static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
 static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
+#[cfg(feature = "opencv-video")]
+static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "opencv-video")]
+static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
+#[cfg(feature = "opencv-video")]
+static OPENCV_DECODER_THREADS_OVERRIDE: OnceLock<Option<i32>> = OnceLock::new();
+#[cfg(feature = "opencv-video")]
+const MAX_OPENCV_DECODER_THREADS: usize = 8;
 
 use super::{
     error::MediaConnectorError,
@@ -565,7 +581,9 @@ fn decode_video_with_opencv_file(
         ))
     })?;
 
-    let mut capture = open_opencv_video_capture(input)?;
+    let active_decode = ActiveOpenCvDecode::enter();
+    let decoder_threads = opencv_decoder_threads(active_decode.count());
+    let mut capture = open_opencv_video_capture(input, decoder_threads)?;
 
     let total_frames = capture
         .get(videoio::CAP_PROP_FRAME_COUNT)
@@ -702,8 +720,12 @@ fn decode_video_with_opencv_file(
 }
 
 #[cfg(feature = "opencv-video")]
-fn open_opencv_video_capture(input: &str) -> Result<videoio::VideoCapture, MediaConnectorError> {
-    let capture = videoio::VideoCapture::from_file(input, videoio::CAP_FFMPEG)
+fn open_opencv_video_capture(
+    input: &str,
+    decoder_threads: i32,
+) -> Result<videoio::VideoCapture, MediaConnectorError> {
+    let params = Vector::from_slice(&[videoio::CAP_PROP_N_THREADS, decoder_threads]);
+    let capture = videoio::VideoCapture::from_file_with_params(input, videoio::CAP_FFMPEG, &params)
         .map_err(opencv_decode_error)?;
     if capture.is_opened().map_err(opencv_decode_error)? {
         return Ok(capture);
@@ -718,6 +740,70 @@ fn open_opencv_video_capture(input: &str) -> Result<videoio::VideoCapture, Media
     Err(MediaConnectorError::VideoDecode(format!(
         "OpenCV could not open video: {input}"
     )))
+}
+
+#[cfg(feature = "opencv-video")]
+struct ActiveOpenCvDecode {
+    count: usize,
+}
+
+#[cfg(feature = "opencv-video")]
+impl ActiveOpenCvDecode {
+    fn enter() -> Self {
+        ACTIVE_OPENCV_DECODES.fetch_add(1, Ordering::AcqRel);
+        if opencv_decoder_threads_override().is_none() {
+            // Let a burst of decode tasks become visible before dividing the
+            // CPU budget. This avoids every request independently selecting
+            // the single-request thread count and oversubscribing the host.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Self {
+            count: ACTIVE_OPENCV_DECODES.load(Ordering::Acquire),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.count
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+impl Drop for ActiveOpenCvDecode {
+    fn drop(&mut self) {
+        ACTIVE_OPENCV_DECODES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+fn opencv_decoder_threads(active_decodes: usize) -> i32 {
+    if let Some(threads) = opencv_decoder_threads_override() {
+        return threads;
+    }
+
+    let available = *AVAILABLE_OPENCV_CPUS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1)
+    });
+    adaptive_opencv_decoder_threads(available, active_decodes)
+}
+
+#[cfg(feature = "opencv-video")]
+fn opencv_decoder_threads_override() -> Option<i32> {
+    *OPENCV_DECODER_THREADS_OVERRIDE.get_or_init(|| {
+        std::env::var("SMG_OPENCV_DECODER_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|threads| *threads > 0)
+    })
+}
+
+#[cfg(feature = "opencv-video")]
+fn adaptive_opencv_decoder_threads(available_cpus: usize, active_decodes: usize) -> i32 {
+    // Leave roughly one seventh of logical CPUs for request handling, RGB
+    // conversion, hashing, and allocator work outside the video decoder.
+    let decoder_budget = available_cpus.saturating_mul(6).div_ceil(7).max(1);
+    (decoder_budget / active_decodes.max(1)).clamp(1, MAX_OPENCV_DECODER_THREADS) as i32
 }
 
 #[cfg(feature = "opencv-video")]
@@ -1575,5 +1661,15 @@ mod tests {
         };
         let indices = super::opencv_frame_indices(1, 30.0, cfg);
         assert_eq!(indices, vec![0, 0, 0, 0]);
+    }
+
+    #[cfg(feature = "opencv-video")]
+    #[test]
+    fn opencv_decoder_threads_share_cpu_budget_across_active_decodes() {
+        assert_eq!(super::adaptive_opencv_decoder_threads(224, 1), 8);
+        assert_eq!(super::adaptive_opencv_decoder_threads(224, 8), 8);
+        assert_eq!(super::adaptive_opencv_decoder_threads(224, 32), 6);
+        assert_eq!(super::adaptive_opencv_decoder_threads(8, 32), 1);
+        assert_eq!(super::adaptive_opencv_decoder_threads(1, 0), 1);
     }
 }
