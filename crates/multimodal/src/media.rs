@@ -826,7 +826,7 @@ impl ActiveOpenCvDecode {
             // Let a burst of decode tasks become visible before dividing the
             // CPU budget. This avoids every request independently selecting
             // the single-request thread count and oversubscribing the host.
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(5));
         }
         Self {
             count: ACTIVE_OPENCV_DECODES.load(Ordering::Acquire),
@@ -871,10 +871,24 @@ fn opencv_decoder_threads_override() -> Option<i32> {
 
 #[cfg(feature = "opencv-video")]
 fn adaptive_opencv_decoder_threads(available_cpus: usize, active_decodes: usize) -> i32 {
-    // Leave roughly one seventh of logical CPUs for request handling, RGB
-    // conversion, hashing, and allocator work outside the video decoder.
+    let available_cpus = available_cpus.max(1);
+    let active_decodes = active_decodes.max(1);
+
+    if active_decodes <= 8 {
+        // A small number of frame-threaded decoders benefits from modest CPU
+        // oversubscription. Once decodes fill the available CPUs, one thread
+        // each avoids scheduler overhead at the C8 boundary.
+        if active_decodes == 8 && available_cpus <= active_decodes {
+            return 1;
+        }
+        let max_threads = if active_decodes <= 2 { 16 } else { 8 };
+        return (available_cpus.saturating_mul(2) / active_decodes).clamp(1, max_threads) as i32;
+    }
+
+    // At higher concurrency, independent decoders already expose enough
+    // parallelism. Leave roughly one seventh of CPUs for non-decoder work.
     let decoder_budget = available_cpus.saturating_mul(6).div_ceil(7).max(1);
-    (decoder_budget / active_decodes.max(1)).clamp(1, MAX_OPENCV_DECODER_THREADS) as i32
+    (decoder_budget / active_decodes).clamp(1, MAX_OPENCV_DECODER_THREADS) as i32
 }
 
 #[cfg(feature = "opencv-video")]
@@ -1981,10 +1995,15 @@ mod tests {
     #[cfg(feature = "opencv-video")]
     #[test]
     fn opencv_decoder_threads_share_cpu_budget_across_active_decodes() {
-        assert_eq!(super::adaptive_opencv_decoder_threads(224, 1), 8);
+        assert_eq!(super::adaptive_opencv_decoder_threads(224, 1), 16);
+        assert_eq!(super::adaptive_opencv_decoder_threads(2, 1), 4);
+        assert_eq!(super::adaptive_opencv_decoder_threads(4, 2), 4);
+        assert_eq!(super::adaptive_opencv_decoder_threads(8, 4), 4);
+        assert_eq!(super::adaptive_opencv_decoder_threads(8, 8), 1);
+        assert_eq!(super::adaptive_opencv_decoder_threads(16, 8), 4);
         assert_eq!(super::adaptive_opencv_decoder_threads(224, 8), 8);
         assert_eq!(super::adaptive_opencv_decoder_threads(224, 32), 6);
         assert_eq!(super::adaptive_opencv_decoder_threads(8, 32), 1);
-        assert_eq!(super::adaptive_opencv_decoder_threads(1, 0), 1);
+        assert_eq!(super::adaptive_opencv_decoder_threads(1, 0), 2);
     }
 }
