@@ -1183,9 +1183,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             try:
                 np_dtype = np.dtype(tensor_data.dtype)
             except TypeError as exc:
-                raise ValueError(
-                    f"Unsupported TensorData dtype: {tensor_data.dtype!r}"
-                ) from exc
+                raise ValueError(f"Unsupported TensorData dtype: {tensor_data.dtype!r}") from exc
             expected = math.prod(shape) * np_dtype.itemsize
         TokenSpeedSchedulerServicer._validate_shm_nbytes_before_read(tensor_data, shape, expected)
         raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(
