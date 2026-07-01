@@ -578,20 +578,19 @@ fn pil_resample_vertical(
     out
 }
 
-/// Pillow-exact BICUBIC resize (RGB8). Horizontal pass then vertical pass with
-/// an intermediate u8 buffer, matching `PIL.Image.resize(.., BICUBIC)`.
+/// Pillow-exact BICUBIC resize (RGB8), matching
+/// `PIL.Image.resize(.., BICUBIC)`.
 pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> DynamicImage {
     let rgb = image.to_rgb8();
     let (in_w, in_h) = rgb.dimensions();
-    let (in_w, in_h, out_w_u, out_h_u) =
-        (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
-    let horiz = pil_resample_horizontal(rgb.as_raw(), in_h, in_w, out_w_u, 3);
-    let vert = pil_resample_vertical(&horiz, in_h, out_w_u, out_h_u, 3);
+    let output = resize_bicubic_pil_bytes(rgb.as_raw(), in_w, in_h, out_w, out_h);
     #[expect(
         clippy::expect_used,
-        reason = "vert is exactly out_w*out_h*3 bytes by construction"
+        reason = "output is exactly out_w*out_h*3 bytes by construction"
     )]
-    DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, vert).expect("pil resize buffer size"))
+    DynamicImage::ImageRgb8(
+        RgbImage::from_raw(out_w, out_h, output).expect("pil resize buffer size"),
+    )
 }
 
 /// PIL-exact bicubic resize over borrowed interleaved RGB bytes.
@@ -606,12 +605,7 @@ pub fn resize_bicubic_pil_rgb(
     out_w: u32,
     out_h: u32,
 ) -> Result<RgbImage> {
-    let (in_w, in_h, out_w_u, out_h_u) = (
-        width as usize,
-        height as usize,
-        out_w as usize,
-        out_h as usize,
-    );
+    let (in_w, in_h) = (width as usize, height as usize);
     let expected = in_w.saturating_mul(in_h).saturating_mul(3);
     if data.len() != expected {
         return Err(TransformError::ShapeError(format!(
@@ -619,13 +613,28 @@ pub fn resize_bicubic_pil_rgb(
             data.len()
         )));
     }
-    let horiz = pil_resample_horizontal(data, in_h, in_w, out_w_u, 3);
-    let vert = pil_resample_vertical(&horiz, in_h, out_w_u, out_h_u, 3);
-    RgbImage::from_raw(out_w, out_h, vert).ok_or_else(|| {
+    let output = resize_bicubic_pil_bytes(data, width, height, out_w, out_h);
+    RgbImage::from_raw(out_w, out_h, output).ok_or_else(|| {
         TransformError::ShapeError(format!(
             "failed to build PIL bicubic RGB image for {out_w}x{out_h}"
         ))
     })
+}
+
+fn resize_bicubic_pil_bytes(data: &[u8], in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> Vec<u8> {
+    let (in_w, in_h, out_w, out_h) = (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
+    if in_w == out_w && in_h == out_h {
+        data.to_vec()
+    } else if in_w == out_w {
+        pil_resample_vertical(data, in_h, in_w, out_h, 3)
+    } else {
+        let horiz = pil_resample_horizontal(data, in_h, in_w, out_w, 3);
+        if in_h == out_h {
+            horiz
+        } else {
+            pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
+        }
+    }
 }
 
 /// Resize image preserving aspect ratio, fitting within max dimensions.
@@ -903,6 +912,32 @@ mod tests {
             via_bytes.into_raw(),
             "raw-RGB PIL bicubic must equal DynamicImage PIL bicubic byte-for-byte"
         );
+    }
+
+    #[test]
+    fn resize_bicubic_pil_rgb_skips_identity_axes_bit_exactly() {
+        let (src_w, src_h) = (31u32, 23u32);
+        let mut data = vec![0u8; src_w as usize * src_h as usize * 3];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(37).wrapping_add(11);
+        }
+
+        for (out_w, out_h) in [(src_w, 17), (19, src_h), (src_w, src_h)] {
+            let horizontal =
+                pil_resample_horizontal(&data, src_h as usize, src_w as usize, out_w as usize, 3);
+            let expected = pil_resample_vertical(
+                &horizontal,
+                src_h as usize,
+                out_w as usize,
+                out_h as usize,
+                3,
+            );
+            let actual = resize_bicubic_pil_rgb(&data, src_w, src_h, out_w, out_h)
+                .unwrap()
+                .into_raw();
+
+            assert_eq!(actual, expected, "identity-axis fast path changed pixels");
+        }
     }
 
     /// `resize_bicubic_pil_rgb` rejects a buffer whose length doesn't match the
