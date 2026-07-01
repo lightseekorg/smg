@@ -123,7 +123,8 @@ jobs:
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
       # PR = quick sanity subset; schedule/dispatch = full domain set.
       DOMAINS: ${{ github.event.inputs.domains || (github.event_name == 'pull_request' && 'retail' || 'retail,airline,telecom') }}
-      NUM_TRIALS: ${{ github.event.inputs.num_trials || '2' }}
+      # PR = single trial (fast sanity); schedule/dispatch = 2 trials (pass^2).
+      NUM_TRIALS: ${{ github.event.inputs.num_trials || (github.event_name == 'pull_request' && '1' || '2') }}
       # PR sanity: cap tasks at 3 for a quick end-to-end smoke. Full runs use
       # num_tasks=0 (all) unless overridden via dispatch.
       # TODO(tune): confirm task cap after live H100 timing data.
