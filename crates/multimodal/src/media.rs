@@ -1,8 +1,5 @@
 #[cfg(feature = "opencv-video")]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    mpsc::{sync_channel, SyncSender},
-};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::{
     collections::HashSet,
     io::Write,
@@ -33,10 +30,6 @@ static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
 static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 #[cfg(feature = "opencv-video")]
-static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
-#[cfg(feature = "opencv-video")]
-static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
-#[cfg(feature = "opencv-video")]
 const MAX_OPENCV_DECODER_THREADS: usize = 8;
 #[cfg(feature = "opencv-video")]
 const OPENCV_DECODE_BURST_COALESCE: Duration = Duration::from_millis(5);
@@ -50,9 +43,12 @@ const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_NUMERATOR: usize = 6;
 const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_DENOMINATOR: usize = 7;
 
 #[cfg(feature = "opencv-video")]
+use super::runtime::ActiveVideoDecode;
+#[cfg(feature = "opencv-video")]
 use super::types::{DecodedRgbFrameStream, OwnedRgbFrame, RgbChannelOrder};
 use super::{
     error::MediaConnectorError,
+    runtime::MultimodalRuntime,
     types::{
         DecodedRgbFrame, DecodedRgbVideo, ImageDetail, ImageFrame, ImageSource, VideoClip,
         VideoSource,
@@ -120,10 +116,23 @@ pub struct MediaConnector {
     allowed_domains: Option<HashSet<String>>,
     allowed_local_media_path: Option<PathBuf>,
     fetch_timeout: Duration,
+    runtime: Arc<MultimodalRuntime>,
 }
 
 impl MediaConnector {
     pub fn new(client: Client, config: MediaConnectorConfig) -> Result<Self, MediaConnectorError> {
+        let runtime = Arc::new(
+            MultimodalRuntime::new()
+                .map_err(|error| MediaConnectorError::Runtime(error.to_string()))?,
+        );
+        Self::new_with_runtime(client, config, runtime)
+    }
+
+    pub fn new_with_runtime(
+        client: Client,
+        config: MediaConnectorConfig,
+        runtime: Arc<MultimodalRuntime>,
+    ) -> Result<Self, MediaConnectorError> {
         let allowed_domains = config.allowed_domains.map(|domains| {
             domains
                 .into_iter()
@@ -142,6 +151,7 @@ impl MediaConnector {
             allowed_domains,
             allowed_local_media_path,
             fetch_timeout: config.fetch_timeout,
+            runtime,
         })
     }
 
@@ -342,7 +352,13 @@ impl MediaConnector {
                 .await
                 .map_err(MediaConnectorError::Blocking)
         };
-        let decode = decode_video_frames_from_path(&canonical, bytes.len(), Some(&bytes), cfg);
+        let decode = decode_video_frames_from_path(
+            &canonical,
+            bytes.len(),
+            Some(&bytes),
+            cfg,
+            self.runtime.clone(),
+        );
         let (hash, decoded) = tokio::try_join!(hash, decode)?;
 
         Ok(Arc::new(video_clip_from_decoded(
@@ -391,7 +407,7 @@ impl MediaConnector {
                 .await
                 .map_err(MediaConnectorError::Blocking)
         };
-        let decode = decode_video_frames(bytes_for_decode, cfg);
+        let decode = decode_video_frames(bytes_for_decode, cfg, self.runtime.clone());
         let (hash, decoded) = tokio::try_join!(hash, decode)?;
 
         Ok(Arc::new(video_clip_from_decoded(
@@ -438,7 +454,10 @@ enum DecodedVideoFrames {
 async fn decode_video_frames(
     bytes: Bytes,
     cfg: VideoFetchConfig,
+    runtime: Arc<MultimodalRuntime>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    #[cfg(not(feature = "opencv-video"))]
+    let _ = &runtime;
     #[cfg(feature = "opencv-video")]
     let input_bytes = bytes.len();
     match video_decode_backend_override() {
@@ -447,8 +466,14 @@ async fn decode_video_frames(
             #[cfg(feature = "opencv-video")]
             {
                 let opencv_bytes = bytes.clone();
+                let opencv_runtime = runtime.clone();
                 let result = task::spawn_blocking(move || {
-                    decode_video_with_opencv_bytes_logged(&opencv_bytes, input_bytes, cfg)
+                    decode_video_with_opencv_bytes_logged(
+                        &opencv_bytes,
+                        input_bytes,
+                        cfg,
+                        &opencv_runtime,
+                    )
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?;
@@ -461,7 +486,7 @@ async fn decode_video_frames(
                                 "smg_mm_timing video_decode_opencv_buffer_fallback"
                             );
                         }
-                        decode_video_bytes_with_tempfile(bytes, cfg).await
+                        decode_video_bytes_with_tempfile(bytes, cfg, runtime).await
                     }
                 }
             }
@@ -479,8 +504,14 @@ async fn decode_video_frames(
             #[cfg(feature = "opencv-video")]
             {
                 let opencv_bytes = bytes.clone();
+                let opencv_runtime = runtime.clone();
                 let opencv_result = task::spawn_blocking(move || {
-                    decode_video_with_opencv_bytes_logged(&opencv_bytes, input_bytes, cfg)
+                    decode_video_with_opencv_bytes_logged(
+                        &opencv_bytes,
+                        input_bytes,
+                        cfg,
+                        &opencv_runtime,
+                    )
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?;
@@ -493,7 +524,7 @@ async fn decode_video_frames(
                                 "smg_mm_timing video_decode_auto_opencv_fallback"
                             );
                         }
-                        decode_video_bytes_with_tempfile(bytes, cfg)
+                        decode_video_bytes_with_tempfile(bytes, cfg, runtime)
                             .await
                             .map_err(|fallback_error| {
                                 MediaConnectorError::VideoDecode(format!(
@@ -515,6 +546,7 @@ async fn decode_video_frames(
 async fn decode_video_bytes_with_tempfile(
     bytes: Bytes,
     cfg: VideoFetchConfig,
+    runtime: Arc<MultimodalRuntime>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let input_bytes = bytes.len();
     let input_file = {
@@ -523,7 +555,7 @@ async fn decode_video_bytes_with_tempfile(
             .await
             .map_err(MediaConnectorError::Blocking)??
     };
-    decode_video_frames_from_path(input_file.path(), input_bytes, Some(&bytes), cfg).await
+    decode_video_frames_from_path(input_file.path(), input_bytes, Some(&bytes), cfg, runtime).await
 }
 
 async fn decode_video_bytes_with_ffmpeg(
@@ -546,7 +578,10 @@ async fn decode_video_frames_from_path(
     input_bytes: usize,
     input_data: Option<&Bytes>,
     cfg: VideoFetchConfig,
+    runtime: Arc<MultimodalRuntime>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    #[cfg(not(feature = "opencv-video"))]
+    let _ = &runtime;
     match video_decode_backend_override() {
         Some("ffmpeg") => decode_video_with_ffmpeg(input_path, input_bytes, input_data, cfg).await,
         Some("opencv") => {
@@ -554,7 +589,7 @@ async fn decode_video_frames_from_path(
             {
                 let input_path = input_path.to_path_buf();
                 task::spawn_blocking(move || {
-                    decode_video_with_opencv_logged(&input_path, input_bytes, cfg)
+                    decode_video_with_opencv_logged(&input_path, input_bytes, cfg, &runtime)
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?
@@ -575,8 +610,14 @@ async fn decode_video_frames_from_path(
                 // OpenCV samples by frame index while the FFmpeg fallback uses an
                 // fps filter, so the fallback can select a different frame set.
                 let opencv_input_path = input_path.to_path_buf();
+                let opencv_runtime = runtime.clone();
                 let opencv_result = task::spawn_blocking(move || {
-                    decode_video_with_opencv_logged(&opencv_input_path, input_bytes, cfg)
+                    decode_video_with_opencv_logged(
+                        &opencv_input_path,
+                        input_bytes,
+                        cfg,
+                        &opencv_runtime,
+                    )
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?;
@@ -656,9 +697,10 @@ fn decode_video_with_opencv_logged(
     input_path: &std::path::Path,
     input_bytes: usize,
     cfg: VideoFetchConfig,
+    runtime: &MultimodalRuntime,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let started = video_decode_timing_started();
-    let result = decode_video_with_opencv_file_stream(input_path, cfg);
+    let result = decode_video_with_opencv_file_stream(input_path, cfg, runtime);
     let backend = if matches!(&result, Ok(DecodedVideoFrames::RgbStream(_))) {
         "opencv_stream_startup"
     } else {
@@ -678,9 +720,10 @@ fn decode_video_with_opencv_bytes_logged(
     bytes: &[u8],
     input_bytes: usize,
     cfg: VideoFetchConfig,
+    runtime: &MultimodalRuntime,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let started = video_decode_timing_started();
-    let result = decode_video_with_opencv_bytes_stream(Bytes::copy_from_slice(bytes), cfg);
+    let result = decode_video_with_opencv_bytes_stream(Bytes::copy_from_slice(bytes), cfg, runtime);
     let backend = if matches!(&result, Ok(DecodedVideoFrames::RgbStream(_))) {
         "opencv_buffer_stream_startup"
     } else {
@@ -775,6 +818,7 @@ fn log_video_decode_backend_timing(
 fn decode_video_with_opencv_file_stream(
     input_path: &std::path::Path,
     cfg: VideoFetchConfig,
+    runtime: &MultimodalRuntime,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let input = input_path.to_str().ok_or_else(|| {
         MediaConnectorError::VideoDecode(format!(
@@ -782,9 +826,10 @@ fn decode_video_with_opencv_file_stream(
             input_path.display()
         ))
     })?;
-    let active_decode = ActiveOpenCvDecode::enter();
+    let active_decode = runtime.enter_video_decode(OPENCV_DECODE_BURST_COALESCE);
     let active_decodes = active_decode.count();
-    let decoder_threads = opencv_decoder_threads(active_decodes);
+    let decoder_threads =
+        adaptive_opencv_decoder_threads(active_decode.available_parallelism(), active_decodes);
     let capture = open_opencv_video_capture(input, decoder_threads)?;
     // Request-level parallelism already overlaps decode and preprocessing.
     // Adding another producer thread under load only increases CPU contention.
@@ -798,10 +843,12 @@ fn decode_video_with_opencv_file_stream(
 fn decode_video_with_opencv_bytes_stream(
     bytes: Bytes,
     cfg: VideoFetchConfig,
+    runtime: &MultimodalRuntime,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
-    let active_decode = ActiveOpenCvDecode::enter();
+    let active_decode = runtime.enter_video_decode(OPENCV_DECODE_BURST_COALESCE);
     let active_decodes = active_decode.count();
-    let decoder_threads = opencv_decoder_threads(active_decodes);
+    let decoder_threads =
+        adaptive_opencv_decoder_threads(active_decode.available_parallelism(), active_decodes);
     let capture = open_opencv_video_capture_from_buffer(&bytes, decoder_threads)?;
     // Recheck after capture startup so concurrent requests have time to enter.
     if active_decode.count() > 1 {
@@ -814,7 +861,7 @@ fn decode_video_with_opencv_bytes_stream(
 fn decode_video_from_opencv_capture_stream(
     mut capture: videoio::VideoCapture,
     cfg: VideoFetchConfig,
-    active_decode: ActiveOpenCvDecode,
+    active_decode: ActiveVideoDecode,
     encoded_bytes: Option<Bytes>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let total_frames = capture
@@ -1118,46 +1165,6 @@ fn open_opencv_video_capture(
     Err(MediaConnectorError::VideoDecode(format!(
         "OpenCV could not open video: {input}"
     )))
-}
-
-#[cfg(feature = "opencv-video")]
-struct ActiveOpenCvDecode {
-    count: usize,
-}
-
-#[cfg(feature = "opencv-video")]
-impl ActiveOpenCvDecode {
-    fn enter() -> Self {
-        ACTIVE_OPENCV_DECODES.fetch_add(1, Ordering::AcqRel);
-        // Let a burst of decode tasks become visible before dividing the CPU
-        // budget. The fixed window also covers blocking-pool ramp-up, where
-        // arrivals may briefly appear stable before the full burst.
-        std::thread::sleep(OPENCV_DECODE_BURST_COALESCE);
-        Self {
-            count: ACTIVE_OPENCV_DECODES.load(Ordering::Acquire),
-        }
-    }
-
-    fn count(&self) -> usize {
-        self.count
-    }
-}
-
-#[cfg(feature = "opencv-video")]
-impl Drop for ActiveOpenCvDecode {
-    fn drop(&mut self) {
-        ACTIVE_OPENCV_DECODES.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-#[cfg(feature = "opencv-video")]
-fn opencv_decoder_threads(active_decodes: usize) -> i32 {
-    let available = *AVAILABLE_OPENCV_CPUS.get_or_init(|| {
-        std::thread::available_parallelism()
-            .map(|parallelism| parallelism.get())
-            .unwrap_or(1)
-    });
-    adaptive_opencv_decoder_threads(available, active_decodes)
 }
 
 #[cfg(feature = "opencv-video")]

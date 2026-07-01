@@ -6,6 +6,7 @@ pub mod media;
 #[cfg(feature = "opencv-video")]
 mod opencv_buffer;
 pub mod registry;
+pub mod runtime;
 pub mod tracker;
 pub mod types;
 pub mod vision;
@@ -15,6 +16,7 @@ pub use media::{
     ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource, VideoFetchConfig,
 };
 pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
+pub use runtime::MultimodalRuntime;
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
     FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, MediaContentPart, Modality,

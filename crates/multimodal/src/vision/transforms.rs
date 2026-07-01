@@ -3,7 +3,7 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::{borrow::Cow, cell::RefCell, sync::OnceLock};
+use std::{borrow::Cow, cell::RefCell};
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -505,43 +505,9 @@ impl PilBicubicRgbPlan {
     }
 }
 
-const DEFAULT_PREPROCESS_POOL_THREADS: usize = 64;
 const PREPROCESS_PAR_MIN_BYTES: usize = 1 << 19;
 const PREPROCESS_PAR_MIN_ROWS: usize = 32;
 const PREPROCESS_PAR_MAX_THREADS: usize = 8;
-
-fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let available = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        let threads = available.min(DEFAULT_PREPROCESS_POOL_THREADS);
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|index| format!("smg-mm-preprocess-{index}"))
-            .build()
-            .ok()
-    })
-    .as_ref()
-}
-
-#[doc(hidden)]
-pub fn prewarm_preprocess_pool() {
-    let _ = preprocess_pool();
-}
-
-#[doc(hidden)]
-pub fn run_in_preprocess_pool<OP, R>(op: OP) -> R
-where
-    OP: FnOnce() -> R + Send,
-    R: Send,
-{
-    match preprocess_pool() {
-        Some(pool) => pool.install(op),
-        None => op(),
-    }
-}
 
 #[doc(hidden)]
 pub fn preprocess_parallelism(output_bytes: usize, work_items: usize) -> usize {
@@ -553,10 +519,7 @@ where
     OP: FnOnce(&rayon::Scope<'scope>) -> R + Send,
     R: Send,
 {
-    match preprocess_pool() {
-        Some(pool) => pool.scope(op),
-        None => rayon::scope(op),
-    }
+    rayon::scope(op)
 }
 
 /// Number of threads to split an elementwise or row-banded preprocessing pass
@@ -568,12 +531,7 @@ pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
     {
         return 1;
     }
-    static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
-    let avail = *AVAILABLE_PARALLELISM.get_or_init(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
+    let avail = rayon::current_num_threads();
     (out_rows / PREPROCESS_PAR_MIN_ROWS)
         .min(avail)
         .clamp(1, PREPROCESS_PAR_MAX_THREADS)

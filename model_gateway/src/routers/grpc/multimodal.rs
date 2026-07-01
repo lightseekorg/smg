@@ -20,11 +20,12 @@ use std::{
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    vision::transforms::{preprocess_parallelism, prewarm_preprocess_pool, run_in_preprocess_pool},
-    AsyncMultiModalTracker, DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame,
-    MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
-    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs,
-    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
+    vision::transforms::preprocess_parallelism, AsyncMultiModalTracker,
+    DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
+    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
+    ModelSpecificValue, MultimodalRuntime, PlaceholderRange, PreProcessorConfig,
+    PreprocessedEncoderInputs, PromptReplacement, TrackedMedia, TrackerOutput, VideoClip,
+    VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
 use ndarray::{ArrayD, ArrayViewD, Axis, Slice};
@@ -75,22 +76,6 @@ fn log_mm_timing_enabled() -> bool {
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false)
     })
-}
-
-async fn ensure_preprocess_pool_ready() -> Result<()> {
-    static READY: tokio::sync::OnceCell<std::result::Result<(), String>> =
-        tokio::sync::OnceCell::const_new();
-    match READY
-        .get_or_init(|| async {
-            tokio::task::spawn_blocking(prewarm_preprocess_pool)
-                .await
-                .map_err(|error| error.to_string())
-        })
-        .await
-    {
-        Ok(()) => Ok(()),
-        Err(error) => anyhow::bail!("Failed to initialize multimodal preprocessing pool: {error}"),
-    }
 }
 
 impl MultimodalConfigRegistry {
@@ -259,6 +244,7 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
 
 /// Shared multimodal components injected at router creation time.
 pub(crate) struct MultimodalComponents {
+    pub runtime: Arc<MultimodalRuntime>,
     pub media_connector: Arc<MediaConnector>,
     pub vision_processor_registry: Arc<VisionProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
@@ -274,10 +260,17 @@ impl MultimodalComponents {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("Failed to create reqwest client")?;
-        let media_connector = MediaConnector::new(client, MediaConnectorConfig::default())
-            .context("Failed to create MediaConnector")?;
+        let runtime =
+            Arc::new(MultimodalRuntime::new().context("Failed to create multimodal runtime")?);
+        let media_connector = MediaConnector::new_with_runtime(
+            client,
+            MediaConnectorConfig::default(),
+            runtime.clone(),
+        )
+        .context("Failed to create MediaConnector")?;
 
         Ok(Self {
+            runtime,
             media_connector: Arc::new(media_connector),
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
@@ -580,7 +573,6 @@ async fn process_multimodal_parts(
     let log_timing = log_mm_timing_enabled();
     let total_started = log_timing.then(Instant::now);
     let media_started = log_timing.then(Instant::now);
-    let preprocess_pool_ready = ensure_preprocess_pool_ready();
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
 
     for part in content_parts {
@@ -616,9 +608,7 @@ async fn process_multimodal_parts(
         ))
     };
 
-    let (tracker_result, config_result, preprocess_pool_result) =
-        tokio::join!(media_future, config_future, preprocess_pool_ready);
-    preprocess_pool_result?;
+    let (tracker_result, config_result) = tokio::join!(media_future, config_future);
     let (tracker_output, media_elapsed_ms) = tracker_result?;
 
     let images: Vec<Arc<ImageFrame>> = tracker_output
@@ -722,80 +712,19 @@ async fn process_multimodal_parts(
     let model_type_for_preprocess = model_type_owned.clone();
     let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
     let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
+    let runtime = components.runtime.clone();
     let preprocess_task = tokio::task::spawn_blocking(move || {
-        let processor = registry
-            .find(&model_id_owned, model_type_for_preprocess.as_deref())
-            .ok_or_else(|| {
-                anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
-            })?;
-
-        match modality {
-            Modality::Image => {
-                if images_for_preprocess.len() == 1 {
-                    let raw_images = [&images_for_preprocess[0].image];
-                    return processor
-                        .preprocess_image_refs_deferred(&raw_images, &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"));
-                }
-                let raw_images: Vec<&image::DynamicImage> =
-                    images_for_preprocess.iter().map(|f| &f.image).collect();
-                processor
-                    .preprocess_image_refs(&raw_images, &pp_config)
-                    .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
-            }
-            Modality::Video => {
-                let video = videos_for_preprocess
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
-
-                if let Some(stream) = video
-                    .take_rgb_stream()
-                    .map_err(|e| anyhow::anyhow!("Video frame stream unavailable: {e}"))?
-                {
-                    return processor
-                        .preprocess_video_rgb_stream_deferred(stream, &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Video stream preprocessing failed: {e}"));
-                }
-
-                if !video.frames().is_empty() {
-                    return processor
-                        .preprocess_video(video.frames(), &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
-                }
-
-                if let Some(rgb_video) = video.rgb_video() {
-                    match rgb_video.frame_refs() {
-                        Ok(frame_refs) => {
-                            match processor.preprocess_video_rgb_deferred(&frame_refs, &pp_config) {
-                                Ok(preprocessed) => return Ok(preprocessed),
-                                Err(error) => {
-                                    warn!(
-                                        error = %error,
-                                        "RGB video preprocessing fast path failed; falling back to materialized frames"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                error = %error,
-                                "RGB video frame refs are invalid; falling back to materialized frames"
-                            );
-                        }
-                    }
-                }
-
-                let frames = video
-                    .materialized_frames()
-                    .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
-                processor
-                    .preprocess_video(&frames, &pp_config)
-                    .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
-            }
-            _ => Err(anyhow::anyhow!(
-                "Unsupported modality for preprocessing: {modality}"
-            )),
-        }
+        runtime.run_cpu(|| {
+            preprocess_media(
+                &registry,
+                &model_id_owned,
+                model_type_for_preprocess.as_deref(),
+                modality,
+                &images_for_preprocess,
+                &videos_for_preprocess,
+                &pp_config,
+            )
+        })
     });
 
     let placeholder_ids_result: Result<(Option<u32>, Option<u32>)> = (|| {
@@ -916,6 +845,92 @@ async fn process_multimodal_parts(
         expanded_token_ids: expanded.token_ids,
         intermediate,
     })
+}
+
+fn preprocess_media(
+    registry: &VisionProcessorRegistry,
+    model_id: &str,
+    model_type: Option<&str>,
+    modality: Modality,
+    images: &[Arc<ImageFrame>],
+    videos: &[Arc<VideoClip>],
+    config: &PreProcessorConfig,
+) -> Result<PreprocessedEncoderInputs> {
+    let processor = registry
+        .find(model_id, model_type)
+        .ok_or_else(|| anyhow::anyhow!("No vision processor found for model: {model_id}"))?;
+
+    match modality {
+        Modality::Image => {
+            if images.len() == 1 {
+                let raw_images = [&images[0].image];
+                return processor
+                    .preprocess_image_refs_deferred(&raw_images, config)
+                    .map_err(|error| anyhow::anyhow!("Image preprocessing failed: {error}"));
+            }
+            let raw_images: Vec<&image::DynamicImage> =
+                images.iter().map(|frame| &frame.image).collect();
+            processor
+                .preprocess_image_refs(&raw_images, config)
+                .map_err(|error| anyhow::anyhow!("Image preprocessing failed: {error}"))
+        }
+        Modality::Video => preprocess_video(processor, videos, config),
+        _ => Err(anyhow::anyhow!(
+            "Unsupported modality for preprocessing: {modality}"
+        )),
+    }
+}
+
+fn preprocess_video(
+    processor: &dyn llm_multimodal::VisionPreProcessor,
+    videos: &[Arc<VideoClip>],
+    config: &PreProcessorConfig,
+) -> Result<PreprocessedEncoderInputs> {
+    let video = videos
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+
+    if let Some(stream) = video
+        .take_rgb_stream()
+        .map_err(|error| anyhow::anyhow!("Video frame stream unavailable: {error}"))?
+    {
+        return processor
+            .preprocess_video_rgb_stream_deferred(stream, config)
+            .map_err(|error| anyhow::anyhow!("Video stream preprocessing failed: {error}"));
+    }
+
+    if !video.frames().is_empty() {
+        return processor
+            .preprocess_video(video.frames(), config)
+            .map_err(|error| anyhow::anyhow!("Video preprocessing failed: {error}"));
+    }
+
+    if let Some(rgb_video) = video.rgb_video() {
+        match rgb_video.frame_refs() {
+            Ok(frame_refs) => match processor.preprocess_video_rgb_deferred(&frame_refs, config) {
+                Ok(preprocessed) => return Ok(preprocessed),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "RGB video preprocessing fast path failed; falling back to materialized frames"
+                    );
+                }
+            },
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "RGB video frame refs are invalid; falling back to materialized frames"
+                );
+            }
+        }
+    }
+
+    let frames = video
+        .materialized_frames()
+        .map_err(|error| anyhow::anyhow!("Video frame materialization failed: {error}"))?;
+    processor
+        .preprocess_video(&frames, config)
+        .map_err(|error| anyhow::anyhow!("Video preprocessing failed: {error}"))
 }
 
 /// Output of token expansion, containing both full structural and patch-only ranges.
@@ -1048,8 +1063,9 @@ pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
+    runtime: &MultimodalRuntime,
 ) -> Result<MultimodalData> {
-    match intermediate {
+    runtime.run_cpu(|| match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
             GrpcClient::Sglang(_) => {
                 ensure_image_only(&precomputed, "SGLang")?;
@@ -1075,7 +1091,7 @@ pub(crate) fn assemble_multimodal_data(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
             ),
         },
-    }
+    })
 }
 
 fn materialize_deferred_encoder_input(
@@ -2281,14 +2297,12 @@ where
     }
 
     let chunk_values = values.len().div_ceil(workers);
-    run_in_preprocess_pool(|| {
-        bytes
-            .par_chunks_mut(chunk_values * size_of::<u16>())
-            .zip(values.par_chunks(chunk_values))
-            .for_each(|(output, values)| {
-                fill_f32_values_as_u16_bytes(output, values.iter().copied(), convert);
-            });
-    });
+    bytes
+        .par_chunks_mut(chunk_values * size_of::<u16>())
+        .zip(values.par_chunks(chunk_values))
+        .for_each(|(output, values)| {
+            fill_f32_values_as_u16_bytes(output, values.iter().copied(), convert);
+        });
 }
 
 fn fill_f32_values_as_u16_bytes<I, F>(bytes: &mut [u8], values: I, convert: F)
