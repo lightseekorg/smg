@@ -22,7 +22,7 @@ pub(super) use tokenspeed::{
     validate_tokenspeed_item_spans,
 };
 
-use super::{MultimodalIntermediate, PrecomputedMultimodalIntermediate, PreparedMedia};
+use super::{MultimodalIntermediate, PreparedMedia};
 use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
@@ -43,38 +43,34 @@ pub(crate) fn assemble_multimodal_data(
     workers: Option<&WorkerSelection>,
     runtime: &MultimodalRuntime,
 ) -> Result<MultimodalData> {
-    runtime.run_cpu(|| match intermediate {
-        MultimodalIntermediate::Precomputed(precomputed) => match client {
-            GrpcClient::Sglang(_) => Ok(MultimodalData::Sglang(assemble_sglang(
-                materialize_encoder_input(precomputed)?,
-            )?)),
-            GrpcClient::Vllm(_) => Ok(MultimodalData::Vllm(assemble_vllm(
-                materialize_encoder_input(precomputed)?,
-            )?)),
-            GrpcClient::Trtllm(_) => Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)?)),
-            GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
-                precomputed,
-                workers,
-            )?)),
-            GrpcClient::Mlx(_) => unreachable!(
-                "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
-            ),
-        },
+    runtime.run_cpu(|| match client {
+        GrpcClient::Sglang(_) => Ok(MultimodalData::Sglang(assemble_sglang(
+            materialize_encoder_input(intermediate)?,
+        )?)),
+        GrpcClient::Vllm(_) => Ok(MultimodalData::Vllm(assemble_vllm(
+            materialize_encoder_input(intermediate)?,
+        )?)),
+        GrpcClient::Trtllm(_) => Ok(MultimodalData::Trtllm(assemble_trtllm(intermediate)?)),
+        GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
+            intermediate,
+            workers,
+        )?)),
+        GrpcClient::Mlx(_) => unreachable!(
+            "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
+        ),
     })
 }
 
 fn materialize_encoder_input(
-    mut intermediate: PrecomputedMultimodalIntermediate,
-) -> Result<PrecomputedMultimodalIntermediate> {
+    mut intermediate: MultimodalIntermediate,
+) -> Result<MultimodalIntermediate> {
     Arc::make_mut(&mut intermediate.preprocessed)
         .materialize_encoder_input()
         .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
     Ok(intermediate)
 }
 
-fn assemble_sglang(
-    intermediate: PrecomputedMultimodalIntermediate,
-) -> Result<SglangMultimodalData> {
+fn assemble_sglang(intermediate: MultimodalIntermediate) -> Result<SglangMultimodalData> {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
@@ -104,7 +100,7 @@ fn assemble_sglang(
     })
 }
 
-fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> Result<VllmMultimodalData> {
+fn assemble_vllm(intermediate: MultimodalIntermediate) -> Result<VllmMultimodalData> {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
@@ -133,9 +129,7 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> Result<Vllm
     })
 }
 
-fn assemble_trtllm(
-    intermediate: PrecomputedMultimodalIntermediate,
-) -> Result<TrtllmMultimodalData> {
+fn assemble_trtllm(intermediate: MultimodalIntermediate) -> Result<TrtllmMultimodalData> {
     let image_data = prepared_images(&intermediate.media, "TRT-LLM")?
         .iter()
         .map(|f| f.raw_bytes.to_vec())

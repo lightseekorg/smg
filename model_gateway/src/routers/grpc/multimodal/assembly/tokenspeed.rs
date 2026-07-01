@@ -17,7 +17,7 @@ pub(in crate::routers::grpc::multimodal) use transport::{
 use transport::{resolve_tokenspeed_shm_enabled, tokenspeed_encoder_input_dtype};
 
 use super::{
-    super::{log_mm_timing_enabled, PrecomputedMultimodalIntermediate},
+    super::{log_mm_timing_enabled, MultimodalIntermediate},
     serialization::model_specific_to_tensor_bytes,
 };
 use crate::routers::grpc::{
@@ -29,7 +29,7 @@ use crate::routers::grpc::{
 };
 
 pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
-    mut intermediate: PrecomputedMultimodalIntermediate,
+    mut intermediate: MultimodalIntermediate,
     workers: Option<&WorkerSelection>,
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
@@ -256,9 +256,7 @@ struct PendingTokenSpeedItem<'a> {
 
 type FlatItemSpans = HashMap<String, Vec<(usize, usize)>>;
 
-fn precomputed_multimodal_item_count(
-    intermediate: &PrecomputedMultimodalIntermediate,
-) -> Result<usize> {
+fn precomputed_multimodal_item_count(intermediate: &MultimodalIntermediate) -> Result<usize> {
     let modality = intermediate.media.modality();
     let media_count = intermediate.media.item_count();
     let token_count = intermediate.preprocessed.feature_token_counts.len();
@@ -643,10 +641,7 @@ fn patch_offsets_sorted(patch_offsets: &[(u32, u32)]) -> bool {
         .all(|window| window[0].0 <= window[1].0)
 }
 
-fn content_hash_for_item(
-    intermediate: &PrecomputedMultimodalIntermediate,
-    item_index: usize,
-) -> Vec<u8> {
+fn content_hash_for_item(intermediate: &MultimodalIntermediate, item_index: usize) -> Vec<u8> {
     intermediate
         .media
         .content_hash(item_index)

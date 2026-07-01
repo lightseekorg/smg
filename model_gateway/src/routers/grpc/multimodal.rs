@@ -283,14 +283,9 @@ pub(crate) struct MultimodalOutput {
 ///
 /// Holds all preprocessing results without serializing tensors to bytes.
 /// The assembly stage converts this into backend-specific data
-/// variant once the target backend is known (after worker selection).
+/// once the target backend is known (after worker selection).
 #[derive(Debug)]
-pub(crate) enum MultimodalIntermediate {
-    Precomputed(PrecomputedMultimodalIntermediate),
-}
-
-#[derive(Debug)]
-pub(crate) struct PrecomputedMultimodalIntermediate {
+pub(crate) struct MultimodalIntermediate {
     /// Fetched media in exactly one active modality.
     pub media: PreparedMedia,
     /// Preprocessed encoder input and model-specific tensors (not yet serialized).
@@ -837,7 +832,7 @@ async fn process_multimodal_parts(
             ));
         }
     };
-    let intermediate = MultimodalIntermediate::Precomputed(PrecomputedMultimodalIntermediate {
+    let intermediate = MultimodalIntermediate {
         media,
         preprocessed,
         placeholders: expanded.placeholders,
@@ -845,7 +840,7 @@ async fn process_multimodal_parts(
         placeholder_token_id,
         field_layouts: spec.field_layouts(),
         keep_on_cpu_keys: spec.keep_on_cpu_keys(),
-    });
+    };
 
     if let Some((image_count, video_count, video_frame_count, original_tokens, expanded_tokens)) =
         timing_counts
@@ -1606,7 +1601,7 @@ mod tests {
             )),
         ];
 
-        let intermediate = PrecomputedMultimodalIntermediate {
+        let intermediate = MultimodalIntermediate {
             media: PreparedMedia::Images(images),
             preprocessed: Arc::new(preprocessed),
             placeholders: vec![
@@ -1712,7 +1707,7 @@ mod tests {
             )),
         ];
 
-        let intermediate = PrecomputedMultimodalIntermediate {
+        let intermediate = MultimodalIntermediate {
             media: PreparedMedia::Videos(videos),
             preprocessed: Arc::new(preprocessed),
             placeholders: vec![
