@@ -23,7 +23,7 @@ use image::DynamicImage;
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
-    processor::{PreprocessRequest, PreprocessedEncoderInputs, VisionPreProcessor},
+    processor::{PreprocessedEncoderInputs, VisionPreProcessor, VisionPreprocessRequest},
     transforms::TransformError,
 };
 
@@ -238,7 +238,7 @@ impl VisionPreProcessor for Qwen3VLProcessor {
 
     fn preprocess_vision_input(
         &self,
-        request: PreprocessRequest<'_>,
+        request: VisionPreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         let processor = self.with_preprocessor_config(config);
@@ -270,8 +270,8 @@ mod tests {
         vision::{
             preprocessor_config::PatchSize,
             processor::{
-                ModalityInput, ModalityPreProcessor, ModelSpecificValue, OutputPreference,
-                VideoInput,
+                ModalityPreProcessor, ModelSpecificValue, OutputPreference, PreprocessRequest,
+                VideoInput, VisionInput,
             },
         },
         RgbFrameRef,
@@ -465,13 +465,11 @@ mod tests {
         ];
 
         let result = processor
-            .preprocess_input(
-                PreprocessRequest {
-                    input: ModalityInput::Video(VideoInput::Frames(&frames)),
-                    output: OutputPreference::Materialized,
-                },
-                &config,
-            )
+            .preprocess_input(PreprocessRequest::Vision {
+                input: VisionInput::Video(VideoInput::Frames(&frames)),
+                output: OutputPreference::Materialized,
+                config: &config,
+            })
             .unwrap();
         assert_eq!(result.encoder_input.ndim(), 2);
         assert_eq!(result.feature_token_counts.len(), 1);
@@ -518,22 +516,18 @@ mod tests {
             .collect();
 
         let dynamic = processor
-            .preprocess_input(
-                PreprocessRequest {
-                    input: ModalityInput::Video(VideoInput::Frames(&frames)),
-                    output: OutputPreference::Materialized,
-                },
-                &config,
-            )
+            .preprocess_input(PreprocessRequest::Vision {
+                input: VisionInput::Video(VideoInput::Frames(&frames)),
+                output: OutputPreference::Materialized,
+                config: &config,
+            })
             .unwrap();
         let rgb = processor
-            .preprocess_input(
-                PreprocessRequest {
-                    input: ModalityInput::Video(VideoInput::Rgb(&rgb_frames)),
-                    output: OutputPreference::Materialized,
-                },
-                &config,
-            )
+            .preprocess_input(PreprocessRequest::Vision {
+                input: VisionInput::Video(VideoInput::Rgb(&rgb_frames)),
+                output: OutputPreference::Materialized,
+                config: &config,
+            })
             .unwrap();
 
         assert_eq!(rgb.encoder_input.shape(), dynamic.encoder_input.shape());

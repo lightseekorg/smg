@@ -26,7 +26,7 @@ pub use types::{
 // Re-export vision processing components
 pub use vision::{
     DeferredNormalizedEncoderInput, EncoderInput, LlavaNextProcessor, LlavaProcessor,
-    ModalityInput, ModalityPreProcessor, ModalityProcessorRegistry, ModelSpecificValue,
-    OutputPreference, PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs,
-    TransformError, VideoInput, VisionPreProcessor, VisionProcessorRegistry,
+    ModalityPreProcessor, ModalityProcessorRegistry, ModelSpecificValue, OutputPreference,
+    PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs, TransformError, VideoInput,
+    VisionInput, VisionPreProcessor, VisionPreprocessRequest, VisionProcessorRegistry,
 };

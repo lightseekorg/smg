@@ -31,8 +31,9 @@ use crate::{
     vision::{
         preprocessor_config::PreProcessorConfig,
         processor::{
-            DeferredNormalizedEncoderInput, ModalityInput, ModelSpecificValue, OutputPreference,
-            PreprocessRequest, PreprocessedEncoderInputs, VideoInput, VisionPreProcessor,
+            DeferredNormalizedEncoderInput, ModelSpecificValue, OutputPreference,
+            PreprocessedEncoderInputs, VideoInput, VisionInput, VisionPreProcessor,
+            VisionPreprocessRequest,
         },
         transforms::{
             par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
@@ -2062,26 +2063,24 @@ impl VisionPreProcessor for QwenVLProcessorBase {
 
     fn preprocess_vision_input(
         &self,
-        request: PreprocessRequest<'_>,
+        request: VisionPreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         match request.input {
-            ModalityInput::Images(images) => match request.output {
+            VisionInput::Images(images) => match request.output {
                 OutputPreference::Materialized => self.preprocess_image_refs(images, config),
                 OutputPreference::CompactAllowed => {
                     self.preprocess_image_refs_deferred(images, config)
                 }
             },
-            ModalityInput::Video(VideoInput::Frames(frames)) => {
-                self.preprocess_video(frames, config)
-            }
-            ModalityInput::Video(VideoInput::Rgb(frames)) => match request.output {
+            VisionInput::Video(VideoInput::Frames(frames)) => self.preprocess_video(frames, config),
+            VisionInput::Video(VideoInput::Rgb(frames)) => match request.output {
                 OutputPreference::Materialized => self.preprocess_video_rgb(frames, config),
                 OutputPreference::CompactAllowed => {
                     self.preprocess_video_rgb_deferred(frames, config)
                 }
             },
-            ModalityInput::Video(VideoInput::RgbStream(stream)) => {
+            VisionInput::Video(VideoInput::RgbStream(stream)) => {
                 let mut output = self.preprocess_video_rgb_stream_deferred(stream, config)?;
                 if request.output == OutputPreference::Materialized {
                     output.materialize_encoder_input()?;
@@ -2128,7 +2127,10 @@ mod tests {
     use image::RgbImage;
 
     use super::*;
-    use crate::vision::{processor::ModalityPreProcessor, transforms::to_tensor_and_normalize};
+    use crate::vision::{
+        processor::{ModalityPreProcessor, PreprocessRequest},
+        transforms::to_tensor_and_normalize,
+    };
 
     fn create_test_config() -> QwenVLConfig {
         QwenVLConfig {
@@ -2570,16 +2572,14 @@ mod tests {
             }
         });
         let mut streamed = processor
-            .preprocess_input(
-                PreprocessRequest {
-                    input: ModalityInput::Video(VideoInput::RgbStream(DecodedRgbFrameStream::new(
-                        expected_frames,
-                        receiver,
-                    ))),
-                    output: OutputPreference::CompactAllowed,
-                },
-                &config,
-            )
+            .preprocess_input(PreprocessRequest::Vision {
+                input: VisionInput::Video(VideoInput::RgbStream(DecodedRgbFrameStream::new(
+                    expected_frames,
+                    receiver,
+                ))),
+                output: OutputPreference::CompactAllowed,
+                config: &config,
+            })
             .unwrap();
         producer.join().unwrap();
 

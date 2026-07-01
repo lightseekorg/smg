@@ -235,13 +235,8 @@ pub struct PreprocessedEncoderInputs {
     pub model_specific: HashMap<String, ModelSpecificValue>,
 }
 
-/// Modality payload supplied to a preprocessor.
-///
-/// This enum is intentionally exhaustive. Adding audio or another modality
-/// should add a representation-neutral variant here, making every processor
-/// dispatch site handle the new input explicitly without changing the serving
-/// contract.
-pub enum ModalityInput<'a> {
+/// Decoded vision payload supplied to a vision preprocessor.
+pub enum VisionInput<'a> {
     Images(&'a [&'a DynamicImage]),
     Video(VideoInput<'a>),
 }
@@ -263,9 +258,22 @@ pub enum OutputPreference {
     CompactAllowed,
 }
 
-pub struct PreprocessRequest<'a> {
-    pub input: ModalityInput<'a>,
+pub struct VisionPreprocessRequest<'a> {
+    pub input: VisionInput<'a>,
     pub output: OutputPreference,
+}
+
+/// Typed modality request supplied to the serving preprocessor contract.
+///
+/// Each variant owns the matching input and configuration types. Adding audio
+/// or another modality therefore requires explicit dispatch without forcing
+/// it through vision-specific configuration.
+pub enum PreprocessRequest<'a> {
+    Vision {
+        input: VisionInput<'a>,
+        output: OutputPreference,
+        config: &'a PreProcessorConfig,
+    },
 }
 
 /// Physical representation of a preprocessed modality encoder input.
@@ -621,7 +629,6 @@ pub trait ModalityPreProcessor: Send + Sync {
     fn preprocess_input(
         &self,
         request: PreprocessRequest<'_>,
-        config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError>;
 }
 
@@ -636,9 +643,14 @@ where
     fn preprocess_input(
         &self,
         request: PreprocessRequest<'_>,
-        config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.preprocess_vision_input(request, config)
+        match request {
+            PreprocessRequest::Vision {
+                input,
+                output,
+                config,
+            } => self.preprocess_vision_input(VisionPreprocessRequest { input, output }, config),
+        }
     }
 }
 
@@ -672,18 +684,18 @@ pub trait VisionPreProcessor: Send + Sync {
     /// the request permits it.
     fn preprocess_vision_input(
         &self,
-        request: PreprocessRequest<'_>,
+        request: VisionPreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         match request.input {
-            ModalityInput::Images(images) => {
+            VisionInput::Images(images) => {
                 let owned = images
                     .iter()
                     .map(|image| (**image).clone())
                     .collect::<Vec<_>>();
                 self.preprocess(&owned, config)
             }
-            ModalityInput::Video(_) => Err(TransformError::ShapeError(format!(
+            VisionInput::Video(_) => Err(TransformError::ShapeError(format!(
                 "{} does not support video preprocessing",
                 self.model_name()
             ))),
@@ -851,7 +863,6 @@ mod tests {
         fn preprocess_input(
             &self,
             _request: PreprocessRequest<'_>,
-            _config: &PreProcessorConfig,
         ) -> Result<PreprocessedEncoderInputs, TransformError> {
             Err(TransformError::ShapeError(
                 "test processor has no payload implementation".to_string(),

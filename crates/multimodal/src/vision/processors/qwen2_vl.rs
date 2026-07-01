@@ -24,7 +24,9 @@ use image::DynamicImage;
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
-    processor::{ModalityInput, PreprocessRequest, PreprocessedEncoderInputs, VisionPreProcessor},
+    processor::{
+        PreprocessedEncoderInputs, VisionInput, VisionPreProcessor, VisionPreprocessRequest,
+    },
     transforms::TransformError,
 };
 
@@ -233,10 +235,10 @@ impl VisionPreProcessor for Qwen2VLProcessor {
 
     fn preprocess_vision_input(
         &self,
-        request: PreprocessRequest<'_>,
+        request: VisionPreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        if matches!(&request.input, ModalityInput::Video(_)) {
+        if matches!(&request.input, VisionInput::Video(_)) {
             return Err(TransformError::ShapeError(format!(
                 "{} does not support video preprocessing",
                 self.model_name()
