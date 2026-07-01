@@ -590,6 +590,75 @@ pub(crate) fn write_tokenspeed_shm_with(
     })
 }
 
+/// Creates a fixed-size TokenSpeed SHM segment and exposes its mapped payload.
+///
+/// This avoids an intermediate conversion buffer for large encoder tensors:
+/// callers can convert directly into the pages the worker will consume.
+pub(crate) fn write_tokenspeed_shm_mapped(
+    nbytes: usize,
+    write_fn: impl FnOnce(&mut [u8]) -> std::io::Result<()>,
+) -> std::io::Result<tokenspeed::ShmHandle> {
+    if nbytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TokenSpeed SHM mapping must not be empty",
+        ));
+    }
+
+    sweep_orphan_tokenspeed_shm_once();
+    let name = next_tokenspeed_shm_name();
+    let path = tokenspeed_shm_path(&name);
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&path)?;
+    let file_len = u64::try_from(nbytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TokenSpeed SHM mapping length does not fit in u64",
+        )
+    })?;
+    if let Err(error) = file.set_len(file_len) {
+        drop(file);
+        let _ = remove_file(&path);
+        return Err(error);
+    }
+
+    let mut mapping = match map_tokenspeed_shm(&file, nbytes) {
+        Ok(mapping) => mapping,
+        Err(error) => {
+            drop(file);
+            let _ = remove_file(&path);
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_fn(&mut mapping) {
+        drop(mapping);
+        drop(file);
+        let _ = remove_file(&path);
+        return Err(error);
+    }
+    drop(mapping);
+
+    Ok(tokenspeed::ShmHandle {
+        name,
+        offset: 0,
+        nbytes: file_len,
+        owner_id: format!("smg:{}", process::id()),
+    })
+}
+
+// Mapping a newly-created, exclusively owned file is the only unsafe operation
+// needed for direct SHM serialization. The mapping cannot outlive `file` here.
+#[expect(unsafe_code, reason = "memmap2 requires unsafe mapping creation")]
+fn map_tokenspeed_shm(file: &std::fs::File, nbytes: usize) -> std::io::Result<memmap2::MmapMut> {
+    unsafe { memmap2::MmapOptions::new().len(nbytes).map_mut(file) }
+}
+
 pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
     inputs: &tokenspeed::MultimodalInputs,
 ) -> Vec<tokenspeed::ShmHandle> {

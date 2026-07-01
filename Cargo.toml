@@ -30,6 +30,7 @@ axum = { version = "0.8.9" }
 blake3 = "1.8"
 lz4_flex = "0.13"
 bytemuck = { version = "1.25" }
+memmap2 = "0.9"
 chrono = { version = "0.4" }
 dashmap = "6.2.1"
 http = "1.4.2"
