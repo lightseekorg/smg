@@ -78,3 +78,15 @@ def test_domain_scores_on_real_fixture():
     scores = run_ab.domain_scores(results, k=2)
     assert scores["pass1"] == pytest.approx(0.5)
     assert scores["passk"] == pytest.approx(1 / 3)
+
+
+def test_save_load_scores_roundtrip(tmp_path):
+    # Sequential mode persists one arm's per-domain scores, then --diff reloads them.
+    arm = run_ab.Arm(
+        name="vllm", base_url="http://x:1", scores={"retail": {"pass1": 0.7, "passk": 0.5}}
+    )
+    path = tmp_path / "vllm.json"
+    run_ab.save_scores(arm, path)
+    back = run_ab.load_scores(path)
+    assert back.name == "vllm"
+    assert back.scores == {"retail": {"pass1": 0.7, "passk": 0.5}}

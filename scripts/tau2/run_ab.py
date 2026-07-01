@@ -11,6 +11,7 @@ frontend (tokenization + tool/reasoning parsing). Arms must already be serving
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -201,6 +202,74 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
     return "\n".join(lines), payload
 
 
+def score_arm(
+    arm: Arm,
+    *,
+    tau2: str,
+    agent_model: str,
+    domains: list[str],
+    num_trials: int,
+    num_tasks: int,
+    max_concurrency: int,
+    user_llm: str,
+    data_dir: Path,
+) -> None:
+    """Run tau2 for every domain against one already-serving arm, filling arm.scores."""
+    for domain in domains:
+        run_tau2(
+            arm,
+            tau2=tau2,
+            agent_model=agent_model,
+            domain=domain,
+            num_trials=num_trials,
+            num_tasks=num_tasks,
+            max_concurrency=max_concurrency,
+            user_llm=user_llm,
+            data_dir=data_dir,
+        )
+
+
+def save_scores(arm: Arm, path: Path) -> None:
+    """Persist one arm's per-domain scores so a later --diff can compare them.
+
+    Sequential mode: a whole-node model (TP=8) can't run both arms at once, so
+    each arm is scored on its own and the two score files are diffed afterwards.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"name": arm.name, "base_url": arm.base_url, "scores": arm.scores}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_scores(path: Path) -> Arm:
+    """Rebuild an Arm (name + per-domain scores) from a file written by save_scores."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return Arm(name=data["name"], base_url=data.get("base_url", ""), scores=data["scores"])
+
+
+def write_report_and_gate(
+    baseline: Arm, candidate: Arm, domains: list[str], k: int, args: argparse.Namespace
+) -> int:
+    """Emit the markdown + JSON comparison and apply the informational regression gate."""
+    report_md, payload = build_report(baseline, candidate, domains, k)
+    print("\n" + report_md)
+    if args.out:
+        args.out.write_text(report_md + "\n", encoding="utf-8")
+    if args.json_out:
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    delta = payload["overall"]["passk"]["delta"]
+    if delta is not None and delta < -args.tolerance:
+        print(
+            f"\nREGRESSION: {candidate.name} pass^{k} {delta * 100:.2f}pp "
+            f"below {baseline.name} (tol {args.tolerance * 100:.2f}pp)",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _parse_arm(spec: str) -> Arm:
     name, url = spec.split("=", 1)
     return Arm(name=name, base_url=url)
@@ -208,8 +277,15 @@ def _parse_arm(spec: str) -> Arm:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--baseline", required=True, help="name=base_url")
-    p.add_argument("--candidate", required=True, help="name=base_url")
+    # Concurrent mode (both arms serving at once on opposite GPU halves): pass both.
+    p.add_argument("--baseline", help="name=base_url (concurrent mode)")
+    p.add_argument("--candidate", help="name=base_url (concurrent mode)")
+    # Sequential mode (one arm owns the whole node, TP=8): score one live arm now,
+    # then later diff the two saved score files.
+    p.add_argument("--score-arm", help="name=base_url of the single live arm to score")
+    p.add_argument("--scores-out", type=Path, help="write this arm's per-domain scores JSON here")
+    p.add_argument("--diff-baseline", type=Path, help="baseline scores JSON (from --scores-out)")
+    p.add_argument("--diff-candidate", type=Path, help="candidate scores JSON (from --scores-out)")
     p.add_argument("--domains", default="retail,airline,telecom")
     p.add_argument("--num-trials", type=int, default=2)
     p.add_argument("--num-tasks", type=int, default=0, help="0 = all tasks")
@@ -229,7 +305,6 @@ def main() -> int:
     p.add_argument(
         "--data-dir",
         type=Path,
-        required=True,
         help="tau2 DATA_DIR (results written/read under <data-dir>/simulations)",
     )
     p.add_argument("--tolerance", type=float, default=0.02)
@@ -238,37 +313,60 @@ def main() -> int:
     args = p.parse_args()
 
     domains = [d.strip() for d in args.domains.split(",") if d.strip()]
+
+    # Mode: diff two previously-saved score files (sequential mode, final step).
+    if args.diff_baseline or args.diff_candidate:
+        if not (args.diff_baseline and args.diff_candidate):
+            p.error("--diff-baseline and --diff-candidate must be given together")
+        baseline = load_scores(args.diff_baseline)
+        candidate = load_scores(args.diff_candidate)
+        diff_domains = sorted(set(baseline.scores) | set(candidate.scores)) or domains
+        return write_report_and_gate(baseline, candidate, diff_domains, args.num_trials, args)
+
+    # Mode: score a single live arm and persist its scores (sequential mode, per arm).
+    if args.score_arm:
+        if not (args.scores_out and args.data_dir):
+            p.error("--score-arm requires --scores-out and --data-dir")
+        arm = _parse_arm(args.score_arm)
+        score_arm(
+            arm,
+            tau2=args.tau2,
+            agent_model=args.agent_model,
+            domains=domains,
+            num_trials=args.num_trials,
+            num_tasks=args.num_tasks,
+            max_concurrency=args.max_concurrency,
+            user_llm=args.user_llm,
+            data_dir=args.data_dir,
+        )
+        save_scores(arm, args.scores_out)
+        print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
+        return 0
+
+    # Mode: concurrent A/B — arms serve on opposite GPU halves, so score them in
+    # PARALLEL (separate servers, separate save_to dirs) to roughly halve wall-clock.
+    if not (args.baseline and args.candidate and args.data_dir):
+        p.error("concurrent mode requires --baseline, --candidate and --data-dir")
     baseline = _parse_arm(args.baseline)
     candidate = _parse_arm(args.candidate)
-    for arm in (baseline, candidate):
-        for d in domains:
-            run_tau2(
-                arm,
-                tau2=args.tau2,
-                agent_model=args.agent_model,
-                domain=d,
-                num_trials=args.num_trials,
-                num_tasks=args.num_tasks,
-                max_concurrency=args.max_concurrency,
-                user_llm=args.user_llm,
-                data_dir=args.data_dir,
-            )
 
-    report_md, payload = build_report(baseline, candidate, domains, args.num_trials)
-    print("\n" + report_md)
-    if args.out:
-        args.out.write_text(report_md + "\n")
-    if args.json_out:
-        args.json_out.write_text(json.dumps(payload, indent=2) + "\n")
-    delta = payload["overall"]["passk"]["delta"]
-    if delta is not None and delta < -args.tolerance:
-        print(
-            f"\nREGRESSION: {candidate.name} pass^{args.num_trials} {delta * 100:.2f}pp "
-            f"below {baseline.name} (tol {args.tolerance * 100:.2f}pp)",
-            file=sys.stderr,
+    def score(arm: Arm) -> None:
+        score_arm(
+            arm,
+            tau2=args.tau2,
+            agent_model=args.agent_model,
+            domains=domains,
+            num_trials=args.num_trials,
+            num_tasks=args.num_tasks,
+            max_concurrency=args.max_concurrency,
+            user_llm=args.user_llm,
+            data_dir=args.data_dir,
         )
-        return 1
-    return 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        # list() forces both futures to complete and re-raises any exception.
+        list(ex.map(score, (baseline, candidate)))
+    return write_report_and_gate(baseline, candidate, domains, args.num_trials, args)
 
 
 if __name__ == "__main__":
