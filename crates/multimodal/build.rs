@@ -1,9 +1,9 @@
-use std::{env, path::PathBuf};
+use std::env;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=src/opencv_buffer_capture.cpp");
     if env::var_os("CARGO_FEATURE_OPENCV_VIDEO").is_none() {
-        return;
+        return Ok(());
     }
 
     let mut build = cc::Build::new();
@@ -19,12 +19,12 @@ fn main() {
     } else {
         let opencv = pkg_config::Config::new()
             .cargo_metadata(false)
-            .probe("opencv4")
-            .expect("opencv-video requires OpenCV headers discoverable via pkg-config");
+            .probe("opencv4")?;
         for path in opencv.include_paths {
-            build.include(PathBuf::from(path));
+            build.include(path);
         }
     }
 
     build.compile("smg_opencv_buffer_capture");
+    Ok(())
 }
