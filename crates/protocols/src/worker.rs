@@ -1145,6 +1145,20 @@ impl WorkerLoadResponse {
         self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
     }
 
+    /// Total in-flight requests (running + waiting) summed across all DP ranks.
+    ///
+    /// This is the worker's *global* request backlog as reported by the backend
+    /// itself — unlike a gateway's local in-flight counter, it counts requests
+    /// dispatched by every gateway, so it is invariant to the number of gateway
+    /// replicas. The `cache_aware` policy uses it to keep imbalance detection
+    /// and shortest-queue selection consistent across a multi-gateway deployment.
+    pub fn total_running_waiting_reqs(&self) -> i64 {
+        self.loads
+            .iter()
+            .map(|l| (l.num_running_reqs + l.num_waiting_reqs) as i64)
+            .sum()
+    }
+
     /// Total queued (waiting, uncached) tokens summed across all DP ranks.
     pub fn total_waiting_uncached_tokens(&self) -> i64 {
         self.loads

@@ -331,6 +331,27 @@ impl CacheAwarePolicy {
         bounds
     }
 
+    /// Resolve a worker's load for count-based imbalance detection and
+    /// shortest-queue selection.
+    ///
+    /// Prefers the backend-reported *global* request count (running + waiting)
+    /// from the `WorkerMonitor` load snapshot, which is invariant to the number
+    /// of gateway replicas. Falls back to this gateway's local in-flight counter
+    /// (`local_load`) only when the worker has no snapshot entry yet (before the
+    /// first poll tick, on a fetch failure, or in single-gateway setups). This
+    /// keeps both the count-spread trigger and the shortest-queue target
+    /// consistent across every gateway instead of diverging on local counters.
+    fn effective_load(
+        snapshot: Option<&HashMap<String, WorkerLoadResponse>>,
+        url: &str,
+        local_load: usize,
+    ) -> usize {
+        snapshot
+            .and_then(|loads| loads.get(url))
+            .map(|resp| resp.total_running_waiting_reqs().max(0) as usize)
+            .unwrap_or(local_load)
+    }
+
     /// Initialize the trees with worker URLs (used only during initial setup)
     /// Initializes both string trees (HTTP) and token trees (gRPC) for each model.
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
@@ -476,10 +497,18 @@ impl CacheAwarePolicy {
         min_load_idx: Option<usize>,
         model_id: &str,
     ) -> Option<usize> {
-        // Log load balancing trigger (only compute worker loads if debug enabled)
+        // Log load balancing trigger (only compute worker loads if debug enabled).
+        // Use the same gateway-global view that drove `min_load_idx` so the log
+        // matches the actual decision instead of showing this gateway's local
+        // counters.
         if tracing::enabled!(tracing::Level::DEBUG) {
-            let worker_loads: Vec<(&str, usize)> =
-                workers.iter().map(|w| (w.url(), w.load())).collect();
+            let load_guard = self.load_rx.read();
+            let snapshot = load_guard.as_ref().map(|rx| rx.borrow());
+            let snapshot = snapshot.as_deref();
+            let worker_loads: Vec<(&str, usize)> = workers
+                .iter()
+                .map(|w| (w.url(), Self::effective_load(snapshot, w.url(), w.load())))
+                .collect();
             debug!("Load balancing triggered | workers: {:?}", worker_loads);
         }
 
@@ -782,18 +811,30 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         // `processed` rides the same guard as `load`, so it is free here.
         let mut min_key: Option<(usize, usize, usize)> = None;
         let mut min_load_idx: Option<usize> = None;
-        for (idx, worker) in workers.iter().enumerate() {
-            let state = worker.routing_state();
-            if state.healthy && state.can_execute {
-                healthy_indices.push(idx);
-                min_load = min_load.min(state.load);
-                max_load = max_load.max(state.load);
-                let key = (state.load, state.processed, idx);
-                match min_key {
-                    Some(best) if key >= best => {}
-                    _ => {
-                        min_key = Some(key);
-                        min_load_idx = Some(idx);
+        {
+            // Read the backend load snapshot once for the whole gather so
+            // min/max and the shortest-queue index use one consistent,
+            // gateway-global view. Scoped to this block so the read guard is
+            // released before `is_imbalanced` below, which re-reads `load_rx`
+            // for the KV-usage triggers — a nested read on the same lock could
+            // deadlock if a writer queues between them.
+            let load_guard = self.load_rx.read();
+            let snapshot = load_guard.as_ref().map(|rx| rx.borrow());
+            let snapshot = snapshot.as_deref();
+            for (idx, worker) in workers.iter().enumerate() {
+                let state = worker.routing_state();
+                if state.healthy && state.can_execute {
+                    healthy_indices.push(idx);
+                    let load = Self::effective_load(snapshot, worker.url(), state.load);
+                    min_load = min_load.min(load);
+                    max_load = max_load.max(load);
+                    let key = (load, state.processed, idx);
+                    match min_key {
+                        Some(best) if key >= best => {}
+                        _ => {
+                            min_key = Some(key);
+                            min_load_idx = Some(idx);
+                        }
                     }
                 }
             }
@@ -904,9 +945,21 @@ impl CacheAwarePolicy {
             .block_size(model_id)
             .unwrap_or(self.config.block_size);
 
-        if let Some(idx) =
-            Self::score_overlap(workers, tokens, healthy_indices, &indexer, block_size)
-        {
+        // Backend load snapshot for the overlap tie-break, so equal-overlap ties
+        // break on the gateway-global request count rather than each gateway's
+        // local counter (which would split ties inconsistently across gateways).
+        let load_guard = self.load_rx.read();
+        let load_snapshot = load_guard.as_ref().map(|rx| rx.borrow());
+        let load_snapshot = load_snapshot.as_deref();
+
+        if let Some(idx) = Self::score_overlap(
+            workers,
+            tokens,
+            healthy_indices,
+            &indexer,
+            block_size,
+            load_snapshot,
+        ) {
             return Some(idx);
         }
 
@@ -931,6 +984,7 @@ impl CacheAwarePolicy {
         healthy_indices: &[usize],
         indexer: &PositionalIndexer,
         block_size: usize,
+        load_snapshot: Option<&HashMap<String, WorkerLoadResponse>>,
     ) -> Option<usize> {
         let content_hashes = compute_request_content_hashes(tokens, block_size);
         if content_hashes.is_empty() {
@@ -961,7 +1015,8 @@ impl CacheAwarePolicy {
                     .and_then(|id| overlap.scores.get(&id))
                     .copied()
                     .unwrap_or(0);
-                let load = workers[idx].load();
+                let load =
+                    Self::effective_load(load_snapshot, workers[idx].url(), workers[idx].load());
                 let tree_size = wid
                     .and_then(|id| overlap.tree_sizes.get(&id))
                     .copied()
@@ -1326,6 +1381,35 @@ mod tests {
         tx
     }
 
+    /// Single-DP load snapshot reporting the given running + waiting request
+    /// counts (the global request backlog used by `effective_load`).
+    fn req_load(num_running_reqs: i32, num_waiting_reqs: i32) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            loads: vec![SchedulerLoadSnapshot {
+                num_running_reqs,
+                num_waiting_reqs,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Inject a backend load snapshot from explicit `(url, response)` entries so
+    /// a test can leave a worker out of the snapshot. Returns the sender; bind it
+    /// (`let _tx = ...`) to keep the watch channel open.
+    fn inject_loads(
+        policy: &CacheAwarePolicy,
+        entries: Vec<(&str, WorkerLoadResponse)>,
+    ) -> watch::Sender<HashMap<String, WorkerLoadResponse>> {
+        let map: HashMap<String, WorkerLoadResponse> = entries
+            .into_iter()
+            .map(|(url, resp)| (url.to_string(), resp))
+            .collect();
+        let (tx, rx) = watch::channel(map);
+        policy.set_load_receiver(Some(rx));
+        tx
+    }
+
     /// Config isolating the KV triggers (count effectively disabled): `balance`
     /// is the spread threshold, `overload` the ceiling.
     fn kv_only_config(balance_spread: f32, overload_ceiling: f32) -> CacheAwareConfig {
@@ -1434,6 +1518,95 @@ mod tests {
             !imbalanced(&policy, &workers),
             "default thresholds (1.0) must ignore KV usage entirely"
         );
+    }
+
+    // ---- effective_load: count-spread + shortest-queue follow global load ----
+
+    /// Config with count thresholds active and KV triggers disabled, so the only
+    /// imbalance signal is the request-count spread fed by `effective_load`.
+    fn count_only_config() -> CacheAwareConfig {
+        CacheAwareConfig {
+            cache_threshold: 0.5,
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            max_tree_size: 10000,
+            block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
+        }
+    }
+
+    /// Multi-gateway: imbalance detection and shortest-queue must follow the
+    /// `WorkerMonitor`-injected *global* request count, not this gateway's local
+    /// in-flight counter. Here local counters and the injected global view
+    /// disagree, and the global view must win.
+    #[test]
+    fn cache_aware_uses_injected_global_load_for_selection() {
+        let policy = CacheAwarePolicy::with_config(count_only_config());
+        let workers = make_workers(&["http://w0:8000", "http://w1:8000"]);
+
+        // Local counters: worker0 looks busy, worker1 idle — the OPPOSITE of the
+        // injected global view. If routing used local load it would pick worker1.
+        for _ in 0..20 {
+            workers[0].increment_load();
+        }
+        policy.init_workers(&workers);
+
+        // Injected global load: worker0 idle, worker1 heavily loaded.
+        let _tx = inject_loads(
+            &policy,
+            vec![
+                ("http://w0:8000", req_load(0, 0)),
+                ("http://w1:8000", req_load(100, 0)),
+            ],
+        );
+
+        // Imbalanced by global view (100 - 0 > 5) → shortest queue by global
+        // load → worker0 every time.
+        let info = SelectWorkerInfo {
+            request_text: Some("hello"),
+            ..Default::default()
+        };
+        for _ in 0..5 {
+            let idx = policy.select_worker(&workers, &info).unwrap();
+            assert_eq!(
+                idx, 0,
+                "must follow injected global load (worker0 idle), not local counter"
+            );
+        }
+    }
+
+    /// A worker absent from the injected snapshot (e.g. not yet polled) must fall
+    /// back to its local counter rather than be treated as idle — otherwise an
+    /// unpolled worker would be stampeded.
+    #[test]
+    fn cache_aware_falls_back_to_local_load_when_worker_unmonitored() {
+        let policy = CacheAwarePolicy::with_config(count_only_config());
+        let workers = make_workers(&["http://w0:8000", "http://w1:8000"]);
+
+        // worker0 is missing from the snapshot but has a real local load of 50.
+        // worker1 is monitored at 10 reqs. If the missing worker were treated as
+        // idle (0) it would be picked; with local fallback (50) worker1 is lighter.
+        for _ in 0..50 {
+            workers[0].increment_load();
+        }
+        policy.init_workers(&workers);
+
+        let _tx = inject_loads(&policy, vec![("http://w1:8000", req_load(10, 0))]);
+
+        // effective: worker0 = 50 (local fallback), worker1 = 10 → imbalanced → w1.
+        let info = SelectWorkerInfo {
+            request_text: Some("hello"),
+            ..Default::default()
+        };
+        for _ in 0..5 {
+            let idx = policy.select_worker(&workers, &info).unwrap();
+            assert_eq!(
+                idx, 1,
+                "unmonitored worker0 must use local load (50), not be treated as idle"
+            );
+        }
     }
 
     #[test]
@@ -1811,6 +1984,7 @@ mod tests {
             &[0, 1],
             &indexer,
             4,
+            None,
         );
         assert_eq!(result, Some(0)); // w1
     }
@@ -1836,6 +2010,7 @@ mod tests {
             &[0],
             &indexer,
             4,
+            None,
         );
         assert_eq!(result, None);
     }
@@ -1883,8 +2058,72 @@ mod tests {
             .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result =
+            CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4, None);
         assert_eq!(result, Some(1)); // w2 (lower load)
+    }
+
+    /// Equal overlap → the tie-break must follow the injected *global* load, not
+    /// the local counter. Local says w1 busy / w2 idle; the global snapshot
+    /// reverses that, and the global view must win (pick w1).
+    #[test]
+    fn test_score_overlap_load_tiebreak_uses_global_load() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+
+        // Local counters: w1 busy, w2 idle — the OPPOSITE of the global snapshot.
+        for _ in 0..10 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Store same blocks for both workers (equal overlap).
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
+        let mut wb1 = WorkerBlockMap::default();
+        let mut wb2 = WorkerBlockMap::default();
+        let blocks = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored(w1_id, &blocks, None, &mut wb1)
+            .unwrap();
+        let blocks2 = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored(w2_id, &blocks2, None, &mut wb2)
+            .unwrap();
+
+        // Global snapshot reverses the local view: w1 idle, w2 busy.
+        let mut snapshot = HashMap::new();
+        snapshot.insert("http://w1:8000".to_string(), req_load(0, 0));
+        snapshot.insert("http://w2:8000".to_string(), req_load(5, 0));
+
+        // Equal overlap → tie-break by global load → w1 wins (global idle),
+        // despite its higher local counter.
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &[1, 2, 3, 4],
+            &[0, 1],
+            &indexer,
+            4,
+            Some(&snapshot),
+        );
+        assert_eq!(result, Some(0)); // w1 (lower GLOBAL load)
     }
 
     #[test]
@@ -1936,7 +2175,8 @@ mod tests {
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result =
+            CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4, None);
         assert_eq!(result, Some(0)); // w1 (smaller tree)
     }
 
@@ -1952,7 +2192,7 @@ mod tests {
         let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
 
         // Request shorter than block_size → no full blocks → None
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4, None);
         assert_eq!(result, None);
     }
 
@@ -2020,6 +2260,7 @@ mod tests {
             &[0, 1],
             &indexer,
             4,
+            None,
         );
         assert_eq!(result, Some(0)); // w1 (higher overlap)
     }
