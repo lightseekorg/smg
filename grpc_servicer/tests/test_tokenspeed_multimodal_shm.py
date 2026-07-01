@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
@@ -8,6 +9,23 @@ shm_transport = pytest.importorskip("tokenspeed.runtime.multimodal.shm_transport
 servicer_module = pytest.importorskip("smg_grpc_servicer.tokenspeed.servicer")
 ShmTensorHandle = shm_transport.ShmTensorHandle
 TokenSpeedSchedulerServicer = servicer_module.TokenSpeedSchedulerServicer
+
+
+def test_multimodal_encoder_dtype_prefers_loaded_vision_dtype():
+    model_config = SimpleNamespace(dtype=torch.float32)
+
+    assert (
+        TokenSpeedSchedulerServicer._multimodal_encoder_dtype(
+            model_config, {"multimodal_encoder_dtype": "bfloat16"}
+        )
+        == "bfloat16"
+    )
+
+
+def test_multimodal_encoder_dtype_falls_back_to_model_dtype():
+    model_config = SimpleNamespace(dtype=torch.float16)
+
+    assert TokenSpeedSchedulerServicer._multimodal_encoder_dtype(model_config, {}) == "float16"
 
 
 def _require_writable_dev_shm():

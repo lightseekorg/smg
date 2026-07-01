@@ -446,7 +446,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if "model_dtype" in fields:
             response_kwargs["model_dtype"] = dtype
         if "multimodal_encoder_dtype" in fields:
-            response_kwargs["multimodal_encoder_dtype"] = dtype
+            response_kwargs["multimodal_encoder_dtype"] = self._multimodal_encoder_dtype(
+                model_config, self.scheduler_info
+            )
         return tokenspeed_scheduler_pb2.GetModelInfoResponse(**response_kwargs)
 
     # ------------------------------------------------------------------
@@ -1372,6 +1374,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if dtype is torch.float32:
             return "float32"
         return ""
+
+    @staticmethod
+    def _multimodal_encoder_dtype(model_config: Any, scheduler_info: dict) -> str:
+        return scheduler_info.get("multimodal_encoder_dtype") or (
+            TokenSpeedSchedulerServicer._torch_dtype_to_proto(getattr(model_config, "dtype", None))
+        )
 
     def _generated_output_ids(
         self,
