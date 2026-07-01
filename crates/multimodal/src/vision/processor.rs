@@ -742,7 +742,8 @@ impl ModalityProcessorRegistry {
     where
         P: ModalityPreProcessor + 'static,
     {
-        self.processors.insert(pattern.into(), Box::new(processor));
+        self.processors
+            .insert(pattern.into().to_lowercase(), Box::new(processor));
     }
 
     /// Find a processor for the given model ID, falling back to model_type.
@@ -759,12 +760,13 @@ impl ModalityProcessorRegistry {
 
     fn find_in_candidate(&self, candidate: &str) -> Option<&dyn ModalityPreProcessor> {
         let candidate = candidate.to_lowercase();
-        for (pattern, processor) in &self.processors {
-            if candidate.contains(&pattern.to_lowercase()) {
-                return Some(processor.as_ref());
-            }
-        }
-        None
+        self.processors
+            .iter()
+            .filter(|(pattern, _)| candidate.contains(pattern.as_str()))
+            .max_by(|(left, _), (right, _)| {
+                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+            })
+            .map(|(_, processor)| processor.as_ref())
     }
 
     /// Get list of supported model patterns.
@@ -993,6 +995,16 @@ mod tests {
 
         let processor = registry.find("vendor/audio-model", None).unwrap();
         assert_eq!(processor.processor_name(), "non-vision");
+    }
+
+    #[test]
+    fn test_registry_prefers_most_specific_pattern_deterministically() {
+        let mut registry = ModalityProcessorRegistry::new();
+        registry.register("audio", NonVisionProcessor);
+        registry.register("audio-special", LlavaProcessor::new());
+
+        let processor = registry.find("vendor/audio-special-model", None).unwrap();
+        assert_eq!(processor.processor_name(), "llava");
     }
 
     #[test]
