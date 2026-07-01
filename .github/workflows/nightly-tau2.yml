@@ -1,0 +1,268 @@
+# Nightly τ²-bench A/B — multi-turn agentic benchmark comparing SMG's parsing
+# frontend (SMG -> vLLM gRPC) against pure vLLM, same model/engine/checkpoint/
+# sampling. Informational/non-blocking — never a merge gate.
+#
+# User-sim is the fixed gpt-5.2 model via the OpenAI API; agent arms expose an
+# identical OpenAI /v1 endpoint so the τ²-bench harness can point at either and
+# the ONLY variable is the frontend (tokenization + tool/reasoning parsing).
+#
+# Runs nightly across retail, airline, and telecom domains (the stable domains
+# from tau2-bench that don't need external sandboxes/web access).
+# On PRs that touch this pipeline it runs a quick retail sanity subset for
+# merge confidence.
+name: Nightly tau2
+
+on:
+  schedule:
+    - cron: "23 10 * * *" # 10:23 UTC = 03:23 PDT
+  # PR sanity: only when the tau2 pipeline itself changes. Runs a quick single-
+  # domain, single-trial, small-task subset so the A/B is exercised end-to-end
+  # (engine, tool/reasoning parsing, scoring) before merge.
+  pull_request:
+    paths:
+      - "scripts/tau2/**"
+      - ".github/workflows/nightly-tau2.yml"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "HF model id to benchmark"
+        required: false
+        default: "Qwen/Qwen3.6-27B"
+      domains:
+        description: "Comma-separated tau2 domains"
+        required: false
+        default: "retail,airline,telecom"
+      num_trials:
+        description: "Number of trials per task (pass^k k value)"
+        required: false
+        default: "2"
+      num_tasks:
+        description: "Max tasks per domain (0 = all)"
+        required: false
+        default: "0"
+      tp:
+        description: "Tensor-parallel size per arm"
+        required: false
+        default: "2"
+      user_llm:
+        description: "Fixed user-sim model (OpenAI)"
+        required: false
+        default: "gpt-5.2"
+      vllm_tool_parser:
+        description: "Pure-vLLM --tool-call-parser for arm A"
+        required: false
+        default: "qwen3_xml"
+      smg_tool_parser:
+        description: "SMG --tool-call-parser for arm B (empty = auto-detect)"
+        required: false
+        default: "qwen_xml"
+      reasoning_parser:
+        description: "Reasoning parser for BOTH arms (vLLM + SMG)"
+        required: false
+        default: "qwen3"
+
+concurrency:
+  group: nightly-tau2-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  # Build the smg wheel once (CPU-only Rust/maturin compile — no GPU needed).
+  build-wheel:
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache wheel artifacts
+        id: cache-wheel
+        uses: actions/cache@v6
+        with:
+          path: |
+            bindings/python/dist/*.whl
+          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/**/src/**', 'model_gateway/src/**', 'bindings/python/src/**') }}
+          restore-keys: |
+            nightly-wheel-${{ runner.os }}-
+      - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-rust
+      - name: Setup Python venv
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        run: bash scripts/ci_setup_python_venv.sh
+      - name: Build Python wheel
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
+        run: bash scripts/ci_build_wheel.sh
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: smg-wheel
+          path: bindings/python/dist/*.whl
+          retention-days: 7
+
+  tau2-ab:
+    needs: [build-wheel]
+    if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
+    runs-on: 4-gpu-h100
+    # TODO(tune): num_tasks cap and timeout will be tuned after live validation
+    # on the H100 box. Starting conservatively at 360 min (ceiling only; fast
+    # runs finish early). Adjust once we have observed wall-clock data.
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Model store: /models on H100 runner (pre-staged or HF download).
+      ROUTER_LOCAL_MODEL_PATH: /models
+      HF_HOME: /models
+      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
+      # PR = quick sanity subset; schedule/dispatch = full domain set.
+      DOMAINS: ${{ github.event.inputs.domains || (github.event_name == 'pull_request' && 'retail' || 'retail,airline,telecom') }}
+      NUM_TRIALS: ${{ github.event.inputs.num_trials || '2' }}
+      # PR sanity: cap tasks at 3 for a quick end-to-end smoke. Full runs use
+      # num_tasks=0 (all) unless overridden via dispatch.
+      # TODO(tune): confirm task cap after live H100 timing data.
+      NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || '0') }}
+      TP: ${{ github.event.inputs.tp || '2' }}
+      USER_LLM: ${{ github.event.inputs.user_llm || 'gpt-5.2' }}
+      TAU2_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
+      TAU2_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen_xml' }}
+      TAU2_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+      TAU2_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: smg-wheel
+          path: wheel
+
+      - name: Setup vLLM env (provides vllm + grpc servicer + smg)
+        uses: ./.github/actions/setup-vllm
+
+      - name: Install smg wheel + ninja (for vLLM torch.compile)
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          pip install ninja
+
+      - name: Install tau2-bench
+        run: |
+          # Install uv for fast venv management, then clone + sync tau2-bench.
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          git clone https://github.com/sierra-research/tau2-bench
+          (cd tau2-bench && uv sync)
+
+      - name: Stage model weights
+        run: |
+          if [ -d "$ROUTER_LOCAL_MODEL_PATH/$MODEL" ]; then
+            echo "model present at $ROUTER_LOCAL_MODEL_PATH/$MODEL — skipping download"
+          else
+            bash scripts/ci_download_model.sh "$MODEL"
+          fi
+
+      - name: Launch arm A (pure vLLM, GPUs 0,1)
+        id: arm_a
+        env:
+          TAU2_GPU: "0,1"
+          TAU2_TP: ${{ env.TP }}
+          TAU2_MODEL: ${{ env.MODEL }}
+          TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          A_URL=$(bash scripts/tau2/launch_arms.sh a)
+          echo "url=$A_URL" >> "$GITHUB_OUTPUT"
+          echo "arm A (vllm): $A_URL"
+
+      - name: Launch arm B (SMG -> vLLM gRPC, GPUs 2,3)
+        id: arm_b
+        env:
+          TAU2_GPU: "2,3"
+          TAU2_TP: ${{ env.TP }}
+          TAU2_MODEL: ${{ env.MODEL }}
+          TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          B_URL=$(bash scripts/tau2/launch_arms.sh b)
+          echo "url=$B_URL" >> "$GITHUB_OUTPUT"
+          echo "arm B (smg): $B_URL"
+
+      - name: Run τ²-bench A/B
+        env:
+          A_URL: ${{ steps.arm_a.outputs.url }}
+          B_URL: ${{ steps.arm_b.outputs.url }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          # Mirror bfcl: capture exit-1 regression signal without failing the job.
+          python scripts/tau2/run_ab.py \
+            --baseline  "vllm=$A_URL" \
+            --candidate "smg=$B_URL" \
+            --agent-model "$MODEL" \
+            --user-llm   "$USER_LLM" \
+            --tau2       tau2-bench/.venv/bin/tau2 \
+            --data-dir   tau2-bench/data \
+            --domains    "$DOMAINS" \
+            --num-trials "$NUM_TRIALS" \
+            --num-tasks  "$NUM_TASKS" \
+            --out        "$RUNNER_TEMP/tau2_ab.md" \
+            --json-out   "$RUNNER_TEMP/tau2_ab.json" \
+            || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+
+      - name: Render summary
+        if: always()
+        run: |
+          {
+            echo "## τ²-bench A/B — $MODEL (domains: $DOMAINS)"
+            cat "$RUNNER_TEMP/tau2_ab.md"
+          } >> "$GITHUB_STEP_SUMMARY" || echo "no tau2 report produced" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect tau2 transcripts
+        if: always()
+        run: |
+          set -uo pipefail
+          ROOT="tau2-bench/data/simulations"
+          OUT="$RUNNER_TEMP/tau2_transcripts.tgz"
+          if [ -d "$ROOT" ]; then
+            if tar -czf "$OUT" -C "$ROOT" .; then
+              echo "transcript tarball: $(du -h "$OUT" | cut -f1)"
+              echo "contents (head):"; tar tzf "$OUT" | head -40 || true
+            else
+              echo "::warning::failed to create $OUT"
+            fi
+          else
+            echo "no $ROOT"
+          fi
+
+      - name: Upload results (summary + scores + transcripts)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tau2-ab-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/tau2_ab.md
+            ${{ runner.temp }}/tau2_ab.json
+            ${{ runner.temp }}/tau2_transcripts.tgz
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload arm logs (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tau2-ab-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/tau2_run/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Teardown arms
+        if: always()
+        env:
+          TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
+        run: bash scripts/tau2/launch_arms.sh stop || true
