@@ -505,13 +505,10 @@ impl PilBicubicRgbPlan {
     }
 }
 
-struct ParConfig {
-    min_bytes: usize,
-    min_rows_per_thread: usize,
-    max_threads: usize,
-}
-
 const DEFAULT_PREPROCESS_POOL_THREADS: usize = 64;
+const PREPROCESS_PAR_MIN_BYTES: usize = 1 << 19;
+const PREPROCESS_PAR_MIN_ROWS: usize = 32;
+const PREPROCESS_PAR_MAX_THREADS: usize = 8;
 
 fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
@@ -519,11 +516,7 @@ fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
         let available = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let threads = env_usize(
-            "SMG_MM_PREPROCESS_POOL_THREADS",
-            available.min(DEFAULT_PREPROCESS_POOL_THREADS),
-        )
-        .clamp(1, available);
+        let threads = available.min(DEFAULT_PREPROCESS_POOL_THREADS);
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|index| format!("smg-mm-preprocess-{index}"))
@@ -566,32 +559,13 @@ where
     }
 }
 
-fn par_config() -> &'static ParConfig {
-    static PAR_CONFIG: OnceLock<ParConfig> = OnceLock::new();
-    PAR_CONFIG.get_or_init(|| ParConfig {
-        min_bytes: env_usize("SMG_MM_PREPROCESS_PAR_MIN_BYTES", 1 << 19),
-        min_rows_per_thread: env_usize("SMG_MM_PREPROCESS_PAR_MIN_ROWS", 32).max(1),
-        // Preprocessing already runs in the blocking worker pool. Keep each
-        // item from monopolizing too many shared preprocessing workers at
-        // high request concurrency; large single inputs can opt up via env.
-        max_threads: env_usize("SMG_MM_PREPROCESS_PAR_MAX_THREADS", 8).max(1),
-    })
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 /// Number of threads to split an elementwise or row-banded preprocessing pass
 /// across. Each output row/element is independent, so banding work over threads
 /// yields BIT-IDENTICAL output: no shared accumulation and no inner-loop order
 /// changes. Small images run serial to avoid thread-spawn overhead.
 pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
-    let cfg = par_config();
-    if out_bytes < cfg.min_bytes || out_rows < cfg.min_rows_per_thread.saturating_mul(2) {
+    if out_bytes < PREPROCESS_PAR_MIN_BYTES || out_rows < PREPROCESS_PAR_MIN_ROWS.saturating_mul(2)
+    {
         return 1;
     }
     static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
@@ -600,9 +574,9 @@ pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
             .map(|n| n.get())
             .unwrap_or(1)
     });
-    (out_rows / cfg.min_rows_per_thread)
+    (out_rows / PREPROCESS_PAR_MIN_ROWS)
         .min(avail)
-        .clamp(1, cfg.max_threads)
+        .clamp(1, PREPROCESS_PAR_MAX_THREADS)
 }
 
 /// Process output rows `[oy0, oy0 + out_band.len()/row_out)` of the horizontal
