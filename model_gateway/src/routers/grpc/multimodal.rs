@@ -28,9 +28,9 @@ use llm_multimodal::EncoderInput;
 use llm_multimodal::{
     AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
     MediaConnectorConfig, MediaContentPart, Modality, ModalityInput, ModalityPreProcessor,
-    ModelMetadata, ModelRegistry, MultimodalRuntime, OutputPreference, PlaceholderRange,
-    PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs, PromptReplacement,
-    TrackedMedia, TrackerOutput, VideoClip, VideoInput, VisionProcessorRegistry,
+    ModalityProcessorRegistry, ModelMetadata, ModelRegistry, MultimodalRuntime, OutputPreference,
+    PlaceholderRange, PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs,
+    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VideoInput,
 };
 use llm_tokenizer::TokenizerTrait;
 use openai_protocol::{
@@ -237,7 +237,7 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
 pub(crate) struct MultimodalComponents {
     pub runtime: Arc<MultimodalRuntime>,
     pub media_connector: Arc<MediaConnector>,
-    pub vision_processor_registry: Arc<VisionProcessorRegistry>,
+    pub processor_registry: Arc<ModalityProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
@@ -263,7 +263,7 @@ impl MultimodalComponents {
         Ok(Self {
             runtime,
             media_connector: Arc::new(media_connector),
-            vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
+            processor_registry: Arc::new(ModalityProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
         })
@@ -719,7 +719,7 @@ async fn process_multimodal_parts(
             .unwrap_or_else(|| model_config.preprocessor_config.clone()),
         _ => model_config.preprocessor_config.clone(),
     };
-    let registry = components.vision_processor_registry.clone();
+    let registry = components.processor_registry.clone();
     let model_id_owned = model_id.to_string();
     let model_type_owned = model_type.map(String::from);
 
@@ -870,7 +870,7 @@ async fn process_multimodal_parts(
 }
 
 fn preprocess_media(
-    registry: &VisionProcessorRegistry,
+    registry: &ModalityProcessorRegistry,
     model_id: &str,
     model_type: Option<&str>,
     modality: Modality,
@@ -880,7 +880,7 @@ fn preprocess_media(
 ) -> Result<PreprocessedEncoderInputs> {
     let processor = registry
         .find(model_id, model_type)
-        .ok_or_else(|| anyhow::anyhow!("No vision processor found for model: {model_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("No modality processor found for model: {model_id}"))?;
 
     match modality {
         Modality::Image => {
@@ -908,7 +908,7 @@ fn preprocess_media(
 }
 
 fn preprocess_video(
-    processor: &dyn llm_multimodal::VisionPreProcessor,
+    processor: &dyn ModalityPreProcessor,
     videos: &[Arc<VideoClip>],
     config: &PreProcessorConfig,
 ) -> Result<PreprocessedEncoderInputs> {

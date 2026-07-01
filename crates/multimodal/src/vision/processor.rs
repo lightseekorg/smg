@@ -615,6 +615,9 @@ impl PreprocessedEncoderInputs {
 
 /// Modality-neutral preprocessing contract used by serving pipelines.
 pub trait ModalityPreProcessor: Send + Sync {
+    /// Stable processor family name for diagnostics and registry inspection.
+    fn processor_name(&self) -> &'static str;
+
     fn preprocess_input(
         &self,
         request: PreprocessRequest<'_>,
@@ -626,6 +629,10 @@ impl<T> ModalityPreProcessor for T
 where
     T: VisionPreProcessor + ?Sized,
 {
+    fn processor_name(&self) -> &'static str {
+        self.model_name()
+    }
+
     fn preprocess_input(
         &self,
         request: PreprocessRequest<'_>,
@@ -705,12 +712,12 @@ pub trait VisionPreProcessor: Send + Sync {
     }
 }
 
-/// Registry of available vision processors.
-pub struct VisionProcessorRegistry {
-    processors: HashMap<String, Box<dyn VisionPreProcessor>>,
+/// Registry of model-specific modality preprocessors.
+pub struct ModalityProcessorRegistry {
+    processors: HashMap<String, Box<dyn ModalityPreProcessor>>,
 }
 
-impl VisionProcessorRegistry {
+impl ModalityProcessorRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -719,8 +726,11 @@ impl VisionProcessorRegistry {
     }
 
     /// Register a processor for a model pattern.
-    pub fn register(&mut self, pattern: impl Into<String>, processor: Box<dyn VisionPreProcessor>) {
-        self.processors.insert(pattern.into(), processor);
+    pub fn register<P>(&mut self, pattern: impl Into<String>, processor: P)
+    where
+        P: ModalityPreProcessor + 'static,
+    {
+        self.processors.insert(pattern.into(), Box::new(processor));
     }
 
     /// Find a processor for the given model ID, falling back to model_type.
@@ -730,12 +740,12 @@ impl VisionProcessorRegistry {
         &self,
         model_id: &str,
         model_type: Option<&str>,
-    ) -> Option<&dyn VisionPreProcessor> {
+    ) -> Option<&dyn ModalityPreProcessor> {
         self.find_in_candidate(model_id)
             .or_else(|| model_type.and_then(|mt| self.find_in_candidate(mt)))
     }
 
-    fn find_in_candidate(&self, candidate: &str) -> Option<&dyn VisionPreProcessor> {
+    fn find_in_candidate(&self, candidate: &str) -> Option<&dyn ModalityPreProcessor> {
         let candidate = candidate.to_lowercase();
         for (pattern, processor) in &self.processors {
             if candidate.contains(&pattern.to_lowercase()) {
@@ -751,13 +761,16 @@ impl VisionProcessorRegistry {
     }
 }
 
-impl Default for VisionProcessorRegistry {
+/// Backward-compatible name for callers that only register vision processors.
+pub type VisionProcessorRegistry = ModalityProcessorRegistry;
+
+impl Default for ModalityProcessorRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl VisionProcessorRegistry {
+impl ModalityProcessorRegistry {
     /// Create a registry with all built-in processors registered.
     ///
     /// Currently registers:
@@ -772,116 +785,50 @@ impl VisionProcessorRegistry {
         let mut registry = Self::new();
 
         // LLaVA-NeXT (v1.6+, anyres multi-crop)
-        registry.register(
-            "llava-next",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
-        registry.register(
-            "llava_next",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
-        registry.register(
-            "llava-v1.6",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
+        registry.register("llava-next", super::processors::LlavaNextProcessor::new());
+        registry.register("llava_next", super::processors::LlavaNextProcessor::new());
+        registry.register("llava-v1.6", super::processors::LlavaNextProcessor::new());
 
         // Standard LLaVA (v1.5, single-patch).
         // Use specific patterns so they don't accidentally match LLaVA-NeXT
         // model IDs like "llava-v1.6-*".
-        registry.register(
-            "llava-1.5",
-            Box::new(super::processors::LlavaProcessor::new()),
-        );
-        registry.register(
-            "llava-v1.5",
-            Box::new(super::processors::LlavaProcessor::new()),
-        );
+        registry.register("llava-1.5", super::processors::LlavaProcessor::new());
+        registry.register("llava-v1.5", super::processors::LlavaProcessor::new());
 
         // Register Qwen3-VL first (more specific pattern - must match before qwen2)
-        registry.register(
-            "qwen3-vl",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_vl",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
+        registry.register("qwen3-vl", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_vl", super::processors::Qwen3VLProcessor::new());
 
         // Qwen3.5 family (and Qwen3.6: same arch) reuses Qwen3-VL preprocessing.
-        registry.register(
-            "qwen3.5",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_5",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3.6",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_6",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
+        registry.register("qwen3.5", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_5", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3.6", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_6", super::processors::Qwen3VLProcessor::new());
 
         // Register Qwen2-VL (matches Qwen/Qwen2-VL-*, etc.)
-        registry.register(
-            "qwen2-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
+        registry.register("qwen2-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_vl", super::processors::Qwen2VLProcessor::new());
 
         // Register Qwen2.5-VL (uses identical preprocessing to Qwen2-VL)
-        registry.register(
-            "qwen2.5-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_5-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_5_vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
+        registry.register("qwen2.5-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_5-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_5_vl", super::processors::Qwen2VLProcessor::new());
 
         // Register Phi3-Vision
         registry.register(
             "phi-3-vision",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
+            super::processors::Phi3VisionProcessor::new(),
         );
-        registry.register(
-            "phi3-vision",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
-        );
-        registry.register(
-            "phi3_v",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
-        );
+        registry.register("phi3-vision", super::processors::Phi3VisionProcessor::new());
+        registry.register("phi3_v", super::processors::Phi3VisionProcessor::new());
 
         // Register LLaMA 4 Vision
-        registry.register(
-            "llama-4",
-            Box::new(super::processors::Llama4VisionProcessor::new()),
-        );
-        registry.register(
-            "llama4",
-            Box::new(super::processors::Llama4VisionProcessor::new()),
-        );
+        registry.register("llama-4", super::processors::Llama4VisionProcessor::new());
+        registry.register("llama4", super::processors::Llama4VisionProcessor::new());
 
         // Register Kimi-K2.5 Vision
-        registry.register(
-            "kimi-k2",
-            Box::new(super::processors::KimiK25Processor::new()),
-        );
-        registry.register(
-            "kimi_k2",
-            Box::new(super::processors::KimiK25Processor::new()),
-        );
+        registry.register("kimi-k2", super::processors::KimiK25Processor::new());
+        registry.register("kimi_k2", super::processors::KimiK25Processor::new());
 
         registry
     }
@@ -893,6 +840,24 @@ mod tests {
 
     use super::*;
     use crate::vision::processors::LlavaProcessor;
+
+    struct NonVisionProcessor;
+
+    impl ModalityPreProcessor for NonVisionProcessor {
+        fn processor_name(&self) -> &'static str {
+            "non-vision"
+        }
+
+        fn preprocess_input(
+            &self,
+            _request: PreprocessRequest<'_>,
+            _config: &PreProcessorConfig,
+        ) -> Result<PreprocessedEncoderInputs, TransformError> {
+            Err(TransformError::ShapeError(
+                "test processor has no payload implementation".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn test_preprocessed_encoder_inputs_accessors() {
@@ -979,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_registry_with_defaults() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         // Should find LLaVA processor
         assert!(registry.find("llava-hf/llava-1.5-7b-hf", None).is_some());
@@ -995,15 +960,15 @@ mod tests {
 
         // Get the processor and check model name
         let processor = registry.find("llava-hf/llava-1.5-7b-hf", None).unwrap();
-        assert_eq!(processor.model_name(), "llava");
+        assert_eq!(processor.processor_name(), "llava");
     }
 
     #[test]
     fn test_registry_find() {
-        let mut registry = VisionProcessorRegistry::new();
+        let mut registry = ModalityProcessorRegistry::new();
 
         // Create a mock processor using LlavaProcessor
-        registry.register("test-model", Box::new(LlavaProcessor::new()));
+        registry.register("test-model", LlavaProcessor::new());
 
         assert!(registry.find("test-model-7b", None).is_some());
         assert!(registry.find("TEST-MODEL", None).is_some());
@@ -1011,34 +976,43 @@ mod tests {
     }
 
     #[test]
+    fn test_registry_accepts_non_vision_processor() {
+        let mut registry = ModalityProcessorRegistry::new();
+        registry.register("audio-model", NonVisionProcessor);
+
+        let processor = registry.find("vendor/audio-model", None).unwrap();
+        assert_eq!(processor.processor_name(), "non-vision");
+    }
+
+    #[test]
     fn test_registry_find_falls_back_to_model_type() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         assert!(registry.find("custom-model", None).is_none());
 
         let processor = registry
             .find("custom-model", Some("qwen3_vl"))
             .expect("qwen3 processor by model_type");
-        assert_eq!(processor.model_name(), "qwen3-vl");
+        assert_eq!(processor.processor_name(), "qwen3-vl");
     }
 
     #[test]
     fn test_registry_find_preserves_fast_path() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         let processor = registry
             .find("Qwen3-VL-30B-A3B-Instruct", Some("qwen2_vl"))
             .expect("qwen3 processor by model_id");
-        assert_eq!(processor.model_name(), "qwen3-vl");
+        assert_eq!(processor.processor_name(), "qwen3-vl");
     }
 
     #[test]
     fn test_registry_find_phi3_model_type_fallback() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         let processor = registry
             .find("custom-model", Some("phi3_v"))
             .expect("phi3 processor by model_type");
-        assert_eq!(processor.model_name(), "phi3-vision");
+        assert_eq!(processor.processor_name(), "phi3-vision");
     }
 }

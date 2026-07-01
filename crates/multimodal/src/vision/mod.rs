@@ -38,8 +38,8 @@ pub mod transforms;
 pub use preprocessor_config::PreProcessorConfig;
 pub use processor::{
     DeferredNormalizedEncoderInput, EncoderInput, ModalityInput, ModalityPreProcessor,
-    ModelSpecificValue, OutputPreference, PreprocessRequest, PreprocessedEncoderInputs, VideoInput,
-    VisionPreProcessor, VisionProcessorRegistry,
+    ModalityProcessorRegistry, ModelSpecificValue, OutputPreference, PreprocessRequest,
+    PreprocessedEncoderInputs, VideoInput, VisionPreProcessor, VisionProcessorRegistry,
 };
 pub use processors::{
     Llama4VisionProcessor, LlavaNextProcessor, LlavaProcessor, Phi3VisionProcessor,
