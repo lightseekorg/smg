@@ -54,6 +54,20 @@ def test_build_report_delta_and_overall():
     assert payload["overall"]["passk"]["delta"] == pytest.approx(0.02)
 
 
+def test_build_report_dedups_columns_at_k1():
+    base = run_ab.Arm(name="vllm", base_url="u")
+    cand = run_ab.Arm(name="smg", base_url="u")
+    base.scores = {"retail": {"pass1": 0.6667, "passk": 0.6667}}
+    cand.scores = {"retail": {"pass1": 1.0, "passk": 1.0}}
+    # k=1: pass^k == pass^1, so only the pass^1 triple renders (no duplicate).
+    md1, _ = run_ab.build_report(base, cand, ["retail"], k=1)
+    assert "pass^2" not in md1
+    assert md1.count("pass^1") == 2  # once per arm in the header, not four times
+    # k>1: both pass^1 and pass^k columns render.
+    md2, _ = run_ab.build_report(base, cand, ["retail"], k=2)
+    assert "pass^2" in md2
+
+
 def test_domain_scores_on_real_fixture():
     fixture = Path(__file__).resolve().parent / "fixtures" / "tau2_results_sample.json"
     raw = json.loads(fixture.read_text())

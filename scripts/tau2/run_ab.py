@@ -164,24 +164,28 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
             "delta": (co - bo) if (bo is not None and co is not None) else None,
         }
 
+    # At k=1, pass^k == pass^1, so show only the pass^1 columns (a duplicated
+    # triple is confusing). At k>1 show both pass^1 and pass^k.
+    metrics = ["pass1"] if k == 1 else ["pass1", "passk"]
+    mlabel = {"pass1": "pass^1", "passk": f"pass^{k}"}
+
+    def triple(d, bold=False):
+        b, c, dl = cell(d["baseline"]), cell(d["candidate"]), dcell(d["delta"])
+        return f"**{b}** | **{c}** | **{dl}**" if bold else f"{b} | {c} | {dl}"
+
+    header = " | ".join(
+        f"{baseline.name} {mlabel[m]} | {candidate.name} {mlabel[m]} | Δ" for m in metrics
+    )
     lines = [
         f"# τ²-bench A/B — {candidate.name} (candidate) vs {baseline.name} (baseline)",
         "",
-        f"| domain | {baseline.name} pass^1 | {candidate.name} pass^1 | Δ | "
-        f"{baseline.name} pass^{k} | {candidate.name} pass^{k} | Δ |",
-        "|---|---|---|---|---|---|---|",
+        f"| domain | {header} |",
+        "|---" * (1 + 3 * len(metrics)) + "|",
     ]
     for r in rows:
-        lines.append(
-            f"| {r['domain']} | {cell(r['pass1']['baseline'])} | {cell(r['pass1']['candidate'])} "
-            f"| {dcell(r['pass1']['delta'])} | {cell(r['passk']['baseline'])} "
-            f"| {cell(r['passk']['candidate'])} | {dcell(r['passk']['delta'])} |"
-        )
+        lines.append(f"| {r['domain']} | " + " | ".join(triple(r[m]) for m in metrics) + " |")
     lines.append(
-        f"| **overall** | **{cell(overall['pass1']['baseline'])}** "
-        f"| **{cell(overall['pass1']['candidate'])}** | **{dcell(overall['pass1']['delta'])}** "
-        f"| **{cell(overall['passk']['baseline'])}** | **{cell(overall['passk']['candidate'])}** "
-        f"| **{dcell(overall['passk']['delta'])}** |"
+        "| **overall** | " + " | ".join(triple(overall[m], bold=True) for m in metrics) + " |"
     )
     lines += [
         "",
