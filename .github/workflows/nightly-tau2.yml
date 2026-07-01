@@ -40,6 +40,10 @@ on:
         description: "Max tasks per domain (0 = all)"
         required: false
         default: "0"
+      max_concurrency:
+        description: "Concurrent tau2 simulations per arm (0 = tau2 default)"
+        required: false
+        default: "16"
       tp:
         description: "Tensor-parallel size per arm"
         required: false
@@ -109,9 +113,10 @@ jobs:
     needs: [build-wheel]
     if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
     runs-on: 4-gpu-h100
-    # TODO(tune): num_tasks cap and timeout will be tuned after live validation
-    # on the H100 box. Starting conservatively at 360 min (ceiling only; fast
-    # runs finish early). Adjust once we have observed wall-clock data.
+    # Validated on 8xB200: retail n=10/k=1 (20 dialogues) = 19.5 min at tau2's
+    # default concurrency (~85s/dialogue). With --max-concurrency 16 the full
+    # retail+airline+telecom x k=2 set is expected to finish well under this
+    # 360-min ceiling (ceiling only; fast runs finish early).
     timeout-minutes: 360
     permissions:
       contents: read
@@ -126,9 +131,11 @@ jobs:
       # PR = single trial (fast sanity); schedule/dispatch = 2 trials (pass^2).
       NUM_TRIALS: ${{ github.event.inputs.num_trials || (github.event_name == 'pull_request' && '1' || '2') }}
       # PR sanity: cap tasks at 3 for a quick end-to-end smoke. Full runs use
-      # num_tasks=0 (all) unless overridden via dispatch.
-      # TODO(tune): confirm task cap after live H100 timing data.
+      # num_tasks=0 (all) — feasible within the timeout thanks to MAX_CONCURRENCY.
       NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || '0') }}
+      # Concurrent tau2 simulations per arm — the lever that keeps the full run
+      # within timeout (tau2's default concurrency would take ~18h for all domains).
+      MAX_CONCURRENCY: ${{ github.event.inputs.max_concurrency || '16' }}
       TP: ${{ github.event.inputs.tp || '2' }}
       USER_LLM: ${{ github.event.inputs.user_llm || 'gpt-5.2' }}
       TAU2_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
@@ -212,6 +219,7 @@ jobs:
             --domains    "$DOMAINS" \
             --num-trials "$NUM_TRIALS" \
             --num-tasks  "$NUM_TASKS" \
+            --max-concurrency "$MAX_CONCURRENCY" \
             --out        "$RUNNER_TEMP/tau2_ab.md" \
             --json-out   "$RUNNER_TEMP/tau2_ab.json" \
             || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
