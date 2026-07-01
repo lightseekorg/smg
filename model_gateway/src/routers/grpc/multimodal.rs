@@ -291,14 +291,10 @@ pub(crate) enum MultimodalIntermediate {
 
 #[derive(Debug)]
 pub(crate) struct PrecomputedMultimodalIntermediate {
-    /// Active modality for this preprocessed payload.
-    pub modality: Modality,
+    /// Fetched media in exactly one active modality.
+    pub media: PreparedMedia,
     /// Preprocessed encoder input and model-specific tensors (not yet serialized).
     pub preprocessed: Arc<PreprocessedEncoderInputs>,
-    /// Raw image frames (bytes + blake3 hashes).
-    pub images: Vec<Arc<ImageFrame>>,
-    /// Raw video clips (bytes + blake3 hashes + sampled frames).
-    pub videos: Vec<Arc<VideoClip>>,
     /// Full structural placeholder ranges (offset, length).
     pub placeholders: Vec<PlaceholderRange>,
     /// Patch-only placeholder offsets for sglang.
@@ -309,6 +305,39 @@ pub(crate) struct PrecomputedMultimodalIntermediate {
     pub field_layouts: HashMap<String, FieldLayout>,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
     pub keep_on_cpu_keys: Vec<String>,
+}
+
+/// Prepared media carried between preprocessing and backend assembly.
+///
+/// Adding audio or another modality requires explicit handling in every
+/// backend adapter, while preventing contradictory modality and payload fields.
+#[derive(Debug)]
+pub(crate) enum PreparedMedia {
+    Images(Vec<Arc<ImageFrame>>),
+    Videos(Vec<Arc<VideoClip>>),
+}
+
+impl PreparedMedia {
+    pub(crate) fn modality(&self) -> Modality {
+        match self {
+            Self::Images(_) => Modality::Image,
+            Self::Videos(_) => Modality::Video,
+        }
+    }
+
+    pub(crate) fn item_count(&self) -> usize {
+        match self {
+            Self::Images(images) => images.len(),
+            Self::Videos(videos) => videos.len(),
+        }
+    }
+
+    pub(crate) fn content_hash(&self, item_index: usize) -> Option<&str> {
+        match self {
+            Self::Images(images) => images.get(item_index).map(|image| image.hash.as_str()),
+            Self::Videos(videos) => videos.get(item_index).map(|video| video.hash.as_str()),
+        }
+    }
 }
 
 /// Resolve the placeholder token string for a multimodal model.
@@ -799,11 +828,18 @@ async fn process_multimodal_parts(
     });
 
     // Step 4: Build lightweight intermediate (defers tensor serialization to assembly)
+    let media = match modality {
+        Modality::Image => PreparedMedia::Images(images),
+        Modality::Video => PreparedMedia::Videos(videos),
+        Modality::Audio | Modality::ImageEmbeds => {
+            return Err(anyhow::anyhow!(
+                "Unsupported prepared media modality: {modality}"
+            ));
+        }
+    };
     let intermediate = MultimodalIntermediate::Precomputed(PrecomputedMultimodalIntermediate {
-        modality,
+        media,
         preprocessed,
-        images,
-        videos,
         placeholders: expanded.placeholders,
         patch_offsets: expanded.patch_offsets,
         placeholder_token_id,
@@ -1571,10 +1607,8 @@ mod tests {
         ];
 
         let intermediate = PrecomputedMultimodalIntermediate {
-            modality: Modality::Image,
+            media: PreparedMedia::Images(images),
             preprocessed: Arc::new(preprocessed),
-            images,
-            videos: vec![],
             placeholders: vec![
                 PlaceholderRange {
                     offset: 10,
@@ -1679,10 +1713,8 @@ mod tests {
         ];
 
         let intermediate = PrecomputedMultimodalIntermediate {
-            modality: Modality::Video,
+            media: PreparedMedia::Videos(videos),
             preprocessed: Arc::new(preprocessed),
-            images: vec![],
-            videos,
             placeholders: vec![
                 PlaceholderRange {
                     offset: 30,

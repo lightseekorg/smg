@@ -34,12 +34,13 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
     let total_started = log_timing.then(Instant::now);
+    let source_modality = intermediate.media.modality();
     // Resolve the multimodal tensor transport once per request: `shm` always on,
     // `auto` only when the worker is verified to share /dev/shm (matching
     // namespace token), otherwise inline. See `worker_shares_dev_shm`.
-    let shm_enabled = resolve_tokenspeed_shm_enabled(intermediate.modality, workers);
+    let shm_enabled = resolve_tokenspeed_shm_enabled(source_modality, workers);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
-    let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
+    let encoder_input_dtype = tokenspeed_encoder_input_dtype(source_modality, workers);
     let encoder_input_dtype = canonical_tokenspeed_encoder_dtype(&encoder_input_dtype);
     if encoder_input_dtype != "bfloat16" && intermediate.preprocessed.encoder_input.is_deferred() {
         Arc::make_mut(&mut intermediate.preprocessed)
@@ -52,7 +53,7 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
         .filter(|offsets| !offsets.is_empty())
         .unwrap_or(&[]);
 
-    let modality = match intermediate.modality {
+    let modality = match source_modality {
         Modality::Image => TokenSpeedModality::Image,
         Modality::Video => TokenSpeedModality::Video,
         Modality::Audio => TokenSpeedModality::Audio,
@@ -75,7 +76,7 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
     anyhow::ensure!(
         mm_placeholders_by_item.len() == item_count,
         "precomputed multimodal assembly placeholder item count mismatch: modality={}, placeholder_item_count={}, item_count={item_count}",
-        intermediate.modality,
+        source_modality,
         mm_placeholders_by_item.len()
     );
     let mut mm_placeholders_by_item = mm_placeholders_by_item.into_iter();
@@ -103,7 +104,7 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
         let mm_placeholders = mm_placeholders_by_item
             .next()
             .ok_or_else(|| anyhow::anyhow!("missing placeholders for multimodal item 0"))?;
-        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, 0);
+        let content_hash = content_hash_for_item(&intermediate, 0);
         let encoder_input_started = log_timing.then(Instant::now);
         let encoder_input = serialize_deferred_bf16_tokenspeed_tensor(
             deferred,
@@ -167,7 +168,7 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
         let mm_placeholders = mm_placeholders_by_item.next().ok_or_else(|| {
             anyhow::anyhow!("missing placeholders for multimodal item {item_index}")
         })?;
-        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, item_index);
+        let content_hash = content_hash_for_item(&intermediate, item_index);
 
         pending_items.push(PendingTokenSpeedItem {
             encoder_input: item_encoder_input,
@@ -258,11 +259,8 @@ type FlatItemSpans = HashMap<String, Vec<(usize, usize)>>;
 fn precomputed_multimodal_item_count(
     intermediate: &PrecomputedMultimodalIntermediate,
 ) -> Result<usize> {
-    let media_count = match intermediate.modality {
-        Modality::Image | Modality::ImageEmbeds => intermediate.images.len(),
-        Modality::Video => intermediate.videos.len(),
-        Modality::Audio => 0,
-    };
+    let modality = intermediate.media.modality();
+    let media_count = intermediate.media.item_count();
     let token_count = intermediate.preprocessed.feature_token_counts.len();
     let placeholder_count = intermediate.placeholders.len();
     let item_count = token_count.max(media_count).max(placeholder_count);
@@ -273,19 +271,16 @@ fn precomputed_multimodal_item_count(
     if media_count > 0 {
         anyhow::ensure!(
             media_count == item_count,
-            "precomputed multimodal assembly media count mismatch: modality={}, media_count={media_count}, item_count={item_count}",
-            intermediate.modality
+            "precomputed multimodal assembly media count mismatch: modality={modality}, media_count={media_count}, item_count={item_count}"
         );
     }
     anyhow::ensure!(
         token_count == item_count,
-        "precomputed multimodal assembly token count mismatch: modality={}, token_count={token_count}, item_count={item_count}",
-        intermediate.modality
+        "precomputed multimodal assembly token count mismatch: modality={modality}, token_count={token_count}, item_count={item_count}"
     );
     anyhow::ensure!(
         placeholder_count == item_count,
-        "precomputed multimodal assembly placeholder count mismatch: modality={}, placeholder_count={placeholder_count}, item_count={item_count}",
-        intermediate.modality
+        "precomputed multimodal assembly placeholder count mismatch: modality={modality}, placeholder_count={placeholder_count}, item_count={item_count}"
     );
     Ok(item_count)
 }
@@ -649,23 +644,14 @@ fn patch_offsets_sorted(patch_offsets: &[(u32, u32)]) -> bool {
 }
 
 fn content_hash_for_item(
-    modality: Modality,
     intermediate: &PrecomputedMultimodalIntermediate,
     item_index: usize,
 ) -> Vec<u8> {
-    match modality {
-        Modality::Image | Modality::ImageEmbeds => intermediate
-            .images
-            .get(item_index)
-            .map(|image| hash_hex_strings(std::iter::once(image.hash.as_str())))
-            .unwrap_or_default(),
-        Modality::Video => intermediate
-            .videos
-            .get(item_index)
-            .map(|video| hash_hex_strings(std::iter::once(video.hash.as_str())))
-            .unwrap_or_default(),
-        Modality::Audio => Vec::new(),
-    }
+    intermediate
+        .media
+        .content_hash(item_index)
+        .map(|hash| hash_hex_strings(std::iter::once(hash)))
+        .unwrap_or_default()
 }
 
 fn slice_array_axis0(array: &ArrayD<f32>, start: usize, len: usize) -> Result<ArrayViewD<'_, f32>> {

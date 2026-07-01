@@ -8,7 +8,7 @@ mod tokenspeed;
 use std::sync::Arc;
 
 use anyhow::Result;
-use llm_multimodal::{Modality, MultimodalRuntime, PreprocessedEncoderInputs};
+use llm_multimodal::{ImageFrame, MultimodalRuntime, PreprocessedEncoderInputs};
 #[cfg(test)]
 pub(super) use serialization::model_specific_to_tensor_bytes;
 use serialization::{serialize_encoder_input, serialize_model_specific};
@@ -22,7 +22,7 @@ pub(super) use tokenspeed::{
     validate_tokenspeed_item_spans,
 };
 
-use super::{MultimodalIntermediate, PrecomputedMultimodalIntermediate};
+use super::{MultimodalIntermediate, PrecomputedMultimodalIntermediate, PreparedMedia};
 use crate::routers::grpc::{
     client::GrpcClient,
     context::WorkerSelection,
@@ -45,22 +45,13 @@ pub(crate) fn assemble_multimodal_data(
 ) -> Result<MultimodalData> {
     runtime.run_cpu(|| match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
-            GrpcClient::Sglang(_) => {
-                ensure_image_only(&precomputed, "SGLang")?;
-                Ok(MultimodalData::Sglang(assemble_sglang(
-                    materialize_encoder_input(precomputed)?,
-                )?))
-            }
-            GrpcClient::Vllm(_) => {
-                ensure_image_only(&precomputed, "vLLM")?;
-                Ok(MultimodalData::Vllm(assemble_vllm(
-                    materialize_encoder_input(precomputed)?,
-                )?))
-            }
-            GrpcClient::Trtllm(_) => {
-                ensure_image_only(&precomputed, "TRT-LLM")?;
-                Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
-            }
+            GrpcClient::Sglang(_) => Ok(MultimodalData::Sglang(assemble_sglang(
+                materialize_encoder_input(precomputed)?,
+            )?)),
+            GrpcClient::Vllm(_) => Ok(MultimodalData::Vllm(assemble_vllm(
+                materialize_encoder_input(precomputed)?,
+            )?)),
+            GrpcClient::Trtllm(_) => Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)?)),
             GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
                 precomputed,
                 workers,
@@ -81,27 +72,13 @@ fn materialize_encoder_input(
     Ok(intermediate)
 }
 
-fn ensure_image_only(
-    intermediate: &PrecomputedMultimodalIntermediate,
-    backend: &str,
-) -> Result<()> {
-    if intermediate.modality != Modality::Image {
-        return Err(anyhow::anyhow!(
-            "{backend} multimodal path currently supports image inputs only; got {}",
-            intermediate.modality
-        ));
-    }
-    Ok(())
-}
-
 fn assemble_sglang(
     intermediate: PrecomputedMultimodalIntermediate,
 ) -> Result<SglangMultimodalData> {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
-    let image_data = intermediate
-        .images
+    let image_data = prepared_images(&intermediate.media, "SGLang")?
         .iter()
         .map(|f| f.raw_bytes.to_vec())
         .collect();
@@ -131,7 +108,10 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> Result<Vllm
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
-    let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
+    let mm_hashes = prepared_images(&intermediate.media, "vLLM")?
+        .iter()
+        .map(|frame| frame.hash.clone())
+        .collect();
     let mm_placeholders = intermediate
         .placeholders
         .iter()
@@ -153,11 +133,22 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> Result<Vllm
     })
 }
 
-fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMultimodalData {
-    let image_data = intermediate
-        .images
+fn assemble_trtllm(
+    intermediate: PrecomputedMultimodalIntermediate,
+) -> Result<TrtllmMultimodalData> {
+    let image_data = prepared_images(&intermediate.media, "TRT-LLM")?
         .iter()
         .map(|f| f.raw_bytes.to_vec())
         .collect();
-    TrtllmMultimodalData { image_data }
+    Ok(TrtllmMultimodalData { image_data })
+}
+
+fn prepared_images<'a>(media: &'a PreparedMedia, backend: &str) -> Result<&'a [Arc<ImageFrame>]> {
+    match media {
+        PreparedMedia::Images(images) => Ok(images),
+        PreparedMedia::Videos(_) => Err(anyhow::anyhow!(
+            "{backend} multimodal path currently supports image inputs only; got {}",
+            media.modality()
+        )),
+    }
 }
