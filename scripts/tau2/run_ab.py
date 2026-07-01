@@ -69,6 +69,7 @@ def run_tau2(
     domain: str,
     num_trials: int,
     num_tasks: int,
+    max_concurrency: int,
     user_llm: str,
     data_dir: Path,
 ) -> None:
@@ -104,6 +105,8 @@ def run_tau2(
     ]
     if num_tasks > 0:
         cmd += ["--num-tasks", str(num_tasks)]
+    if max_concurrency > 0:
+        cmd += ["--max-concurrency", str(max_concurrency)]
     print(f"\n=== [{arm.name}/{domain}] {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, env=os.environ.copy(), check=False)
     if proc.returncode != 0:
@@ -196,6 +199,12 @@ def main() -> int:
     p.add_argument("--num-trials", type=int, default=2)
     p.add_argument("--num-tasks", type=int, default=0, help="0 = all tasks")
     p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=0,
+        help="tau2 --max-concurrency (concurrent simulations per arm; 0 = tau2 default)",
+    )
+    p.add_argument(
         "--agent-model",
         default="Qwen/Qwen3.6-27B",
         help="served model name on both arms (used as openai/<name>)",
@@ -225,6 +234,7 @@ def main() -> int:
                 domain=d,
                 num_trials=args.num_trials,
                 num_tasks=args.num_tasks,
+                max_concurrency=args.max_concurrency,
                 user_llm=args.user_llm,
                 data_dir=args.data_dir,
             )

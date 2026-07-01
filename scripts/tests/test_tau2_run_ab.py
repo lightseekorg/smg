@@ -57,7 +57,10 @@ def test_build_report_delta_and_overall():
 def test_domain_scores_on_real_fixture():
     fixture = Path(__file__).resolve().parent / "fixtures" / "tau2_results_sample.json"
     raw = json.loads(fixture.read_text())
-    results = run_ab.load_results(raw)  # adapter to the real schema (Task 4)
+    results = run_ab.load_results(raw)  # schema validated live against tau2 1.0.0 output
+    # Fixture: 3 tasks x 2 trials, mixed pass/fail -> pass1 = 3/6, and at k=2 one
+    # task passes both trials -> pass^2 = 1/3. Pinned so a grouping/schema regression
+    # (e.g. swapping pass1/passk, or reading the wrong reward key) actually fails.
     scores = run_ab.domain_scores(results, k=2)
-    assert 0.0 <= scores["pass1"] <= 1.0
-    assert 0.0 <= scores["passk"] <= 1.0
+    assert scores["pass1"] == pytest.approx(0.5)
+    assert scores["passk"] == pytest.approx(1 / 3)
