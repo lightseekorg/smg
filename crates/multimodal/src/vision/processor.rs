@@ -627,7 +627,8 @@ pub trait VisionPreProcessor: Send + Sync {
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         let expected_frames = stream.expected_frames();
         let mut frames = Vec::with_capacity(expected_frames);
-        while let Some(frame) = stream.next_frame().map_err(TransformError::ShapeError)? {
+        while let Some(mut frame) = stream.next_frame().map_err(TransformError::ShapeError)? {
+            frame.convert_to_rgb();
             frames.push(frame);
         }
         if frames.len() != expected_frames {

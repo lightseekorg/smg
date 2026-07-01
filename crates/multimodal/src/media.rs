@@ -52,7 +52,7 @@ const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_NUMERATOR: usize = 6;
 const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_DENOMINATOR: usize = 7;
 
 #[cfg(feature = "opencv-video")]
-use super::types::{DecodedRgbFrameStream, OwnedRgbFrame};
+use super::types::{DecodedRgbFrameStream, OwnedRgbFrame, RgbChannelOrder};
 use super::{
     error::MediaConnectorError,
     types::{
@@ -876,7 +876,6 @@ fn decode_opencv_frames_to_stream(
     let mut decoded_pos: i64 = -1;
     let mut emitted = 0usize;
     let mut bgr_frame = Mat::default();
-    let mut rgb_frame = Mat::default();
 
     for (idx, repeat_count) in sampled_frame_counts {
         while decoded_pos + 1 < idx as i64 {
@@ -899,32 +898,31 @@ fn decode_opencv_frames_to_stream(
         if !read_successful || bgr_frame.empty() {
             continue;
         }
-        imgproc::cvt_color_def(&bgr_frame, &mut rgb_frame, imgproc::COLOR_BGR2RGB)
-            .map_err(opencv_decode_error)?;
-        let width = u32::try_from(rgb_frame.cols()).map_err(|_| {
+        let width = u32::try_from(bgr_frame.cols()).map_err(|_| {
             MediaConnectorError::VideoDecode(format!(
-                "OpenCV produced invalid RGB frame width: {}",
-                rgb_frame.cols()
+                "OpenCV produced invalid BGR frame width: {}",
+                bgr_frame.cols()
             ))
         })?;
-        let height = u32::try_from(rgb_frame.rows()).map_err(|_| {
+        let height = u32::try_from(bgr_frame.rows()).map_err(|_| {
             MediaConnectorError::VideoDecode(format!(
-                "OpenCV produced invalid RGB frame height: {}",
-                rgb_frame.rows()
+                "OpenCV produced invalid BGR frame height: {}",
+                bgr_frame.rows()
             ))
         })?;
         let frame_size = rawvideo_frame_size(width, height)?;
-        let rgb_bytes = rgb_frame.data_bytes().map_err(opencv_decode_error)?;
-        if rgb_bytes.len() < frame_size {
+        let bgr_bytes = bgr_frame.data_bytes().map_err(opencv_decode_error)?;
+        if bgr_bytes.len() < frame_size {
             return Err(MediaConnectorError::VideoDecode(format!(
-                "OpenCV produced {} RGB bytes for {width}x{height} frame, expected {frame_size}",
-                rgb_bytes.len()
+                "OpenCV produced {} BGR bytes for {width}x{height} frame, expected {frame_size}",
+                bgr_bytes.len()
             )));
         }
         let frame = OwnedRgbFrame {
             width,
             height,
-            data: Bytes::copy_from_slice(&rgb_bytes[..frame_size]),
+            data: Bytes::copy_from_slice(&bgr_bytes[..frame_size]),
+            channel_order: RgbChannelOrder::Bgr,
         };
         for _ in 0..repeat_count {
             if sender.send(Ok(frame.clone())).is_err() {

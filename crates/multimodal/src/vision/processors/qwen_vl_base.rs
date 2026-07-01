@@ -27,7 +27,7 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3};
 
 use crate::{
-    types::{DecodedRgbFrameStream, OwnedRgbFrame, RgbFrameRef},
+    types::{DecodedRgbFrameStream, OwnedRgbFrame, RgbChannelOrder, RgbFrameRef},
     vision::{
         preprocessor_config::PreProcessorConfig,
         processor::{
@@ -102,6 +102,7 @@ fn validate_streamed_qwen_frame(
     frame: &OwnedRgbFrame,
     expected_width: u32,
     expected_height: u32,
+    expected_channel_order: RgbChannelOrder,
 ) -> Result<(), TransformError> {
     if frame.width != expected_width || frame.height != expected_height {
         return Err(TransformError::InvalidShape {
@@ -126,6 +127,11 @@ fn validate_streamed_qwen_frame(
             ),
             actual: vec![frame.data.len()],
         });
+    }
+    if frame.channel_order != expected_channel_order {
+        return Err(TransformError::ShapeError(
+            "decoded video stream changed channel order between frames".to_string(),
+        ));
     }
     Ok(())
 }
@@ -733,6 +739,7 @@ impl QwenVLProcessorBase {
     fn patchify_video_rgb_u8_chunk_into(
         &self,
         frames: &[VideoFrameRgb<'_>],
+        channel_order: RgbChannelOrder,
         grid_h: usize,
         grid_w: usize,
         output: &mut [u8],
@@ -778,6 +785,7 @@ impl QwenVLProcessorBase {
         if nthreads <= 1 {
             Self::patchify_video_rgb_u8_block_band(
                 frames,
+                channel_order,
                 width,
                 patch_size,
                 merge_size,
@@ -799,6 +807,7 @@ impl QwenVLProcessorBase {
                     scope.spawn(move |_| {
                         Self::patchify_video_rgb_u8_block_band(
                             frames,
+                            channel_order,
                             width,
                             patch_size,
                             merge_size,
@@ -816,9 +825,14 @@ impl QwenVLProcessorBase {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resized RGB patchifier needs source order, grid, and output state"
+    )]
     fn patchify_video_resized_u8_chunk_into(
         &self,
         frames: &[Cow<'_, [u8]>],
+        channel_order: RgbChannelOrder,
         resize: &PilBicubicRgbPlan,
         grid_h: usize,
         grid_w: usize,
@@ -861,6 +875,7 @@ impl QwenVLProcessorBase {
                 scope.spawn(move |_| {
                     Self::patchify_video_resized_u8_block_band(
                         frames,
+                        channel_order,
                         resize,
                         patch_size,
                         merge_size,
@@ -882,6 +897,7 @@ impl QwenVLProcessorBase {
     )]
     fn patchify_video_resized_u8_block_band(
         frames: &[Cow<'_, [u8]>],
+        channel_order: RgbChannelOrder,
         resize: &PilBicubicRgbPlan,
         patch_size: usize,
         merge_size: usize,
@@ -899,6 +915,7 @@ impl QwenVLProcessorBase {
             for merge_row in 0..merge_size {
                 for merge_column in 0..merge_size {
                     for channel in 0..3 {
+                        let source_channel = channel_order.source_channel(channel);
                         for frame in frames {
                             for patch_row in 0..patch_size {
                                 let y = y0 + merge_row * patch_size + patch_row;
@@ -908,8 +925,12 @@ impl QwenVLProcessorBase {
                                     .iter_mut()
                                     .enumerate()
                                 {
-                                    *output =
-                                        resize.pixel(frame.as_ref(), x + patch_column, y, channel);
+                                    *output = resize.pixel(
+                                        frame.as_ref(),
+                                        x + patch_column,
+                                        y,
+                                        source_channel,
+                                    );
                                 }
                                 output_index += patch_size;
                             }
@@ -926,6 +947,7 @@ impl QwenVLProcessorBase {
     )]
     fn patchify_video_rgb_u8_block_band(
         frames: &[VideoFrameRgb<'_>],
+        channel_order: RgbChannelOrder,
         width: usize,
         patch_size: usize,
         merge_size: usize,
@@ -946,13 +968,14 @@ impl QwenVLProcessorBase {
             for merge_row in 0..merge_size {
                 for merge_column in 0..merge_size {
                     for channel in 0..3 {
+                        let source_channel = channel_order.source_channel(channel);
                         for frame in frames {
                             let raw = frame.data.as_ref();
                             for patch_row in 0..patch_size {
                                 let row = (y0 + merge_row * patch_size + patch_row) * width
                                     + x0
                                     + merge_column * patch_size;
-                                let mut source_index = row * 3 + channel;
+                                let mut source_index = row * 3 + source_channel;
                                 for output in &mut chunk[output_index..output_index + patch_size] {
                                     *output = raw[source_index];
                                     source_index += 3;
@@ -1197,6 +1220,7 @@ impl QwenVLProcessorBase {
         let mut output_index = 0;
         self.patchify_video_rgb_u8_chunk_into(
             &frames,
+            RgbChannelOrder::Rgb,
             grid_h,
             grid_w,
             &mut patches,
@@ -1773,6 +1797,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                 }
                 self.patchify_video_resized_u8_chunk_into(
                     &resized_horizontal,
+                    RgbChannelOrder::Rgb,
                     resize,
                     grid_h,
                     grid_w,
@@ -1808,6 +1833,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             }
             self.patchify_video_rgb_u8_chunk_into(
                 &frame_rgbs,
+                RgbChannelOrder::Rgb,
                 grid_h,
                 grid_w,
                 &mut patches,
@@ -1863,6 +1889,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             })?;
         let width = first.width;
         let height = first.height;
+        let channel_order = first.channel_order;
         let item_sizes = vec![(width, height)];
         let temporal_patch_size = self.config.temporal_patch_size;
         let padded_frames = frame_count.div_ceil(temporal_patch_size) * temporal_patch_size;
@@ -1933,7 +1960,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             }
 
             for frame in &frame_group {
-                validate_streamed_qwen_frame(frame, width, height)?;
+                validate_streamed_qwen_frame(frame, width, height, channel_order)?;
             }
             if let Some(resize) = &direct_resize {
                 let mut resized_horizontal = Vec::with_capacity(temporal_patch_size);
@@ -1942,6 +1969,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                 }
                 self.patchify_video_resized_u8_chunk_into(
                     &resized_horizontal,
+                    channel_order,
                     resize,
                     grid_h,
                     grid_w,
@@ -1979,6 +2007,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             }
             self.patchify_video_rgb_u8_chunk_into(
                 &frame_rgbs,
+                channel_order,
                 grid_h,
                 grid_w,
                 &mut patches,
@@ -2452,12 +2481,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_streaming_video_matches_bulk_deferred_with_resize_and_padding() {
+    fn assert_bgr_streaming_matches_bulk(resampling: Option<usize>) {
         let processor = QwenVLProcessorBase::new(create_video_test_config());
         let config = PreProcessorConfig {
             image_mean: Some(processor.default_mean().to_vec()),
             image_std: Some(processor.default_std().to_vec()),
+            resampling,
             ..Default::default()
         };
         let frames = [
@@ -2471,19 +2500,29 @@ mod tests {
                 let DynamicImage::ImageRgb8(rgb) = frame else {
                     panic!("test frame is not RGB8");
                 };
+                let mut bgr = rgb.as_raw().clone();
+                for pixel in bgr.chunks_exact_mut(3) {
+                    pixel.swap(0, 2);
+                }
                 OwnedRgbFrame {
                     width: rgb.width(),
                     height: rgb.height(),
-                    data: bytes::Bytes::copy_from_slice(rgb.as_raw()),
+                    data: bytes::Bytes::from(bgr),
+                    channel_order: RgbChannelOrder::Bgr,
                 }
             })
             .collect::<Vec<_>>();
-        let frame_refs = owned_frames
+        let frame_refs = frames
             .iter()
-            .map(|frame| RgbFrameRef {
-                width: frame.width,
-                height: frame.height,
-                data: frame.data.as_ref(),
+            .map(|frame| {
+                let DynamicImage::ImageRgb8(rgb) = frame else {
+                    panic!("test frame is not RGB8");
+                };
+                RgbFrameRef {
+                    width: rgb.width(),
+                    height: rgb.height(),
+                    data: rgb.as_raw(),
+                }
             })
             .collect::<Vec<_>>();
         let mut bulk = processor
@@ -2530,6 +2569,16 @@ mod tests {
                 "streamed video path diverges at index {index}"
             );
         }
+    }
+
+    #[test]
+    fn test_streaming_bgr_video_matches_bulk_bicubic_with_padding() {
+        assert_bgr_streaming_matches_bulk(Some(3));
+    }
+
+    #[test]
+    fn test_streaming_bgr_video_matches_bulk_bilinear_with_padding() {
+        assert_bgr_streaming_matches_bulk(Some(2));
     }
 
     #[test]
