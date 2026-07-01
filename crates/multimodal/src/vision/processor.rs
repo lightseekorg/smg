@@ -13,7 +13,7 @@ use super::{
     preprocessor_config::PreProcessorConfig,
     transforms::{par_scope, par_threads, TransformError},
 };
-use crate::types::{FieldLayout, RgbFrameRef};
+use crate::types::{DecodedRgbFrameStream, FieldLayout, RgbFrameRef};
 
 /// Helper to extract a dimension from encoder_input given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.
@@ -616,6 +616,35 @@ pub trait VisionPreProcessor: Send + Sync {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         self.preprocess_video_rgb(frames, config)
+    }
+
+    /// Consume one bounded decoded-frame stream under a single video plan.
+    /// The default preserves bulk semantics by collecting before preprocessing.
+    fn preprocess_video_rgb_stream_deferred(
+        &self,
+        stream: DecodedRgbFrameStream,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let expected_frames = stream.expected_frames();
+        let mut frames = Vec::with_capacity(expected_frames);
+        while let Some(frame) = stream.next_frame().map_err(TransformError::ShapeError)? {
+            frames.push(frame);
+        }
+        if frames.len() != expected_frames {
+            return Err(TransformError::ShapeError(format!(
+                "decoded RGB stream produced {} frames, expected {expected_frames}",
+                frames.len()
+            )));
+        }
+        let frame_refs: Vec<_> = frames
+            .iter()
+            .map(|frame| RgbFrameRef {
+                width: frame.width,
+                height: frame.height,
+                data: frame.data.as_ref(),
+            })
+            .collect();
+        self.preprocess_video_rgb_deferred(&frame_refs, config)
     }
 
     /// Calculate the number of vision tokens for a given image size.

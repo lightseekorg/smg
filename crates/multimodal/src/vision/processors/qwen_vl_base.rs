@@ -27,7 +27,7 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3};
 
 use crate::{
-    types::RgbFrameRef,
+    types::{DecodedRgbFrameStream, OwnedRgbFrame, RgbFrameRef},
     vision::{
         preprocessor_config::PreProcessorConfig,
         processor::{
@@ -96,6 +96,38 @@ struct QwenImagePlan {
     num_patches: usize,
     patch_values: usize,
     tokens: usize,
+}
+
+fn validate_streamed_qwen_frame(
+    frame: &OwnedRgbFrame,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(), TransformError> {
+    if frame.width != expected_width || frame.height != expected_height {
+        return Err(TransformError::InvalidShape {
+            expected: format!("uniform RGB frames of {expected_width}x{expected_height}"),
+            actual: vec![frame.width as usize, frame.height as usize],
+        });
+    }
+    let expected_len = (frame.width as usize)
+        .checked_mul(frame.height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| {
+            TransformError::ShapeError(format!(
+                "video frame dimensions are too large: {}x{}",
+                frame.width, frame.height
+            ))
+        })?;
+    if frame.data.len() != expected_len {
+        return Err(TransformError::InvalidShape {
+            expected: format!(
+                "RGB frame byte length {expected_len} for {}x{}",
+                frame.width, frame.height
+            ),
+            actual: vec![frame.data.len()],
+        });
+    }
+    Ok(())
 }
 
 fn resize_rgb_frame_to_raw(
@@ -1812,6 +1844,191 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         )
     }
 
+    fn preprocess_video_rgb_stream_deferred(
+        &self,
+        stream: DecodedRgbFrameStream,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let frame_count = stream.expected_frames();
+        if frame_count == 0 {
+            return Err(TransformError::EmptyBatch);
+        }
+        let first = stream
+            .next_frame()
+            .map_err(TransformError::ShapeError)?
+            .ok_or_else(|| {
+                TransformError::ShapeError(
+                    "decoded RGB stream ended before its first frame".to_string(),
+                )
+            })?;
+        let width = first.width;
+        let height = first.height;
+        let item_sizes = vec![(width, height)];
+        let temporal_patch_size = self.config.temporal_patch_size;
+        let padded_frames = frame_count.div_ceil(temporal_patch_size) * temporal_patch_size;
+        let do_resize = config.do_resize.unwrap_or(true);
+        let (target_h, target_w) = if do_resize {
+            self.smart_resize_video(frame_count, height as usize, width as usize)?
+        } else {
+            self.validate_unresized_patch_dimensions(height as usize, width as usize)?;
+            (height as usize, width as usize)
+        };
+        let (target_width, target_height) = (target_w as u32, target_h as u32);
+        let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, padded_frames);
+        let patch_size = self.config.patch_size;
+        let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+        let num_patches = grid_t * grid_h * grid_w;
+        let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
+        let mut patches = vec![0; num_patches * patch_features];
+
+        let mean = config.get_image_mean();
+        let std = config.get_image_std();
+        let do_normalize = config.do_normalize.unwrap_or(true);
+        let scale: [f32; 3] = if do_normalize {
+            std::array::from_fn(|channel| 1.0 / (255.0 * std[channel] as f32))
+        } else {
+            [1.0 / 255.0; 3]
+        };
+        let bias: [f32; 3] = if do_normalize {
+            std::array::from_fn(|channel| -(mean[channel] as f32) / (std[channel] as f32))
+        } else {
+            [0.0; 3]
+        };
+        let lut: [[f32; 256]; 3] = std::array::from_fn(|channel| {
+            std::array::from_fn(|value| value as f32 * scale[channel] + bias[channel])
+        });
+        let filter = pil_to_filter(config.resampling.or(Some(3)));
+        let direct_resize = (do_resize
+            && filter == FilterType::CatmullRom
+            && (width != target_width || height != target_height))
+            .then(|| PilBicubicRgbPlan::new(width, height, target_width, target_height))
+            .transpose()?;
+
+        let mut consumed = 1usize;
+        let mut output_frame_index = 0usize;
+        let mut last_frame = first;
+        let mut output_index = 0;
+        let mut frame_group = Vec::with_capacity(temporal_patch_size);
+        for _ in 0..grid_t {
+            frame_group.clear();
+            for _ in 0..temporal_patch_size {
+                if output_frame_index == 0 {
+                    frame_group.push(last_frame.clone());
+                    output_frame_index += 1;
+                    continue;
+                }
+                if output_frame_index < frame_count {
+                    last_frame = stream
+                        .next_frame()
+                        .map_err(TransformError::ShapeError)?
+                        .ok_or_else(|| {
+                            TransformError::ShapeError(format!(
+                                "decoded RGB stream ended after {consumed} of {frame_count} frames"
+                            ))
+                        })?;
+                    consumed += 1;
+                }
+                frame_group.push(last_frame.clone());
+                output_frame_index += 1;
+            }
+
+            for frame in &frame_group {
+                validate_streamed_qwen_frame(frame, width, height)?;
+            }
+            if let Some(resize) = &direct_resize {
+                let mut resized_horizontal = Vec::with_capacity(temporal_patch_size);
+                for frame in &frame_group {
+                    resized_horizontal.push(resize.prepare_horizontal(frame.data.as_ref())?);
+                }
+                self.patchify_video_resized_u8_chunk_into(
+                    &resized_horizontal,
+                    resize,
+                    grid_h,
+                    grid_w,
+                    &mut patches,
+                    &mut output_index,
+                )?;
+                continue;
+            }
+
+            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+            for frame in &frame_group {
+                let frame_ref = RgbFrameRef {
+                    width: frame.width,
+                    height: frame.height,
+                    data: frame.data.as_ref(),
+                };
+                if do_resize && (frame.width != target_width || frame.height != target_height) {
+                    frame_rgbs.push(VideoFrameRgb {
+                        width: target_width as usize,
+                        height: target_height as usize,
+                        data: Cow::Owned(resize_rgb_frame_to_raw(
+                            frame_ref,
+                            target_width,
+                            target_height,
+                            filter,
+                        )?),
+                    });
+                } else {
+                    frame_rgbs.push(VideoFrameRgb {
+                        width: frame.width as usize,
+                        height: frame.height as usize,
+                        data: Cow::Borrowed(frame.data.as_ref()),
+                    });
+                }
+            }
+            self.patchify_video_rgb_u8_chunk_into(
+                &frame_rgbs,
+                grid_h,
+                grid_w,
+                &mut patches,
+                &mut output_index,
+            )?;
+        }
+        if consumed != frame_count {
+            return Err(TransformError::ShapeError(format!(
+                "decoded RGB stream consumed {consumed} frames, expected {frame_count}"
+            )));
+        }
+        if stream
+            .next_frame()
+            .map_err(TransformError::ShapeError)?
+            .is_some()
+        {
+            return Err(TransformError::ShapeError(
+                "decoded RGB stream produced more frames than expected".to_string(),
+            ));
+        }
+        debug_assert_eq!(output_index, patches.len());
+
+        let channel_run = temporal_patch_size * patch_size * patch_size;
+        let deferred = DeferredNormalizedEncoderInput::new(
+            patches,
+            vec![num_patches, patch_features],
+            lut,
+            channel_run,
+        )?;
+        Ok(
+            PreprocessedEncoderInputs::new_deferred_normalized(deferred, vec![tokens], item_sizes)
+                .with_extra(
+                    "video_grid_thw",
+                    ModelSpecificValue::int_2d(
+                        vec![grid_t as i64, grid_h as i64, grid_w as i64],
+                        1,
+                        3,
+                    ),
+                )
+                .with_extra(
+                    "patches_per_video",
+                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
+                )
+                .with_extra(
+                    "patches_per_image",
+                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
+                ),
+        )
+    }
+
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let fallback_size = || {
             let factor = self.get_factor();
@@ -1844,6 +2061,8 @@ impl VisionPreProcessor for QwenVLProcessorBase {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc::sync_channel, thread};
+
     use image::RgbImage;
 
     use super::*;
@@ -2229,6 +2448,86 @@ mod tests {
                 want.to_bits(),
                 deferred_value.to_bits(),
                 "deferred video path diverges at index {idx}: rgb {want} vs deferred {deferred_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_video_matches_bulk_deferred_with_resize_and_padding() {
+        let processor = QwenVLProcessorBase::new(create_video_test_config());
+        let config = PreProcessorConfig {
+            image_mean: Some(processor.default_mean().to_vec()),
+            image_std: Some(processor.default_std().to_vec()),
+            ..Default::default()
+        };
+        let frames = [
+            create_sized_pattern_frame(7, 9, 3),
+            create_sized_pattern_frame(7, 9, 101),
+            create_sized_pattern_frame(7, 9, 177),
+        ];
+        let owned_frames = frames
+            .iter()
+            .map(|frame| {
+                let DynamicImage::ImageRgb8(rgb) = frame else {
+                    panic!("test frame is not RGB8");
+                };
+                OwnedRgbFrame {
+                    width: rgb.width(),
+                    height: rgb.height(),
+                    data: bytes::Bytes::copy_from_slice(rgb.as_raw()),
+                }
+            })
+            .collect::<Vec<_>>();
+        let frame_refs = owned_frames
+            .iter()
+            .map(|frame| RgbFrameRef {
+                width: frame.width,
+                height: frame.height,
+                data: frame.data.as_ref(),
+            })
+            .collect::<Vec<_>>();
+        let mut bulk = processor
+            .preprocess_video_rgb_deferred(&frame_refs, &config)
+            .unwrap();
+
+        let (sender, receiver) = sync_channel(2);
+        let expected_frames = owned_frames.len();
+        let producer = thread::spawn(move || {
+            for frame in owned_frames {
+                sender.send(Ok(frame)).unwrap();
+            }
+        });
+        let mut streamed = processor
+            .preprocess_video_rgb_stream_deferred(
+                DecodedRgbFrameStream::new(expected_frames, receiver),
+                &config,
+            )
+            .unwrap();
+        producer.join().unwrap();
+
+        let bulk_compact = bulk.deferred_encoder_input.as_ref().unwrap();
+        let streamed_compact = streamed.deferred_encoder_input.as_ref().unwrap();
+        let mut bulk_bf16 = vec![0; bulk_compact.len() * 2];
+        let mut streamed_bf16 = vec![0; streamed_compact.len() * 2];
+        bulk_compact.fill_bf16_le_bytes(&mut bulk_bf16).unwrap();
+        streamed_compact
+            .fill_bf16_le_bytes(&mut streamed_bf16)
+            .unwrap();
+        assert_eq!(streamed_bf16, bulk_bf16);
+        assert_eq!(streamed.feature_token_counts, bulk.feature_token_counts);
+
+        bulk.materialize_deferred_encoder_input().unwrap();
+        streamed.materialize_deferred_encoder_input().unwrap();
+        for (index, (&actual, &expected)) in streamed
+            .encoder_input
+            .iter()
+            .zip(bulk.encoder_input.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "streamed video path diverges at index {index}"
             );
         }
     }

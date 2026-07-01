@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    path::PathBuf,
+    sync::{mpsc::Receiver, Arc, Mutex},
+};
 
 use image::{DynamicImage, RgbImage};
 use serde::{Deserialize, Serialize};
@@ -113,10 +118,53 @@ pub struct ImageFrame {
 pub struct VideoClip {
     pub frames: Vec<DynamicImage>,
     pub rgb_video: Option<DecodedRgbVideo>,
+    rgb_stream: Option<Arc<DecodedRgbFrameStreamSlot>>,
     pub raw_bytes: bytes::Bytes,
     pub source: VideoSource,
     /// Blake3 hex-digest of raw_bytes, computed at decode time.
     pub hash: String,
+}
+
+/// One owned sampled RGB frame emitted by a streaming video decoder.
+#[derive(Debug, Clone)]
+pub struct OwnedRgbFrame {
+    pub width: u32,
+    pub height: u32,
+    pub data: bytes::Bytes,
+}
+
+/// Bounded sampled-frame stream consumed by video preprocessors.
+#[derive(Debug)]
+pub struct DecodedRgbFrameStream {
+    expected_frames: usize,
+    receiver: Receiver<Result<OwnedRgbFrame, String>>,
+}
+
+#[derive(Debug)]
+struct DecodedRgbFrameStreamSlot {
+    expected_frames: usize,
+    stream: Mutex<Option<DecodedRgbFrameStream>>,
+}
+
+impl DecodedRgbFrameStream {
+    pub fn new(expected_frames: usize, receiver: Receiver<Result<OwnedRgbFrame, String>>) -> Self {
+        Self {
+            expected_frames,
+            receiver,
+        }
+    }
+
+    pub fn expected_frames(&self) -> usize {
+        self.expected_frames
+    }
+
+    pub fn next_frame(&self) -> Result<Option<OwnedRgbFrame>, String> {
+        match self.receiver.recv() {
+            Ok(Ok(frame)) => Ok(Some(frame)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 /// Borrowed RGB frame data for video preprocessors.
@@ -203,6 +251,7 @@ impl VideoClip {
         Self {
             frames,
             rgb_video: None,
+            rgb_stream: None,
             raw_bytes,
             source,
             hash,
@@ -218,6 +267,26 @@ impl VideoClip {
         Self {
             frames: Vec::new(),
             rgb_video: Some(rgb_video),
+            rgb_stream: None,
+            raw_bytes,
+            source,
+            hash,
+        }
+    }
+
+    pub fn new_rgb_stream(
+        stream: DecodedRgbFrameStream,
+        raw_bytes: bytes::Bytes,
+        source: VideoSource,
+        hash: String,
+    ) -> Self {
+        Self {
+            frames: Vec::new(),
+            rgb_video: None,
+            rgb_stream: Some(Arc::new(DecodedRgbFrameStreamSlot {
+                expected_frames: stream.expected_frames(),
+                stream: Mutex::new(Some(stream)),
+            })),
             raw_bytes,
             source,
             hash,
@@ -230,6 +299,30 @@ impl VideoClip {
 
     pub fn rgb_video(&self) -> Option<&DecodedRgbVideo> {
         self.rgb_video.as_ref()
+    }
+
+    pub fn take_rgb_stream(&self) -> Result<Option<DecodedRgbFrameStream>, String> {
+        let Some(stream) = &self.rgb_stream else {
+            return Ok(None);
+        };
+        stream
+            .stream
+            .lock()
+            .map_err(|_| "decoded RGB frame stream lock is poisoned".to_string())
+            .map(|mut slot| slot.take())
+    }
+
+    pub fn frame_count(&self) -> usize {
+        if !self.frames.is_empty() {
+            return self.frames.len();
+        }
+        if let Some(rgb_video) = &self.rgb_video {
+            return rgb_video.frames.len();
+        }
+        self.rgb_stream
+            .as_ref()
+            .map(|stream| stream.expected_frames)
+            .unwrap_or_default()
     }
 
     pub fn materialized_frames(&self) -> Result<Vec<DynamicImage>, String> {

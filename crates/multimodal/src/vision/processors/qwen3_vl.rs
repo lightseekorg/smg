@@ -22,7 +22,7 @@ use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::{
-    types::RgbFrameRef,
+    types::{DecodedRgbFrameStream, RgbFrameRef},
     vision::{
         preprocessor_config::PreProcessorConfig,
         processor::{PreprocessedEncoderInputs, VisionPreProcessor},
@@ -286,6 +286,17 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         processor
             .inner
             .preprocess_video_rgb_deferred(frames, config)
+    }
+
+    fn preprocess_video_rgb_stream_deferred(
+        &self,
+        stream: DecodedRgbFrameStream,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor
+            .inner
+            .preprocess_video_rgb_stream_deferred(stream, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {

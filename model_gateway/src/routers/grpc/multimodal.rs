@@ -681,7 +681,7 @@ async fn process_multimodal_parts(
         Modality::Video => {
             debug!(
                 video_count = videos.len(),
-                frame_count = videos.first().map_or(0, |v| v.frames.len()),
+                frame_count = videos.first().map_or(0, |v| v.frame_count()),
                 "Fetched video for multimodal processing"
             );
         }
@@ -747,6 +747,15 @@ async fn process_multimodal_parts(
                 let video = videos_for_preprocess
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+
+                if let Some(stream) = video
+                    .take_rgb_stream()
+                    .map_err(|e| anyhow::anyhow!("Video frame stream unavailable: {e}"))?
+                {
+                    return processor
+                        .preprocess_video_rgb_stream_deferred(stream, &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Video stream preprocessing failed: {e}"));
+                }
 
                 if !video.frames().is_empty() {
                     return processor
@@ -859,15 +868,7 @@ async fn process_multimodal_parts(
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or_default();
     let timing_counts = log_timing.then(|| {
-        let video_frame_count = videos.first().map_or(0, |video| {
-            if video.frames().is_empty() {
-                video
-                    .rgb_video()
-                    .map_or(0, |rgb_video| rgb_video.frames.len())
-            } else {
-                video.frames().len()
-            }
-        });
+        let video_frame_count = videos.first().map_or(0, |video| video.frame_count());
         (
             images.len(),
             videos.len(),
