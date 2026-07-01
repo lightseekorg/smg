@@ -244,6 +244,7 @@ pub struct DeferredNormalizedEncoderInput {
     data: Vec<u8>,
     shape: Vec<usize>,
     lut: Box<[[f32; 256]; 3]>,
+    bf16_lut: Box<[[u16; 256]; 3]>,
     channel_run: usize,
 }
 
@@ -265,10 +266,18 @@ impl DeferredNormalizedEncoderInput {
                 actual: vec![data.len(), channel_run],
             });
         }
+        let bf16_lut = lut.map(|channel| {
+            channel.map(|value| {
+                let bits = value.to_bits();
+                let lsb = (bits >> 16) & 1;
+                (bits.wrapping_add(0x7fff + lsb) >> 16) as u16
+            })
+        });
         Ok(Self {
             data,
             shape,
             lut: Box::new(lut),
+            bf16_lut: Box::new(bf16_lut),
             channel_run,
         })
     }
@@ -319,12 +328,9 @@ impl DeferredNormalizedEncoderInput {
             });
         }
         self.fill_parallel(output, size_of::<u16>(), |group, input, output| {
-            let lut = &self.lut[group % 3];
+            let lut = &self.bf16_lut[group % 3];
             for (&value, output) in input.iter().zip(output.chunks_exact_mut(2)) {
-                let bits = lut[value as usize].to_bits();
-                let lsb = (bits >> 16) & 1;
-                let bf16 = (bits.wrapping_add(0x7fff + lsb) >> 16) as u16;
-                output.copy_from_slice(&bf16.to_le_bytes());
+                output.copy_from_slice(&lut[value as usize].to_le_bytes());
             }
         });
         Ok(())
