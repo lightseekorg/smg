@@ -36,7 +36,7 @@ use crate::{
         },
         transforms::{
             par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
-            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, TransformError,
+            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, PilBicubicRgbPlan, TransformError,
         },
     },
 };
@@ -782,6 +782,110 @@ impl QwenVLProcessorBase {
         }
         *out_idx = end_idx;
         Ok(())
+    }
+
+    fn patchify_video_resized_u8_chunk_into(
+        &self,
+        frames: &[Cow<'_, [u8]>],
+        resize: &PilBicubicRgbPlan,
+        grid_h: usize,
+        grid_w: usize,
+        output: &mut [u8],
+        out_idx: &mut usize,
+    ) -> Result<(), TransformError> {
+        let patch_size = self.config.patch_size;
+        let merge_size = self.config.merge_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+        if frames.len() != temporal_patch_size {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{temporal_patch_size} video frames in temporal patch"),
+                actual: vec![frames.len()],
+            });
+        }
+
+        let merged_patch = merge_size * patch_size;
+        let row_blocks = grid_h / merge_size;
+        let column_blocks = grid_w / merge_size;
+        let blocks = row_blocks * column_blocks;
+        let values_per_block =
+            merge_size * merge_size * 3 * temporal_patch_size * patch_size * patch_size;
+        let values = blocks.checked_mul(values_per_block).ok_or_else(|| {
+            TransformError::ShapeError("Qwen resized video patch size overflow".to_string())
+        })?;
+        let end = out_idx.checked_add(values).ok_or_else(|| {
+            TransformError::ShapeError("Qwen resized video patch range overflow".to_string())
+        })?;
+        let region = output.get_mut(*out_idx..end).ok_or_else(|| {
+            TransformError::ShapeError("Qwen resized video patch range out of bounds".to_string())
+        })?;
+        let workers = par_threads(region.len(), blocks);
+        let blocks_per_task = blocks.div_ceil(workers);
+        par_scope(|scope| {
+            for (task, band) in region
+                .chunks_mut(blocks_per_task * values_per_block)
+                .enumerate()
+            {
+                let block_start = task * blocks_per_task;
+                scope.spawn(move |_| {
+                    Self::patchify_video_resized_u8_block_band(
+                        frames,
+                        resize,
+                        patch_size,
+                        merge_size,
+                        merged_patch,
+                        column_blocks,
+                        block_start,
+                        band,
+                    );
+                });
+            }
+        });
+        *out_idx = end;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resized RGB patchifier mirrors the Qwen output layout"
+    )]
+    fn patchify_video_resized_u8_block_band(
+        frames: &[Cow<'_, [u8]>],
+        resize: &PilBicubicRgbPlan,
+        patch_size: usize,
+        merge_size: usize,
+        merged_patch: usize,
+        column_blocks: usize,
+        block_start: usize,
+        band: &mut [u8],
+    ) {
+        let values_per_block = merge_size * merge_size * 3 * frames.len() * patch_size * patch_size;
+        for (band_index, block_output) in band.chunks_mut(values_per_block).enumerate() {
+            let block = block_start + band_index;
+            let y0 = block / column_blocks * merged_patch;
+            let x0 = block % column_blocks * merged_patch;
+            let mut output_index = 0;
+            for merge_row in 0..merge_size {
+                for merge_column in 0..merge_size {
+                    for channel in 0..3 {
+                        for frame in frames {
+                            for patch_row in 0..patch_size {
+                                let y = y0 + merge_row * patch_size + patch_row;
+                                let x = x0 + merge_column * patch_size;
+                                for (patch_column, output) in block_output
+                                    [output_index..output_index + patch_size]
+                                    .iter_mut()
+                                    .enumerate()
+                                {
+                                    *output =
+                                        resize.pixel(frame.as_ref(), x + patch_column, y, channel);
+                                }
+                                output_index += patch_size;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[expect(
@@ -1615,9 +1719,37 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             }
         }
 
+        let direct_resize = (do_resize
+            && filter == FilterType::CatmullRom
+            && (width != target_width || height != target_height)
+            && frames
+                .iter()
+                .all(|frame| frame.width == width && frame.height == height))
+        .then(|| PilBicubicRgbPlan::new(width, height, target_width, target_height))
+        .transpose()?;
+
         let mut output_index = 0;
         let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+        let mut resized_horizontal = Vec::with_capacity(temporal_patch_size);
         for temporal_index in 0..grid_t {
+            if let Some(resize) = &direct_resize {
+                resized_horizontal.clear();
+                for temporal_patch_index in 0..temporal_patch_size {
+                    let frame_index = (temporal_index * temporal_patch_size + temporal_patch_index)
+                        .min(frames.len() - 1);
+                    resized_horizontal.push(resize.prepare_horizontal(frames[frame_index].data)?);
+                }
+                self.patchify_video_resized_u8_chunk_into(
+                    &resized_horizontal,
+                    resize,
+                    grid_h,
+                    grid_w,
+                    &mut patches,
+                    &mut output_index,
+                )?;
+                continue;
+            }
+
             frame_rgbs.clear();
             for temporal_patch_index in 0..temporal_patch_size {
                 let frame_index = (temporal_index * temporal_patch_size + temporal_patch_index)

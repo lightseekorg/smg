@@ -3,7 +3,7 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::{cell::RefCell, sync::OnceLock};
+use std::{borrow::Cow, cell::RefCell, sync::OnceLock};
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -39,18 +39,18 @@ pub type Result<T> = std::result::Result<T, TransformError>;
 
 /// Extract RGB pixel data from a DynamicImage, avoiding a copy when already RGB8.
 /// Returns (width, height, raw_bytes) where raw_bytes is interleaved R,G,B,R,G,B,...
-pub fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u8]>) {
+pub fn rgb_bytes(image: &DynamicImage) -> (usize, usize, Cow<'_, [u8]>) {
     match image {
         DynamicImage::ImageRgb8(rgb) => (
             rgb.width() as usize,
             rgb.height() as usize,
-            std::borrow::Cow::Borrowed(rgb.as_raw()),
+            Cow::Borrowed(rgb.as_raw()),
         ),
         _ => {
             let rgb = image.to_rgb8();
             let w = rgb.width() as usize;
             let h = rgb.height() as usize;
-            (w, h, std::borrow::Cow::Owned(rgb.into_raw()))
+            (w, h, Cow::Owned(rgb.into_raw()))
         }
     }
 }
@@ -411,6 +411,97 @@ fn pil_clip8(v: i64) -> u8 {
         255
     } else {
         v as u8
+    }
+}
+
+type PilCoefficients = (Vec<(usize, usize)>, Vec<Vec<i64>>);
+
+pub(crate) struct PilBicubicRgbPlan {
+    in_w: usize,
+    in_h: usize,
+    out_w: usize,
+    out_h: usize,
+    horizontal: Option<PilCoefficients>,
+    vertical: Option<PilCoefficients>,
+}
+
+impl PilBicubicRgbPlan {
+    pub(crate) fn new(in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> Result<Self> {
+        if in_w == 0 || in_h == 0 || out_w == 0 || out_h == 0 {
+            return Err(TransformError::ShapeError(
+                "PIL bicubic resize dimensions must be non-zero".to_string(),
+            ));
+        }
+        let (in_w, in_h, out_w, out_h) =
+            (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
+        Ok(Self {
+            in_w,
+            in_h,
+            out_w,
+            out_h,
+            horizontal: (in_w != out_w).then(|| pil_precompute_coeffs(in_w, out_w)),
+            vertical: (in_h != out_h).then(|| pil_precompute_coeffs(in_h, out_h)),
+        })
+    }
+
+    pub(crate) fn prepare_horizontal<'a>(&self, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+        let expected = self.in_w * self.in_h * 3;
+        if data.len() != expected {
+            return Err(TransformError::ShapeError(format!(
+                "PIL bicubic RGB source has {} bytes, expected {expected}",
+                data.len()
+            )));
+        }
+        let Some((bounds, kernels)) = &self.horizontal else {
+            return Ok(Cow::Borrowed(data));
+        };
+
+        let half = 1_i64 << (PIL_PRECISION_BITS - 1);
+        let row_out = self.out_w * 3;
+        let mut output = vec![0; self.in_h * row_out];
+        let workers = par_threads(output.len(), self.in_h);
+        if workers <= 1 {
+            pil_h_band(
+                data,
+                bounds,
+                kernels,
+                half,
+                self.in_w,
+                self.out_w,
+                3,
+                0,
+                &mut output,
+            );
+        } else {
+            let rows_per_task = self.in_h.div_ceil(workers);
+            par_scope(|scope| {
+                for (task, band) in output.chunks_mut(rows_per_task * row_out).enumerate() {
+                    let first_row = task * rows_per_task;
+                    scope.spawn(move |_| {
+                        pil_h_band(
+                            data, bounds, kernels, half, self.in_w, self.out_w, 3, first_row, band,
+                        );
+                    });
+                }
+            });
+        }
+        Ok(Cow::Owned(output))
+    }
+
+    #[inline]
+    pub(crate) fn pixel(&self, horizontal: &[u8], x: usize, y: usize, channel: usize) -> u8 {
+        debug_assert!(x < self.out_w && y < self.out_h && channel < 3);
+        let Some((bounds, kernels)) = &self.vertical else {
+            return horizontal[(y * self.out_w + x) * 3 + channel];
+        };
+        let (source_y, rows) = bounds[y];
+        let kernel = &kernels[y];
+        let mut value = 1_i64 << (PIL_PRECISION_BITS - 1);
+        for row in 0..rows {
+            value +=
+                horizontal[((source_y + row) * self.out_w + x) * 3 + channel] as i64 * kernel[row];
+        }
+        pil_clip8(value)
     }
 }
 
