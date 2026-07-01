@@ -24,7 +24,7 @@ use image::DynamicImage;
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
-    processor::{PreprocessedEncoderInputs, VisionPreProcessor},
+    processor::{ModalityInput, PreprocessRequest, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::TransformError,
 };
 
@@ -231,24 +231,19 @@ impl VisionPreProcessor for Qwen2VLProcessor {
         processor.inner.preprocess(images, config)
     }
 
-    fn preprocess_image_refs(
+    fn preprocess_vision_input(
         &self,
-        images: &[&DynamicImage],
+        request: PreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        if matches!(&request.input, ModalityInput::Video(_)) {
+            return Err(TransformError::ShapeError(format!(
+                "{} does not support video preprocessing",
+                self.model_name()
+            )));
+        }
         let processor = self.with_preprocessor_config(config);
-        processor.inner.preprocess_image_refs(images, config)
-    }
-
-    fn preprocess_image_refs_deferred(
-        &self,
-        images: &[&DynamicImage],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor
-            .inner
-            .preprocess_image_refs_deferred(images, config)
+        processor.inner.preprocess_vision_input(request, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {

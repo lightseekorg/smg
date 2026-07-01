@@ -235,6 +235,39 @@ pub struct PreprocessedEncoderInputs {
     pub model_specific: HashMap<String, ModelSpecificValue>,
 }
 
+/// Modality payload supplied to a preprocessor.
+///
+/// This enum is intentionally exhaustive. Adding audio or another modality
+/// should add a representation-neutral variant here, making every processor
+/// dispatch site handle the new input explicitly without changing the serving
+/// contract.
+pub enum ModalityInput<'a> {
+    Images(&'a [&'a DynamicImage]),
+    Video(VideoInput<'a>),
+}
+
+/// Decoded video representation supplied to a preprocessor.
+pub enum VideoInput<'a> {
+    Frames(&'a [DynamicImage]),
+    Rgb(&'a [RgbFrameRef<'a>]),
+    RgbStream(DecodedRgbFrameStream),
+}
+
+/// Preferred physical form of the encoder output.
+///
+/// This describes a serving constraint rather than a backend or tensor dtype;
+/// processors remain free to choose the most efficient compatible form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPreference {
+    Materialized,
+    CompactAllowed,
+}
+
+pub struct PreprocessRequest<'a> {
+    pub input: ModalityInput<'a>,
+    pub output: OutputPreference,
+}
+
 /// Physical representation of a preprocessed modality encoder input.
 ///
 /// The variants are mutually exclusive, so callers cannot accidentally attach
@@ -580,6 +613,28 @@ impl PreprocessedEncoderInputs {
     }
 }
 
+/// Modality-neutral preprocessing contract used by serving pipelines.
+pub trait ModalityPreProcessor: Send + Sync {
+    fn preprocess_input(
+        &self,
+        request: PreprocessRequest<'_>,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError>;
+}
+
+impl<T> ModalityPreProcessor for T
+where
+    T: VisionPreProcessor + ?Sized,
+{
+    fn preprocess_input(
+        &self,
+        request: PreprocessRequest<'_>,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        self.preprocess_vision_input(request, config)
+    }
+}
+
 /// Trait for model-specific vision preprocessors.
 ///
 /// Each vision model (LLaVA, Qwen-VL, Phi3-Vision, etc.) implements this trait
@@ -605,101 +660,27 @@ pub trait VisionPreProcessor: Send + Sync {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError>;
 
-    /// Preprocess a batch of borrowed images.
-    ///
-    /// The default preserves existing behavior by cloning into owned
-    /// `DynamicImage`s and calling `preprocess`. Processors with bit-exact
-    /// borrowed paths can override this to avoid high-throughput image copies.
-    fn preprocess_image_refs(
+    /// Preprocess a modality payload independently of its decoded
+    /// representation. Implementations may select a compact output only when
+    /// the request permits it.
+    fn preprocess_vision_input(
         &self,
-        images: &[&DynamicImage],
+        request: PreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let owned = images
-            .iter()
-            .map(|image| (**image).clone())
-            .collect::<Vec<_>>();
-        self.preprocess(&owned, config)
-    }
-
-    /// Preprocess borrowed images while allowing normalization to be deferred
-    /// until backend assembly. The default keeps the FP32 behavior.
-    fn preprocess_image_refs_deferred(
-        &self,
-        images: &[&DynamicImage],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.preprocess_image_refs(images, config)
-    }
-
-    /// Preprocess one decoded video clip represented as sampled frames.
-    ///
-    /// Implementations that support video should emit the same primary
-    /// `encoder_input` tensor shape used by the image path, plus video-specific
-    /// model metadata such as `video_grid_thw`.
-    fn preprocess_video(
-        &self,
-        _frames: &[DynamicImage],
-        _config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        Err(TransformError::ShapeError(format!(
-            "{} does not support video preprocessing",
-            self.model_name()
-        )))
-    }
-
-    /// Preprocess one decoded video clip represented as borrowed RGB frame
-    /// buffers. Implementations can override this to avoid materializing
-    /// `DynamicImage` objects after media decode.
-    fn preprocess_video_rgb(
-        &self,
-        _frames: &[RgbFrameRef<'_>],
-        _config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        Err(TransformError::ShapeError(format!(
-            "{} does not support RGB video preprocessing",
-            self.model_name()
-        )))
-    }
-
-    /// Preprocess borrowed RGB video while allowing normalization to be
-    /// deferred until backend assembly. The default keeps the FP32 behavior.
-    fn preprocess_video_rgb_deferred(
-        &self,
-        frames: &[RgbFrameRef<'_>],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.preprocess_video_rgb(frames, config)
-    }
-
-    /// Consume one bounded decoded-frame stream under a single video plan.
-    /// The default preserves bulk semantics by collecting before preprocessing.
-    fn preprocess_video_rgb_stream_deferred(
-        &self,
-        stream: DecodedRgbFrameStream,
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let expected_frames = stream.expected_frames();
-        let mut frames = Vec::with_capacity(expected_frames);
-        while let Some(mut frame) = stream.next_frame().map_err(TransformError::ShapeError)? {
-            frame.convert_to_rgb();
-            frames.push(frame);
+        match request.input {
+            ModalityInput::Images(images) => {
+                let owned = images
+                    .iter()
+                    .map(|image| (**image).clone())
+                    .collect::<Vec<_>>();
+                self.preprocess(&owned, config)
+            }
+            ModalityInput::Video(_) => Err(TransformError::ShapeError(format!(
+                "{} does not support video preprocessing",
+                self.model_name()
+            ))),
         }
-        if frames.len() != expected_frames {
-            return Err(TransformError::ShapeError(format!(
-                "decoded RGB stream produced {} frames, expected {expected_frames}",
-                frames.len()
-            )));
-        }
-        let frame_refs: Vec<_> = frames
-            .iter()
-            .map(|frame| RgbFrameRef {
-                width: frame.width,
-                height: frame.height,
-                data: frame.data.as_ref(),
-            })
-            .collect();
-        self.preprocess_video_rgb_deferred(&frame_refs, config)
     }
 
     /// Calculate the number of vision tokens for a given image size.

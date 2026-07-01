@@ -154,20 +154,6 @@ impl RgbChannelOrder {
     }
 }
 
-impl OwnedRgbFrame {
-    pub(crate) fn convert_to_rgb(&mut self) {
-        if self.channel_order == RgbChannelOrder::Rgb {
-            return;
-        }
-        let mut data = self.data.to_vec();
-        for pixel in data.chunks_exact_mut(3) {
-            pixel.swap(0, 2);
-        }
-        self.data = bytes::Bytes::from(data);
-        self.channel_order = RgbChannelOrder::Rgb;
-    }
-}
-
 /// Bounded sampled-frame stream consumed by video preprocessors.
 #[derive(Debug)]
 pub struct DecodedRgbFrameStream {
@@ -513,21 +499,6 @@ mod tests {
     fn prompt_replacement_builders() {
         let rep = PromptReplacement::repeated(Modality::Image, "<image>", 100, 3);
         assert_eq!(rep.tokens, vec![100, 100, 100]);
-    }
-
-    #[test]
-    fn owned_bgr_frame_converts_to_rgb() {
-        let mut frame = OwnedRgbFrame {
-            width: 2,
-            height: 1,
-            data: bytes::Bytes::from_static(&[1, 2, 3, 4, 5, 6]),
-            channel_order: RgbChannelOrder::Bgr,
-        };
-
-        frame.convert_to_rgb();
-
-        assert_eq!(frame.data.as_ref(), &[3, 2, 1, 6, 5, 4]);
-        assert_eq!(frame.channel_order, RgbChannelOrder::Rgb);
     }
 
     #[test]

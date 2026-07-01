@@ -31,8 +31,8 @@ use crate::{
     vision::{
         preprocessor_config::PreProcessorConfig,
         processor::{
-            DeferredNormalizedEncoderInput, ModelSpecificValue, PreprocessedEncoderInputs,
-            VisionPreProcessor,
+            DeferredNormalizedEncoderInput, ModalityInput, ModelSpecificValue, OutputPreference,
+            PreprocessRequest, PreprocessedEncoderInputs, VideoInput, VisionPreProcessor,
         },
         transforms::{
             par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
@@ -1268,28 +1268,7 @@ impl QwenVLProcessorBase {
     }
 }
 
-impl VisionPreProcessor for QwenVLProcessorBase {
-    fn default_mean(&self) -> [f64; 3] {
-        self.config.mean
-    }
-
-    fn default_std(&self) -> [f64; 3] {
-        self.config.std
-    }
-
-    fn preprocess(
-        &self,
-        images: &[DynamicImage],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        if images.len() == 1 {
-            let image_refs = [&images[0]];
-            return self.preprocess_image_refs(&image_refs, config);
-        }
-        let image_refs = images.iter().collect::<Vec<_>>();
-        self.preprocess_image_refs(&image_refs, config)
-    }
-
+impl QwenVLProcessorBase {
     fn preprocess_image_refs(
         &self,
         images: &[&DynamicImage],
@@ -2057,6 +2036,60 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                 ),
         )
     }
+}
+
+impl VisionPreProcessor for QwenVLProcessorBase {
+    fn default_mean(&self) -> [f64; 3] {
+        self.config.mean
+    }
+
+    fn default_std(&self) -> [f64; 3] {
+        self.config.std
+    }
+
+    fn preprocess(
+        &self,
+        images: &[DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        if images.len() == 1 {
+            let image_refs = [&images[0]];
+            return self.preprocess_image_refs(&image_refs, config);
+        }
+        let image_refs = images.iter().collect::<Vec<_>>();
+        self.preprocess_image_refs(&image_refs, config)
+    }
+
+    fn preprocess_vision_input(
+        &self,
+        request: PreprocessRequest<'_>,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        match request.input {
+            ModalityInput::Images(images) => match request.output {
+                OutputPreference::Materialized => self.preprocess_image_refs(images, config),
+                OutputPreference::CompactAllowed => {
+                    self.preprocess_image_refs_deferred(images, config)
+                }
+            },
+            ModalityInput::Video(VideoInput::Frames(frames)) => {
+                self.preprocess_video(frames, config)
+            }
+            ModalityInput::Video(VideoInput::Rgb(frames)) => match request.output {
+                OutputPreference::Materialized => self.preprocess_video_rgb(frames, config),
+                OutputPreference::CompactAllowed => {
+                    self.preprocess_video_rgb_deferred(frames, config)
+                }
+            },
+            ModalityInput::Video(VideoInput::RgbStream(stream)) => {
+                let mut output = self.preprocess_video_rgb_stream_deferred(stream, config)?;
+                if request.output == OutputPreference::Materialized {
+                    output.materialize_encoder_input()?;
+                }
+                Ok(output)
+            }
+        }
+    }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let fallback_size = || {
@@ -2095,7 +2128,7 @@ mod tests {
     use image::RgbImage;
 
     use super::*;
-    use crate::vision::transforms::to_tensor_and_normalize;
+    use crate::vision::{processor::ModalityPreProcessor, transforms::to_tensor_and_normalize};
 
     fn create_test_config() -> QwenVLConfig {
         QwenVLConfig {
@@ -2537,8 +2570,14 @@ mod tests {
             }
         });
         let mut streamed = processor
-            .preprocess_video_rgb_stream_deferred(
-                DecodedRgbFrameStream::new(expected_frames, receiver),
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::RgbStream(DecodedRgbFrameStream::new(
+                        expected_frames,
+                        receiver,
+                    ))),
+                    output: OutputPreference::CompactAllowed,
+                },
                 &config,
             )
             .unwrap();

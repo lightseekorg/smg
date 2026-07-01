@@ -24,10 +24,10 @@ use llm_multimodal::EncoderInput;
 use llm_multimodal::{
     vision::transforms::preprocess_parallelism, AsyncMultiModalTracker,
     DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
-    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
-    ModelSpecificValue, MultimodalRuntime, PlaceholderRange, PreProcessorConfig,
-    PreprocessedEncoderInputs, PromptReplacement, TrackedMedia, TrackerOutput, VideoClip,
-    VisionProcessorRegistry,
+    MediaConnectorConfig, MediaContentPart, Modality, ModalityInput, ModalityPreProcessor,
+    ModelMetadata, ModelRegistry, ModelSpecificValue, MultimodalRuntime, OutputPreference,
+    PlaceholderRange, PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs,
+    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VideoInput, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
 use ndarray::{ArrayD, ArrayViewD, Axis, Slice};
@@ -864,16 +864,20 @@ fn preprocess_media(
 
     match modality {
         Modality::Image => {
-            if images.len() == 1 {
-                let raw_images = [&images[0].image];
-                return processor
-                    .preprocess_image_refs_deferred(&raw_images, config)
-                    .map_err(|error| anyhow::anyhow!("Image preprocessing failed: {error}"));
-            }
             let raw_images: Vec<&image::DynamicImage> =
                 images.iter().map(|frame| &frame.image).collect();
             processor
-                .preprocess_image_refs(&raw_images, config)
+                .preprocess_input(
+                    PreprocessRequest {
+                        input: ModalityInput::Images(&raw_images),
+                        output: if images.len() == 1 {
+                            OutputPreference::CompactAllowed
+                        } else {
+                            OutputPreference::Materialized
+                        },
+                    },
+                    config,
+                )
                 .map_err(|error| anyhow::anyhow!("Image preprocessing failed: {error}"))
         }
         Modality::Video => preprocess_video(processor, videos, config),
@@ -897,19 +901,37 @@ fn preprocess_video(
         .map_err(|error| anyhow::anyhow!("Video frame stream unavailable: {error}"))?
     {
         return processor
-            .preprocess_video_rgb_stream_deferred(stream, config)
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::RgbStream(stream)),
+                    output: OutputPreference::CompactAllowed,
+                },
+                config,
+            )
             .map_err(|error| anyhow::anyhow!("Video stream preprocessing failed: {error}"));
     }
 
     if !video.frames().is_empty() {
         return processor
-            .preprocess_video(video.frames(), config)
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::Frames(video.frames())),
+                    output: OutputPreference::Materialized,
+                },
+                config,
+            )
             .map_err(|error| anyhow::anyhow!("Video preprocessing failed: {error}"));
     }
 
     if let Some(rgb_video) = video.rgb_video() {
         match rgb_video.frame_refs() {
-            Ok(frame_refs) => match processor.preprocess_video_rgb_deferred(&frame_refs, config) {
+            Ok(frame_refs) => match processor.preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::Rgb(&frame_refs)),
+                    output: OutputPreference::CompactAllowed,
+                },
+                config,
+            ) {
                 Ok(preprocessed) => return Ok(preprocessed),
                 Err(error) => {
                     warn!(
@@ -931,7 +953,13 @@ fn preprocess_video(
         .materialized_frames()
         .map_err(|error| anyhow::anyhow!("Video frame materialization failed: {error}"))?;
     processor
-        .preprocess_video(&frames, config)
+        .preprocess_input(
+            PreprocessRequest {
+                input: ModalityInput::Video(VideoInput::Frames(&frames)),
+                output: OutputPreference::Materialized,
+            },
+            config,
+        )
         .map_err(|error| anyhow::anyhow!("Video preprocessing failed: {error}"))
 }
 

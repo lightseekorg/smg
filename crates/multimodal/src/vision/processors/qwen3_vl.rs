@@ -21,13 +21,10 @@ use std::ops::Deref;
 use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
-use crate::{
-    types::{DecodedRgbFrameStream, RgbFrameRef},
-    vision::{
-        preprocessor_config::PreProcessorConfig,
-        processor::{PreprocessedEncoderInputs, VisionPreProcessor},
-        transforms::TransformError,
-    },
+use crate::vision::{
+    preprocessor_config::PreProcessorConfig,
+    processor::{PreprocessRequest, PreprocessedEncoderInputs, VisionPreProcessor},
+    transforms::TransformError,
 };
 
 /// Qwen3-VL normalization mean values (simple [0.5, 0.5, 0.5]).
@@ -239,64 +236,13 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         processor.inner.preprocess(images, config)
     }
 
-    fn preprocess_image_refs(
+    fn preprocess_vision_input(
         &self,
-        images: &[&DynamicImage],
+        request: PreprocessRequest<'_>,
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         let processor = self.with_preprocessor_config(config);
-        processor.inner.preprocess_image_refs(images, config)
-    }
-
-    fn preprocess_image_refs_deferred(
-        &self,
-        images: &[&DynamicImage],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor
-            .inner
-            .preprocess_image_refs_deferred(images, config)
-    }
-
-    fn preprocess_video(
-        &self,
-        frames: &[DynamicImage],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor.inner.preprocess_video(frames, config)
-    }
-
-    fn preprocess_video_rgb(
-        &self,
-        frames: &[RgbFrameRef<'_>],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor.inner.preprocess_video_rgb(frames, config)
-    }
-
-    fn preprocess_video_rgb_deferred(
-        &self,
-        frames: &[RgbFrameRef<'_>],
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor
-            .inner
-            .preprocess_video_rgb_deferred(frames, config)
-    }
-
-    fn preprocess_video_rgb_stream_deferred(
-        &self,
-        stream: DecodedRgbFrameStream,
-        config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        let processor = self.with_preprocessor_config(config);
-        processor
-            .inner
-            .preprocess_video_rgb_stream_deferred(stream, config)
+        processor.inner.preprocess_vision_input(request, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
@@ -320,7 +266,16 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::*;
-    use crate::vision::{preprocessor_config::PatchSize, processor::ModelSpecificValue};
+    use crate::{
+        vision::{
+            preprocessor_config::PatchSize,
+            processor::{
+                ModalityInput, ModalityPreProcessor, ModelSpecificValue, OutputPreference,
+                VideoInput,
+            },
+        },
+        RgbFrameRef,
+    };
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
         DynamicImage::from(RgbImage::from_pixel(width, height, color))
@@ -509,7 +464,15 @@ mod tests {
             create_test_image(640, 480, Rgb([200, 200, 200])),
         ];
 
-        let result = processor.preprocess_video(&frames, &config).unwrap();
+        let result = processor
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::Frames(&frames)),
+                    output: OutputPreference::Materialized,
+                },
+                &config,
+            )
+            .unwrap();
         assert_eq!(result.encoder_input.ndim(), 2);
         assert_eq!(result.feature_token_counts.len(), 1);
         assert!(result.model_specific.contains_key("video_grid_thw"));
@@ -554,9 +517,23 @@ mod tests {
             })
             .collect();
 
-        let dynamic = processor.preprocess_video(&frames, &config).unwrap();
+        let dynamic = processor
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::Frames(&frames)),
+                    output: OutputPreference::Materialized,
+                },
+                &config,
+            )
+            .unwrap();
         let rgb = processor
-            .preprocess_video_rgb(&rgb_frames, &config)
+            .preprocess_input(
+                PreprocessRequest {
+                    input: ModalityInput::Video(VideoInput::Rgb(&rgb_frames)),
+                    output: OutputPreference::Materialized,
+                },
+                &config,
+            )
             .unwrap();
 
         assert_eq!(rgb.encoder_input.shape(), dynamic.encoder_input.shape());
