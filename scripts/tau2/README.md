@@ -85,12 +85,24 @@ where `<DATA_DIR>` is the path you pass to the **required** `--data-dir` flag (t
 
 ## Per-model parser flags (the nightly matrix)
 
-| model (matrix leg) | pure-vLLM `--tool-call-parser` / `--reasoning-parser` | SMG `--tool-call-parser` / `--reasoning-parser` |
-|---|---|---|
-| Qwen3.6-27B (`qwen3.6`) | `qwen3_xml` / `qwen3` | `qwen_xml` / `qwen3` |
+Mirrors `nightly-bfcl.yml`'s 6-leg matrix. The 2 H100 legs run full task sets; the 4
+Blackwell legs are capped at `num_tasks=30`/domain (tau2 is multi-turn + spends
+gpt-5.2 per turn). `glm-5.2` runs **sequential** (whole 8-GPU node per arm — `run_ab.py
+--score-arm` each arm, then `--diff`); the rest run both arms concurrently on opposite
+GPU halves. On PRs only the 2 H100 legs run, as a quick sanity subset.
 
-> The mid-2026 SKU ids and vLLM parser names may shift; confirm against the installed
-> vLLM build: `vllm serve --help | grep -A40 tool-call-parser`.
+| leg | model | runner (TP) | vLLM tool/reason | SMG tool/reason |
+|---|---|---|---|---|
+| qwen3.6 | Qwen/Qwen3.6-27B | 4-gpu-h100 (2) | `qwen3_xml` / `qwen3` | `qwen_xml` / `qwen3` |
+| gpt-oss | openai/gpt-oss-120b | 4-gpu-h100 (2) | `openai` / — | — / — (harmony auto) |
+| deepseek-v4 | deepseek-ai/DeepSeek-V4-Flash | blackwell (4) | `deepseek_v4` / `deepseek_v4` | `deepseek_v4` / `deepseek_v31` |
+| minimax-m2.7 | MiniMaxAI/MiniMax-M2.7 | blackwell (4) | `minimax_m2` / `minimax_m2` | `minimax_m2` / `minimax` |
+| kimi-k2.6 | moonshotai/Kimi-K2.6 | blackwell (4) | `kimi_k2` / `kimi_k2` | `kimik2` / `kimi_k25` |
+| glm-5.2 | zai-org/GLM-5.2-FP8 | blackwell (8, seq) | `glm47` / `glm45` | `glm47_moe` / `glm45` |
+
+> Dispatch `only=<leg>` runs a single leg; `model=` overrides its weights. SKU ids and
+> vLLM parser names may shift; confirm against the installed vLLM build:
+> `vllm serve --help | grep -A40 tool-call-parser`.
 
 ## Gotchas discovered while bringing this up (read before debugging)
 

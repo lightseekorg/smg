@@ -1,69 +1,68 @@
 # Nightly τ²-bench A/B — multi-turn agentic benchmark comparing SMG's parsing
 # frontend (SMG -> vLLM gRPC) against pure vLLM, same model/engine/checkpoint/
-# sampling. Informational/non-blocking — never a merge gate.
+# sampling. Mirrors nightly-bfcl.yml's model matrix. Informational/non-blocking —
+# never a merge gate.
 #
 # User-sim is the fixed gpt-5.2 model via the OpenAI API; agent arms expose an
 # identical OpenAI /v1 endpoint so the τ²-bench harness can point at either and
 # the ONLY variable is the frontend (tokenization + tool/reasoning parsing).
 #
-# Runs nightly across retail, airline, and telecom domains (the stable domains
-# from tau2-bench that don't need external sandboxes/web access).
-# On PRs that touch this pipeline it runs a quick retail sanity subset for
-# merge confidence.
+# Runs nightly across retail, airline, and telecom domains over a 6-model matrix
+# (qwen3.6 + gpt-oss on H100; deepseek-v4, minimax-m2.7, kimi-k2.6, glm-5.2 on
+# Blackwell). The 4 Blackwell legs are num_tasks-capped to bound GPU time and
+# gpt-5.2 spend (tau2 is far heavier per-leg than bfcl: multi-turn + per-turn API
+# spend). On PRs that touch this pipeline it runs the two cheap H100 legs as a
+# quick sanity subset.
 name: Nightly tau2
 
 on:
   schedule:
     - cron: "23 10 * * *" # 10:23 UTC = 03:23 PDT
-  # PR sanity: only when the tau2 pipeline itself changes. Runs a quick single-
-  # domain, single-trial, small-task subset so the A/B is exercised end-to-end
-  # (engine, tool/reasoning parsing, scoring) before merge.
+  # PR sanity: only when the tau2 pipeline itself changes. Runs the H100 legs on a
+  # quick single-domain, single-trial, small-task subset so the A/B is exercised
+  # end-to-end (engine, tool/reasoning parsing, scoring) before merge.
   pull_request:
     paths:
       - "scripts/tau2/**"
       - ".github/workflows/nightly-tau2.yml"
   workflow_dispatch:
     inputs:
-      model:
-        description: "HF model id to benchmark"
+      only:
+        description: "Run only this matrix leg (qwen3.6|gpt-oss|deepseek-v4|minimax-m2.7|kimi-k2.6|glm-5.2); empty = all"
         required: false
-        default: "Qwen/Qwen3.6-27B"
+        default: ""
+      model:
+        description: "Override HF model id for the selected leg; empty = matrix default"
+        required: false
+        default: ""
       domains:
         description: "Comma-separated tau2 domains"
         required: false
         default: "retail,airline,telecom"
       num_trials:
-        description: "Number of trials per task (pass^k k value)"
+        description: "Trials per task (pass^k k value)"
         required: false
         default: "2"
       num_tasks:
-        description: "Max tasks per domain (0 = all)"
+        description: "Max tasks per domain (0 = all); empty = matrix per-leg default"
         required: false
-        default: "0"
+        default: ""
       max_concurrency:
-        description: "Concurrent tau2 simulations per arm (0 = tau2 default)"
+        description: "Concurrent tau2 simulations per arm"
         required: false
         default: "16"
-      tp:
-        description: "Tensor-parallel size per arm"
-        required: false
-        default: "2"
-      user_llm:
-        description: "Fixed user-sim model (OpenAI)"
-        required: false
-        default: "gpt-5.2"
       vllm_tool_parser:
-        description: "Pure-vLLM --tool-call-parser for arm A"
+        description: "Override pure-vLLM --tool-call-parser; empty = matrix default"
         required: false
-        default: "qwen3_xml"
+        default: ""
       smg_tool_parser:
-        description: "SMG --tool-call-parser for arm B (empty = auto-detect)"
+        description: "Override SMG --tool-call-parser; empty = matrix default (empty also = SMG auto-detect)"
         required: false
-        default: "qwen_xml"
+        default: ""
       reasoning_parser:
-        description: "Reasoning parser for BOTH arms (vLLM + SMG)"
+        description: "Override reasoning parser for BOTH arms; empty = matrix defaults"
         required: false
-        default: "qwen3"
+        default: ""
 
 concurrency:
   group: nightly-tau2-${{ github.event_name }}-${{ github.ref }}
@@ -109,129 +108,246 @@ jobs:
           path: bindings/python/dist/*.whl
           retention-days: 7
 
+  # Compute the model matrix as JSON so the dispatch `only` filter (and the
+  # PR-sanity H100-only subset) can depend on inputs — `matrix` is not available
+  # in a job-level `if`.
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - id: build
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          # max_model_len "auto": largest window that fits GPU memory (vLLM 0.24+),
+          # capped at native max — multi-turn tau2 prompts can exceed a fixed 16k.
+          # num_tasks: 0 = all (cheap H100 legs); 30/domain caps the heavy Blackwell
+          # legs to bound GPU time + gpt-5.2 spend.
+          legs = [
+              # H100 legs (TP=2 per arm, both arms concurrent: GPUs 0,1 + 2,3).
+              {"name": "qwen3.6", "runner": "4-gpu-h100", "tp": 2,
+               "gpu_a": "0,1", "gpu_b": "2,3",
+               "model": "Qwen/Qwen3.6-27B",
+               "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
+               "smg_tool": "qwen_xml", "smg_reason": "qwen3",
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               "model_cache": "/models", "arm_mode": "concurrent",
+               "max_model_len": "auto", "num_tasks": 0},
+              # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
+              {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
+               "gpu_a": "0,1", "gpu_b": "2,3",
+               "model": "openai/gpt-oss-120b",
+               "vllm_tool": "openai", "vllm_reason": "",
+               "smg_tool": "", "smg_reason": "",
+               "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               "model_cache": "/models", "arm_mode": "concurrent",
+               "max_model_len": "auto", "num_tasks": 0},
+              # Blackwell legs (B200). Models pre-staged on NVMe at /raid/models/<id>.
+              # Concurrent TP=4 per arm (0-3 + 4-7); num_tasks-capped.
+              {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
+               "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
+               "model": "deepseek-ai/DeepSeek-V4-Flash",
+               "vllm_tool": "deepseek_v4", "vllm_reason": "deepseek_v4",
+               "smg_tool": "deepseek_v4", "smg_reason": "deepseek_v31",
+               "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
+               "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models",
+               "arm_mode": "concurrent", "max_model_len": "auto", "num_tasks": 30},
+              {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
+               "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
+               "model": "MiniMaxAI/MiniMax-M2.7",
+               "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
+               "smg_tool": "minimax_m2", "smg_reason": "minimax",
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "model_cache": "/raid/models", "arm_mode": "concurrent",
+               "max_model_len": "auto", "num_tasks": 30},
+              {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
+               "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
+               "model": "moonshotai/Kimi-K2.6",
+               "vllm_tool": "kimi_k2", "vllm_reason": "kimi_k2",
+               "smg_tool": "kimik2", "smg_reason": "kimi_k25",
+               "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "model_cache": "/raid/models", "arm_mode": "concurrent",
+               "max_model_len": "auto", "num_tasks": 30},
+              # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
+              # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
+              {"name": "glm-5.2", "runner": "blackwell", "tp": 8,
+               "gpu_a": "0,1,2,3,4,5,6,7", "gpu_b": "",
+               "model": "zai-org/GLM-5.2-FP8",
+               "vllm_tool": "glm47", "vllm_reason": "glm45",
+               "smg_tool": "glm47_moe", "smg_reason": "glm45",
+               "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3",
+               "gpu_mem": "0.90", "startup_timeout": "3000", "model_cache": "/raid/models",
+               "arm_mode": "sequential", "max_model_len": "auto", "num_tasks": 30},
+          ]
+          only = os.environ.get("ONLY", "")
+          valid = [l["name"] for l in legs]
+          if only:
+              legs = [l for l in legs if l["name"] == only]
+              if not legs:
+                  raise SystemExit(f"unknown leg {only!r}; valid: {valid}")
+          elif os.environ.get("IS_PR") == "true":
+              # PR sanity: only the cheap H100 legs (spinning up the giant Blackwell
+              # models for a 3-task smoke on every pipeline PR is not worth it).
+              legs = [l for l in legs if l["runner"] == "4-gpu-h100"]
+          print("matrix=" + json.dumps({"include": legs}))
+          PY
+
   tau2-ab:
-    needs: [build-wheel]
-    if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
-    runs-on: 4-gpu-h100
-    # Validated on 8xB200: retail n=10/k=1 (20 dialogues) = 19.5 min at tau2's
-    # default concurrency (~85s/dialogue). With --max-concurrency 16 the full
-    # retail+airline+telecom x k=2 set is expected to finish well under this
-    # 360-min ceiling (ceiling only; fast runs finish early).
+    name: tau2-ab ${{ matrix.model }} (${{ matrix.runner }} TP${{ matrix.tp }})
+    needs: [build-wheel, setup]
+    if: ${{ !cancelled() && needs.build-wheel.result == 'success' && needs.setup.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    # Generous ceiling: multi-turn state simulation is slow, and the sequential
+    # glm-5.2 leg scores two whole-node arms serially. Ceiling only; fast legs
+    # finish early. --max-concurrency keeps the full run within budget.
     timeout-minutes: 360
     permissions:
       contents: read
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # Model store: /models on H100 runner (pre-staged or HF download).
-      ROUTER_LOCAL_MODEL_PATH: /models
-      HF_HOME: /models
-      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
+      # Per-runner model store: /models on h100, /raid/models (NVMe) on blackwell.
+      ROUTER_LOCAL_MODEL_PATH: ${{ matrix.model_cache }}
+      HF_HOME: ${{ matrix.model_cache }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      MODEL: ${{ github.event.inputs.model || matrix.model }}
       # PR = quick sanity subset; schedule/dispatch = full domain set.
       DOMAINS: ${{ github.event.inputs.domains || (github.event_name == 'pull_request' && 'retail' || 'retail,airline,telecom') }}
-      # PR = single trial (fast sanity); schedule/dispatch = 2 trials (pass^2).
+      # PR = single trial (fast); schedule/dispatch = 2 trials (pass^2).
       NUM_TRIALS: ${{ github.event.inputs.num_trials || (github.event_name == 'pull_request' && '1' || '2') }}
-      # PR sanity: cap tasks at 3 for a quick end-to-end smoke. Full runs use
-      # num_tasks=0 (all) — feasible within the timeout thanks to MAX_CONCURRENCY.
-      NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || '0') }}
-      # Concurrent tau2 simulations per arm — the lever that keeps the full run
-      # within timeout (tau2's default concurrency would take ~18h for all domains).
+      # PR = 3 tasks (smoke); schedule/dispatch = the leg's matrix cap (0=all on H100,
+      # 30 on the heavy Blackwell legs). Dispatch `num_tasks` overrides all legs.
+      NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || matrix.num_tasks) }}
       MAX_CONCURRENCY: ${{ github.event.inputs.max_concurrency || '16' }}
-      TP: ${{ github.event.inputs.tp || '2' }}
-      USER_LLM: ${{ github.event.inputs.user_llm || 'gpt-5.2' }}
-      TAU2_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
-      TAU2_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen_xml' }}
-      TAU2_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
-      TAU2_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel
-
       - name: Setup vLLM env (provides vllm + grpc servicer + smg)
         uses: ./.github/actions/setup-vllm
-
       - name: Install smg wheel + ninja (for vLLM torch.compile)
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
           pip install ninja
-
       - name: Install tau2-bench
         run: |
-          # Install uv for fast venv management, then clone + sync tau2-bench.
+          # uv for fast venv management, then clone + sync tau2-bench (its own .venv).
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           git clone https://github.com/sierra-research/tau2-bench
           (cd tau2-bench && uv sync)
-
       - name: Stage model weights
+        # Skip if pre-staged locally at <cache>/<id> (e.g. blackwell NVMe); else
+        # download just this leg's model (not the whole GPU tier).
         run: |
           if [ -d "$ROUTER_LOCAL_MODEL_PATH/$MODEL" ]; then
             echo "model present at $ROUTER_LOCAL_MODEL_PATH/$MODEL — skipping download"
           else
             bash scripts/ci_download_model.sh "$MODEL"
           fi
-
-      - name: Launch arm A (pure vLLM, GPUs 0,1)
-        id: arm_a
+      - name: Launch arms + run τ²-bench A/B
         env:
-          TAU2_GPU: "0,1"
-          TAU2_TP: ${{ env.TP }}
+          VLLM_BIN: vllm
+          VLLM_PYTHON: python
+          SMG_LAUNCH: "python -m smg.launch_router"
           TAU2_MODEL: ${{ env.MODEL }}
+          TAU2_TP: ${{ matrix.tp }}
+          TAU2_MAX_MODEL_LEN: ${{ matrix.max_model_len }}
+          TAU2_GPU_MEM_UTIL: ${{ matrix.gpu_mem }}
+          TAU2_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || matrix.vllm_tool }}
+          TAU2_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || matrix.smg_tool }}
+          TAU2_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || matrix.vllm_reason }}
+          TAU2_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || matrix.smg_reason }}
+          TAU2_VLLM_EXTRA: ${{ matrix.vllm_extra }}
+          TAU2_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
           TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          A_URL=$(bash scripts/tau2/launch_arms.sh a)
-          echo "url=$A_URL" >> "$GITHUB_OUTPUT"
-          echo "arm A (vllm): $A_URL"
-
-      - name: Launch arm B (SMG -> vLLM gRPC, GPUs 2,3)
-        id: arm_b
-        env:
-          TAU2_GPU: "2,3"
-          TAU2_TP: ${{ env.TP }}
-          TAU2_MODEL: ${{ env.MODEL }}
-          TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          B_URL=$(bash scripts/tau2/launch_arms.sh b)
-          echo "url=$B_URL" >> "$GITHUB_OUTPUT"
-          echo "arm B (smg): $B_URL"
-
-      - name: Run τ²-bench A/B
-        env:
-          A_URL: ${{ steps.arm_a.outputs.url }}
-          B_URL: ${{ steps.arm_b.outputs.url }}
+          ARM_MODE: ${{ matrix.arm_mode }}
+          GPU_A: ${{ matrix.gpu_a }}
+          GPU_B: ${{ matrix.gpu_b }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          # Mirror bfcl: capture exit-1 regression signal without failing the job.
-          python scripts/tau2/run_ab.py \
-            --baseline  "vllm=$A_URL" \
-            --candidate "smg=$B_URL" \
-            --agent-model "$MODEL" \
-            --user-llm   "$USER_LLM" \
-            --tau2       tau2-bench/.venv/bin/tau2 \
-            --data-dir   tau2-bench/data \
-            --domains    "$DOMAINS" \
-            --num-trials "$NUM_TRIALS" \
-            --num-tasks  "$NUM_TASKS" \
-            --max-concurrency "$MAX_CONCURRENCY" \
-            --out        "$RUNNER_TEMP/tau2_ab.md" \
-            --json-out   "$RUNNER_TEMP/tau2_ab.json" \
-            || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          # Serialize the launch->serve->teardown phase PER HOST. Blackwell runner
+          # agents share one bare-metal machine (host network + the same 8 GPUs), so
+          # two legs at once collide on ports and GPU memory. A host-wide flock runs
+          # them one at a time; the lock releases when this step's shell exits.
+          #
+          # CRITICAL: every launch_arms.sh call is invoked with `9>&-` so the
+          # setsid-detached vLLM/SMG servers do NOT inherit lock FD 9 (a leaked
+          # server would hold the lock forever and deadlock future jobs). With 9>&-,
+          # only this step shell holds the lock; it always releases on step exit.
+          exec 9>/tmp/tau2-host.lock
+          echo "waiting for host lock..."
+          flock -w 9000 9 || { echo "::error::host lock not acquired within 9000s"; exit 1; }
+          echo "acquired host lock"
+          # Pre-flight GPU nuke: clear leftovers from a prior cancelled leg whose
+          # teardown was skipped. Safe: we hold the host lock, so no other tau2 leg runs.
+          bash scripts/ci_killall_sglang.sh nuke_gpus 9>&- || true
+          cleanup() {
+            bash scripts/tau2/launch_arms.sh stop 9>&- || true
+            bash scripts/ci_killall_sglang.sh nuke_gpus 9>&- || true
+          }
+          trap cleanup EXIT
+          trap 'cleanup; exit 143' INT TERM
 
+          TAU2_BIN="tau2-bench/.venv/bin/tau2"
+          DATA_DIR="tau2-bench/data"
+          COMMON=(
+            --agent-model "$MODEL" --user-llm gpt-5.2
+            --tau2 "$TAU2_BIN" --data-dir "$DATA_DIR"
+            --domains "$DOMAINS" --num-trials "$NUM_TRIALS" --num-tasks "$NUM_TASKS"
+            --max-concurrency "$MAX_CONCURRENCY"
+          )
+          if [ "$ARM_MODE" = sequential ]; then
+            # Whole node per arm (TP=8), one at a time: score arm A, tear it down to
+            # free the GPUs, score arm B, then diff the two saved score files.
+            A_URL=$(TAU2_GPU="$GPU_A" bash scripts/tau2/launch_arms.sh a 9>&-)
+            echo "arm A (vllm): $A_URL"
+            python scripts/tau2/run_ab.py --score-arm "vllm=$A_URL" \
+              --scores-out "$RUNNER_TEMP/scores_vllm.json" "${COMMON[@]}"
+            bash scripts/tau2/launch_arms.sh stop 9>&-
+            B_URL=$(TAU2_GPU="$GPU_A" bash scripts/tau2/launch_arms.sh b 9>&-)
+            echo "arm B (smg): $B_URL"
+            python scripts/tau2/run_ab.py --score-arm "smg=$B_URL" \
+              --scores-out "$RUNNER_TEMP/scores_smg.json" "${COMMON[@]}"
+            bash scripts/tau2/launch_arms.sh stop 9>&-
+            python scripts/tau2/run_ab.py \
+              --diff-baseline "$RUNNER_TEMP/scores_vllm.json" \
+              --diff-candidate "$RUNNER_TEMP/scores_smg.json" \
+              --num-trials "$NUM_TRIALS" --tolerance 0.02 \
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
+              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          else
+            # Concurrent: arm A (pure vLLM) on the first GPU half, arm B (SMG ->
+            # vLLM gRPC) on the second; ports left unset so launch_arms.sh picks free.
+            A_URL=$(TAU2_GPU="$GPU_A" bash scripts/tau2/launch_arms.sh a 9>&-)
+            B_URL=$(TAU2_GPU="$GPU_B" bash scripts/tau2/launch_arms.sh b 9>&-)
+            echo "arm A: $A_URL   arm B: $B_URL"
+            python scripts/tau2/run_ab.py \
+              --baseline "vllm=$A_URL" --candidate "smg=$B_URL" "${COMMON[@]}" \
+              --tolerance 0.02 \
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
+              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+          fi
       - name: Render summary
         if: always()
         run: |
           {
-            echo "## τ²-bench A/B — $MODEL (domains: $DOMAINS)"
+            echo "## τ²-bench A/B — ${{ matrix.name }} (${{ matrix.model }}, domains: $DOMAINS)"
             cat "$RUNNER_TEMP/tau2_ab.md"
-          } >> "$GITHUB_STEP_SUMMARY" || echo "no tau2 report produced" >> "$GITHUB_STEP_SUMMARY"
-
+          } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Collect tau2 transcripts
         if: always()
         run: |
@@ -248,29 +364,26 @@ jobs:
           else
             echo "no $ROOT"
           fi
-
       - name: Upload results (summary + scores + transcripts)
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: tau2-ab-${{ github.run_id }}
+          name: tau2-ab-${{ matrix.name }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/tau2_ab.md
             ${{ runner.temp }}/tau2_ab.json
             ${{ runner.temp }}/tau2_transcripts.tgz
           if-no-files-found: warn
           retention-days: 30
-
       - name: Upload arm logs (failure only)
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: tau2-ab-logs-${{ github.run_id }}
+          name: tau2-ab-${{ matrix.name }}-logs-${{ github.run_id }}
           path: ${{ runner.temp }}/tau2_run/*.log
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Teardown arms
+      - name: Teardown arms (leg-scoped backstop)
         if: always()
         env:
           TAU2_RUN_DIR: ${{ runner.temp }}/tau2_run
