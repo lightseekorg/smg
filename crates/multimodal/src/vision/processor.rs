@@ -202,18 +202,14 @@ fn slice_1d<T>(values: &[T], start: usize, len: usize) -> AnyhowResult<&[T]> {
 /// can reuse the same output contract for audio features or other encoder inputs.
 #[derive(Debug, Clone)]
 pub struct PreprocessedEncoderInputs {
-    /// Primary encoder input as a dynamic-dimensional float32 tensor.
+    /// Primary encoder input, either materialized as a dynamic-dimensional
+    /// float32 tensor or held in a compact representation for later assembly.
     ///
     /// For vision models this is typically the preprocessed image/video tensor.
     /// Shape varies by model and modality:
     /// - Standard: [B, C, H, W] (4D)
     /// - Phi3-Vision: [B, num_crops+1, C, H, W] (5D)
-    pub encoder_input: ArrayD<f32>,
-
-    /// Compact encoder input whose normalization is deferred until backend
-    /// assembly. This avoids materializing a full FP32 tensor when a backend
-    /// accepts a narrower wire dtype.
-    pub deferred_encoder_input: Option<DeferredNormalizedEncoderInput>,
+    pub encoder_input: EncoderInput,
 
     /// Number of encoder feature tokens per media item in the batch.
     ///
@@ -237,6 +233,65 @@ pub struct PreprocessedEncoderInputs {
     /// - LLaMA-Vision: `aspect_ratio_ids`, `aspect_ratio_mask`
     /// - Phi3-Vision: `num_img_tokens` auxiliary metadata
     pub model_specific: HashMap<String, ModelSpecificValue>,
+}
+
+/// Physical representation of a preprocessed modality encoder input.
+///
+/// The variants are mutually exclusive, so callers cannot accidentally attach
+/// both a dense tensor and a deferred payload or represent deferred data with an
+/// empty sentinel tensor.
+#[derive(Debug, Clone)]
+pub enum EncoderInput {
+    Dense(ArrayD<f32>),
+    DeferredNormalized(DeferredNormalizedEncoderInput),
+}
+
+impl EncoderInput {
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            Self::Dense(input) => input.shape(),
+            Self::DeferredNormalized(input) => input.shape(),
+        }
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.shape().len()
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        matches!(self, Self::DeferredNormalized(_))
+    }
+
+    pub fn dense(&self) -> Result<&ArrayD<f32>, TransformError> {
+        match self {
+            Self::Dense(input) => Ok(input),
+            Self::DeferredNormalized(_) => Err(TransformError::ShapeError(
+                "encoder input must be materialized before dense access".to_string(),
+            )),
+        }
+    }
+
+    pub fn deferred_normalized(&self) -> Option<&DeferredNormalizedEncoderInput> {
+        match self {
+            Self::DeferredNormalized(input) => Some(input),
+            Self::Dense(_) => None,
+        }
+    }
+
+    pub fn materialize(&mut self) -> Result<(), TransformError> {
+        if let Self::DeferredNormalized(input) = self {
+            let dense = input.materialize_f32()?;
+            *self = Self::Dense(dense);
+        }
+        Ok(())
+    }
+
+    pub fn as_slice_memory_order(&self) -> Option<&[f32]> {
+        match self {
+            Self::Dense(input) => input.as_slice_memory_order(),
+            Self::DeferredNormalized(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -380,8 +435,7 @@ impl PreprocessedEncoderInputs {
         item_sizes: Vec<(u32, u32)>,
     ) -> Self {
         Self {
-            encoder_input: encoder_input.into_dyn(),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(encoder_input.into_dyn()),
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
@@ -397,8 +451,7 @@ impl PreprocessedEncoderInputs {
         item_sizes: Vec<(u32, u32)>,
     ) -> Self {
         Self {
-            encoder_input,
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(encoder_input),
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
@@ -411,24 +464,29 @@ impl PreprocessedEncoderInputs {
         item_sizes: Vec<(u32, u32)>,
     ) -> Self {
         Self {
-            encoder_input: ArrayD::zeros(IxDyn(&[0])),
-            deferred_encoder_input: Some(deferred_encoder_input),
+            encoder_input: EncoderInput::DeferredNormalized(deferred_encoder_input),
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
         }
     }
 
-    pub fn materialize_deferred_encoder_input(&mut self) -> Result<(), TransformError> {
-        if let Some(deferred) = self.deferred_encoder_input.take() {
-            self.encoder_input = deferred.materialize_f32()?;
-        }
-        Ok(())
+    pub fn materialize_encoder_input(&mut self) -> Result<(), TransformError> {
+        self.encoder_input.materialize()
     }
 
     /// Add a model-specific value.
     pub fn with_extra(mut self, key: impl Into<String>, value: ModelSpecificValue) -> Self {
         self.model_specific.insert(key.into(), value);
+        self
+    }
+
+    /// Attach the complete model-specific output set produced by a processor.
+    pub fn with_model_specific(
+        mut self,
+        model_specific: HashMap<String, ModelSpecificValue>,
+    ) -> Self {
+        self.model_specific = model_specific;
         self
     }
 
@@ -472,9 +530,7 @@ impl PreprocessedEncoderInputs {
 
     /// Get the number of dimensions of encoder_input.
     pub fn ndim(&self) -> usize {
-        self.deferred_encoder_input
-            .as_ref()
-            .map_or_else(|| self.encoder_input.ndim(), |input| input.shape().len())
+        self.encoder_input.ndim()
     }
 
     /// Get total number of encoder feature tokens across all media items.
@@ -483,19 +539,17 @@ impl PreprocessedEncoderInputs {
     }
 
     /// Get the primary encoder input as a flat f32 slice without copying if possible.
-    pub fn encoder_input_flat(&self) -> Cow<'_, [f32]> {
-        match self.encoder_input.as_slice() {
+    pub fn encoder_input_flat(&self) -> Result<Cow<'_, [f32]>, TransformError> {
+        let encoder_input = self.encoder_input.dense()?;
+        Ok(match encoder_input.as_slice() {
             Some(slice) => Cow::Borrowed(slice),
-            None => Cow::Owned(self.encoder_input.iter().copied().collect()),
-        }
+            None => Cow::Owned(encoder_input.iter().copied().collect()),
+        })
     }
 
     /// Get the shape of the primary encoder input as a vector.
     pub fn encoder_input_shape(&self) -> Vec<usize> {
-        self.deferred_encoder_input.as_ref().map_or_else(
-            || self.encoder_input.shape().to_vec(),
-            |input| input.shape().to_vec(),
-        )
+        self.encoder_input.shape().to_vec()
     }
 
     /// Number of media items in this batch.
@@ -937,7 +991,7 @@ mod tests {
         encoder_input[[0, 0, 1, 1]] = 4.0;
 
         let inputs = PreprocessedEncoderInputs::new(encoder_input, vec![4], vec![(2, 2)]);
-        let flat = inputs.encoder_input_flat();
+        let flat = inputs.encoder_input_flat().unwrap();
 
         assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
     }

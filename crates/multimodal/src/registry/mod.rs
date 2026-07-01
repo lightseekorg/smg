@@ -79,7 +79,7 @@ pub(super) mod test_helpers {
 
     use crate::{
         types::ImageSize,
-        vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
+        vision::processor::{EncoderInput, ModelSpecificValue, PreprocessedEncoderInputs},
     };
 
     pub struct TestTokenizer {
@@ -160,8 +160,7 @@ pub(super) mod test_helpers {
     ) -> PreprocessedEncoderInputs {
         let sizes: Vec<(u32, u32)> = item_sizes.iter().map(|s| (s.height, s.width)).collect();
         PreprocessedEncoderInputs {
-            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(ndarray::ArrayD::zeros(vec![1, 3, 336, 336])),
             feature_token_counts: feature_token_counts.to_vec(),
             item_sizes: sizes,
             model_specific: HashMap::new(),
@@ -188,8 +187,7 @@ pub(super) mod test_helpers {
             },
         );
         PreprocessedEncoderInputs {
-            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(ndarray::ArrayD::zeros(vec![1, 3, 336, 336])),
             feature_token_counts: vec![0; sizes.len()],
             item_sizes: sizes,
             model_specific,

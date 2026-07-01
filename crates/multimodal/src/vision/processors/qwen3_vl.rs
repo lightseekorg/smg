@@ -433,7 +433,7 @@ mod tests {
         assert!(result.encoder_input.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
-        let flat = result.encoder_input_flat();
+        let flat = result.encoder_input_flat().unwrap();
         // After normalization with [0.5, 0.5, 0.5] mean/std:
         // (0.5 - 0.5) / 0.5 = 0.0 for gray
         // Values should be in [-1, 1] range

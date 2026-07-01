@@ -2375,7 +2375,7 @@ mod tests {
             .unwrap();
 
         let reference_values = reference.encoder_input.as_slice_memory_order().unwrap();
-        let compact = deferred.deferred_encoder_input.as_ref().unwrap();
+        let compact = deferred.encoder_input.deferred_normalized().unwrap();
         let mut actual_bf16 = vec![0; compact.len() * 2];
         compact.fill_bf16_le_bytes(&mut actual_bf16).unwrap();
         let reference_bf16 = reference_values
@@ -2388,7 +2388,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(actual_bf16, reference_bf16);
 
-        deferred.materialize_deferred_encoder_input().unwrap();
+        deferred.materialize_encoder_input().unwrap();
         let actual_values = deferred.encoder_input.as_slice_memory_order().unwrap();
         assert_eq!(actual_values.len(), reference_values.len());
         for (index, (&actual, &expected)) in actual_values.iter().zip(reference_values).enumerate()
@@ -2449,7 +2449,7 @@ mod tests {
 
         let a = dynamic.encoder_input.as_slice_memory_order().unwrap();
         let b = rgb.encoder_input.as_slice_memory_order().unwrap();
-        let compact = deferred.deferred_encoder_input.as_ref().unwrap();
+        let compact = deferred.encoder_input.deferred_normalized().unwrap();
         let mut deferred_bf16 = vec![0; compact.len() * 2];
         compact.fill_bf16_le_bytes(&mut deferred_bf16).unwrap();
         let reference_bf16 = b
@@ -2461,7 +2461,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(deferred_bf16, reference_bf16);
-        deferred.materialize_deferred_encoder_input().unwrap();
+        deferred.materialize_encoder_input().unwrap();
         let c = deferred.encoder_input.as_slice_memory_order().unwrap();
         assert_eq!(a.len(), b.len());
         assert_eq!(b.len(), c.len());
@@ -2544,8 +2544,8 @@ mod tests {
             .unwrap();
         producer.join().unwrap();
 
-        let bulk_compact = bulk.deferred_encoder_input.as_ref().unwrap();
-        let streamed_compact = streamed.deferred_encoder_input.as_ref().unwrap();
+        let bulk_compact = bulk.encoder_input.deferred_normalized().unwrap();
+        let streamed_compact = streamed.encoder_input.deferred_normalized().unwrap();
         let mut bulk_bf16 = vec![0; bulk_compact.len() * 2];
         let mut streamed_bf16 = vec![0; streamed_compact.len() * 2];
         bulk_compact.fill_bf16_le_bytes(&mut bulk_bf16).unwrap();
@@ -2555,12 +2555,14 @@ mod tests {
         assert_eq!(streamed_bf16, bulk_bf16);
         assert_eq!(streamed.feature_token_counts, bulk.feature_token_counts);
 
-        bulk.materialize_deferred_encoder_input().unwrap();
-        streamed.materialize_deferred_encoder_input().unwrap();
+        bulk.materialize_encoder_input().unwrap();
+        streamed.materialize_encoder_input().unwrap();
         for (index, (&actual, &expected)) in streamed
             .encoder_input
+            .dense()
+            .unwrap()
             .iter()
-            .zip(bulk.encoder_input.iter())
+            .zip(bulk.encoder_input.dense().unwrap().iter())
             .enumerate()
         {
             assert_eq!(

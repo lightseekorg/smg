@@ -248,13 +248,12 @@ impl VisionPreProcessor for PixtralProcessor {
             },
         );
 
-        Ok(PreprocessedEncoderInputs {
-            encoder_input: batch_tensor,
-            deferred_encoder_input: None,
+        Ok(PreprocessedEncoderInputs::new_dynamic(
+            batch_tensor,
             feature_token_counts,
-            item_sizes: original_sizes,
-            model_specific,
-        })
+            original_sizes,
+        )
+        .with_model_specific(model_specific))
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {

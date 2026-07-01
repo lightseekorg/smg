@@ -37,7 +37,7 @@ pub mod transforms;
 // Re-export commonly used types
 pub use preprocessor_config::PreProcessorConfig;
 pub use processor::{
-    DeferredNormalizedEncoderInput, ModelSpecificValue, PreprocessedEncoderInputs,
+    DeferredNormalizedEncoderInput, EncoderInput, ModelSpecificValue, PreprocessedEncoderInputs,
     VisionPreProcessor, VisionProcessorRegistry,
 };
 pub use processors::{

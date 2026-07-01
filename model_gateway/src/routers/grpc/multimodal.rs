@@ -19,6 +19,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+#[cfg(test)]
+use llm_multimodal::EncoderInput;
 use llm_multimodal::{
     vision::transforms::preprocess_parallelism, AsyncMultiModalTracker,
     DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
@@ -1070,14 +1072,14 @@ pub(crate) fn assemble_multimodal_data(
             GrpcClient::Sglang(_) => {
                 ensure_image_only(&precomputed, "SGLang")?;
                 Ok(MultimodalData::Sglang(assemble_sglang(
-                    materialize_deferred_encoder_input(precomputed)?,
-                )))
+                    materialize_encoder_input(precomputed)?,
+                )?))
             }
             GrpcClient::Vllm(_) => {
                 ensure_image_only(&precomputed, "vLLM")?;
                 Ok(MultimodalData::Vllm(assemble_vllm(
-                    materialize_deferred_encoder_input(precomputed)?,
-                )))
+                    materialize_encoder_input(precomputed)?,
+                )?))
             }
             GrpcClient::Trtllm(_) => {
                 ensure_image_only(&precomputed, "TRT-LLM")?;
@@ -1094,11 +1096,11 @@ pub(crate) fn assemble_multimodal_data(
     })
 }
 
-fn materialize_deferred_encoder_input(
+fn materialize_encoder_input(
     mut intermediate: PrecomputedMultimodalIntermediate,
 ) -> Result<PrecomputedMultimodalIntermediate> {
     Arc::make_mut(&mut intermediate.preprocessed)
-        .materialize_deferred_encoder_input()
+        .materialize_encoder_input()
         .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
     Ok(intermediate)
 }
@@ -1116,8 +1118,10 @@ fn ensure_image_only(
     Ok(())
 }
 
-fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
+fn assemble_sglang(
+    intermediate: PrecomputedMultimodalIntermediate,
+) -> Result<SglangMultimodalData> {
+    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
     let image_data = intermediate
@@ -1137,18 +1141,18 @@ fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMul
                 .collect()
         });
 
-    SglangMultimodalData {
+    Ok(SglangMultimodalData {
         image_data,
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
         im_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
-    }
+    })
 }
 
-fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
+fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> Result<VllmMultimodalData> {
+    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed)?;
     let model_specific_tensors =
         serialize_model_specific(&intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
@@ -1160,7 +1164,7 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
     let batched_keys = PreprocessedEncoderInputs::batched_keys(&intermediate.field_layouts);
     let flat_keys = PreprocessedEncoderInputs::flat_keys(&intermediate.field_layouts);
 
-    VllmMultimodalData {
+    Ok(VllmMultimodalData {
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
@@ -1170,7 +1174,7 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
         batched_keys,
         flat_keys,
         keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
-    }
+    })
 }
 
 fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMultimodalData {
@@ -1195,11 +1199,9 @@ fn assemble_tokenspeed(
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
     let encoder_input_dtype = canonical_tokenspeed_encoder_dtype(&encoder_input_dtype);
-    if encoder_input_dtype != "bfloat16"
-        && intermediate.preprocessed.deferred_encoder_input.is_some()
-    {
+    if encoder_input_dtype != "bfloat16" && intermediate.preprocessed.encoder_input.is_deferred() {
         Arc::make_mut(&mut intermediate.preprocessed)
-            .materialize_deferred_encoder_input()
+            .materialize_encoder_input()
             .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
     }
     let patch_offsets = intermediate
@@ -1235,7 +1237,11 @@ fn assemble_tokenspeed(
         mm_placeholders_by_item.len()
     );
     let mut mm_placeholders_by_item = mm_placeholders_by_item.into_iter();
-    if let Some(deferred) = intermediate.preprocessed.deferred_encoder_input.as_ref() {
+    if let Some(deferred) = intermediate
+        .preprocessed
+        .encoder_input
+        .deferred_normalized()
+    {
         anyhow::ensure!(
             item_count == 1,
             "deferred TokenSpeed encoder input currently requires one multimodal item"
@@ -1636,11 +1642,15 @@ fn encoder_input_for_item<'a>(
     let layout = field_layouts
         .get("pixel_values")
         .unwrap_or(&FieldLayout::Batched);
+    let encoder_input = preprocessed
+        .encoder_input
+        .dense()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     match layout {
-        FieldLayout::Batched => slice_array_axis0(&preprocessed.encoder_input, item_index, 1),
+        FieldLayout::Batched => slice_array_axis0(encoder_input, item_index, 1),
         FieldLayout::Flat { sizes_key } => {
             let (start, len) = flat_item_span(flat_spans, sizes_key, item_index)?;
-            slice_array_axis0(&preprocessed.encoder_input, start, len)
+            slice_array_axis0(encoder_input, start, len)
         }
     }
 }
@@ -1890,8 +1900,14 @@ fn serialize_deferred_bf16_tokenspeed_tensor(
 }
 
 /// Serialize the primary encoder input ndarray to raw little-endian f32 bytes + shape.
-fn serialize_encoder_input(preprocessed: &PreprocessedEncoderInputs) -> (Vec<u8>, Vec<u32>) {
-    serialize_array(&preprocessed.encoder_input)
+fn serialize_encoder_input(
+    preprocessed: &PreprocessedEncoderInputs,
+) -> Result<(Vec<u8>, Vec<u32>)> {
+    let encoder_input = preprocessed
+        .encoder_input
+        .dense()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(serialize_array(encoder_input))
 }
 
 fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
@@ -3033,8 +3049,9 @@ mod tests {
     #[test]
     fn test_validate_tokenspeed_item_spans_rejects_flat_under_consumption() {
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::from_shape_vec(IxDyn(&[4, 2]), vec![0.0; 8]).unwrap(),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(
+                ArrayD::from_shape_vec(IxDyn(&[4, 2]), vec![0.0; 8]).unwrap(),
+            ),
             feature_token_counts: vec![1, 1],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific: HashMap::from([(
@@ -3065,8 +3082,9 @@ mod tests {
     #[test]
     fn test_validate_tokenspeed_item_spans_rejects_batched_extra_rows() {
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![0.0; 6]).unwrap(),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(
+                ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![0.0; 6]).unwrap(),
+            ),
             feature_token_counts: vec![1, 1],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific: HashMap::new(),
@@ -3110,12 +3128,13 @@ mod tests {
         );
 
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::from_shape_vec(
-                IxDyn(&[4, 2]),
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            )
-            .unwrap(),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(
+                ArrayD::from_shape_vec(
+                    IxDyn(&[4, 2]),
+                    vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                )
+                .unwrap(),
+            ),
             feature_token_counts: vec![2, 2],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific,
@@ -3219,12 +3238,13 @@ mod tests {
         );
 
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::from_shape_vec(
-                IxDyn(&[4, 2]),
-                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            )
-            .unwrap(),
-            deferred_encoder_input: None,
+            encoder_input: EncoderInput::Dense(
+                ArrayD::from_shape_vec(
+                    IxDyn(&[4, 2]),
+                    vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                )
+                .unwrap(),
+            ),
             feature_token_counts: vec![2, 2],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific,

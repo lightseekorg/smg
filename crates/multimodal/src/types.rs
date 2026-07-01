@@ -116,13 +116,18 @@ pub struct ImageFrame {
 /// Decoded video payload captured by the media connector.
 #[derive(Debug, Clone)]
 pub struct VideoClip {
-    pub frames: Vec<DynamicImage>,
-    pub rgb_video: Option<DecodedRgbVideo>,
-    rgb_stream: Option<Arc<DecodedRgbFrameStreamSlot>>,
+    frames: VideoFrames,
     pub raw_bytes: bytes::Bytes,
     pub source: VideoSource,
     /// Blake3 hex-digest of raw_bytes, computed at decode time.
     pub hash: String,
+}
+
+#[derive(Debug, Clone)]
+enum VideoFrames {
+    Dynamic(Vec<DynamicImage>),
+    Rgb(DecodedRgbVideo),
+    Stream(Arc<DecodedRgbFrameStreamSlot>),
 }
 
 /// One owned sampled three-channel frame emitted by a streaming video decoder.
@@ -279,9 +284,7 @@ impl VideoClip {
         hash: String,
     ) -> Self {
         Self {
-            frames,
-            rgb_video: None,
-            rgb_stream: None,
+            frames: VideoFrames::Dynamic(frames),
             raw_bytes,
             source,
             hash,
@@ -295,9 +298,7 @@ impl VideoClip {
         hash: String,
     ) -> Self {
         Self {
-            frames: Vec::new(),
-            rgb_video: Some(rgb_video),
-            rgb_stream: None,
+            frames: VideoFrames::Rgb(rgb_video),
             raw_bytes,
             source,
             hash,
@@ -311,9 +312,7 @@ impl VideoClip {
         hash: String,
     ) -> Self {
         Self {
-            frames: Vec::new(),
-            rgb_video: None,
-            rgb_stream: Some(Arc::new(DecodedRgbFrameStreamSlot {
+            frames: VideoFrames::Stream(Arc::new(DecodedRgbFrameStreamSlot {
                 expected_frames: stream.expected_frames(),
                 stream: Mutex::new(Some(stream)),
             })),
@@ -324,15 +323,21 @@ impl VideoClip {
     }
 
     pub fn frames(&self) -> &[DynamicImage] {
-        &self.frames
+        match &self.frames {
+            VideoFrames::Dynamic(frames) => frames,
+            VideoFrames::Rgb(_) | VideoFrames::Stream(_) => &[],
+        }
     }
 
     pub fn rgb_video(&self) -> Option<&DecodedRgbVideo> {
-        self.rgb_video.as_ref()
+        match &self.frames {
+            VideoFrames::Rgb(video) => Some(video),
+            VideoFrames::Dynamic(_) | VideoFrames::Stream(_) => None,
+        }
     }
 
     pub fn take_rgb_stream(&self) -> Result<Option<DecodedRgbFrameStream>, String> {
-        let Some(stream) = &self.rgb_stream else {
+        let VideoFrames::Stream(stream) = &self.frames else {
             return Ok(None);
         };
         stream
@@ -343,26 +348,21 @@ impl VideoClip {
     }
 
     pub fn frame_count(&self) -> usize {
-        if !self.frames.is_empty() {
-            return self.frames.len();
+        match &self.frames {
+            VideoFrames::Dynamic(frames) => frames.len(),
+            VideoFrames::Rgb(video) => video.frames.len(),
+            VideoFrames::Stream(stream) => stream.expected_frames,
         }
-        if let Some(rgb_video) = &self.rgb_video {
-            return rgb_video.frames.len();
-        }
-        self.rgb_stream
-            .as_ref()
-            .map(|stream| stream.expected_frames)
-            .unwrap_or_default()
     }
 
     pub fn materialized_frames(&self) -> Result<Vec<DynamicImage>, String> {
-        if !self.frames.is_empty() {
-            return Ok(self.frames.clone());
+        match &self.frames {
+            VideoFrames::Dynamic(frames) => Ok(frames.clone()),
+            VideoFrames::Rgb(video) => video.to_dynamic_images(),
+            VideoFrames::Stream(_) => {
+                Err("streaming video frames cannot be materialized before consumption".to_string())
+            }
         }
-        self.rgb_video
-            .as_ref()
-            .ok_or_else(|| "video clip has no decoded frames".to_string())?
-            .to_dynamic_images()
     }
 
     pub fn raw_bytes(&self) -> &[u8] {
@@ -495,6 +495,8 @@ impl PromptReplacement {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::sync_channel;
+
     use super::*;
 
     #[test]
@@ -526,5 +528,57 @@ mod tests {
 
         assert_eq!(frame.data.as_ref(), &[3, 2, 1, 6, 5, 4]);
         assert_eq!(frame.channel_order, RgbChannelOrder::Rgb);
+    }
+
+    #[test]
+    fn video_clip_representation_accessors_are_exclusive() {
+        let dynamic = VideoClip::new(
+            vec![DynamicImage::new_rgb8(2, 3)],
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "dynamic".to_string(),
+        );
+        assert_eq!(dynamic.frames().len(), 1);
+        assert!(dynamic.rgb_video().is_none());
+        assert!(dynamic.take_rgb_stream().unwrap().is_none());
+
+        let rgb = VideoClip::new_rgb(
+            DecodedRgbVideo::new(
+                bytes::Bytes::from_static(&[0, 0, 0]),
+                vec![DecodedRgbFrame {
+                    width: 1,
+                    height: 1,
+                    offset: 0,
+                    len: 3,
+                }],
+            ),
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "rgb".to_string(),
+        );
+        assert!(rgb.frames().is_empty());
+        assert_eq!(rgb.rgb_video().unwrap().frames.len(), 1);
+        assert!(rgb.take_rgb_stream().unwrap().is_none());
+
+        let (sender, receiver) = sync_channel(1);
+        sender
+            .send(Ok(OwnedRgbFrame {
+                width: 1,
+                height: 1,
+                data: bytes::Bytes::from_static(&[0, 0, 0]),
+                channel_order: RgbChannelOrder::Rgb,
+            }))
+            .unwrap();
+        drop(sender);
+        let stream = VideoClip::new_rgb_stream(
+            DecodedRgbFrameStream::new(1, receiver),
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "stream".to_string(),
+        );
+        assert!(stream.frames().is_empty());
+        assert!(stream.rgb_video().is_none());
+        assert!(stream.take_rgb_stream().unwrap().is_some());
+        assert!(stream.take_rgb_stream().unwrap().is_none());
     }
 }

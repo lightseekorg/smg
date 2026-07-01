@@ -409,7 +409,7 @@ mod tests {
         assert!(result.encoder_input.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
-        let flat = result.encoder_input_flat();
+        let flat = result.encoder_input_flat().unwrap();
         // After normalization with CLIP mean/std, gray (0.5) should be near 0
         // (0.5 - 0.48) / 0.27 ≈ 0.07
         assert!(flat.iter().all(|&v| v.abs() < 1.0)); // Should be normalized

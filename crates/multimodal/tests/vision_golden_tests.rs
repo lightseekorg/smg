@@ -153,7 +153,10 @@ fn run_golden_test(mode: &str, image_name: &str) {
         .preprocess(&[image], &config)
         .expect("Processing failed");
 
-    let diff = max_diff(&golden, &result.encoder_input);
+    let diff = max_diff(
+        &golden,
+        result.encoder_input.dense().expect("dense encoder input"),
+    );
     println!("{mode} - {image_name} image - Max difference: {diff:.6}");
     println!("Golden shape: {:?}", golden.shape());
     println!("Rust shape: {:?}", result.encoder_input.shape());
@@ -382,7 +385,7 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
     );
 
     // pixel_values is now already patchified: [total_patches, patch_features]
-    let rust_patches = result.encoder_input_flat();
+    let rust_patches = result.encoder_input_flat().expect("dense encoder input");
     let rust_shape = (
         result.encoder_input.shape()[0],
         result.encoder_input.shape()[1],
@@ -533,7 +536,7 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
     );
 
     // pixel_values is now already patchified: [total_patches, patch_features]
-    let rust_patches = result.encoder_input_flat();
+    let rust_patches = result.encoder_input_flat().expect("dense encoder input");
     let rust_shape = (
         result.encoder_input.shape()[0],
         result.encoder_input.shape()[1],
@@ -811,6 +814,8 @@ fn run_phi3_vision_golden_test(image_name: &str) {
     // Convert rust ArrayD to Array5 for comparison
     let rust_pixels = result
         .encoder_input
+        .dense()
+        .expect("dense encoder input")
         .clone()
         .into_dimensionality::<ndarray::Ix5>()
         .expect("Failed to convert to Ix5");
@@ -1012,6 +1017,8 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     // Compare pixel values
     let rust_pixels = result
         .encoder_input
+        .dense()
+        .expect("dense encoder input")
         .clone()
         .into_dimensionality::<ndarray::Ix5>()
         .expect("Failed to convert to Ix5");
@@ -1223,7 +1230,7 @@ fn run_llama4_vision_golden_test(image_name: &str) {
     );
 
     // Compare pixel values
-    let rust_pixels = result.encoder_input_flat();
+    let rust_pixels = result.encoder_input_flat().expect("dense encoder input");
     let num_golden_elements: usize = golden_shape.iter().product();
 
     // Find the max difference for the actual tiles (not padding)
@@ -1412,7 +1419,7 @@ fn run_pixtral_golden_test(image_name: &str) {
     );
 
     // Compare pixel values - only compare the actual image region, not padding
-    let rust_pixels = result.encoder_input_flat();
+    let rust_pixels = result.encoder_input_flat().expect("dense encoder input");
     let golden_pixels_flat: Vec<f32> = golden_pixels.iter().copied().collect();
 
     // Calculate indices for the actual image region (not padding)
