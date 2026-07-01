@@ -306,7 +306,7 @@ pub(crate) struct MultimodalIntermediate {
 ///
 /// Adding audio or another modality requires explicit handling in every
 /// backend adapter, while preventing contradictory modality and payload fields.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum PreparedMedia {
     Images(Vec<Arc<ImageFrame>>),
     Videos(Vec<Arc<VideoClip>>),
@@ -333,6 +333,55 @@ impl PreparedMedia {
             Self::Videos(videos) => videos.get(item_index).map(|video| video.hash.as_str()),
         }
     }
+}
+
+fn prepared_media_from_tracker(output: TrackerOutput) -> Result<PreparedMedia> {
+    let mut prepared = None;
+
+    for (modality, items) in output.data {
+        if items.is_empty() {
+            continue;
+        }
+
+        let media = match modality {
+            Modality::Image => PreparedMedia::Images(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        TrackedMedia::Image(image) => Ok(image),
+                        _ => Err(anyhow::anyhow!(
+                            "Tracker returned non-image media under the image modality"
+                        )),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Modality::Video => PreparedMedia::Videos(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        TrackedMedia::Video(video) => Ok(video),
+                        _ => Err(anyhow::anyhow!(
+                            "Tracker returned non-video media under the video modality"
+                        )),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Modality::Audio | Modality::ImageEmbeds => {
+                return Err(anyhow::anyhow!(
+                    "Prepared media does not support {modality} inputs yet"
+                ));
+            }
+        };
+
+        if prepared.replace(media).is_some() {
+            return Err(anyhow::anyhow!(
+                "Mixed multimodal requests are not supported yet"
+            ));
+        }
+    }
+
+    prepared
+        .ok_or_else(|| anyhow::anyhow!("No media was successfully fetched for multimodal request"))
 }
 
 /// Resolve the placeholder token string for a multimodal model.
@@ -625,72 +674,30 @@ async fn process_multimodal_parts(
 
     let (tracker_result, config_result) = tokio::join!(media_future, config_future);
     let (tracker_output, media_elapsed_ms) = tracker_result?;
+    let media = prepared_media_from_tracker(tracker_output)?;
+    let modality = media.modality();
 
-    let images: Vec<Arc<ImageFrame>> = tracker_output
-        .data
-        .get(&Modality::Image)
-        .map(|media_vec| {
-            media_vec
-                .iter()
-                .filter_map(|m| match m {
-                    TrackedMedia::Image(frame) => Some(frame.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let videos: Vec<Arc<VideoClip>> = tracker_output
-        .data
-        .get(&Modality::Video)
-        .map(|media_vec| {
-            media_vec
-                .iter()
-                .filter_map(|m| match m {
-                    TrackedMedia::Video(clip) => Some(clip.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let modality = match (images.is_empty(), videos.is_empty()) {
-        (false, true) => Modality::Image,
-        (true, false) => Modality::Video,
-        (false, false) => {
-            return Err(anyhow::anyhow!(
-                "Mixed image and video multimodal requests are not supported yet"
-            ));
-        }
-        (true, true) => {
-            return Err(anyhow::anyhow!(
-                "No media was successfully fetched for multimodal request"
-            ));
-        }
-    };
-
-    if modality == Modality::Video && videos.len() != 1 {
+    if matches!(&media, PreparedMedia::Videos(videos) if videos.len() != 1) {
         return Err(anyhow::anyhow!(
             "Exactly one video is supported per request for the initial video path"
         ));
     }
 
-    match modality {
-        Modality::Image => {
+    match &media {
+        PreparedMedia::Images(images) => {
             debug!(
                 image_count = images.len(),
                 item_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
                 "Fetched images for multimodal processing"
             );
         }
-        Modality::Video => {
+        PreparedMedia::Videos(videos) => {
             debug!(
                 video_count = videos.len(),
                 frame_count = videos.first().map_or(0, |v| v.frame_count()),
                 "Fetched video for multimodal processing"
             );
         }
-        _ => {}
     }
 
     // Step 2: Resolve model spec and preprocess media.
@@ -709,9 +716,8 @@ async fn process_multimodal_parts(
         .lookup(&metadata)
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
-    // Run CPU-intensive vision preprocessing on a blocking thread pool so it
-    // doesn't block the tokio async runtime under concurrent load.
-    // TODO: consider making the thread pool size configurable.
+    // Run CPU-intensive modality preprocessing on the owned blocking pool so
+    // it does not block the Tokio runtime under concurrent load.
     let pp_config = match modality {
         Modality::Video => model_config
             .video_preprocessor_config
@@ -725,8 +731,7 @@ async fn process_multimodal_parts(
 
     let preprocess_started = log_timing.then(Instant::now);
     let model_type_for_preprocess = model_type_owned.clone();
-    let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
-    let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
+    let media_for_preprocess = media.clone(); // cheap Arc refcount bumps
     let runtime = components.runtime.clone();
     let preprocess_task = tokio::task::spawn_blocking(move || {
         runtime.run_cpu(|| {
@@ -734,9 +739,7 @@ async fn process_multimodal_parts(
                 &registry,
                 &model_id_owned,
                 model_type_for_preprocess.as_deref(),
-                modality,
-                &images_for_preprocess,
-                &videos_for_preprocess,
+                &media_for_preprocess,
                 &pp_config,
             )
         })
@@ -812,10 +815,17 @@ async fn process_multimodal_parts(
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or_default();
     let timing_counts = log_timing.then(|| {
-        let video_frame_count = videos.first().map_or(0, |video| video.frame_count());
+        let (image_count, video_count, video_frame_count) = match &media {
+            PreparedMedia::Images(images) => (images.len(), 0, 0),
+            PreparedMedia::Videos(videos) => (
+                0,
+                videos.len(),
+                videos.first().map_or(0, |video| video.frame_count()),
+            ),
+        };
         (
-            images.len(),
-            videos.len(),
+            image_count,
+            video_count,
             video_frame_count,
             token_ids.len(),
             expanded.token_ids.len(),
@@ -823,15 +833,6 @@ async fn process_multimodal_parts(
     });
 
     // Step 4: Build lightweight intermediate (defers tensor serialization to assembly)
-    let media = match modality {
-        Modality::Image => PreparedMedia::Images(images),
-        Modality::Video => PreparedMedia::Videos(videos),
-        Modality::Audio | Modality::ImageEmbeds => {
-            return Err(anyhow::anyhow!(
-                "Unsupported prepared media modality: {modality}"
-            ));
-        }
-    };
     let intermediate = MultimodalIntermediate {
         media,
         preprocessed,
@@ -873,17 +874,15 @@ fn preprocess_media(
     registry: &ModalityProcessorRegistry,
     model_id: &str,
     model_type: Option<&str>,
-    modality: Modality,
-    images: &[Arc<ImageFrame>],
-    videos: &[Arc<VideoClip>],
+    media: &PreparedMedia,
     config: &PreProcessorConfig,
 ) -> Result<PreprocessedEncoderInputs> {
     let processor = registry
         .find(model_id, model_type)
         .ok_or_else(|| anyhow::anyhow!("No modality processor found for model: {model_id}"))?;
 
-    match modality {
-        Modality::Image => {
+    match media {
+        PreparedMedia::Images(images) => {
             let raw_images: Vec<&image::DynamicImage> =
                 images.iter().map(|frame| &frame.image).collect();
             processor
@@ -900,10 +899,7 @@ fn preprocess_media(
                 )
                 .map_err(|error| anyhow::anyhow!("Image preprocessing failed: {error}"))
         }
-        Modality::Video => preprocess_video(processor, videos, config),
-        _ => Err(anyhow::anyhow!(
-            "Unsupported modality for preprocessing: {modality}"
-        )),
+        PreparedMedia::Videos(videos) => preprocess_video(processor, videos, config),
     }
 }
 
@@ -1169,6 +1165,55 @@ mod tests {
             effective_tokenspeed_transport_mode(Modality::Video, "shm"),
             "shm"
         );
+    }
+
+    #[test]
+    fn prepared_media_from_tracker_builds_one_exhaustive_variant() {
+        let image = Arc::new(ImageFrame::new(
+            image::DynamicImage::new_rgb8(1, 1),
+            bytes::Bytes::from_static(b"image"),
+            ImageDetail::Auto,
+            llm_multimodal::ImageSource::InlineBytes,
+            "image-hash".to_string(),
+        ));
+        let output = TrackerOutput {
+            data: HashMap::from([(Modality::Image, vec![TrackedMedia::Image(image.clone())])]),
+            uuids: HashMap::new(),
+        };
+
+        let prepared = prepared_media_from_tracker(output).unwrap();
+        let PreparedMedia::Images(images) = prepared else {
+            panic!("expected prepared image media");
+        };
+        assert_eq!(images.len(), 1);
+        assert!(Arc::ptr_eq(&images[0], &image));
+    }
+
+    #[test]
+    fn prepared_media_from_tracker_rejects_mixed_modalities() {
+        let image = Arc::new(ImageFrame::new(
+            image::DynamicImage::new_rgb8(1, 1),
+            bytes::Bytes::from_static(b"image"),
+            ImageDetail::Auto,
+            llm_multimodal::ImageSource::InlineBytes,
+            "image-hash".to_string(),
+        ));
+        let video = Arc::new(VideoClip::new(
+            vec![image::DynamicImage::new_rgb8(1, 1)],
+            bytes::Bytes::from_static(b"video"),
+            llm_multimodal::VideoSource::InlineBytes,
+            "video-hash".to_string(),
+        ));
+        let output = TrackerOutput {
+            data: HashMap::from([
+                (Modality::Image, vec![TrackedMedia::Image(image)]),
+                (Modality::Video, vec![TrackedMedia::Video(video)]),
+            ]),
+            uuids: HashMap::new(),
+        };
+
+        let error = prepared_media_from_tracker(output).unwrap_err();
+        assert!(error.to_string().contains("Mixed multimodal requests"));
     }
 
     #[test]
