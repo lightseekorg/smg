@@ -33,8 +33,6 @@ static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
 static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 #[cfg(feature = "opencv-video")]
-static VIDEO_PREPROCESS_OVERLAP: OnceLock<bool> = OnceLock::new();
-#[cfg(feature = "opencv-video")]
 static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "opencv-video")]
 static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
@@ -662,11 +660,7 @@ fn decode_video_with_opencv_logged(
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let started = video_decode_timing_started();
-    let result = if video_preprocess_overlap_enabled() {
-        decode_video_with_opencv_file_stream(input_path, cfg)
-    } else {
-        decode_video_with_opencv_file(input_path, cfg)
-    };
+    let result = decode_video_with_opencv_file_stream(input_path, cfg);
     let backend = if matches!(&result, Ok(DecodedVideoFrames::RgbStream(_))) {
         "opencv_stream_startup"
     } else {
@@ -688,11 +682,7 @@ fn decode_video_with_opencv_bytes_logged(
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let started = video_decode_timing_started();
-    let result = if video_preprocess_overlap_enabled() {
-        decode_video_with_opencv_bytes_stream(Bytes::copy_from_slice(bytes), cfg)
-    } else {
-        decode_video_with_opencv_bytes(bytes, cfg)
-    };
+    let result = decode_video_with_opencv_bytes_stream(Bytes::copy_from_slice(bytes), cfg);
     let backend = if matches!(&result, Ok(DecodedVideoFrames::RgbStream(_))) {
         "opencv_buffer_stream_startup"
     } else {
@@ -726,20 +716,6 @@ fn video_decode_backend_override() -> Option<&'static str> {
             }
         })
         .as_deref()
-}
-
-#[cfg(feature = "opencv-video")]
-fn video_preprocess_overlap_enabled() -> bool {
-    *VIDEO_PREPROCESS_OVERLAP.get_or_init(|| {
-        std::env::var("SMG_VIDEO_PREPROCESS_OVERLAP")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
-    })
 }
 
 fn log_video_decode_timing_enabled() -> bool {
@@ -964,35 +940,6 @@ fn decode_opencv_frames_to_stream(
         )));
     }
     Ok(())
-}
-
-#[cfg(feature = "opencv-video")]
-fn decode_video_with_opencv_file(
-    input_path: &std::path::Path,
-    cfg: VideoFetchConfig,
-) -> Result<DecodedVideoFrames, MediaConnectorError> {
-    let input = input_path.to_str().ok_or_else(|| {
-        MediaConnectorError::VideoDecode(format!(
-            "OpenCV video path is not valid UTF-8: {}",
-            input_path.display()
-        ))
-    })?;
-
-    let active_decode = ActiveOpenCvDecode::enter();
-    let decoder_threads = opencv_decoder_threads(active_decode.count());
-    let capture = open_opencv_video_capture(input, decoder_threads)?;
-    decode_video_from_opencv_capture(capture, cfg)
-}
-
-#[cfg(feature = "opencv-video")]
-fn decode_video_with_opencv_bytes(
-    bytes: &[u8],
-    cfg: VideoFetchConfig,
-) -> Result<DecodedVideoFrames, MediaConnectorError> {
-    let active_decode = ActiveOpenCvDecode::enter();
-    let decoder_threads = opencv_decoder_threads(active_decode.count());
-    let capture = open_opencv_video_capture_from_buffer(bytes, decoder_threads)?;
-    decode_video_from_opencv_capture(capture, cfg)
 }
 
 #[cfg(feature = "opencv-video")]
