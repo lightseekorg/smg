@@ -78,13 +78,13 @@ fn assemble_sglang(intermediate: MultimodalIntermediate) -> Result<SglangMultimo
         .iter()
         .map(|f| f.raw_bytes.to_vec())
         .collect();
-    // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
+    // Prefer encoder-feature ranges; fall back to full structural ranges.
     let mm_placeholders = intermediate
-        .patch_offsets
-        .filter(|offsets| !offsets.is_empty())
+        .feature_ranges
+        .filter(|ranges| !ranges.is_empty())
         .unwrap_or_else(|| {
             intermediate
-                .placeholders
+                .structural_ranges
                 .iter()
                 .map(|p| (p.offset as u32, p.length as u32))
                 .collect()
@@ -109,7 +109,7 @@ fn assemble_vllm(intermediate: MultimodalIntermediate) -> Result<VllmMultimodalD
         .map(|frame| frame.hash.clone())
         .collect();
     let mm_placeholders = intermediate
-        .placeholders
+        .structural_ranges
         .iter()
         .map(|p| (p.offset as u32, p.length as u32))
         .collect();
@@ -125,7 +125,7 @@ fn assemble_vllm(intermediate: MultimodalIntermediate) -> Result<VllmMultimodalD
         mm_hashes,
         batched_keys,
         flat_keys,
-        keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
+        keep_on_cpu_keys: intermediate.cpu_resident_tensor_keys,
     })
 }
 

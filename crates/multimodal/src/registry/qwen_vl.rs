@@ -88,7 +88,7 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
         ])
     }
 
-    fn keep_on_cpu_keys(&self) -> Vec<String> {
+    fn cpu_resident_tensor_keys(&self) -> Vec<String> {
         vec!["image_grid_thw".to_string()]
     }
 }

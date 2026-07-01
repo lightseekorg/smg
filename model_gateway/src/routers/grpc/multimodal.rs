@@ -290,16 +290,16 @@ pub(crate) struct MultimodalIntermediate {
     pub media: PreparedMedia,
     /// Preprocessed encoder input and model-specific tensors (not yet serialized).
     pub preprocessed: Arc<PreprocessedEncoderInputs>,
-    /// Full structural placeholder ranges (offset, length).
-    pub placeholders: Vec<PlaceholderRange>,
-    /// Patch-only placeholder offsets for sglang.
-    pub patch_offsets: Option<Vec<(u32, u32)>>,
+    /// Full structural token ranges occupied by each media item.
+    pub structural_ranges: Vec<PlaceholderRange>,
+    /// Encoder-feature token ranges inside the structural ranges, when known.
+    pub feature_ranges: Option<Vec<(u32, u32)>>,
     /// Placeholder token ID from model config for the active modality.
     pub placeholder_token_id: Option<u32>,
     /// Per-tensor field layout classification from the model spec.
     pub field_layouts: HashMap<String, FieldLayout>,
-    /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
-    pub keep_on_cpu_keys: Vec<String>,
+    /// Model-declared tensor keys that should remain CPU-resident.
+    pub cpu_resident_tensor_keys: Vec<String>,
 }
 
 /// Prepared media carried between preprocessing and backend assembly.
@@ -806,7 +806,7 @@ async fn process_multimodal_parts(
     debug!(
         original_len = token_ids.len(),
         expanded_len = expanded.token_ids.len(),
-        placeholder_count = expanded.placeholders.len(),
+        placeholder_count = expanded.structural_ranges.len(),
         ?search_token_id,
         ?placeholder_token_id,
         "Token expansion complete"
@@ -836,11 +836,11 @@ async fn process_multimodal_parts(
     let intermediate = MultimodalIntermediate {
         media,
         preprocessed,
-        placeholders: expanded.placeholders,
-        patch_offsets: expanded.patch_offsets,
+        structural_ranges: expanded.structural_ranges,
+        feature_ranges: expanded.feature_ranges,
         placeholder_token_id,
         field_layouts: spec.field_layouts(),
-        keep_on_cpu_keys: spec.keep_on_cpu_keys(),
+        cpu_resident_tensor_keys: spec.cpu_resident_tensor_keys(),
     };
 
     if let Some((image_count, video_count, video_frame_count, original_tokens, expanded_tokens)) =
@@ -979,24 +979,22 @@ fn preprocess_video(
         .map_err(|error| anyhow::anyhow!("Video preprocessing failed: {error}"))
 }
 
-/// Output of token expansion, containing both full structural and patch-only ranges.
+/// Output of token expansion with structural and encoder-feature ranges.
 struct ExpandedTokens {
     /// The expanded token ID sequence.
     token_ids: Vec<u32>,
-    /// Full structural placeholder ranges (offset, length) covering the entire
-    /// replacement including structural tokens. Used by vLLM (which filters via is_embed).
-    placeholders: Vec<PlaceholderRange>,
-    /// Patch-only placeholder ranges: contiguous runs of `im_token_id` within each
-    /// expansion. Used by sglang (which expects offsets aligned 1:1 with vision
-    /// encoder output). `None` when `im_token_id` is not set.
-    patch_offsets: Option<Vec<(u32, u32)>>,
+    /// Full ranges covering each replacement, including structural tokens.
+    structural_ranges: Vec<PlaceholderRange>,
+    /// Contiguous `im_token_id` ranges aligned with encoder features. `None`
+    /// when the model does not declare a feature token ID.
+    feature_ranges: Option<Vec<(u32, u32)>>,
 }
 
 /// Expand placeholder tokens in the token ID sequence.
 ///
 /// For each placeholder token found, replace it with the expanded token sequence
 /// from the corresponding `PromptReplacement`. Also track both the full structural
-/// placeholder ranges and patch-only offsets (contiguous runs of `im_token_id`)
+/// structural ranges and encoder-feature ranges (runs of `im_token_id`)
 /// in a single pass — no extra iteration needed.
 fn expand_tokens(
     token_ids: &[u32],
@@ -1009,8 +1007,8 @@ fn expand_tokens(
         warn!("Could not resolve placeholder token ID; skipping token expansion");
         return ExpandedTokens {
             token_ids: token_ids.to_vec(),
-            placeholders: vec![],
-            patch_offsets: None,
+            structural_ranges: vec![],
+            feature_ranges: None,
         };
     };
 
@@ -1025,8 +1023,8 @@ fn expand_tokens(
         .checked_add(replacement_extra_capacity)
         .unwrap_or(token_ids.len());
     let mut expanded = Vec::with_capacity(expanded_capacity);
-    let mut placeholders = Vec::with_capacity(replacements.len());
-    let mut patch_offsets: Option<Vec<(u32, u32)>> =
+    let mut structural_ranges = Vec::with_capacity(replacements.len());
+    let mut feature_ranges: Option<Vec<(u32, u32)>> =
         im_token_id.map(|_| Vec::with_capacity(replacements.len()));
     let mut replacement_idx = 0;
 
@@ -1037,8 +1035,8 @@ fn expand_tokens(
             let repl_len = repl.tokens.len();
             let mut repeated_patch_token: Option<u32> = None;
 
-            // Track patch-only runs while extending
-            if let (Some(im_id), Some(ref mut offsets)) = (im_token_id, &mut patch_offsets) {
+            // Track encoder-feature runs while extending.
+            if let (Some(im_id), Some(ref mut offsets)) = (im_token_id, &mut feature_ranges) {
                 if matches!(repl.tokens.first(), Some(&token) if token as u32 == im_id)
                     && repl.tokens.iter().all(|&token| token as u32 == im_id)
                 {
@@ -1069,7 +1067,7 @@ fn expand_tokens(
             } else {
                 expanded.extend(repl.tokens.iter().map(|&t| t as u32));
             }
-            placeholders.push(PlaceholderRange {
+            structural_ranges.push(PlaceholderRange {
                 offset,
                 length: repl_len,
             });
@@ -1089,8 +1087,8 @@ fn expand_tokens(
 
     ExpandedTokens {
         token_ids: expanded,
-        placeholders,
-        patch_offsets,
+        structural_ranges,
+        feature_ranges,
     }
 }
 
@@ -1346,10 +1344,10 @@ mod tests {
         let result = expand_tokens(&token_ids, Some(100), None, &replacements);
 
         assert_eq!(result.token_ids, vec![1, 2, 50, 50, 50, 50, 3, 4]);
-        assert_eq!(result.placeholders.len(), 1);
-        assert_eq!(result.placeholders[0].offset, 2);
-        assert_eq!(result.placeholders[0].length, 4);
-        assert!(result.patch_offsets.is_none());
+        assert_eq!(result.structural_ranges.len(), 1);
+        assert_eq!(result.structural_ranges[0].offset, 2);
+        assert_eq!(result.structural_ranges[0].length, 4);
+        assert!(result.feature_ranges.is_none());
     }
 
     #[test]
@@ -1358,8 +1356,8 @@ mod tests {
         let result = expand_tokens(&token_ids, None, None, &[]);
 
         assert_eq!(result.token_ids, vec![1, 2, 3]);
-        assert!(result.placeholders.is_empty());
-        assert!(result.patch_offsets.is_none());
+        assert!(result.structural_ranges.is_empty());
+        assert!(result.feature_ranges.is_none());
     }
 
     #[test]
@@ -1381,11 +1379,11 @@ mod tests {
         let result = expand_tokens(&token_ids, Some(100), None, &replacements);
 
         assert_eq!(result.token_ids, vec![1, 50, 50, 2, 60, 60, 60, 3]);
-        assert_eq!(result.placeholders.len(), 2);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 2);
-        assert_eq!(result.placeholders[1].offset, 4);
-        assert_eq!(result.placeholders[1].length, 3);
+        assert_eq!(result.structural_ranges.len(), 2);
+        assert_eq!(result.structural_ranges[0].offset, 1);
+        assert_eq!(result.structural_ranges[0].length, 2);
+        assert_eq!(result.structural_ranges[1].offset, 4);
+        assert_eq!(result.structural_ranges[1].length, 3);
     }
 
     #[test]
@@ -1402,12 +1400,12 @@ mod tests {
         let result = expand_tokens(&token_ids, Some(100), Some(92), &replacements);
 
         // Full structural range
-        assert_eq!(result.placeholders.len(), 1);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 9);
+        assert_eq!(result.structural_ranges.len(), 1);
+        assert_eq!(result.structural_ranges[0].offset, 1);
+        assert_eq!(result.structural_ranges[0].length, 9);
 
         // Patch-only offsets: two runs of token 92
-        let patch = result.patch_offsets.unwrap();
+        let patch = result.feature_ranges.unwrap();
         assert_eq!(patch.len(), 2);
         assert_eq!(patch[0], (2, 3)); // offset=2, length=3
         assert_eq!(patch[1], (6, 3)); // offset=6, length=3
@@ -1425,9 +1423,9 @@ mod tests {
         let result = expand_tokens(&token_ids, Some(100), Some(92), &replacements);
 
         assert_eq!(result.token_ids, vec![1, 92, 92, 92, 92, 2]);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 4);
-        assert_eq!(result.patch_offsets.unwrap(), vec![(1, 4)]);
+        assert_eq!(result.structural_ranges[0].offset, 1);
+        assert_eq!(result.structural_ranges[0].length, 4);
+        assert_eq!(result.feature_ranges.unwrap(), vec![(1, 4)]);
     }
 
     #[test]
@@ -1649,7 +1647,7 @@ mod tests {
         let intermediate = MultimodalIntermediate {
             media: PreparedMedia::Images(images),
             preprocessed: Arc::new(preprocessed),
-            placeholders: vec![
+            structural_ranges: vec![
                 PlaceholderRange {
                     offset: 10,
                     length: 2,
@@ -1659,7 +1657,7 @@ mod tests {
                     length: 2,
                 },
             ],
-            patch_offsets: Some(vec![(10, 2), (20, 2)]),
+            feature_ranges: Some(vec![(10, 2), (20, 2)]),
             placeholder_token_id: Some(151655),
             field_layouts: HashMap::from([
                 (
@@ -1669,7 +1667,7 @@ mod tests {
                 ("patches_per_image".to_string(), FieldLayout::Batched),
                 ("image_grid_thw".to_string(), FieldLayout::Batched),
             ]),
-            keep_on_cpu_keys: vec![],
+            cpu_resident_tensor_keys: vec![],
         };
 
         let assembled = assemble_tokenspeed(intermediate, None).unwrap();
@@ -1755,7 +1753,7 @@ mod tests {
         let intermediate = MultimodalIntermediate {
             media: PreparedMedia::Videos(videos),
             preprocessed: Arc::new(preprocessed),
-            placeholders: vec![
+            structural_ranges: vec![
                 PlaceholderRange {
                     offset: 30,
                     length: 2,
@@ -1765,7 +1763,7 @@ mod tests {
                     length: 2,
                 },
             ],
-            patch_offsets: Some(vec![(30, 2), (40, 2)]),
+            feature_ranges: Some(vec![(30, 2), (40, 2)]),
             placeholder_token_id: Some(151656),
             field_layouts: HashMap::from([
                 (
@@ -1775,7 +1773,7 @@ mod tests {
                 ("patches_per_video".to_string(), FieldLayout::Batched),
                 ("video_grid_thw".to_string(), FieldLayout::Batched),
             ]),
-            keep_on_cpu_keys: vec![],
+            cpu_resident_tensor_keys: vec![],
         };
 
         let assembled = assemble_tokenspeed(intermediate, None).unwrap();

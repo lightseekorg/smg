@@ -39,7 +39,7 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
     // `auto` only when the worker is verified to share /dev/shm (matching
     // namespace token), otherwise inline. See `worker_shares_dev_shm`.
     let shm_enabled = resolve_tokenspeed_shm_enabled(source_modality, workers);
-    // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
+    // Prefer encoder-feature ranges; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(source_modality, workers);
     let encoder_input_dtype = canonical_tokenspeed_encoder_dtype(&encoder_input_dtype);
     if encoder_input_dtype != "bfloat16" && intermediate.preprocessed.encoder_input.is_deferred() {
@@ -47,10 +47,10 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
             .materialize_encoder_input()
             .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
     }
-    let patch_offsets = intermediate
-        .patch_offsets
+    let feature_ranges = intermediate
+        .feature_ranges
         .as_deref()
-        .filter(|offsets| !offsets.is_empty())
+        .filter(|ranges| !ranges.is_empty())
         .unwrap_or(&[]);
 
     let modality = match source_modality {
@@ -72,7 +72,8 @@ pub(in crate::routers::grpc::multimodal) fn assemble_tokenspeed(
         &flat_spans,
         item_count,
     )?;
-    let mm_placeholders_by_item = placeholders_for_items(&intermediate.placeholders, patch_offsets);
+    let mm_placeholders_by_item =
+        placeholders_for_items(&intermediate.structural_ranges, feature_ranges);
     anyhow::ensure!(
         mm_placeholders_by_item.len() == item_count,
         "precomputed multimodal assembly placeholder item count mismatch: modality={}, placeholder_item_count={}, item_count={item_count}",
@@ -260,7 +261,7 @@ fn precomputed_multimodal_item_count(intermediate: &MultimodalIntermediate) -> R
     let modality = intermediate.media.modality();
     let media_count = intermediate.media.item_count();
     let token_count = intermediate.preprocessed.feature_token_counts.len();
-    let placeholder_count = intermediate.placeholders.len();
+    let placeholder_count = intermediate.structural_ranges.len();
     let item_count = token_count.max(media_count).max(placeholder_count);
     anyhow::ensure!(
         item_count > 0,
