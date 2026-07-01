@@ -240,6 +240,17 @@ impl VisionPreProcessor for Qwen2VLProcessor {
         processor.inner.preprocess_image_refs(images, config)
     }
 
+    fn preprocess_image_refs_deferred(
+        &self,
+        images: &[&DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor
+            .inner
+            .preprocess_image_refs_deferred(images, config)
+    }
+
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let processor = self.with_preprocessor_config(config);
         processor.inner.calculate_num_tokens(width, height, config)

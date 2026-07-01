@@ -248,6 +248,17 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         processor.inner.preprocess_image_refs(images, config)
     }
 
+    fn preprocess_image_refs_deferred(
+        &self,
+        images: &[&DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor
+            .inner
+            .preprocess_image_refs_deferred(images, config)
+    }
+
     fn preprocess_video(
         &self,
         frames: &[DynamicImage],

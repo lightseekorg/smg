@@ -1006,6 +1006,106 @@ impl QwenVLProcessorBase {
             }
         }
     }
+
+    fn preprocess_single_image_ref_deferred(
+        &self,
+        image: &DynamicImage,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let (width, height) = image.dimensions();
+        let do_resize = config.do_resize.unwrap_or(true);
+        let (target_height, target_width) = if do_resize {
+            self.smart_resize(height as usize, width as usize)?
+        } else {
+            self.validate_unresized_patch_dimensions(height as usize, width as usize)?;
+            (height as usize, width as usize)
+        };
+        let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_height, target_width, 1);
+        let patch_size = self.config.patch_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+        let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+        let num_patches = grid_t
+            .checked_mul(grid_h)
+            .and_then(|value| value.checked_mul(grid_w))
+            .ok_or_else(|| {
+                TransformError::ShapeError("Qwen deferred image patch count overflow".to_string())
+            })?;
+        let patch_values = num_patches.checked_mul(patch_features).ok_or_else(|| {
+            TransformError::ShapeError("Qwen deferred image patch size overflow".to_string())
+        })?;
+
+        let target_width = target_width as u32;
+        let target_height = target_height as u32;
+        let filter = pil_to_filter(config.resampling.or(Some(3)));
+        let resized;
+        let image = if do_resize && (width != target_width || height != target_height) {
+            resized = if filter == FilterType::CatmullRom {
+                resize_bicubic_pil(image, target_width, target_height)
+            } else {
+                resize(image, target_width, target_height, filter)
+            };
+            &resized
+        } else {
+            image
+        };
+
+        let (rgb_width, rgb_height, rgb_data) = rgb_bytes(image);
+        let frames: Vec<_> = (0..temporal_patch_size)
+            .map(|_| VideoFrameRgb {
+                width: rgb_width,
+                height: rgb_height,
+                data: Cow::Borrowed(rgb_data.as_ref()),
+            })
+            .collect();
+        let mut patches = vec![0; patch_values];
+        let mut output_index = 0;
+        self.patchify_video_rgb_u8_chunk_into(
+            &frames,
+            grid_h,
+            grid_w,
+            &mut patches,
+            &mut output_index,
+        )?;
+        debug_assert_eq!(output_index, patches.len());
+
+        let mean = config.get_image_mean();
+        let std = config.get_image_std();
+        let do_normalize = config.do_normalize.unwrap_or(true);
+        let scale: [f32; 3] = if do_normalize {
+            std::array::from_fn(|channel| 1.0 / (255.0 * std[channel] as f32))
+        } else {
+            [1.0 / 255.0; 3]
+        };
+        let bias: [f32; 3] = if do_normalize {
+            std::array::from_fn(|channel| -(mean[channel] as f32) / (std[channel] as f32))
+        } else {
+            [0.0; 3]
+        };
+        let lut: [[f32; 256]; 3] = std::array::from_fn(|channel| {
+            std::array::from_fn(|value| value as f32 * scale[channel] + bias[channel])
+        });
+        let channel_run = temporal_patch_size * patch_size * patch_size;
+        let deferred = DeferredNormalizedEncoderInput::new(
+            patches,
+            vec![num_patches, patch_features],
+            lut,
+            channel_run,
+        )?;
+
+        Ok(PreprocessedEncoderInputs::new_deferred_normalized(
+            deferred,
+            vec![self.calculate_tokens_from_grid(grid_t, grid_h, grid_w)],
+            vec![(width, height)],
+        )
+        .with_extra(
+            "image_grid_thw",
+            ModelSpecificValue::int_2d(vec![grid_t as i64, grid_h as i64, grid_w as i64], 1, 3),
+        )
+        .with_extra(
+            "patches_per_image",
+            ModelSpecificValue::int_1d(vec![num_patches as i64]),
+        ))
+    }
 }
 
 impl VisionPreProcessor for QwenVLProcessorBase {
@@ -1183,6 +1283,18 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         );
 
         Ok(result)
+    }
+
+    fn preprocess_image_refs_deferred(
+        &self,
+        images: &[&DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        if let [image] = images {
+            self.preprocess_single_image_ref_deferred(image, config)
+        } else {
+            self.preprocess_image_refs(images, config)
+        }
     }
 
     fn preprocess_video(
@@ -1864,6 +1976,47 @@ mod tests {
                 got.to_bits(),
                 want.to_bits(),
                 "resized video path diverges at index {idx}: dynamic {got} vs rgb {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preprocess_image_deferred_matches_fp32_and_bf16_reference() {
+        let processor = QwenVLProcessorBase::new(create_video_test_config());
+        let config = PreProcessorConfig {
+            image_mean: Some(processor.default_mean().to_vec()),
+            image_std: Some(processor.default_std().to_vec()),
+            ..Default::default()
+        };
+        let image = create_sized_pattern_frame(7, 9, 31);
+        let reference = processor.preprocess_image_refs(&[&image], &config).unwrap();
+        let mut deferred = processor
+            .preprocess_image_refs_deferred(&[&image], &config)
+            .unwrap();
+
+        let reference_values = reference.encoder_input.as_slice_memory_order().unwrap();
+        let compact = deferred.deferred_encoder_input.as_ref().unwrap();
+        let mut actual_bf16 = vec![0; compact.len() * 2];
+        compact.fill_bf16_le_bytes(&mut actual_bf16).unwrap();
+        let reference_bf16 = reference_values
+            .iter()
+            .flat_map(|&value| {
+                let bits = value.to_bits();
+                let lsb = (bits >> 16) & 1;
+                ((bits.wrapping_add(0x7fff + lsb) >> 16) as u16).to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_bf16, reference_bf16);
+
+        deferred.materialize_deferred_encoder_input().unwrap();
+        let actual_values = deferred.encoder_input.as_slice_memory_order().unwrap();
+        assert_eq!(actual_values.len(), reference_values.len());
+        for (index, (&actual, &expected)) in actual_values.iter().zip(reference_values).enumerate()
+        {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "deferred image path diverges at index {index}"
             );
         }
     }

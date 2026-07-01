@@ -734,7 +734,7 @@ async fn process_multimodal_parts(
                 if images_for_preprocess.len() == 1 {
                     let raw_images = [&images_for_preprocess[0].image];
                     return processor
-                        .preprocess_image_refs(&raw_images, &pp_config)
+                        .preprocess_image_refs_deferred(&raw_images, &pp_config)
                         .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"));
                 }
                 let raw_images: Vec<&image::DynamicImage> =
@@ -1052,11 +1052,15 @@ pub(crate) fn assemble_multimodal_data(
         MultimodalIntermediate::Precomputed(precomputed) => match client {
             GrpcClient::Sglang(_) => {
                 ensure_image_only(&precomputed, "SGLang")?;
-                Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
+                Ok(MultimodalData::Sglang(assemble_sglang(
+                    materialize_deferred_encoder_input(precomputed)?,
+                )))
             }
             GrpcClient::Vllm(_) => {
                 ensure_image_only(&precomputed, "vLLM")?;
-                Ok(MultimodalData::Vllm(assemble_vllm(precomputed)))
+                Ok(MultimodalData::Vllm(assemble_vllm(
+                    materialize_deferred_encoder_input(precomputed)?,
+                )))
             }
             GrpcClient::Trtllm(_) => {
                 ensure_image_only(&precomputed, "TRT-LLM")?;
@@ -1071,6 +1075,15 @@ pub(crate) fn assemble_multimodal_data(
             ),
         },
     }
+}
+
+fn materialize_deferred_encoder_input(
+    mut intermediate: PrecomputedMultimodalIntermediate,
+) -> Result<PrecomputedMultimodalIntermediate> {
+    Arc::make_mut(&mut intermediate.preprocessed)
+        .materialize_deferred_encoder_input()
+        .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
+    Ok(intermediate)
 }
 
 fn ensure_image_only(

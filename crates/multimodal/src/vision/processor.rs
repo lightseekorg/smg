@@ -562,6 +562,16 @@ pub trait VisionPreProcessor: Send + Sync {
         self.preprocess(&owned, config)
     }
 
+    /// Preprocess borrowed images while allowing normalization to be deferred
+    /// until backend assembly. The default keeps the FP32 behavior.
+    fn preprocess_image_refs_deferred(
+        &self,
+        images: &[&DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        self.preprocess_image_refs(images, config)
+    }
+
     /// Preprocess one decoded video clip represented as sampled frames.
     ///
     /// Implementations that support video should emit the same primary
