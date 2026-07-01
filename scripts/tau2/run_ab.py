@@ -108,13 +108,24 @@ def run_tau2(
     if max_concurrency > 0:
         cmd += ["--max-concurrency", str(max_concurrency)]
     print(f"\n=== [{arm.name}/{domain}] {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, env=os.environ.copy(), check=False)
+    env = os.environ.copy()
+    # Pin tau2's write dir to the same dir we read from, so results land where we
+    # look for them regardless of any inherited $TAU2_DATA_DIR or whether tau2 is
+    # installed editable vs into site-packages.
+    env["TAU2_DATA_DIR"] = str(data_dir)
+    proc = subprocess.run(cmd, env=env, check=False)
     if proc.returncode != 0:
         print(f"WARNING: [{arm.name}/{domain}] exited {proc.returncode}", file=sys.stderr)
     results_json = data_dir / "simulations" / save_to / "results.json"
-    arm.scores[domain] = domain_scores(
-        load_results(json.loads(results_json.read_text())), k=num_trials
-    )
+    try:
+        arm.scores[domain] = domain_scores(
+            load_results(json.loads(results_json.read_text())), k=num_trials
+        )
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        # tau2 may have died before writing results (OOM, engine death, API auth).
+        # Skip this domain rather than aborting — build_report renders "—" for a
+        # missing domain, so one failure doesn't discard the rest of the run.
+        print(f"WARNING: [{arm.name}/{domain}] no usable results ({e})", file=sys.stderr)
 
 
 def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
