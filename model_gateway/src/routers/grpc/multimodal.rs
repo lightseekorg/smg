@@ -13,7 +13,6 @@ mod assembly;
 
 use std::{
     collections::HashMap,
-    mem::size_of,
     path::Path,
     sync::{Arc, OnceLock},
     time::Instant,
@@ -27,34 +26,19 @@ use dashmap::DashMap;
 #[cfg(test)]
 use llm_multimodal::EncoderInput;
 use llm_multimodal::{
-    vision::transforms::preprocess_parallelism, AsyncMultiModalTracker,
-    DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
+    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
     MediaConnectorConfig, MediaContentPart, Modality, ModalityInput, ModalityPreProcessor,
-    ModelMetadata, ModelRegistry, ModelSpecificValue, MultimodalRuntime, OutputPreference,
-    PlaceholderRange, PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs,
-    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VideoInput, VisionProcessorRegistry,
+    ModelMetadata, ModelRegistry, MultimodalRuntime, OutputPreference, PlaceholderRange,
+    PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs, PromptReplacement,
+    TrackedMedia, TrackerOutput, VideoClip, VideoInput, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
-use ndarray::{ArrayD, ArrayViewD, Axis, Slice};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
-use rayon::prelude::*;
 use tracing::{debug, info, warn};
-
-use crate::routers::grpc::{
-    client::GrpcClient,
-    context::WorkerSelection,
-    proto_wrapper::{
-        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode,
-        tokenspeed_shm_dev_writable, write_tokenspeed_shm_mapped, SglangMultimodalData,
-        TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData, TokenSpeedMultimodalItem,
-        TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
-    },
-    MultimodalData,
-};
 
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
@@ -291,14 +275,14 @@ pub(crate) struct MultimodalOutput {
     /// Token IDs with placeholder tokens expanded to the correct count per media item.
     pub expanded_token_ids: Vec<u32>,
     /// Lightweight intermediate holding preprocessing results.
-    /// Assembled into backend-specific `MultimodalData` in request_building.
+    /// Assembled into backend-specific data in request_building.
     pub intermediate: MultimodalIntermediate,
 }
 
 /// Lightweight intermediate from the preparation stage.
 ///
 /// Holds all preprocessing results without serializing tensors to bytes.
-/// The assembly stage converts this into a backend-specific [`MultimodalData`]
+/// The assembly stage converts this into backend-specific data
 /// variant once the target backend is known (after worker selection).
 #[derive(Debug)]
 pub(crate) enum MultimodalIntermediate {
@@ -1091,13 +1075,15 @@ mod tests {
         mem::size_of,
     };
 
-    use ndarray::IxDyn;
+    use llm_multimodal::{DeferredNormalizedEncoderInput, ModelSpecificValue};
+    use ndarray::{ArrayD, Axis, IxDyn, Slice};
     use openai_protocol::common::{ImageUrl, VideoUrl};
     use tempfile::TempDir;
 
     use super::*;
     use crate::routers::grpc::proto_wrapper::{
-        cleanup_tokenspeed_shm_handles, write_tokenspeed_shm_with, TokenSpeedTensorStorage,
+        cleanup_tokenspeed_shm_handles, tokenspeed_shm_dev_writable, write_tokenspeed_shm_with,
+        TokenSpeedModality, TokenSpeedTensorStorage,
     };
 
     #[test]
