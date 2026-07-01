@@ -375,6 +375,7 @@ impl VisionPreProcessor for Phi3VisionProcessor {
 
         Ok(PreprocessedEncoderInputs {
             encoder_input,
+            deferred_encoder_input: None,
             feature_token_counts: all_num_tokens,
             item_sizes: all_image_sizes,
             model_specific,

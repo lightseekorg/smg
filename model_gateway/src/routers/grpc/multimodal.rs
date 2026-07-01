@@ -21,8 +21,8 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
     vision::transforms::{preprocess_parallelism, prewarm_preprocess_pool, run_in_preprocess_pool},
-    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
-    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
+    AsyncMultiModalTracker, DeferredNormalizedEncoderInput, FieldLayout, ImageDetail, ImageFrame,
+    MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
     ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs,
     PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
@@ -757,7 +757,7 @@ async fn process_multimodal_parts(
                 if let Some(rgb_video) = video.rgb_video() {
                     match rgb_video.frame_refs() {
                         Ok(frame_refs) => {
-                            match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
+                            match processor.preprocess_video_rgb_deferred(&frame_refs, &pp_config) {
                                 Ok(preprocessed) => return Ok(preprocessed),
                                 Err(error) => {
                                     warn!(
@@ -1153,7 +1153,7 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
 }
 
 fn assemble_tokenspeed(
-    intermediate: PrecomputedMultimodalIntermediate,
+    mut intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
@@ -1164,6 +1164,14 @@ fn assemble_tokenspeed(
     let shm_enabled = resolve_tokenspeed_shm_enabled(intermediate.modality, workers);
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
+    let encoder_input_dtype = canonical_tokenspeed_encoder_dtype(&encoder_input_dtype);
+    if encoder_input_dtype != "bfloat16"
+        && intermediate.preprocessed.deferred_encoder_input.is_some()
+    {
+        Arc::make_mut(&mut intermediate.preprocessed)
+            .materialize_deferred_encoder_input()
+            .map_err(|error| anyhow::anyhow!("failed to materialize encoder input: {error}"))?;
+    }
     let patch_offsets = intermediate
         .patch_offsets
         .as_deref()
@@ -1197,6 +1205,70 @@ fn assemble_tokenspeed(
         mm_placeholders_by_item.len()
     );
     let mut mm_placeholders_by_item = mm_placeholders_by_item.into_iter();
+    if let Some(deferred) = intermediate.preprocessed.deferred_encoder_input.as_ref() {
+        anyhow::ensure!(
+            item_count == 1,
+            "deferred TokenSpeed encoder input currently requires one multimodal item"
+        );
+        // TODO: Add native typed payload support for vLLM/SGLang before using
+        // deferred BF16 outside TokenSpeed; converting BF16 back to FP32 would
+        // not preserve their current FP32 contract.
+        let model_specific_started = log_timing.then(Instant::now);
+        let model_specific_tensors = serialize_model_specific_for_item(
+            &intermediate.preprocessed.model_specific,
+            &intermediate.field_layouts,
+            &flat_spans,
+            0,
+        )?;
+        let model_specific_serialize_ms =
+            model_specific_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        let mm_placeholders = mm_placeholders_by_item
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing placeholders for multimodal item 0"))?;
+        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, 0);
+        let encoder_input_started = log_timing.then(Instant::now);
+        let encoder_input = serialize_deferred_bf16_tokenspeed_tensor(
+            deferred,
+            shm_enabled,
+            tokenspeed_mm_shm_min_bytes(),
+            log_timing,
+        )?;
+        let encoder_input_serialize_ms =
+            encoder_input_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        if log_timing {
+            info!(
+                modality = ?modality,
+                item_index = 0,
+                encoder_input_dtype = %encoder_input.dtype,
+                encoder_input_bytes = encoder_input.nbytes(),
+                encoder_input_shape = ?encoder_input.shape,
+                model_specific_tensor_count = model_specific_tensors.len(),
+                encoder_input_serialize_ms = encoder_input_serialize_ms.unwrap_or_default(),
+                model_specific_serialize_ms = model_specific_serialize_ms.unwrap_or_default(),
+                "smg_mm_timing assemble_tokenspeed_item"
+            );
+        }
+        if let Some(total_started) = total_started {
+            info!(
+                modality = ?modality,
+                item_count = 1,
+                total_ms = total_started.elapsed().as_secs_f64() * 1000.0,
+                "smg_mm_timing assemble_tokenspeed"
+            );
+        }
+        return Ok(TokenSpeedMultimodalData {
+            items: vec![TokenSpeedMultimodalItem {
+                modality,
+                encoder_input,
+                model_specific_tensors,
+                placeholder_token_id: intermediate.placeholder_token_id,
+                mm_placeholders,
+                content_hash,
+            }],
+            shm_enabled,
+        });
+    }
+
     let mut pending_items: Vec<PendingTokenSpeedItem<'_>> = Vec::with_capacity(item_count);
     for item_index in 0..item_count {
         let item_encoder_input = encoder_input_for_item(
@@ -1434,9 +1506,8 @@ fn validate_tokenspeed_item_spans(
     flat_spans: &FlatItemSpans,
     item_count: usize,
 ) -> Result<()> {
-    let encoder_first_dim = *preprocessed
-        .encoder_input
-        .shape()
+    let encoder_shape = preprocessed.encoder_input_shape();
+    let encoder_first_dim = *encoder_shape
         .first()
         .ok_or_else(|| anyhow::anyhow!("encoder_input tensor must have a first dimension"))?;
     let encoder_layout = field_layouts
@@ -1738,6 +1809,55 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Serialization helpers
 // ---------------------------------------------------------------------------
+
+fn serialize_deferred_bf16_tokenspeed_tensor(
+    encoder_input: &DeferredNormalizedEncoderInput,
+    shm_enabled: bool,
+    min_shm_bytes: usize,
+    log_timing: bool,
+) -> Result<TokenSpeedTensor> {
+    let nbytes = encoder_input
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| anyhow::anyhow!("deferred BF16 encoder input size overflow"))?;
+    let shape = encoder_input
+        .shape()
+        .iter()
+        .map(|&dimension| {
+            u32::try_from(dimension)
+                .map_err(|_| anyhow::anyhow!("encoder input dimension exceeds u32"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if shm_enabled && nbytes >= min_shm_bytes {
+        let timing_started = log_timing.then(Instant::now);
+        let handle = write_tokenspeed_shm_mapped(nbytes, |output| {
+            encoder_input
+                .fill_bf16_le_bytes(output)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })?;
+        if log_timing {
+            info!(
+                nbytes,
+                elapsed_ms = timing_started
+                    .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or_default(),
+                "smg_mm_timing tokenspeed_shm_write_deferred_bf16"
+            );
+        }
+        return Ok(TokenSpeedTensor::shm(handle, shape, "bfloat16".to_string()));
+    }
+
+    let mut data = vec![0; nbytes];
+    encoder_input
+        .fill_bf16_le_bytes(&mut data)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(TokenSpeedTensor::inline(
+        data,
+        shape,
+        "bfloat16".to_string(),
+    ))
+}
 
 /// Serialize the primary encoder input ndarray to raw little-endian f32 bytes + shape.
 fn serialize_encoder_input(preprocessed: &PreprocessedEncoderInputs) -> (Vec<u8>, Vec<u32>) {
@@ -2886,6 +3006,7 @@ mod tests {
     fn test_validate_tokenspeed_item_spans_rejects_flat_under_consumption() {
         let preprocessed = PreprocessedEncoderInputs {
             encoder_input: ArrayD::from_shape_vec(IxDyn(&[4, 2]), vec![0.0; 8]).unwrap(),
+            deferred_encoder_input: None,
             feature_token_counts: vec![1, 1],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific: HashMap::from([(
@@ -2917,6 +3038,7 @@ mod tests {
     fn test_validate_tokenspeed_item_spans_rejects_batched_extra_rows() {
         let preprocessed = PreprocessedEncoderInputs {
             encoder_input: ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![0.0; 6]).unwrap(),
+            deferred_encoder_input: None,
             feature_token_counts: vec![1, 1],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific: HashMap::new(),
@@ -2965,6 +3087,7 @@ mod tests {
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             )
             .unwrap(),
+            deferred_encoder_input: None,
             feature_token_counts: vec![2, 2],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific,
@@ -3073,6 +3196,7 @@ mod tests {
                 vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             )
             .unwrap(),
+            deferred_encoder_input: None,
             feature_token_counts: vec![2, 2],
             item_sizes: vec![(1, 1), (1, 1)],
             model_specific,
@@ -3345,6 +3469,33 @@ mod tests {
             uint_tensor.data,
             vec![0x01, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11]
         );
+    }
+
+    #[test]
+    fn deferred_bf16_tokenspeed_tensor_matches_reference_conversion() {
+        let lut: [[f32; 256]; 3] = std::array::from_fn(|channel| {
+            std::array::from_fn(|value| value as f32 * (channel + 1) as f32 / 255.0)
+        });
+        let raw = vec![0, 127, 255, 1, 128, 254];
+        let deferred =
+            DeferredNormalizedEncoderInput::new(raw.clone(), vec![2, 3], lut, 1).unwrap();
+
+        let tensor =
+            serialize_deferred_bf16_tokenspeed_tensor(&deferred, false, usize::MAX, false).unwrap();
+        let TokenSpeedTensorStorage::Inline(data) = tensor.storage else {
+            panic!("expected inline deferred tensor");
+        };
+        let expected = raw
+            .iter()
+            .enumerate()
+            .flat_map(|(index, &value)| {
+                f32_to_bf16_bits(lut[index % 3][value as usize]).to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(data, expected);
+        assert_eq!(tensor.shape, vec![2, 3]);
+        assert_eq!(tensor.dtype, "bfloat16");
     }
 
     // ------------------------------------------------------------------

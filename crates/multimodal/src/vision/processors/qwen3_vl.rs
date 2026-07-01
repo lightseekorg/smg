@@ -266,6 +266,17 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         processor.inner.preprocess_video_rgb(frames, config)
     }
 
+    fn preprocess_video_rgb_deferred(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor
+            .inner
+            .preprocess_video_rgb_deferred(frames, config)
+    }
+
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let processor = self.with_preprocessor_config(config);
         processor.inner.calculate_num_tokens(width, height, config)

@@ -3,13 +3,16 @@
 //! This module defines the interface for model-specific vision processors
 //! and the common output format for preprocessed encoder inputs.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, mem::size_of};
 
 use anyhow::{Context, Result as AnyhowResult};
 use image::DynamicImage;
-use ndarray::{Array4, ArrayD};
+use ndarray::{Array4, ArrayD, IxDyn};
 
-use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
+use super::{
+    preprocessor_config::PreProcessorConfig,
+    transforms::{par_scope, par_threads, TransformError},
+};
 use crate::types::{FieldLayout, RgbFrameRef};
 
 /// Helper to extract a dimension from encoder_input given an ndim-dependent axis index.
@@ -207,6 +210,11 @@ pub struct PreprocessedEncoderInputs {
     /// - Phi3-Vision: [B, num_crops+1, C, H, W] (5D)
     pub encoder_input: ArrayD<f32>,
 
+    /// Compact encoder input whose normalization is deferred until backend
+    /// assembly. This avoids materializing a full FP32 tensor when a backend
+    /// accepts a narrower wire dtype.
+    pub deferred_encoder_input: Option<DeferredNormalizedEncoderInput>,
+
     /// Number of encoder feature tokens per media item in the batch.
     ///
     /// Used to expand placeholder tokens in the text input. For vision this is
@@ -231,6 +239,133 @@ pub struct PreprocessedEncoderInputs {
     pub model_specific: HashMap<String, ModelSpecificValue>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DeferredNormalizedEncoderInput {
+    data: Vec<u8>,
+    shape: Vec<usize>,
+    lut: Box<[[f32; 256]; 3]>,
+    channel_run: usize,
+}
+
+impl DeferredNormalizedEncoderInput {
+    pub fn new(
+        data: Vec<u8>,
+        shape: Vec<usize>,
+        lut: [[f32; 256]; 3],
+        channel_run: usize,
+    ) -> Result<Self, TransformError> {
+        let expected = shape.iter().try_fold(1usize, |count, &dimension| {
+            count.checked_mul(dimension).ok_or_else(|| {
+                TransformError::ShapeError("deferred encoder input size overflow".to_string())
+            })
+        })?;
+        if data.len() != expected || channel_run == 0 {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{expected} deferred values with a non-zero channel run"),
+                actual: vec![data.len(), channel_run],
+            });
+        }
+        Ok(Self {
+            data,
+            shape,
+            lut: Box::new(lut),
+            channel_run,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn materialize_f32(&self) -> Result<ArrayD<f32>, TransformError> {
+        let mut values = vec![0.0; self.data.len()];
+        self.fill_f32(&mut values)?;
+        ArrayD::from_shape_vec(IxDyn(&self.shape), values).map_err(|error| {
+            TransformError::ShapeError(format!(
+                "failed to materialize deferred encoder input: {error}"
+            ))
+        })
+    }
+
+    pub fn fill_f32(&self, output: &mut [f32]) -> Result<(), TransformError> {
+        if output.len() != self.data.len() {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{} normalized encoder values", self.data.len()),
+                actual: vec![output.len()],
+            });
+        }
+        self.fill_parallel(output, size_of::<f32>(), |group, input, output| {
+            let lut = &self.lut[group % 3];
+            for (&value, output) in input.iter().zip(output) {
+                *output = lut[value as usize];
+            }
+        });
+        Ok(())
+    }
+
+    pub fn fill_bf16_le_bytes(&self, output: &mut [u8]) -> Result<(), TransformError> {
+        if output.len() != self.data.len() * size_of::<u16>() {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{} BF16 encoder bytes", self.data.len() * 2),
+                actual: vec![output.len()],
+            });
+        }
+        self.fill_parallel(output, size_of::<u16>(), |group, input, output| {
+            let lut = &self.lut[group % 3];
+            for (&value, output) in input.iter().zip(output.chunks_exact_mut(2)) {
+                let bits = lut[value as usize].to_bits();
+                let lsb = (bits >> 16) & 1;
+                let bf16 = (bits.wrapping_add(0x7fff + lsb) >> 16) as u16;
+                output.copy_from_slice(&bf16.to_le_bytes());
+            }
+        });
+        Ok(())
+    }
+
+    fn fill_parallel<T, F>(&self, output: &mut [T], output_bytes_per_value: usize, fill: F)
+    where
+        T: Send,
+        F: Fn(usize, &[u8], &mut [T]) + Copy + Send + Sync,
+    {
+        let groups = self.data.len().div_ceil(self.channel_run);
+        let workers = par_threads(self.data.len() * output_bytes_per_value, groups);
+        let groups_per_task = groups.div_ceil(workers);
+        let input_values_per_task = groups_per_task * self.channel_run;
+        let output_values_per_task =
+            input_values_per_task * output_bytes_per_value / size_of::<T>();
+        par_scope(|scope| {
+            for (task, (input, output)) in self
+                .data
+                .chunks(input_values_per_task)
+                .zip(output.chunks_mut(output_values_per_task))
+                .enumerate()
+            {
+                let first_group = task * groups_per_task;
+                scope.spawn(move |_| {
+                    for (group_offset, (input, output)) in
+                        input
+                            .chunks(self.channel_run)
+                            .zip(output.chunks_mut(
+                                self.channel_run * output_bytes_per_value / size_of::<T>(),
+                            ))
+                            .enumerate()
+                    {
+                        fill(first_group + group_offset, input, output);
+                    }
+                });
+            }
+        });
+    }
+}
+
 impl PreprocessedEncoderInputs {
     /// Create a new PreprocessedEncoderInputs with required fields (4D encoder input).
     pub fn new(
@@ -240,6 +375,7 @@ impl PreprocessedEncoderInputs {
     ) -> Self {
         Self {
             encoder_input: encoder_input.into_dyn(),
+            deferred_encoder_input: None,
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
@@ -256,10 +392,32 @@ impl PreprocessedEncoderInputs {
     ) -> Self {
         Self {
             encoder_input,
+            deferred_encoder_input: None,
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
         }
+    }
+
+    pub fn new_deferred_normalized(
+        deferred_encoder_input: DeferredNormalizedEncoderInput,
+        feature_token_counts: Vec<usize>,
+        item_sizes: Vec<(u32, u32)>,
+    ) -> Self {
+        Self {
+            encoder_input: ArrayD::zeros(IxDyn(&[0])),
+            deferred_encoder_input: Some(deferred_encoder_input),
+            feature_token_counts,
+            item_sizes,
+            model_specific: HashMap::new(),
+        }
+    }
+
+    pub fn materialize_deferred_encoder_input(&mut self) -> Result<(), TransformError> {
+        if let Some(deferred) = self.deferred_encoder_input.take() {
+            self.encoder_input = deferred.materialize_f32()?;
+        }
+        Ok(())
     }
 
     /// Add a model-specific value.
@@ -308,7 +466,9 @@ impl PreprocessedEncoderInputs {
 
     /// Get the number of dimensions of encoder_input.
     pub fn ndim(&self) -> usize {
-        self.encoder_input.ndim()
+        self.deferred_encoder_input
+            .as_ref()
+            .map_or_else(|| self.encoder_input.ndim(), |input| input.shape().len())
     }
 
     /// Get total number of encoder feature tokens across all media items.
@@ -326,7 +486,10 @@ impl PreprocessedEncoderInputs {
 
     /// Get the shape of the primary encoder input as a vector.
     pub fn encoder_input_shape(&self) -> Vec<usize> {
-        self.encoder_input.shape().to_vec()
+        self.deferred_encoder_input.as_ref().map_or_else(
+            || self.encoder_input.shape().to_vec(),
+            |input| input.shape().to_vec(),
+        )
     }
 
     /// Number of media items in this batch.
@@ -427,6 +590,16 @@ pub trait VisionPreProcessor: Send + Sync {
             "{} does not support RGB video preprocessing",
             self.model_name()
         )))
+    }
+
+    /// Preprocess borrowed RGB video while allowing normalization to be
+    /// deferred until backend assembly. The default keeps the FP32 behavior.
+    fn preprocess_video_rgb_deferred(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        self.preprocess_video_rgb(frames, config)
     }
 
     /// Calculate the number of vision tokens for a given image size.

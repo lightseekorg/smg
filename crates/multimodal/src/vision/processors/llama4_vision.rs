@@ -503,6 +503,7 @@ impl VisionPreProcessor for Llama4VisionProcessor {
 
         Ok(PreprocessedEncoderInputs {
             encoder_input: encoder_input.into_dyn(),
+            deferred_encoder_input: None,
             feature_token_counts,
             item_sizes,
             model_specific,

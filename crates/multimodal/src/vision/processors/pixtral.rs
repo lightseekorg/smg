@@ -250,6 +250,7 @@ impl VisionPreProcessor for PixtralProcessor {
 
         Ok(PreprocessedEncoderInputs {
             encoder_input: batch_tensor,
+            deferred_encoder_input: None,
             feature_token_counts,
             item_sizes: original_sizes,
             model_specific,
