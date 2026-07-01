@@ -38,14 +38,17 @@ MAX_MODEL_LEN="${TAU2_MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${TAU2_GPU_MEM_UTIL:-0.85}"
 RUN_DIR="${TAU2_RUN_DIR:-/tmp/tau2_ab}"
 
-# Pure-vLLM (arm A) tool/reasoning parser flags.
+# Pure-vLLM (arm A) tool/reasoning parser flags. `-` (not `:-`) on the reasoning
+# parser: an explicit empty value passes through (the flag is omitted → no
+# reasoning parse, e.g. gpt-oss/harmony or a non-thinking SKU); only an UNSET var
+# defaults to qwen3. (The vLLM tool parser is always non-empty, so `:-` is fine.)
 VLLM_TOOL_PARSER="${TAU2_VLLM_TOOL_PARSER:-qwen3_xml}"
-VLLM_REASONING_PARSER="${TAU2_VLLM_REASONING_PARSER:-qwen3}"   # empty = none (non-thinking SKU)
-# SMG (arm B) parser flags — SMG registry names, NOT vLLM's.
-# `-` not `:-`: an explicit empty value passes through (omits the flag → SMG
-# auto-detect, e.g. harmony for gpt-oss); only an unset var defaults to qwen_xml.
+VLLM_REASONING_PARSER="${TAU2_VLLM_REASONING_PARSER-qwen3}"
+# SMG (arm B) parser flags — SMG registry names, NOT vLLM's. Same `-` rule: an
+# explicit empty value passes through (omits the flag → SMG auto-detect, e.g.
+# harmony for gpt-oss); only an unset var defaults.
 SMG_TOOL_PARSER="${TAU2_SMG_TOOL_PARSER-qwen_xml}"
-SMG_REASONING_PARSER="${TAU2_SMG_REASONING_PARSER:-qwen3}"
+SMG_REASONING_PARSER="${TAU2_SMG_REASONING_PARSER-qwen3}"
 
 # Extra args appended to every vLLM process (both arms). e.g.
 # TAU2_VLLM_EXTRA="--enforce-eager" — skips CUDA-graph capture, which has been
