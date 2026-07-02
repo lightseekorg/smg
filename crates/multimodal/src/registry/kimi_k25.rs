@@ -89,7 +89,7 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
         ])
     }
 
-    fn keep_on_cpu_keys(&self) -> Vec<String> {
+    fn cpu_resident_tensor_keys(&self) -> Vec<String> {
         vec!["grid_thws".to_string()]
     }
 }

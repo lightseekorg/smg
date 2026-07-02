@@ -373,12 +373,10 @@ impl VisionPreProcessor for Phi3VisionProcessor {
                 actual: shape.clone(),
             })?;
 
-        Ok(PreprocessedEncoderInputs {
-            encoder_input,
-            feature_token_counts: all_num_tokens,
-            item_sizes: all_image_sizes,
-            model_specific,
-        })
+        Ok(
+            PreprocessedEncoderInputs::new_dynamic(encoder_input, all_num_tokens, all_image_sizes)
+                .with_model_specific(model_specific),
+        )
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {

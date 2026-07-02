@@ -129,13 +129,11 @@ pub trait ModelProcessorSpec: Send + Sync {
         HashMap::from([("pixel_values".to_string(), FieldLayout::Batched)])
     }
 
-    /// Tensor keys that should remain on CPU (not transferred to GPU).
+    /// Model-specific tensor keys that should remain CPU-resident.
     ///
-    /// In vLLM, certain model-specific tensors are marked `keep_on_cpu=True`
-    /// in their `MultiModalFieldConfig`.  This method mirrors that per-model
-    /// knowledge so the router can send the hint via gRPC, avoiding the need
-    /// for the backend to instantiate a Python processor just to query it.
-    fn keep_on_cpu_keys(&self) -> Vec<String> {
+    /// Backend adapters translate this model-level placement requirement to
+    /// their native wire or runtime representation.
+    fn cpu_resident_tensor_keys(&self) -> Vec<String> {
         vec![]
     }
 }

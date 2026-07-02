@@ -942,10 +942,13 @@ smg \
 These env-only variables tune how the router ships preprocessed multimodal
 tensors (image/video encoder inputs) to a TokenSpeed worker. They do not affect
 accuracy — the inline and shared-memory paths produce byte-identical tensors.
+SHM handles include offsets; multi-item TokenSpeed encoder inputs may share one
+packed segment while preserving the same byte-exact tensor payloads and reducing
+per-tensor file lifecycle overhead.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. No locality configuration is needed. |
+| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | image/audio: `inline`; video: `auto` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). When unset, image/audio stay inline while video uses `auto` to avoid the high-throughput video gRPC byte-copy path on colocated workers without hurting image TTFT. In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. No locality configuration is needed. |
 | `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
 | `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
 

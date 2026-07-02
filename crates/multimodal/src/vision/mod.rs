@@ -37,7 +37,9 @@ pub mod transforms;
 // Re-export commonly used types
 pub use preprocessor_config::PreProcessorConfig;
 pub use processor::{
-    ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor, VisionProcessorRegistry,
+    DeferredNormalizedEncoderInput, EncoderInput, ModalityPreProcessor, ModalityProcessorRegistry,
+    ModelSpecificValue, OutputPreference, PreprocessRequest, PreprocessedEncoderInputs, VideoInput,
+    VisionInput, VisionPreProcessor, VisionPreprocessRequest, VisionProcessorRegistry,
 };
 pub use processors::{
     Llama4VisionProcessor, LlavaNextProcessor, LlavaProcessor, Phi3VisionProcessor,

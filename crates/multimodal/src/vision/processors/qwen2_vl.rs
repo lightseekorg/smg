@@ -24,7 +24,9 @@ use image::DynamicImage;
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
-    processor::{PreprocessedEncoderInputs, VisionPreProcessor},
+    processor::{
+        PreprocessedEncoderInputs, VisionInput, VisionPreProcessor, VisionPreprocessRequest,
+    },
     transforms::TransformError,
 };
 
@@ -231,6 +233,21 @@ impl VisionPreProcessor for Qwen2VLProcessor {
         processor.inner.preprocess(images, config)
     }
 
+    fn preprocess_vision_input(
+        &self,
+        request: VisionPreprocessRequest<'_>,
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        if matches!(&request.input, VisionInput::Video(_)) {
+            return Err(TransformError::ShapeError(format!(
+                "{} does not support video preprocessing",
+                self.model_name()
+            )));
+        }
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess_vision_input(request, config)
+    }
+
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
         let processor = self.with_preprocessor_config(config);
         processor.inner.calculate_num_tokens(width, height, config)
@@ -389,7 +406,7 @@ mod tests {
         assert!(result.encoder_input.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
-        let flat = result.encoder_input_flat();
+        let flat = result.encoder_input_flat().unwrap();
         // After normalization with CLIP mean/std, gray (0.5) should be near 0
         // (0.5 - 0.48) / 0.27 ≈ 0.07
         assert!(flat.iter().all(|&v| v.abs() < 1.0)); // Should be normalized

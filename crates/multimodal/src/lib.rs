@@ -3,7 +3,10 @@ pub mod hasher;
 pub mod hub;
 pub mod jpeg_turbo;
 pub mod media;
+#[cfg(feature = "opencv-video")]
+mod opencv_buffer;
 pub mod registry;
+pub mod runtime;
 pub mod tracker;
 pub mod types;
 pub mod vision;
@@ -13,6 +16,7 @@ pub use media::{
     ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource, VideoFetchConfig,
 };
 pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
+pub use runtime::MultimodalRuntime;
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
     FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, MediaContentPart, Modality,
@@ -21,6 +25,8 @@ pub use types::{
 };
 // Re-export vision processing components
 pub use vision::{
-    LlavaNextProcessor, LlavaProcessor, ModelSpecificValue, PreProcessorConfig,
-    PreprocessedEncoderInputs, TransformError, VisionPreProcessor, VisionProcessorRegistry,
+    DeferredNormalizedEncoderInput, EncoderInput, LlavaNextProcessor, LlavaProcessor,
+    ModalityPreProcessor, ModalityProcessorRegistry, ModelSpecificValue, OutputPreference,
+    PreProcessorConfig, PreprocessRequest, PreprocessedEncoderInputs, TransformError, VideoInput,
+    VisionInput, VisionPreProcessor, VisionPreprocessRequest, VisionProcessorRegistry,
 };

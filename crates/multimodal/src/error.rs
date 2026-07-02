@@ -24,6 +24,8 @@ pub enum MediaConnectorError {
     DataUrl(String),
     #[error("media decode task failed: {0}")]
     Blocking(#[from] tokio::task::JoinError),
+    #[error("failed to initialize multimodal runtime: {0}")]
+    Runtime(String),
     #[error("image decode error: {0}")]
     Image(#[from] image::ImageError),
     #[error("video decode error: {0}")]

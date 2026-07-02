@@ -496,7 +496,7 @@ mod tests {
         let image = create_test_image(100, 100, Rgb([255, 255, 255]));
         let result = p.preprocess(&[image], &config).unwrap();
 
-        let flat = result.encoder_input_flat();
+        let flat = result.encoder_input_flat().unwrap();
         // Padded region should be normalized black (-1.0)
         let has_neg_ones = flat.iter().any(|&v| (v - (-1.0)).abs() < 1e-6);
         assert!(

@@ -501,12 +501,12 @@ impl VisionPreProcessor for Llama4VisionProcessor {
             ModelSpecificValue::int_1d(patches_per_image),
         );
 
-        Ok(PreprocessedEncoderInputs {
-            encoder_input: encoder_input.into_dyn(),
+        Ok(PreprocessedEncoderInputs::new_dynamic(
+            encoder_input.into_dyn(),
             feature_token_counts,
             item_sizes,
-            model_specific,
-        })
+        )
+        .with_model_specific(model_specific))
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
@@ -627,7 +627,7 @@ mod tests {
         assert!(result.feature_token_counts[0] > 0);
 
         // Check pixel values are normalized
-        let flat = result.encoder_input_flat();
+        let flat = result.encoder_input_flat().unwrap();
         assert!(flat.iter().all(|&v| (-1.5..=1.5).contains(&v)));
     }
 

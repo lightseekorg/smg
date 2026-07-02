@@ -3,14 +3,17 @@
 //! This module defines the interface for model-specific vision processors
 //! and the common output format for preprocessed encoder inputs.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, mem::size_of};
 
 use anyhow::{Context, Result as AnyhowResult};
 use image::DynamicImage;
-use ndarray::{Array4, ArrayD};
+use ndarray::{Array4, ArrayD, IxDyn};
 
-use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
-use crate::types::{FieldLayout, RgbFrameRef};
+use super::{
+    preprocessor_config::PreProcessorConfig,
+    transforms::{par_scope, par_threads, TransformError},
+};
+use crate::types::{DecodedRgbFrameStream, FieldLayout, RgbFrameRef};
 
 /// Helper to extract a dimension from encoder_input given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.
@@ -199,13 +202,14 @@ fn slice_1d<T>(values: &[T], start: usize, len: usize) -> AnyhowResult<&[T]> {
 /// can reuse the same output contract for audio features or other encoder inputs.
 #[derive(Debug, Clone)]
 pub struct PreprocessedEncoderInputs {
-    /// Primary encoder input as a dynamic-dimensional float32 tensor.
+    /// Primary encoder input, either materialized as a dynamic-dimensional
+    /// float32 tensor or held in a compact representation for later assembly.
     ///
     /// For vision models this is typically the preprocessed image/video tensor.
     /// Shape varies by model and modality:
     /// - Standard: [B, C, H, W] (4D)
     /// - Phi3-Vision: [B, num_crops+1, C, H, W] (5D)
-    pub encoder_input: ArrayD<f32>,
+    pub encoder_input: EncoderInput,
 
     /// Number of encoder feature tokens per media item in the batch.
     ///
@@ -231,6 +235,244 @@ pub struct PreprocessedEncoderInputs {
     pub model_specific: HashMap<String, ModelSpecificValue>,
 }
 
+/// Decoded vision payload supplied to a vision preprocessor.
+pub enum VisionInput<'a> {
+    Images(&'a [&'a DynamicImage]),
+    Video(VideoInput<'a>),
+}
+
+/// Decoded video representation supplied to a preprocessor.
+pub enum VideoInput<'a> {
+    Frames(&'a [DynamicImage]),
+    Rgb(&'a [RgbFrameRef<'a>]),
+    RgbStream(DecodedRgbFrameStream),
+}
+
+/// Preferred physical form of the encoder output.
+///
+/// This describes a serving constraint rather than a backend or tensor dtype;
+/// processors remain free to choose the most efficient compatible form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPreference {
+    Materialized,
+    CompactAllowed,
+}
+
+pub struct VisionPreprocessRequest<'a> {
+    pub input: VisionInput<'a>,
+    pub output: OutputPreference,
+}
+
+/// Typed modality request supplied to the serving preprocessor contract.
+///
+/// Each variant owns the matching input and configuration types. Adding audio
+/// or another modality therefore requires explicit dispatch without forcing
+/// it through vision-specific configuration.
+pub enum PreprocessRequest<'a> {
+    Vision {
+        input: VisionInput<'a>,
+        output: OutputPreference,
+        config: &'a PreProcessorConfig,
+    },
+}
+
+/// Physical representation of a preprocessed modality encoder input.
+///
+/// The variants are mutually exclusive, so callers cannot accidentally attach
+/// both a dense tensor and a deferred payload or represent deferred data with an
+/// empty sentinel tensor.
+#[derive(Debug, Clone)]
+pub enum EncoderInput {
+    Dense(ArrayD<f32>),
+    DeferredNormalized(DeferredNormalizedEncoderInput),
+}
+
+impl EncoderInput {
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            Self::Dense(input) => input.shape(),
+            Self::DeferredNormalized(input) => input.shape(),
+        }
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.shape().len()
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        matches!(self, Self::DeferredNormalized(_))
+    }
+
+    pub fn dense(&self) -> Result<&ArrayD<f32>, TransformError> {
+        match self {
+            Self::Dense(input) => Ok(input),
+            Self::DeferredNormalized(_) => Err(TransformError::ShapeError(
+                "encoder input must be materialized before dense access".to_string(),
+            )),
+        }
+    }
+
+    pub fn deferred_normalized(&self) -> Option<&DeferredNormalizedEncoderInput> {
+        match self {
+            Self::DeferredNormalized(input) => Some(input),
+            Self::Dense(_) => None,
+        }
+    }
+
+    pub fn materialize(&mut self) -> Result<(), TransformError> {
+        if let Self::DeferredNormalized(input) = self {
+            let dense = input.materialize_f32()?;
+            *self = Self::Dense(dense);
+        }
+        Ok(())
+    }
+
+    pub fn as_slice_memory_order(&self) -> Option<&[f32]> {
+        match self {
+            Self::Dense(input) => input.as_slice_memory_order(),
+            Self::DeferredNormalized(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferredNormalizedEncoderInput {
+    data: Vec<u8>,
+    shape: Vec<usize>,
+    lut: Box<[[f32; 256]; 3]>,
+    bf16_lut: Box<[[u16; 256]; 3]>,
+    channel_run: usize,
+}
+
+impl DeferredNormalizedEncoderInput {
+    pub fn new(
+        data: Vec<u8>,
+        shape: Vec<usize>,
+        lut: [[f32; 256]; 3],
+        channel_run: usize,
+    ) -> Result<Self, TransformError> {
+        let expected = shape.iter().try_fold(1usize, |count, &dimension| {
+            count.checked_mul(dimension).ok_or_else(|| {
+                TransformError::ShapeError("deferred encoder input size overflow".to_string())
+            })
+        })?;
+        let valid_channel_layout = channel_run != 0
+            && data.len().is_multiple_of(channel_run)
+            && (data.len() / channel_run).is_multiple_of(3);
+        if data.len() != expected || !valid_channel_layout {
+            return Err(TransformError::InvalidShape {
+                expected: format!(
+                    "{expected} deferred values partitioned into complete RGB channel runs"
+                ),
+                actual: vec![data.len(), channel_run],
+            });
+        }
+        let bf16_lut = lut.map(|channel| {
+            channel.map(|value| {
+                let bits = value.to_bits();
+                let lsb = (bits >> 16) & 1;
+                (bits.wrapping_add(0x7fff + lsb) >> 16) as u16
+            })
+        });
+        Ok(Self {
+            data,
+            shape,
+            lut: Box::new(lut),
+            bf16_lut: Box::new(bf16_lut),
+            channel_run,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn materialize_f32(&self) -> Result<ArrayD<f32>, TransformError> {
+        let mut values = vec![0.0; self.data.len()];
+        self.fill_f32(&mut values)?;
+        ArrayD::from_shape_vec(IxDyn(&self.shape), values).map_err(|error| {
+            TransformError::ShapeError(format!(
+                "failed to materialize deferred encoder input: {error}"
+            ))
+        })
+    }
+
+    pub fn fill_f32(&self, output: &mut [f32]) -> Result<(), TransformError> {
+        if output.len() != self.data.len() {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{} normalized encoder values", self.data.len()),
+                actual: vec![output.len()],
+            });
+        }
+        self.fill_parallel(output, size_of::<f32>(), |group, input, output| {
+            let lut = &self.lut[group % 3];
+            for (&value, output) in input.iter().zip(output) {
+                *output = lut[value as usize];
+            }
+        });
+        Ok(())
+    }
+
+    pub fn fill_bf16_le_bytes(&self, output: &mut [u8]) -> Result<(), TransformError> {
+        if output.len() != self.data.len() * size_of::<u16>() {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{} BF16 encoder bytes", self.data.len() * 2),
+                actual: vec![output.len()],
+            });
+        }
+        self.fill_parallel(output, size_of::<u16>(), |group, input, output| {
+            let lut = &self.bf16_lut[group % 3];
+            for (&value, output) in input.iter().zip(output.chunks_exact_mut(2)) {
+                output.copy_from_slice(&lut[value as usize].to_le_bytes());
+            }
+        });
+        Ok(())
+    }
+
+    fn fill_parallel<T, F>(&self, output: &mut [T], output_bytes_per_value: usize, fill: F)
+    where
+        T: Send,
+        F: Fn(usize, &[u8], &mut [T]) + Copy + Send + Sync,
+    {
+        let groups = self.data.len().div_ceil(self.channel_run);
+        let workers = par_threads(self.data.len() * output_bytes_per_value, groups);
+        let groups_per_task = groups.div_ceil(workers);
+        let input_values_per_task = groups_per_task * self.channel_run;
+        let output_values_per_task =
+            input_values_per_task * output_bytes_per_value / size_of::<T>();
+        par_scope(|scope| {
+            for (task, (input, output)) in self
+                .data
+                .chunks(input_values_per_task)
+                .zip(output.chunks_mut(output_values_per_task))
+                .enumerate()
+            {
+                let first_group = task * groups_per_task;
+                scope.spawn(move |_| {
+                    for (group_offset, (input, output)) in
+                        input
+                            .chunks(self.channel_run)
+                            .zip(output.chunks_mut(
+                                self.channel_run * output_bytes_per_value / size_of::<T>(),
+                            ))
+                            .enumerate()
+                    {
+                        fill(first_group + group_offset, input, output);
+                    }
+                });
+            }
+        });
+    }
+}
+
 impl PreprocessedEncoderInputs {
     /// Create a new PreprocessedEncoderInputs with required fields (4D encoder input).
     pub fn new(
@@ -239,7 +481,7 @@ impl PreprocessedEncoderInputs {
         item_sizes: Vec<(u32, u32)>,
     ) -> Self {
         Self {
-            encoder_input: encoder_input.into_dyn(),
+            encoder_input: EncoderInput::Dense(encoder_input.into_dyn()),
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
@@ -255,16 +497,42 @@ impl PreprocessedEncoderInputs {
         item_sizes: Vec<(u32, u32)>,
     ) -> Self {
         Self {
-            encoder_input,
+            encoder_input: EncoderInput::Dense(encoder_input),
             feature_token_counts,
             item_sizes,
             model_specific: HashMap::new(),
         }
     }
 
+    pub fn new_deferred_normalized(
+        deferred_encoder_input: DeferredNormalizedEncoderInput,
+        feature_token_counts: Vec<usize>,
+        item_sizes: Vec<(u32, u32)>,
+    ) -> Self {
+        Self {
+            encoder_input: EncoderInput::DeferredNormalized(deferred_encoder_input),
+            feature_token_counts,
+            item_sizes,
+            model_specific: HashMap::new(),
+        }
+    }
+
+    pub fn materialize_encoder_input(&mut self) -> Result<(), TransformError> {
+        self.encoder_input.materialize()
+    }
+
     /// Add a model-specific value.
     pub fn with_extra(mut self, key: impl Into<String>, value: ModelSpecificValue) -> Self {
         self.model_specific.insert(key.into(), value);
+        self
+    }
+
+    /// Attach the complete model-specific output set produced by a processor.
+    pub fn with_model_specific(
+        mut self,
+        model_specific: HashMap<String, ModelSpecificValue>,
+    ) -> Self {
+        self.model_specific = model_specific;
         self
     }
 
@@ -317,11 +585,12 @@ impl PreprocessedEncoderInputs {
     }
 
     /// Get the primary encoder input as a flat f32 slice without copying if possible.
-    pub fn encoder_input_flat(&self) -> Cow<'_, [f32]> {
-        match self.encoder_input.as_slice() {
+    pub fn encoder_input_flat(&self) -> Result<Cow<'_, [f32]>, TransformError> {
+        let encoder_input = self.encoder_input.dense()?;
+        Ok(match encoder_input.as_slice() {
             Some(slice) => Cow::Borrowed(slice),
-            None => Cow::Owned(self.encoder_input.iter().copied().collect()),
-        }
+            None => Cow::Owned(encoder_input.iter().copied().collect()),
+        })
     }
 
     /// Get the shape of the primary encoder input as a vector.
@@ -357,6 +626,39 @@ impl PreprocessedEncoderInputs {
     }
 }
 
+/// Modality-neutral preprocessing contract used by serving pipelines.
+pub trait ModalityPreProcessor: Send + Sync {
+    /// Stable processor family name for diagnostics and registry inspection.
+    fn processor_name(&self) -> &'static str;
+
+    fn preprocess_input(
+        &self,
+        request: PreprocessRequest<'_>,
+    ) -> Result<PreprocessedEncoderInputs, TransformError>;
+}
+
+impl<T> ModalityPreProcessor for T
+where
+    T: VisionPreProcessor + ?Sized,
+{
+    fn processor_name(&self) -> &'static str {
+        self.model_name()
+    }
+
+    fn preprocess_input(
+        &self,
+        request: PreprocessRequest<'_>,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        match request {
+            PreprocessRequest::Vision {
+                input,
+                output,
+                config,
+            } => self.preprocess_vision_input(VisionPreprocessRequest { input, output }, config),
+        }
+    }
+}
+
 /// Trait for model-specific vision preprocessors.
 ///
 /// Each vision model (LLaVA, Qwen-VL, Phi3-Vision, etc.) implements this trait
@@ -382,34 +684,27 @@ pub trait VisionPreProcessor: Send + Sync {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError>;
 
-    /// Preprocess one decoded video clip represented as sampled frames.
-    ///
-    /// Implementations that support video should emit the same primary
-    /// `encoder_input` tensor shape used by the image path, plus video-specific
-    /// model metadata such as `video_grid_thw`.
-    fn preprocess_video(
+    /// Preprocess a modality payload independently of its decoded
+    /// representation. Implementations may select a compact output only when
+    /// the request permits it.
+    fn preprocess_vision_input(
         &self,
-        _frames: &[DynamicImage],
-        _config: &PreProcessorConfig,
+        request: VisionPreprocessRequest<'_>,
+        config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        Err(TransformError::ShapeError(format!(
-            "{} does not support video preprocessing",
-            self.model_name()
-        )))
-    }
-
-    /// Preprocess one decoded video clip represented as borrowed RGB frame
-    /// buffers. Implementations can override this to avoid materializing
-    /// `DynamicImage` objects after media decode.
-    fn preprocess_video_rgb(
-        &self,
-        _frames: &[RgbFrameRef<'_>],
-        _config: &PreProcessorConfig,
-    ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        Err(TransformError::ShapeError(format!(
-            "{} does not support RGB video preprocessing",
-            self.model_name()
-        )))
+        match request.input {
+            VisionInput::Images(images) => {
+                let owned = images
+                    .iter()
+                    .map(|image| (**image).clone())
+                    .collect::<Vec<_>>();
+                self.preprocess(&owned, config)
+            }
+            VisionInput::Video(_) => Err(TransformError::ShapeError(format!(
+                "{} does not support video preprocessing",
+                self.model_name()
+            ))),
+        }
     }
 
     /// Calculate the number of vision tokens for a given image size.
@@ -434,12 +729,12 @@ pub trait VisionPreProcessor: Send + Sync {
     }
 }
 
-/// Registry of available vision processors.
-pub struct VisionProcessorRegistry {
-    processors: HashMap<String, Box<dyn VisionPreProcessor>>,
+/// Registry of model-specific modality preprocessors.
+pub struct ModalityProcessorRegistry {
+    processors: HashMap<String, Box<dyn ModalityPreProcessor>>,
 }
 
-impl VisionProcessorRegistry {
+impl ModalityProcessorRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -448,8 +743,12 @@ impl VisionProcessorRegistry {
     }
 
     /// Register a processor for a model pattern.
-    pub fn register(&mut self, pattern: impl Into<String>, processor: Box<dyn VisionPreProcessor>) {
-        self.processors.insert(pattern.into(), processor);
+    pub fn register<P>(&mut self, pattern: impl Into<String>, processor: P)
+    where
+        P: ModalityPreProcessor + 'static,
+    {
+        self.processors
+            .insert(pattern.into().to_lowercase(), Box::new(processor));
     }
 
     /// Find a processor for the given model ID, falling back to model_type.
@@ -459,19 +758,20 @@ impl VisionProcessorRegistry {
         &self,
         model_id: &str,
         model_type: Option<&str>,
-    ) -> Option<&dyn VisionPreProcessor> {
+    ) -> Option<&dyn ModalityPreProcessor> {
         self.find_in_candidate(model_id)
             .or_else(|| model_type.and_then(|mt| self.find_in_candidate(mt)))
     }
 
-    fn find_in_candidate(&self, candidate: &str) -> Option<&dyn VisionPreProcessor> {
+    fn find_in_candidate(&self, candidate: &str) -> Option<&dyn ModalityPreProcessor> {
         let candidate = candidate.to_lowercase();
-        for (pattern, processor) in &self.processors {
-            if candidate.contains(&pattern.to_lowercase()) {
-                return Some(processor.as_ref());
-            }
-        }
-        None
+        self.processors
+            .iter()
+            .filter(|(pattern, _)| candidate.contains(pattern.as_str()))
+            .max_by(|(left, _), (right, _)| {
+                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+            })
+            .map(|(_, processor)| processor.as_ref())
     }
 
     /// Get list of supported model patterns.
@@ -480,13 +780,16 @@ impl VisionProcessorRegistry {
     }
 }
 
-impl Default for VisionProcessorRegistry {
+/// Backward-compatible name for callers that only register vision processors.
+pub type VisionProcessorRegistry = ModalityProcessorRegistry;
+
+impl Default for ModalityProcessorRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl VisionProcessorRegistry {
+impl ModalityProcessorRegistry {
     /// Create a registry with all built-in processors registered.
     ///
     /// Currently registers:
@@ -501,116 +804,50 @@ impl VisionProcessorRegistry {
         let mut registry = Self::new();
 
         // LLaVA-NeXT (v1.6+, anyres multi-crop)
-        registry.register(
-            "llava-next",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
-        registry.register(
-            "llava_next",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
-        registry.register(
-            "llava-v1.6",
-            Box::new(super::processors::LlavaNextProcessor::new()),
-        );
+        registry.register("llava-next", super::processors::LlavaNextProcessor::new());
+        registry.register("llava_next", super::processors::LlavaNextProcessor::new());
+        registry.register("llava-v1.6", super::processors::LlavaNextProcessor::new());
 
         // Standard LLaVA (v1.5, single-patch).
         // Use specific patterns so they don't accidentally match LLaVA-NeXT
         // model IDs like "llava-v1.6-*".
-        registry.register(
-            "llava-1.5",
-            Box::new(super::processors::LlavaProcessor::new()),
-        );
-        registry.register(
-            "llava-v1.5",
-            Box::new(super::processors::LlavaProcessor::new()),
-        );
+        registry.register("llava-1.5", super::processors::LlavaProcessor::new());
+        registry.register("llava-v1.5", super::processors::LlavaProcessor::new());
 
         // Register Qwen3-VL first (more specific pattern - must match before qwen2)
-        registry.register(
-            "qwen3-vl",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_vl",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
+        registry.register("qwen3-vl", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_vl", super::processors::Qwen3VLProcessor::new());
 
         // Qwen3.5 family (and Qwen3.6: same arch) reuses Qwen3-VL preprocessing.
-        registry.register(
-            "qwen3.5",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_5",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3.6",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
-        registry.register(
-            "qwen3_6",
-            Box::new(super::processors::Qwen3VLProcessor::new()),
-        );
+        registry.register("qwen3.5", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_5", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3.6", super::processors::Qwen3VLProcessor::new());
+        registry.register("qwen3_6", super::processors::Qwen3VLProcessor::new());
 
         // Register Qwen2-VL (matches Qwen/Qwen2-VL-*, etc.)
-        registry.register(
-            "qwen2-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
+        registry.register("qwen2-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_vl", super::processors::Qwen2VLProcessor::new());
 
         // Register Qwen2.5-VL (uses identical preprocessing to Qwen2-VL)
-        registry.register(
-            "qwen2.5-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_5-vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
-        registry.register(
-            "qwen2_5_vl",
-            Box::new(super::processors::Qwen2VLProcessor::new()),
-        );
+        registry.register("qwen2.5-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_5-vl", super::processors::Qwen2VLProcessor::new());
+        registry.register("qwen2_5_vl", super::processors::Qwen2VLProcessor::new());
 
         // Register Phi3-Vision
         registry.register(
             "phi-3-vision",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
+            super::processors::Phi3VisionProcessor::new(),
         );
-        registry.register(
-            "phi3-vision",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
-        );
-        registry.register(
-            "phi3_v",
-            Box::new(super::processors::Phi3VisionProcessor::new()),
-        );
+        registry.register("phi3-vision", super::processors::Phi3VisionProcessor::new());
+        registry.register("phi3_v", super::processors::Phi3VisionProcessor::new());
 
         // Register LLaMA 4 Vision
-        registry.register(
-            "llama-4",
-            Box::new(super::processors::Llama4VisionProcessor::new()),
-        );
-        registry.register(
-            "llama4",
-            Box::new(super::processors::Llama4VisionProcessor::new()),
-        );
+        registry.register("llama-4", super::processors::Llama4VisionProcessor::new());
+        registry.register("llama4", super::processors::Llama4VisionProcessor::new());
 
         // Register Kimi-K2.5 Vision
-        registry.register(
-            "kimi-k2",
-            Box::new(super::processors::KimiK25Processor::new()),
-        );
-        registry.register(
-            "kimi_k2",
-            Box::new(super::processors::KimiK25Processor::new()),
-        );
+        registry.register("kimi-k2", super::processors::KimiK25Processor::new());
+        registry.register("kimi_k2", super::processors::KimiK25Processor::new());
 
         registry
     }
@@ -622,6 +859,23 @@ mod tests {
 
     use super::*;
     use crate::vision::processors::LlavaProcessor;
+
+    struct NonVisionProcessor;
+
+    impl ModalityPreProcessor for NonVisionProcessor {
+        fn processor_name(&self) -> &'static str {
+            "non-vision"
+        }
+
+        fn preprocess_input(
+            &self,
+            _request: PreprocessRequest<'_>,
+        ) -> Result<PreprocessedEncoderInputs, TransformError> {
+            Err(TransformError::ShapeError(
+                "test processor has no payload implementation".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn test_preprocessed_encoder_inputs_accessors() {
@@ -701,14 +955,42 @@ mod tests {
         encoder_input[[0, 0, 1, 1]] = 4.0;
 
         let inputs = PreprocessedEncoderInputs::new(encoder_input, vec![4], vec![(2, 2)]);
-        let flat = inputs.encoder_input_flat();
+        let flat = inputs.encoder_input_flat().unwrap();
 
         assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
+    fn deferred_encoder_input_validates_rgb_channel_runs() {
+        let lut = [[0.0; 256]; 3];
+
+        assert!(DeferredNormalizedEncoderInput::new(vec![0; 6], vec![2, 3], lut, 4).is_err());
+        assert!(DeferredNormalizedEncoderInput::new(vec![0; 4], vec![1, 4], lut, 1).is_err());
+    }
+
+    #[test]
+    fn deferred_encoder_input_accessors_use_logical_shape() {
+        let lut = std::array::from_fn(|channel| {
+            std::array::from_fn(|value| value as f32 + channel as f32)
+        });
+        let deferred =
+            DeferredNormalizedEncoderInput::new(vec![0; 12], vec![1, 3, 2, 2], lut, 4).unwrap();
+        let mut inputs =
+            PreprocessedEncoderInputs::new_deferred_normalized(deferred, vec![1], vec![(2, 2)]);
+
+        assert_eq!(inputs.channels().unwrap(), 3);
+        assert_eq!(inputs.height().unwrap(), 2);
+        assert_eq!(inputs.width().unwrap(), 2);
+        assert_eq!(inputs.encoder_input_shape(), vec![1, 3, 2, 2]);
+        assert!(inputs.encoder_input_flat().is_err());
+
+        inputs.materialize_encoder_input().unwrap();
+        assert_eq!(inputs.encoder_input_flat().unwrap().len(), 12);
+    }
+
+    #[test]
     fn test_registry_with_defaults() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         // Should find LLaVA processor
         assert!(registry.find("llava-hf/llava-1.5-7b-hf", None).is_some());
@@ -724,15 +1006,15 @@ mod tests {
 
         // Get the processor and check model name
         let processor = registry.find("llava-hf/llava-1.5-7b-hf", None).unwrap();
-        assert_eq!(processor.model_name(), "llava");
+        assert_eq!(processor.processor_name(), "llava");
     }
 
     #[test]
     fn test_registry_find() {
-        let mut registry = VisionProcessorRegistry::new();
+        let mut registry = ModalityProcessorRegistry::new();
 
         // Create a mock processor using LlavaProcessor
-        registry.register("test-model", Box::new(LlavaProcessor::new()));
+        registry.register("test-model", LlavaProcessor::new());
 
         assert!(registry.find("test-model-7b", None).is_some());
         assert!(registry.find("TEST-MODEL", None).is_some());
@@ -740,34 +1022,53 @@ mod tests {
     }
 
     #[test]
+    fn test_registry_accepts_non_vision_processor() {
+        let mut registry = ModalityProcessorRegistry::new();
+        registry.register("audio-model", NonVisionProcessor);
+
+        let processor = registry.find("vendor/audio-model", None).unwrap();
+        assert_eq!(processor.processor_name(), "non-vision");
+    }
+
+    #[test]
+    fn test_registry_prefers_most_specific_pattern_deterministically() {
+        let mut registry = ModalityProcessorRegistry::new();
+        registry.register("audio", NonVisionProcessor);
+        registry.register("audio-special", LlavaProcessor::new());
+
+        let processor = registry.find("vendor/audio-special-model", None).unwrap();
+        assert_eq!(processor.processor_name(), "llava");
+    }
+
+    #[test]
     fn test_registry_find_falls_back_to_model_type() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         assert!(registry.find("custom-model", None).is_none());
 
         let processor = registry
             .find("custom-model", Some("qwen3_vl"))
             .expect("qwen3 processor by model_type");
-        assert_eq!(processor.model_name(), "qwen3-vl");
+        assert_eq!(processor.processor_name(), "qwen3-vl");
     }
 
     #[test]
     fn test_registry_find_preserves_fast_path() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         let processor = registry
             .find("Qwen3-VL-30B-A3B-Instruct", Some("qwen2_vl"))
             .expect("qwen3 processor by model_id");
-        assert_eq!(processor.model_name(), "qwen3-vl");
+        assert_eq!(processor.processor_name(), "qwen3-vl");
     }
 
     #[test]
     fn test_registry_find_phi3_model_type_fallback() {
-        let registry = VisionProcessorRegistry::with_defaults();
+        let registry = ModalityProcessorRegistry::with_defaults();
 
         let processor = registry
             .find("custom-model", Some("phi3_v"))
             .expect("phi3 processor by model_type");
-        assert_eq!(processor.model_name(), "phi3-vision");
+        assert_eq!(processor.processor_name(), "phi3-vision");
     }
 }
