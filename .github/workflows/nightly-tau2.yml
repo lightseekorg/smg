@@ -19,14 +19,15 @@ name: Nightly tau2
 
 on:
   schedule:
-    - cron: "17 7 * * 2,4,6" # Tue/Thu/Sat 07:17 UTC = 00:17 PDT (alternates nights with nightly-bfcl; both are ~7h and share the Blackwell host)
-  # PR sanity: only when the tau2 pipeline itself changes. Runs the H100 legs on a
-  # quick single-domain, single-trial, small-task subset so the A/B is exercised
-  # end-to-end (engine, tool/reasoning parsing, scoring) before merge.
-  pull_request:
-    paths:
-      - "scripts/tau2/**"
-      - ".github/workflows/nightly-tau2.yml"
+    - cron: "17 7 * * 2,4,6" # Tue/Thu/Sat 07:17 UTC = 00:17 PDT — alternates nights with nightly-bfcl so the two ~7h runs don't queue back-to-back on the shared Blackwell runner
+  # PR sanity (disabled, like nightly-bfcl): when the tau2 pipeline itself changes
+  # this would run ALL legs on a tiny retail / 1-trial / few-task subset — but the
+  # 6-leg run (incl. the ~7h Blackwell legs) is too heavy for every pipeline PR.
+  # Re-enable temporarily to smoke a pipeline change, or use workflow_dispatch.
+  # pull_request:
+  #   paths:
+  #     - "scripts/tau2/**"
+  #     - ".github/workflows/nightly-tau2.yml"
   workflow_dispatch:
     inputs:
       only:
