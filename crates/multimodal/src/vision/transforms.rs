@@ -3,7 +3,13 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::{cell::RefCell, sync::OnceLock};
+use std::{
+    cell::RefCell,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
+};
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -431,6 +437,25 @@ fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
     .as_ref()
 }
 
+static NESTED_PARALLELISM_IN_USE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct NestedParallelismPermit;
+
+impl NestedParallelismPermit {
+    pub(crate) fn try_acquire() -> Option<Self> {
+        NESTED_PARALLELISM_IN_USE
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then_some(Self)
+    }
+}
+
+impl Drop for NestedParallelismPermit {
+    fn drop(&mut self) {
+        NESTED_PARALLELISM_IN_USE.store(false, Ordering::Release);
+    }
+}
+
 pub(crate) fn par_scope<'scope, OP, R>(op: OP) -> R
 where
     OP: FnOnce(&rayon::Scope<'scope>) -> R + Send,
@@ -439,6 +464,19 @@ where
     match preprocess_pool() {
         Some(pool) => pool.scope(op),
         None => rayon::scope(op),
+    }
+}
+
+pub(crate) fn par_join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
+where
+    A: FnOnce() -> RA + Send,
+    B: FnOnce() -> RB + Send,
+    RA: Send,
+    RB: Send,
+{
+    match preprocess_pool() {
+        Some(pool) => pool.join(left, right),
+        None => rayon::join(left, right),
     }
 }
 

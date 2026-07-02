@@ -32,8 +32,9 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
-            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, TransformError,
+            par_join, par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
+            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, NestedParallelismPermit,
+            TransformError,
         },
     },
 };
@@ -122,6 +123,33 @@ fn resize_rgb_frame_to_raw(
         )?
     };
     Ok(resized.into_raw())
+}
+
+fn prepare_video_rgb_frame<'a>(
+    frame: RgbFrameRef<'a>,
+    target_width: u32,
+    target_height: u32,
+    filter: FilterType,
+    do_resize: bool,
+) -> Result<VideoFrameRgb<'a>, TransformError> {
+    if do_resize && (frame.width != target_width || frame.height != target_height) {
+        Ok(VideoFrameRgb {
+            width: target_width as usize,
+            height: target_height as usize,
+            data: Cow::Owned(resize_rgb_frame_to_raw(
+                frame,
+                target_width,
+                target_height,
+                filter,
+            )?),
+        })
+    } else {
+        Ok(VideoFrameRgb {
+            width: frame.width as usize,
+            height: frame.height as usize,
+            data: Cow::Borrowed(frame.data),
+        })
+    }
 }
 
 fn resize_dynamic_frame_to_raw(
@@ -1207,21 +1235,43 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
         for gt in 0..grid_t {
             frame_rgbs.clear();
-            for tp in 0..temporal_patch_size {
-                let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
-                let frame = frames[idx];
-                if do_resize && (frame.width != tw32 || frame.height != th32) {
-                    frame_rgbs.push(VideoFrameRgb {
-                        width: tw32 as usize,
-                        height: th32 as usize,
-                        data: Cow::Owned(resize_rgb_frame_to_raw(frame, tw32, th32, filter)?),
-                    });
-                } else {
-                    frame_rgbs.push(VideoFrameRgb {
-                        width: frame.width as usize,
-                        height: frame.height as usize,
-                        data: Cow::Borrowed(frame.data),
-                    });
+            let mut used_parallel_pair = false;
+            if temporal_patch_size == 2 {
+                let first = frames[(gt * temporal_patch_size).min(frames.len() - 1)];
+                let second = frames[(gt * temporal_patch_size + 1).min(frames.len() - 1)];
+                let both_resize = do_resize
+                    && (first.width != tw32 || first.height != th32)
+                    && (second.width != tw32 || second.height != th32);
+                if let Some(_permit) = both_resize
+                    .then(NestedParallelismPermit::try_acquire)
+                    .flatten()
+                {
+                    let (first, second) = par_join(
+                        || prepare_video_rgb_frame(first, tw32, th32, filter, do_resize),
+                        || prepare_video_rgb_frame(second, tw32, th32, filter, do_resize),
+                    );
+                    frame_rgbs.push(first?);
+                    frame_rgbs.push(second?);
+                    used_parallel_pair = true;
+                }
+            }
+            if !used_parallel_pair {
+                for tp in 0..temporal_patch_size {
+                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
+                    let frame = frames[idx];
+                    if do_resize && (frame.width != tw32 || frame.height != th32) {
+                        frame_rgbs.push(VideoFrameRgb {
+                            width: tw32 as usize,
+                            height: th32 as usize,
+                            data: Cow::Owned(resize_rgb_frame_to_raw(frame, tw32, th32, filter)?),
+                        });
+                    } else {
+                        frame_rgbs.push(VideoFrameRgb {
+                            width: frame.width as usize,
+                            height: frame.height as usize,
+                            data: Cow::Borrowed(frame.data),
+                        });
+                    }
                 }
             }
 
@@ -1581,15 +1631,26 @@ mod tests {
         let rgb = processor
             .preprocess_video_rgb(&rgb_frames, &config)
             .unwrap();
+        let _permit = NestedParallelismPermit::try_acquire().unwrap();
+        let contended = processor
+            .preprocess_video_rgb(&rgb_frames, &config)
+            .unwrap();
 
         let a = dynamic.encoder_input.as_slice_memory_order().unwrap();
         let b = rgb.encoder_input.as_slice_memory_order().unwrap();
+        let c = contended.encoder_input.as_slice_memory_order().unwrap();
         assert_eq!(a.len(), b.len());
-        for (idx, (&got, &want)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(a.len(), c.len());
+        for (idx, ((&got, &want), &fallback)) in a.iter().zip(b.iter()).zip(c.iter()).enumerate() {
             assert_eq!(
                 got.to_bits(),
                 want.to_bits(),
                 "resized padded video path diverges at index {idx}: dynamic {got} vs rgb {want}"
+            );
+            assert_eq!(
+                got.to_bits(),
+                fallback.to_bits(),
+                "contended video path diverges at index {idx}: dynamic {got} vs rgb {fallback}"
             );
         }
     }
