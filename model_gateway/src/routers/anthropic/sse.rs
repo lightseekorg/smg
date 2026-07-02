@@ -11,7 +11,6 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures::StreamExt;
 use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -19,7 +18,10 @@ use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
 use crate::routers::{
-    common::sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+    common::{
+        sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+        stream_timeout::StreamDeadline,
+    },
     error::internal_error,
 };
 
@@ -224,6 +226,7 @@ pub(crate) async fn consume_and_forward<F>(
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
+    stream_deadline: StreamDeadline,
     resolve_server_name: F,
 ) -> Result<StreamConsumeResult, String>
 where
@@ -238,8 +241,12 @@ where
         is_first_iteration,
         resolve_server_name,
     );
-
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match stream_deadline.next(&mut stream).await {
+            Ok(Some(chunk_result)) => chunk_result,
+            Ok(None) => break,
+            Err(timeout) => return Err(stream_deadline.message(timeout)),
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         decoder.push(&chunk).map_err(|e| match e {

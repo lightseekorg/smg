@@ -379,6 +379,10 @@ struct CliArgs {
     #[arg(long, default_value_t = 1800, help_heading = "Request Handling")]
     request_timeout_secs: u64,
 
+    /// Maximum time a streaming response may go without yielding a chunk
+    #[arg(long, default_value_t = 300, help_heading = "Request Handling")]
+    stream_idle_timeout_secs: u64,
+
     /// Grace period in seconds to wait for in-flight requests during shutdown
     #[arg(long, default_value_t = 180, help_heading = "Request Handling")]
     shutdown_grace_period_secs: u64,
@@ -1280,6 +1284,7 @@ impl CliArgs {
             .runtime_worker_threads(self.runtime_worker_threads)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
+            .stream_idle_timeout_secs(self.stream_idle_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)

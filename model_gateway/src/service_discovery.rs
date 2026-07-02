@@ -1283,6 +1283,7 @@ mod tests {
         // Jobs submitted during tests will queue but not be processed
         Arc::new(AppContext {
             client: reqwest::Client::new(),
+            streaming_client: reqwest::Client::new(),
             router_config: router_config.clone(),
             rate_limiter: Some(Arc::new(TokenBucket::new(1000, 1000))),
             worker_registry: worker_registry.clone(),

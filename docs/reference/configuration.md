@@ -452,6 +452,14 @@ smg \
 | Default | `1800` (30 minutes) |
 | Description | Maximum time for request processing |
 
+### Stream Idle Timeout
+
+| Option | `--stream-idle-timeout-secs` |
+|--------|------------------------------|
+| Environment | - |
+| Default | `300` (5 minutes) |
+| Description | Maximum time a streaming response may go without yielding a chunk |
+
 ### Shutdown Grace Period
 
 | Option | `--shutdown-grace-period-secs` |
