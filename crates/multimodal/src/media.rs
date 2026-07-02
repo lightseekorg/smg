@@ -3,12 +3,12 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Output, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
-    },
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
+
+#[cfg(feature = "opencv-video")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
@@ -34,6 +34,7 @@ static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "opencv-video")]
 static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
+#[cfg(feature = "opencv-video")]
 const MAX_OPENCV_DECODER_THREADS: usize = 8;
 #[cfg(feature = "opencv-video")]
 const OPENCV_DECODE_BURST_COALESCE: Duration = Duration::from_millis(5);
@@ -425,6 +426,7 @@ async fn decode_video_frames(
     bytes: Bytes,
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    #[cfg(feature = "opencv-video")]
     let input_bytes = bytes.len();
     match video_decode_backend_override() {
         Some("ffmpeg") => decode_video_bytes_with_ffmpeg(bytes, cfg).await,
@@ -526,6 +528,7 @@ async fn decode_video_bytes_with_ffmpeg(
     decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await
 }
 
+#[cfg(feature = "opencv-video")]
 async fn decode_video_frames_from_path(
     input_path: &std::path::Path,
     input_bytes: usize,
