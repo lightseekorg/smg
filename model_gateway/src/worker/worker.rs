@@ -313,6 +313,18 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
             .filter(|n| *n > 0)
     }
 
+    /// Whether this worker can serve the Realtime API (WS/WebRTC/REST
+    /// relay). Reads the `realtime` label (`"true"`) populated via
+    /// discovery, worker registration, or static config. Defaults to
+    /// `false` so only explicitly-marked workers receive realtime traffic.
+    fn is_realtime_capable(&self) -> bool {
+        self.metadata()
+            .spec
+            .labels
+            .get("realtime")
+            .is_some_and(|v| v == "true")
+    }
+
     /// Get the current circuit breaker state for observability/debugging.
     fn circuit_breaker_state(&self) -> super::circuit_breaker::CircuitState;
 
@@ -1560,6 +1572,36 @@ mod tests {
             .build();
         // Zero is meaningless for capacity; treat as "not reported".
         assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
+    fn test_is_realtime_capable_true_from_label() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("realtime".to_string(), "true".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        assert!(worker.is_realtime_capable());
+    }
+
+    #[test]
+    fn test_is_realtime_capable_false_when_label_missing() {
+        use crate::worker::BasicWorkerBuilder;
+        let worker = BasicWorkerBuilder::new("http://w:9000").build();
+        assert!(!worker.is_realtime_capable());
+    }
+
+    #[test]
+    fn test_is_realtime_capable_false_on_non_true_value() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("realtime".to_string(), "1".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        // Only the exact string "true" enables realtime.
+        assert!(!worker.is_realtime_capable());
     }
 
     #[test]

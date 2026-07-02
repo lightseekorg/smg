@@ -140,6 +140,7 @@ print_usage() {
     echo "  chat        Run chat completions tests (e2e_test/chat_completions)"
     echo "  responses   Run responses tests (e2e_test/responses)"
     echo "  embeddings  Run embeddings tests (e2e_test/embeddings)"
+    echo "  realtime    Run realtime WebSocket tests (e2e_test/realtime)"
     echo "  benchmarks  Run benchmarks (e2e_test/benchmarks)"
     echo "  go          Run Go bindings e2e tests (e2e_test/bindings_go)"
     echo ""
@@ -183,6 +184,9 @@ main() {
             ;;
         embeddings)
             run_pytest "$E2E_DIR/embeddings"
+            ;;
+        realtime)
+            run_pytest "$E2E_DIR/realtime"
             ;;
         benchmarks)
             run_pytest "$E2E_DIR/benchmarks"

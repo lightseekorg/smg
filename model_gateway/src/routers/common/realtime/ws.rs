@@ -13,7 +13,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::{debug, error};
 
-use super::{proxy, RealtimeRegistry};
+use super::{proxy, RealtimeLabels, RealtimeRegistry};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::common::header_utils::extract_auth_header,
@@ -31,6 +31,7 @@ pub struct RealtimeQueryParams {
 /// and selecting a worker. This function handles WS upgrade, auth resolution,
 /// and proxy spawning.
 pub(crate) async fn handle_realtime_ws(
+    labels: RealtimeLabels,
     mut parts: Parts,
     model: String,
     worker: Result<Arc<dyn Worker>, Response>,
@@ -41,8 +42,8 @@ pub(crate) async fn handle_realtime_ws(
         Ok(w) => w,
         Err(response) => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_WEBSOCKET,
                 &model,
                 metrics_labels::ENDPOINT_REALTIME,
@@ -62,8 +63,8 @@ pub(crate) async fn handle_realtime_ws(
             Ok(s) => s.to_string(),
             Err(_) => {
                 Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
+                    labels.router,
+                    labels.backend,
                     metrics_labels::CONNECTION_WEBSOCKET,
                     &model,
                     metrics_labels::ENDPOINT_REALTIME,
@@ -78,8 +79,8 @@ pub(crate) async fn handle_realtime_ws(
         },
         None => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_WEBSOCKET,
                 &model,
                 metrics_labels::ENDPOINT_REALTIME,
@@ -93,8 +94,8 @@ pub(crate) async fn handle_realtime_ws(
         Ok(ws) => ws,
         Err(e) => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_WEBSOCKET,
                 &model,
                 metrics_labels::ENDPOINT_REALTIME,
@@ -156,4 +157,41 @@ pub(crate) fn build_upstream_ws_url(worker_url: &str, model: &str) -> String {
         .append_pair("model", model)
         .finish();
     format!("{ws_base}/v1/realtime?{query}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_upstream_ws_url;
+
+    #[test]
+    fn https_becomes_wss() {
+        assert_eq!(
+            build_upstream_ws_url("https://api.openai.com", "gpt-4o-realtime-preview"),
+            "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+        );
+    }
+
+    #[test]
+    fn http_becomes_ws() {
+        assert_eq!(
+            build_upstream_ws_url("http://127.0.0.1:8000", "qwen3-asr"),
+            "ws://127.0.0.1:8000/v1/realtime?model=qwen3-asr"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_trimmed() {
+        assert_eq!(
+            build_upstream_ws_url("http://worker:9000/", "m"),
+            "ws://worker:9000/v1/realtime?model=m"
+        );
+    }
+
+    #[test]
+    fn model_is_query_encoded() {
+        assert_eq!(
+            build_upstream_ws_url("https://x", "gpt 4o"),
+            "wss://x/v1/realtime?model=gpt+4o"
+        );
+    }
 }
