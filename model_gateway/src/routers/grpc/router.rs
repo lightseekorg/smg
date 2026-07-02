@@ -6,9 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
-    chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
-    embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
-    responses::ResponsesRequest,
+    chat::ChatCompletionRequest, classify::ClassifyRequest, common::GenerationRequest,
+    completion::CompletionRequest, embedding::EmbeddingRequest, generate::GenerateRequest,
+    messages::CreateMessageRequest, responses::ResponsesRequest,
 };
 use tracing::debug;
 
@@ -27,8 +27,10 @@ use crate::{
     config::types::RetryConfig,
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
+    rate_limit::{rate_limit_exceeded_response, LocalTokenRateLimiter},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
+        common::token_count::count_tokens,
         RouterTrait,
     },
     worker::WorkerRegistry,
@@ -48,6 +50,7 @@ pub struct GrpcRouter {
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
     retry_config: RetryConfig,
+    app_token_rate_limiter: Option<Arc<LocalTokenRateLimiter>>,
 }
 
 impl GrpcRouter {
@@ -170,7 +173,23 @@ impl GrpcRouter {
             responses_context,
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
+            app_token_rate_limiter: ctx.token_rate_limiter.clone(),
         })
+    }
+
+    fn enforce_token_rate_limit<T: GenerationRequest>(
+        &self,
+        tenant_meta: &TenantRequestMeta,
+        body: &T,
+        model_id: &str,
+    ) -> Option<Response> {
+        let limiter = self.app_token_rate_limiter.as_ref()?;
+        let estimated_tokens =
+            count_tokens(&self.shared_components.tokenizer_registry, body, model_id);
+        limiter
+            .check_and_consume(tenant_meta.tenant_key().as_str(), estimated_tokens)
+            .err()
+            .map(rate_limit_exceeded_response)
     }
 
     /// Main route_chat implementation
@@ -181,6 +200,10 @@ impl GrpcRouter {
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         // Choose Harmony pipeline if workers indicate Harmony (checks architectures, hf_model_type)
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
@@ -253,6 +276,10 @@ impl GrpcRouter {
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         debug!("Processing generate request for model: {}", model_id);
 
         // Clone values needed for retry closure
@@ -315,6 +342,10 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         // 0. Fast worker validation (fail-fast before expensive operations)
         if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
         {
@@ -374,6 +405,10 @@ impl GrpcRouter {
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         debug!("Processing embedding request for model: {}", model_id);
 
         self.embedding_pipeline
@@ -451,6 +486,10 @@ impl GrpcRouter {
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         debug!("Processing completion request for model: {}", model_id);
 
         let request = Arc::new(body.clone());
@@ -511,6 +550,10 @@ impl GrpcRouter {
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
+
         debug!("Processing classify request for model: {}", model_id);
 
         self.classify_pipeline

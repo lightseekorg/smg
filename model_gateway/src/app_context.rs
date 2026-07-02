@@ -19,6 +19,7 @@ use crate::{
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
+    rate_limit::LocalTokenRateLimiter,
     routers::{
         common::openai_bridge::FormatRegistry, grpc::multimodal::MultimodalConfigRegistry,
         openai::realtime::RealtimeRegistry, router_manager::RouterManager,
@@ -51,6 +52,7 @@ pub struct AppContext {
     pub client: Client,
     pub router_config: RouterConfig,
     pub rate_limiter: Option<Arc<TokenBucket>>,
+    pub token_rate_limiter: Option<Arc<LocalTokenRateLimiter>>,
     pub tokenizer_registry: Arc<TokenizerRegistry>,
     pub multimodal_config_registry: Arc<MultimodalConfigRegistry>,
     pub reasoning_parser_factory: Option<ReasoningParserFactory>,
@@ -91,6 +93,7 @@ pub struct AppContextBuilder {
     client: Option<Client>,
     router_config: Option<RouterConfig>,
     rate_limiter: Option<Arc<TokenBucket>>,
+    token_rate_limiter: Option<Arc<LocalTokenRateLimiter>>,
     tokenizer_registry: Option<Arc<TokenizerRegistry>>,
     reasoning_parser_factory: Option<ReasoningParserFactory>,
     tool_parser_factory: Option<ToolParserFactory>,
@@ -144,6 +147,7 @@ impl AppContextBuilder {
             client: None,
             router_config: None,
             rate_limiter: None,
+            token_rate_limiter: None,
             tokenizer_registry: None,
             reasoning_parser_factory: None,
             tool_parser_factory: None,
@@ -337,6 +341,7 @@ impl AppContextBuilder {
                 .ok_or(AppContextBuildError::MissingField("client"))?,
             router_config,
             rate_limiter: self.rate_limiter,
+            token_rate_limiter: self.token_rate_limiter,
             tokenizer_registry: self
                 .tokenizer_registry
                 .ok_or(AppContextBuildError::MissingField("tokenizer_registry"))?,
@@ -488,6 +493,11 @@ impl AppContextBuilder {
                 )))
             }
         };
+        self.token_rate_limiter = config.multi_tenant_rate_limit.enabled.then(|| {
+            Arc::new(LocalTokenRateLimiter::new(
+                config.multi_tenant_rate_limit.clone(),
+            ))
+        });
         self
     }
 
