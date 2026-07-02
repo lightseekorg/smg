@@ -11,8 +11,10 @@
 # (qwen3.6 + gpt-oss on H100; deepseek-v4, minimax-m2.7, kimi-k2.6, glm-5.2 on
 # Blackwell). The 4 Blackwell legs are num_tasks-capped to bound GPU time and
 # gpt-5.2 spend (tau2 is far heavier per-leg than bfcl: multi-turn + per-turn API
-# spend). On PRs that touch this pipeline it runs the two cheap H100 legs as a
-# quick sanity subset.
+# spend). On PRs that touch this pipeline ALL legs run on a tiny retail / 1-trial /
+# few-task subset — a quick "does each leg launch + parse + score" smoke. The heavy
+# Blackwell legs are dominated by model-load time and serialized by a host lock, so
+# a PR run is not fast, but it confirms every leg works end-to-end before merge.
 name: Nightly tau2
 
 on:
@@ -121,7 +123,6 @@ jobs:
       - id: build
         env:
           ONLY: ${{ github.event.inputs.only }}
-          IS_PR: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -192,10 +193,9 @@ jobs:
               legs = [l for l in legs if l["name"] == only]
               if not legs:
                   raise SystemExit(f"unknown leg {only!r}; valid: {valid}")
-          elif os.environ.get("IS_PR") == "true":
-              # PR sanity: only the cheap H100 legs (spinning up the giant Blackwell
-              # models for a 3-task smoke on every pipeline PR is not worth it).
-              legs = [l for l in legs if l["runner"] == "4-gpu-h100"]
+          # All legs (incl. Blackwell) run on PRs too — the PR env below forces a
+          # tiny retail / 1-trial / few-task subset, so each leg is just a quick
+          # "does it launch + parse + score" smoke (model load dominates its time).
           print("matrix=" + json.dumps({"include": legs}))
           PY
 

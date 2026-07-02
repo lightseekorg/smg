@@ -89,7 +89,9 @@ Mirrors `nightly-bfcl.yml`'s 6-leg matrix. The 2 H100 legs run full task sets; t
 Blackwell legs are capped at `num_tasks=30`/domain (tau2 is multi-turn + spends
 gpt-5.2 per turn). `glm-5.2` runs **sequential** (whole 8-GPU node per arm — `run_ab.py
 --score-arm` each arm, then `--diff`); the rest run both arms concurrently on opposite
-GPU halves. On PRs only the 2 H100 legs run, as a quick sanity subset.
+GPU halves. On PRs **all** legs run on a tiny retail / 1-trial / few-task subset — a
+quick "does each leg launch + parse + score" smoke (the heavy Blackwell legs are
+dominated by model-load time, serialized by a host lock, so a PR run is not fast).
 
 | leg | model | runner (TP) | vLLM tool/reason | SMG tool/reason |
 |---|---|---|---|---|
