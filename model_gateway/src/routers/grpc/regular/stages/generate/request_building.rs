@@ -9,8 +9,7 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext},
-        proto_wrapper::ProtoRequest,
+        context::{ClientSelection, ExecutionPlan, ExecutionPlanKind, RequestContext},
     },
 };
 
@@ -19,11 +18,15 @@ use crate::routers::{
 /// Extracts generate-specific request building logic from the old unified RequestBuildingStage.
 pub(crate) struct GenerateRequestBuildingStage {
     inject_pd_metadata: bool,
+    plan_kind: ExecutionPlanKind,
 }
 
 impl GenerateRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, plan_kind: ExecutionPlanKind) -> Self {
+        Self {
+            inject_pd_metadata,
+            plan_kind,
+        }
     }
 }
 
@@ -51,19 +54,18 @@ impl PipelineStage for GenerateRequestBuildingStage {
 
         let generate_request = ctx.generate_request_arc();
 
-        // Get client for building request (use prefill client if PD mode)
+        // Get client for building request (use prefill client in disaggregated mode)
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
         // Build generate request. PD retries re-run this stage, and a NIXL-tagged
         // prefill keeps the request_id alive on the worker until the KV lease
         // expires, so client rids get a unique per-attempt engine id in PD mode.
+        let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_id = match generate_request.rid.clone() {
-            Some(rid) if matches!(clients, ClientSelection::Dual { .. }) => {
-                format!("{rid}-{}", Uuid::now_v7())
-            }
+            Some(rid) if disaggregated => format!("{rid}-{}", Uuid::now_v7()),
             Some(rid) => rid,
             None => format!("gen-{}", Uuid::now_v7()),
         };
@@ -93,7 +95,14 @@ impl PipelineStage for GenerateRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
+        // EPD: inject the prefill->decode KV rendezvous for backends that carry it
+        // in the request. No-op unless the selected workers are TokenSpeed EPD.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);
+        }
+
+        ctx.state.execution_plan =
+            Some(ExecutionPlan::generate(self.plan_kind, proto_request, None));
         Ok(None)
     }
 

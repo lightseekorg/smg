@@ -3,22 +3,38 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::response::Response;
+use axum::{
+    http::{HeaderMap, HeaderValue},
+    response::Response,
+};
 use tracing::{error, warn};
 
 use super::PipelineStage;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    policies::{PolicyRegistry, SelectWorkerInfo},
+    policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo, WorkerLeg},
     routers::{
         error,
-        grpc::context::{RequestContext, WorkerSelection},
+        grpc::{
+            context::{EncodeWorkerAssignment, PreparationOutput, RequestContext, WorkerSelection},
+            multimodal::{self, MultimodalIntermediate},
+        },
     },
-    worker::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
+    worker::{
+        ConnectionMode, HashRing, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+    },
 };
 
 /// Result type for PD worker pair selection: (prefill, decode, runtime_type)
 type PdWorkerPair = (Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType);
+
+/// Result type for EPD worker selection: (encode assignments, prefill, decode, runtime_type).
+type EncodePrefillDecodeWorkerSelection = (
+    Vec<EncodeWorkerAssignment>,
+    Arc<dyn Worker>,
+    Arc<dyn Worker>,
+    RuntimeType,
+);
 
 /// Worker selection stage: Select appropriate worker(s) based on routing mode
 pub(crate) struct WorkerSelectionStage {
@@ -32,6 +48,8 @@ pub(crate) enum WorkerSelectionMode {
     Regular,
     /// PD mode: select prefill + decode workers
     PrefillDecode,
+    /// EPD mode: select encode + prefill + decode workers
+    EncodePrefillDecode,
 }
 
 impl WorkerSelectionStage {
@@ -88,7 +106,8 @@ impl PipelineStage for WorkerSelectionStage {
             }
             WorkerSelectionMode::PrefillDecode => {
                 match self.select_pd_pair(model_id, text, tokens, headers) {
-                    Some((prefill, decode, runtime_type)) => WorkerSelection::Dual {
+                    Some((prefill, decode, runtime_type)) => WorkerSelection::Disaggregated {
+                        encode_assignments: None,
                         prefill,
                         decode,
                         runtime_type,
@@ -99,6 +118,51 @@ impl PipelineStage for WorkerSelectionStage {
                             mode = "PrefillDecode",
                             model_id = %model_id,
                             "No available PD worker pairs for model"
+                        );
+                        return Err(error::model_not_found(model_id));
+                    }
+                }
+            }
+            WorkerSelectionMode::EncodePrefillDecode => {
+                let encode_item_hashes = match encode_item_hashes(prep) {
+                    Ok(hashes) => hashes,
+                    Err(err) => {
+                        error!(
+                            function = "WorkerSelectionStage::execute",
+                            error = %err,
+                            "Failed to derive encode item routing hashes"
+                        );
+                        return Err(error::internal_error(
+                            "encode_routing_hash_failed",
+                            format!("Failed to derive encode routing hashes: {err}"),
+                        ));
+                    }
+                };
+                match self.select_encode_prefill_decode_workers(
+                    model_id,
+                    text,
+                    tokens,
+                    headers,
+                    &encode_item_hashes,
+                ) {
+                    Some((encode_assignments, prefill, decode, runtime_type)) => {
+                        WorkerSelection::Disaggregated {
+                            encode_assignments: if encode_assignments.is_empty() {
+                                None
+                            } else {
+                                Some(encode_assignments)
+                            },
+                            prefill,
+                            decode,
+                            runtime_type,
+                        }
+                    }
+                    None => {
+                        error!(
+                            function = "WorkerSelectionStage::execute",
+                            mode = "EncodePrefillDecode",
+                            model_id = %model_id,
+                            "No available encode/prefill/decode worker set for model"
                         );
                         return Err(error::model_not_found(model_id));
                     }
@@ -121,7 +185,7 @@ impl WorkerSelectionStage {
         model_id: &str,
         text: Option<&str>,
         tokens: Option<&[u32]>,
-        headers: Option<&http::HeaderMap>,
+        headers: Option<&HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
         // Treat "unknown" model as wildcard (match any worker)
         let model_filter = if model_id == UNKNOWN_MODEL_ID {
@@ -163,7 +227,7 @@ impl WorkerSelectionStage {
                 tokens,
                 headers,
                 hash_ring,
-                leg: crate::policies::WorkerLeg::Single,
+                leg: WorkerLeg::Single,
             },
         )?;
         let selected = available[idx].clone();
@@ -184,7 +248,7 @@ impl WorkerSelectionStage {
         model_id: &str,
         text: Option<&str>,
         tokens: Option<&[u32]>,
-        headers: Option<&http::HeaderMap>,
+        headers: Option<&HeaderMap>,
     ) -> Option<PdWorkerPair> {
         // Treat "unknown" model as wildcard (match any worker)
         let model_filter = if model_id == UNKNOWN_MODEL_ID {
@@ -210,6 +274,9 @@ impl WorkerSelectionStage {
                             WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
                             WorkerType::Regular => {}
+                            // Encode-prefill-decode selection is handled in select_encode_prefill_decode_workers;
+                            // the PD pair fold ignores encode workers.
+                            WorkerType::Encode => {}
                         }
                     }
                     acc
@@ -277,12 +344,12 @@ impl WorkerSelectionStage {
             tokens,
             headers,
             hash_ring,
-            leg: crate::policies::WorkerLeg::Prefill,
+            leg: WorkerLeg::Prefill,
         };
         let prefill_idx = self
             .policy_registry
             .select_worker(&policy, &available_prefill, &info)?;
-        info.leg = crate::policies::WorkerLeg::Decode;
+        info.leg = WorkerLeg::Decode;
         let decode_idx = self
             .policy_registry
             .select_worker(&policy, &available_decode, &info)?;
@@ -310,4 +377,249 @@ impl WorkerSelectionStage {
             target_runtime,
         ))
     }
+
+    /// Select per-item encode workers + a prefill/decode pair for EPD routing.
+    ///
+    /// Mirrors `select_pd_pair` but also assigns each multimodal item to an
+    /// encode worker. prefill+decode are selected as a normal PD pair. All pools
+    /// are filtered to a runtime shared by the selected encode/prefill/decode
+    /// legs.
+    fn select_encode_prefill_decode_workers(
+        &self,
+        model_id: &str,
+        text: Option<&str>,
+        tokens: Option<&[u32]>,
+        headers: Option<&HeaderMap>,
+        encode_item_hashes: &[Vec<u8>],
+    ) -> Option<EncodePrefillDecodeWorkerSelection> {
+        // Treat "unknown" model as wildcard (match any worker)
+        let model_filter = if model_id == UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
+
+        let all_workers = self.worker_registry.get_workers_filtered(
+            model_filter,
+            None,
+            Some(ConnectionMode::Grpc), // Match any gRPC worker
+            None,                       // any runtime type
+            false,
+        );
+
+        let (all_encode, all_prefill, all_decode): (Vec<_>, Vec<_>, Vec<_>) = all_workers
+            .into_iter()
+            .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, w| {
+                if w.is_available() {
+                    match w.metadata().spec.worker_type {
+                        WorkerType::Encode => acc.0.push(w),
+                        WorkerType::Prefill => acc.1.push(w),
+                        WorkerType::Decode => acc.2.push(w),
+                        WorkerType::Regular => {}
+                    }
+                }
+                acc
+            });
+
+        let needs_encode = !encode_item_hashes.is_empty();
+        if needs_encode && all_encode.is_empty() {
+            warn!("No available encode workers");
+            return None;
+        }
+        if all_prefill.is_empty() {
+            warn!("No available prefill workers");
+            return None;
+        }
+        if all_decode.is_empty() {
+            warn!("No available decode workers");
+            return None;
+        }
+
+        // Disaggregated legs must share a runtime. Pick a runtime that has at
+        // least one available worker in every required EPD pool instead of
+        // blindly using the first prefill runtime.
+        let Some(target_runtime) = all_prefill
+            .iter()
+            .map(|w| w.metadata().spec.runtime_type)
+            .find(|runtime| {
+                all_decode
+                    .iter()
+                    .any(|w| w.metadata().spec.runtime_type == *runtime)
+                    && (!needs_encode
+                        || all_encode
+                            .iter()
+                            .any(|w| w.metadata().spec.runtime_type == *runtime))
+            })
+        else {
+            warn!("No available encode/prefill/decode worker set with a shared runtime");
+            return None;
+        };
+
+        let mixed = all_prefill
+            .iter()
+            .chain(all_decode.iter())
+            .any(|w| w.metadata().spec.runtime_type != target_runtime)
+            || (needs_encode
+                && all_encode
+                    .iter()
+                    .any(|w| w.metadata().spec.runtime_type != target_runtime));
+        if mixed {
+            warn!(
+                "Mixed runtime types in encode/prefill/decode workers. Using {:?}.",
+                target_runtime
+            );
+        }
+
+        // Filter all three pools to the target runtime
+        let available_encode: Vec<_> = all_encode
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+        let available_prefill: Vec<_> = all_prefill
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+        let available_decode: Vec<_> = all_decode
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+
+        if (needs_encode && available_encode.is_empty())
+            || available_prefill.is_empty()
+            || available_decode.is_empty()
+        {
+            warn!(
+                "No available encode/prefill/decode worker set for runtime {:?}",
+                target_runtime
+            );
+            return None;
+        }
+
+        // Select encode, prefill, and decode via their per-role policies. Encode
+        // defaults to consistent hashing over each item's content hash; prefill
+        // and decode fall back to the main policy when unset.
+        let encode_policy = self.policy_registry.get_encode_policy();
+        let prefill_policy = self.policy_registry.get_prefill_policy();
+        let decode_policy = self.policy_registry.get_decode_policy();
+
+        // Get cached hash ring for consistent hashing (O(log n) lookup)
+        let hash_ring = self.worker_registry.get_hash_ring(model_id);
+
+        let mut info = SelectWorkerInfo {
+            request_text: text,
+            tokens,
+            headers,
+            hash_ring: hash_ring.clone(),
+            leg: WorkerLeg::Prefill,
+        };
+        let prefill_idx =
+            self.policy_registry
+                .select_worker(&prefill_policy, &available_prefill, &info)?;
+        info.leg = WorkerLeg::Decode;
+        let decode_idx =
+            self.policy_registry
+                .select_worker(&decode_policy, &available_decode, &info)?;
+
+        let encode_assignments = assign_encode_workers(
+            &available_encode,
+            encode_item_hashes,
+            model_id,
+            encode_policy.as_ref(),
+            hash_ring.clone(),
+        )?;
+
+        // Record worker selection metrics for prefill and decode, each tagged
+        // with the policy that picked it. Encode item assignment metrics are
+        // recorded in assign_encode_workers.
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_PREFILL,
+            metrics_labels::CONNECTION_GRPC,
+            model_id,
+            prefill_policy.name(),
+        );
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_DECODE,
+            metrics_labels::CONNECTION_GRPC,
+            model_id,
+            decode_policy.name(),
+        );
+
+        Some((
+            encode_assignments,
+            available_prefill[prefill_idx].clone(),
+            available_decode[decode_idx].clone(),
+            target_runtime,
+        ))
+    }
+}
+
+fn encode_item_hashes(prep: &PreparationOutput) -> anyhow::Result<Vec<Vec<u8>>> {
+    let intermediate = match prep {
+        PreparationOutput::Chat {
+            processed_messages, ..
+        }
+        | PreparationOutput::Messages {
+            processed_messages, ..
+        } => processed_messages.multimodal_intermediate.as_ref(),
+        _ => None,
+    };
+    let Some(MultimodalIntermediate::Precomputed(precomputed)) = intermediate else {
+        return Ok(Vec::new());
+    };
+    multimodal::precomputed_encode_routing_hashes(precomputed)
+}
+
+fn assign_encode_workers(
+    encode_workers: &[Arc<dyn Worker>],
+    item_hashes: &[Vec<u8>],
+    model_id: &str,
+    policy: &dyn LoadBalancingPolicy,
+    hash_ring: Option<Arc<HashRing>>,
+) -> Option<Vec<EncodeWorkerAssignment>> {
+    if item_hashes.is_empty() {
+        return Some(Vec::new());
+    }
+
+    item_hashes
+        .iter()
+        .enumerate()
+        .map(|(item_index, content_hash)| {
+            let routing_headers = encode_routing_headers(content_hash);
+            let info = SelectWorkerInfo {
+                request_text: None,
+                tokens: None,
+                headers: Some(&routing_headers),
+                hash_ring: hash_ring.clone(),
+                leg: WorkerLeg::Single,
+            };
+            let worker_idx = policy.select_worker(encode_workers, &info)?;
+            let worker = encode_workers[worker_idx].clone();
+            Metrics::record_worker_selection(
+                metrics_labels::WORKER_ENCODE,
+                metrics_labels::CONNECTION_GRPC,
+                model_id,
+                policy.name(),
+            );
+            Some(EncodeWorkerAssignment { item_index, worker })
+        })
+        .collect()
+}
+
+fn encode_routing_headers(content_hash: &[u8]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let key = hex_encode(content_hash);
+    if let Ok(value) = HeaderValue::from_str(&key) {
+        headers.insert("x-smg-routing-key", value);
+    }
+    headers
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }

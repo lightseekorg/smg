@@ -40,13 +40,13 @@ impl PipelineStage for ClientAcquisitionStage {
                 let client = get_grpc_client_from_worker(worker).await?;
                 ClientSelection::Single { client }
             }
-            WorkerSelection::Dual {
+            WorkerSelection::Disaggregated {
                 prefill, decode, ..
             } => {
                 let prefill_client = get_grpc_client_from_worker(prefill).await?;
                 let decode_client = get_grpc_client_from_worker(decode).await?;
 
-                ClientSelection::Dual {
+                ClientSelection::Disaggregated {
                     prefill: prefill_client,
                     decode: decode_client,
                 }

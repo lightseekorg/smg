@@ -211,6 +211,46 @@ impl ConfigValidator {
                     Self::validate_policy(d_policy)?;
                 }
             }
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls,
+                encode_policy,
+                prefill_policy,
+                decode_policy,
+            } => {
+                for urls in [encode_urls, prefill_urls] {
+                    if !urls.is_empty() {
+                        let url_strings: Vec<String> =
+                            urls.iter().map(|(url, _)| url.clone()).collect();
+                        Self::validate_urls(&url_strings)?;
+                    }
+                    for (_url, port) in urls {
+                        if let Some(port) = port {
+                            if *port == 0 {
+                                return Err(ConfigError::InvalidValue {
+                                    field: "bootstrap_port".to_string(),
+                                    value: port.to_string(),
+                                    reason: "Port must be between 1 and 65535".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                if !decode_urls.is_empty() {
+                    Self::validate_urls(decode_urls)?;
+                }
+                if let Some(policy) = encode_policy {
+                    Self::validate_policy(policy)?;
+                    Self::validate_encode_policy(policy)?;
+                }
+                if let Some(policy) = prefill_policy {
+                    Self::validate_policy(policy)?;
+                }
+                if let Some(policy) = decode_policy {
+                    Self::validate_policy(policy)?;
+                }
+            }
             RoutingMode::OpenAI { worker_urls } => {
                 // Allow empty URLs to support dynamic worker addition
                 // URLs will be validated if provided
@@ -409,6 +449,18 @@ impl ConfigValidator {
         Ok(())
     }
 
+    fn validate_encode_policy(policy: &PolicyConfig) -> ConfigResult<()> {
+        match policy {
+            PolicyConfig::Random | PolicyConfig::RoundRobin | PolicyConfig::ConsistentHashing => {
+                Ok(())
+            }
+            _ => Err(ConfigError::IncompatibleConfig {
+                reason: "Encode policy supports random, round_robin, or consistent_hashing"
+                    .to_string(),
+            }),
+        }
+    }
+
     fn validate_server_settings(config: &RouterConfig) -> ConfigResult<()> {
         if config.port == 0 {
             return Err(ConfigError::InvalidValue {
@@ -528,6 +580,16 @@ impl ConfigValidator {
                 if discovery.prefill_selector.is_empty() && discovery.decode_selector.is_empty() {
                     return Err(ConfigError::ValidationFailed {
                         reason: "PD mode with service discovery requires at least one non-empty selector (prefill or decode)".to_string(),
+                    });
+                }
+            }
+            RoutingMode::EncodePrefillDecode { .. } => {
+                if discovery.encode_selector.is_empty()
+                    || discovery.prefill_selector.is_empty()
+                    || discovery.decode_selector.is_empty()
+                {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: "EPD mode with service discovery requires non-empty encode_selector, prefill_selector, and decode_selector".to_string(),
                     });
                 }
             }
@@ -731,6 +793,15 @@ impl ConfigValidator {
 
         let has_service_discovery = config.discovery.as_ref().is_some_and(|d| d.enabled);
 
+        if let RoutingMode::EncodePrefillDecode { decode_policy, .. } = &config.mode {
+            let effective_decode_policy = decode_policy.as_ref().unwrap_or(&config.policy);
+            if matches!(effective_decode_policy, PolicyConfig::Bucket { .. }) {
+                return Err(ConfigError::IncompatibleConfig {
+                    reason: "Decode policy should not be allowed to be bucket".to_string(),
+                });
+            }
+        }
+
         if !has_service_discovery {
             if let PolicyConfig::PowerOfTwo { .. } = &config.policy {
                 let worker_count = config.mode.worker_count();
@@ -770,6 +841,37 @@ impl ConfigValidator {
                 if let Some(PolicyConfig::Bucket { .. }) = decode_policy {
                     return Err(ConfigError::IncompatibleConfig {
                         reason: "Decode policy should not be allowed to be bucket".to_string(),
+                    });
+                }
+            }
+
+            if let RoutingMode::EncodePrefillDecode {
+                prefill_urls,
+                decode_urls,
+                prefill_policy,
+                decode_policy,
+                ..
+            } = &config.mode
+            {
+                let effective_prefill_policy = prefill_policy.as_ref().unwrap_or(&config.policy);
+                let effective_decode_policy = decode_policy.as_ref().unwrap_or(&config.policy);
+
+                if matches!(effective_prefill_policy, PolicyConfig::PowerOfTwo { .. })
+                    && prefill_urls.len() < 2
+                {
+                    return Err(ConfigError::IncompatibleConfig {
+                        reason:
+                            "Power-of-two policy for prefill requires at least 2 prefill workers"
+                                .to_string(),
+                    });
+                }
+
+                if matches!(effective_decode_policy, PolicyConfig::PowerOfTwo { .. })
+                    && decode_urls.len() < 2
+                {
+                    return Err(ConfigError::IncompatibleConfig {
+                        reason: "Power-of-two policy for decode requires at least 2 decode workers"
+                            .to_string(),
                     });
                 }
             }
@@ -1151,6 +1253,62 @@ mod tests {
             result.is_err(),
             "Decode policy should not be allowed to be bucket"
         );
+    }
+
+    #[test]
+    fn test_validate_epd_mode_encode_policy_restrictions() {
+        let valid = RouterConfig::new(
+            RoutingMode::EncodePrefillDecode {
+                encode_urls: vec![("http://encode:8000".to_string(), None)],
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                encode_policy: Some(PolicyConfig::ConsistentHashing),
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::Random,
+        );
+        assert!(ConfigValidator::validate(&valid).is_ok());
+
+        let invalid_cache_aware = RouterConfig::new(
+            RoutingMode::EncodePrefillDecode {
+                encode_urls: vec![("http://encode:8000".to_string(), None)],
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                encode_policy: Some(PolicyConfig::CacheAware {
+                    cache_threshold: 0.5,
+                    balance_abs_threshold: 32,
+                    balance_rel_threshold: 1.1,
+                    eviction_interval_secs: 60,
+                    max_tree_size: 1000,
+                    block_size: 16,
+                    balance_token_usage_threshold: 1.0,
+                    overload_token_usage_threshold: 1.0,
+                }),
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::Random,
+        );
+        assert!(ConfigValidator::validate(&invalid_cache_aware).is_err());
+
+        let invalid_least_load = RouterConfig::new(
+            RoutingMode::EncodePrefillDecode {
+                encode_urls: vec![("http://encode:8000".to_string(), None)],
+                prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+                decode_urls: vec!["http://decode:8000".to_string()],
+                encode_policy: Some(PolicyConfig::LeastLoad {
+                    load_check_interval_secs: 5,
+                    kv_pressure_weight: 0.15,
+                    mean_prefill_tokens: 1024,
+                    default_throughput: 2000.0,
+                }),
+                prefill_policy: None,
+                decode_policy: None,
+            },
+            PolicyConfig::Random,
+        );
+        assert!(ConfigValidator::validate(&invalid_least_load).is_err());
     }
 
     #[test]

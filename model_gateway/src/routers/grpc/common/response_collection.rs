@@ -17,8 +17,8 @@ use crate::routers::{
 
 /// Collect and merge responses from execution result
 ///
-/// Handles both Single and Dual (prefill-decode) execution modes.
-/// For Dual mode, merges prefill input_logprobs into decode responses if requested.
+/// Handles both Single and PrefillDecode execution modes.
+/// For PrefillDecode mode, merges prefill input_logprobs into decode responses if requested.
 ///
 /// # Arguments
 /// * `execution_result` - The execution result containing stream(s)
@@ -36,7 +36,7 @@ pub(crate) async fn collect_responses(
             stream.mark_completed();
             responses
         }
-        ExecutionResult::Dual {
+        ExecutionResult::PrefillDecode {
             mut prefill,
             decode,
             ..

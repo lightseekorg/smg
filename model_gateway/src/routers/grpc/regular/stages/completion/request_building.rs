@@ -17,18 +17,21 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext},
-        proto_wrapper::ProtoRequest,
+        context::{ClientSelection, ExecutionPlan, ExecutionPlanKind, RequestContext},
     },
 };
 
 pub(crate) struct CompletionRequestBuildingStage {
     inject_pd_metadata: bool,
+    plan_kind: ExecutionPlanKind,
 }
 
 impl CompletionRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, plan_kind: ExecutionPlanKind) -> Self {
+        Self {
+            inject_pd_metadata,
+            plan_kind,
+        }
     }
 }
 
@@ -58,7 +61,7 @@ impl PipelineStage for CompletionRequestBuildingStage {
 
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
         let request_id = format!("cmpl_{}", Uuid::now_v7());
@@ -94,7 +97,15 @@ impl PipelineStage for CompletionRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
+        // EPD: inject the prefill->decode KV rendezvous. Completion EPD is
+        // text-only (no encode jobs), so this is the only EPD injection here.
+        // No-op unless the backend carries it in the request.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);
+        }
+
+        ctx.state.execution_plan =
+            Some(ExecutionPlan::generate(self.plan_kind, proto_request, None));
         Ok(None)
     }
 

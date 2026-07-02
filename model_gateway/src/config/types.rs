@@ -243,6 +243,21 @@ pub enum RoutingMode {
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
     },
+    #[serde(rename = "encode_prefill_decode")]
+    EncodePrefillDecode {
+        /// Encode worker urls (run the vision tower); optional Mooncake
+        /// bootstrap ports.
+        encode_urls: Vec<(String, Option<u16>)>,
+        /// Prefill worker urls with optional bootstrap ports.
+        prefill_urls: Vec<(String, Option<u16>)>,
+        decode_urls: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encode_policy: Option<PolicyConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prefill_policy: Option<PolicyConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decode_policy: Option<PolicyConfig>,
+    },
     #[serde(rename = "openai")]
     OpenAI { worker_urls: Vec<String> },
     #[serde(rename = "anthropic")]
@@ -264,6 +279,12 @@ impl RoutingMode {
                 decode_urls,
                 ..
             } => prefill_urls.len() + decode_urls.len(),
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls,
+                ..
+            } => encode_urls.len() + prefill_urls.len() + decode_urls.len(),
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
             RoutingMode::Gemini { worker_urls } => worker_urls.len(),
@@ -274,7 +295,8 @@ impl RoutingMode {
     /// Falls back to the main policy if no specific prefill policy is set
     pub fn get_prefill_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
-            RoutingMode::PrefillDecode { prefill_policy, .. } => {
+            RoutingMode::PrefillDecode { prefill_policy, .. }
+            | RoutingMode::EncodePrefillDecode { prefill_policy, .. } => {
                 prefill_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
@@ -285,10 +307,26 @@ impl RoutingMode {
     /// Falls back to the main policy if no specific decode policy is set
     pub fn get_decode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
-            RoutingMode::PrefillDecode { decode_policy, .. } => {
+            RoutingMode::PrefillDecode { decode_policy, .. }
+            | RoutingMode::EncodePrefillDecode { decode_policy, .. } => {
                 decode_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
+        }
+    }
+
+    /// Get the effective encode policy for EPD mode. The default is
+    /// consistent_hashing because encode routing is item-cache affinity, not the
+    /// request-level main policy.
+    pub fn get_encode_policy<'a>(
+        &'a self,
+        default_encode_policy: &'a PolicyConfig,
+    ) -> &'a PolicyConfig {
+        match self {
+            RoutingMode::EncodePrefillDecode { encode_policy, .. } => {
+                encode_policy.as_ref().unwrap_or(default_encode_policy)
+            }
+            _ => default_encode_policy,
         }
     }
 }
@@ -514,6 +552,9 @@ pub struct DiscoveryConfig {
     pub check_interval_secs: u64,
     /// Regular mode
     pub selector: HashMap<String, String>,
+    /// EPD mode encode
+    #[serde(default)]
+    pub encode_selector: HashMap<String, String>,
     /// PD mode prefill
     pub prefill_selector: HashMap<String, String>,
     /// PD mode decode
@@ -542,6 +583,7 @@ impl Default for DiscoveryConfig {
             port: 8000,
             check_interval_secs: 120,
             selector: HashMap::new(),
+            encode_selector: HashMap::new(),
             prefill_selector: HashMap::new(),
             decode_selector: HashMap::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
@@ -771,6 +813,7 @@ impl RouterConfig {
         match self.mode {
             RoutingMode::Regular { .. } => "regular",
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
+            RoutingMode::EncodePrefillDecode { .. } => "encode_prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
             RoutingMode::Gemini { .. } => "gemini",
@@ -1126,6 +1169,7 @@ mod tests {
         assert_eq!(config.port, 8000);
         assert_eq!(config.check_interval_secs, 120);
         assert!(config.selector.is_empty());
+        assert!(config.encode_selector.is_empty());
         assert!(config.prefill_selector.is_empty());
         assert!(config.decode_selector.is_empty());
         assert_eq!(config.bootstrap_port_annotation, "sglang.ai/bootstrap-port");
@@ -1143,6 +1187,7 @@ mod tests {
             port: 9000,
             check_interval_secs: 30,
             selector: selector.clone(),
+            encode_selector: selector.clone(),
             prefill_selector: selector.clone(),
             decode_selector: selector.clone(),
             bootstrap_port_annotation: "custom.io/port".to_string(),
@@ -1422,6 +1467,7 @@ mod tests {
                 port: 8443,
                 check_interval_secs: 120,
                 selector: selectors.clone(),
+                encode_selector: selectors.clone(),
                 prefill_selector: selectors.clone(),
                 decode_selector: selectors,
                 bootstrap_port_annotation: "mycompany.io/bootstrap".to_string(),

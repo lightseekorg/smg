@@ -10,6 +10,8 @@ _GENERATED_MODULES = {
     "sglang_scheduler_pb2_grpc",
     "sglang_encoder_pb2",
     "sglang_encoder_pb2_grpc",
+    "tokenspeed_encoder_pb2",
+    "tokenspeed_encoder_pb2_grpc",
     "tokenspeed_scheduler_pb2",
     "tokenspeed_scheduler_pb2_grpc",
     "vllm_engine_pb2",

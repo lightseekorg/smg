@@ -10,8 +10,8 @@ use crate::routers::{
     grpc::{
         client::GrpcClient,
         common::stages::PipelineStage,
-        context::{RequestContext, RequestType},
-        proto_wrapper::{ProtoEmbedRequest, ProtoRequest},
+        context::{ExecutionPlan, RequestContext, RequestType},
+        proto_wrapper::ProtoEmbedRequest,
     },
 };
 
@@ -108,7 +108,7 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
             }
         };
 
-        ctx.state.proto_request = Some(ProtoRequest::Embed(proto_req));
+        ctx.state.execution_plan = Some(ExecutionPlan::embed(proto_req));
         Ok(None)
     }
 
