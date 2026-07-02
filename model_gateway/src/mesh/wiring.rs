@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use smg_mesh::{MergeStrategy, MeshKV};
 
-use super::adapters::{RateLimitSyncAdapter, WorkerSyncAdapter};
+use super::{
+    adapters::{RateLimitSyncAdapter, WorkerSyncAdapter},
+    global_rate_limit::GlobalRateLimiter,
+};
 use crate::worker::WorkerRegistry;
 
 /// Owns the started mesh sync adapters. Mesh on means every adapter here is
@@ -21,6 +24,7 @@ use crate::worker::WorkerRegistry;
 pub struct MeshAdapters {
     worker: Arc<WorkerSyncAdapter>,
     rate_limit: Arc<RateLimitSyncAdapter>,
+    global_rate_limit: Arc<GlobalRateLimiter>,
 }
 
 impl MeshAdapters {
@@ -49,7 +53,16 @@ impl MeshAdapters {
         let rate_limit = RateLimitSyncAdapter::new(rl_ns, node_name);
         worker.start();
         rate_limit.start();
-        Arc::new(Self { worker, rate_limit })
+        // No background task: the limiter publishes its shard inline from
+        // the admission path, paced by its flush interval. Once admits stop
+        // the published value is frozen (the unpublished tail is bounded and
+        // enforcement-harmless — see GlobalRateLimiter), so no timer is owed.
+        let global_rate_limit = GlobalRateLimiter::new(rate_limit.clone(), mesh_kv.configs());
+        Arc::new(Self {
+            worker,
+            rate_limit,
+            global_rate_limit,
+        })
     }
 
     /// Worker sync adapter.
@@ -60,6 +73,12 @@ impl MeshAdapters {
     /// Rate-limit sync adapter.
     pub fn rate_limit(&self) -> &Arc<RateLimitSyncAdapter> {
         &self.rate_limit
+    }
+
+    /// Cluster-wide request limiter, consulted by the concurrency
+    /// middleware before the local token bucket.
+    pub fn global_rate_limit(&self) -> &Arc<GlobalRateLimiter> {
+        &self.global_rate_limit
     }
 }
 

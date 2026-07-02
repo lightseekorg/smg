@@ -766,6 +766,10 @@ pub fn build_app(
         &app_state.context.router_config,
         app_state.context.worker_registry.clone(),
         app_state.context.rate_limiter.clone(),
+        app_state
+            .mesh_adapters
+            .as_ref()
+            .map(|adapters| adapters.global_rate_limit().clone()),
     );
 
     let protected_routes = with_admission_layer(

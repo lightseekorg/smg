@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{
     config::types::RouterConfig,
+    mesh::global_rate_limit::GlobalRateLimiter,
     middleware::token_bucket::TokenBucket,
     worker::{CapacityTrackerSettings, WorkerCapacity, WorkerRegistry},
 };
@@ -28,6 +29,11 @@ pub struct SchedulerState {
     /// it as a concurrency limiter (that would double-limit). `None` =
     /// no RPS limit.
     pub rate_limiter: Option<Arc<TokenBucket>>,
+    /// Cluster-wide rate limiter, checked before admission (and before the
+    /// RPS bucket) so the advertised `config:rate_limit` is enforced under
+    /// the priority scheduler too, not only on the legacy path. `None` when
+    /// mesh is off.
+    pub global_rate_limit: Option<Arc<GlobalRateLimiter>>,
 }
 
 /// Which admission path the protected routes use. Chosen once at startup.
@@ -55,11 +61,12 @@ impl AdmissionMode {
         rc: &RouterConfig,
         registry: Arc<WorkerRegistry>,
         rate_limiter: Option<Arc<TokenBucket>>,
+        global_rate_limit: Option<Arc<GlobalRateLimiter>>,
     ) -> Self {
         if !rc.priority_scheduler_enabled {
             return Self::Legacy;
         }
-        match Self::try_build_priority(rc, registry, rate_limiter) {
+        match Self::try_build_priority(rc, registry, rate_limiter, global_rate_limit) {
             Ok(mode) => {
                 info!("priority scheduler enabled");
                 mode
@@ -78,6 +85,7 @@ impl AdmissionMode {
         rc: &RouterConfig,
         registry: Arc<WorkerRegistry>,
         rate_limiter: Option<Arc<TokenBucket>>,
+        global_rate_limit: Option<Arc<GlobalRateLimiter>>,
     ) -> Result<Self, String> {
         // Tier-4 fallback for WorkerCapacity comes from the legacy
         // --max-concurrent-requests (clamped to u16; <=0 means "disabled",
@@ -120,6 +128,7 @@ impl AdmissionMode {
             scheduler,
             resolver,
             rate_limiter,
+            global_rate_limit,
         })))
     }
 }
