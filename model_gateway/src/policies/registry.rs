@@ -384,13 +384,23 @@ impl PolicyRegistry {
             .unwrap_or_else(|| self.get_default_policy())
     }
 
-    /// Get all load-aware policies that need periodic load updates (lock-free).
+    /// Get all policies that require the worker load monitor to poll `/v1/loads`
+    /// (lock-free).
     ///
-    /// These are policies whose routing depends on the worker load monitor:
-    /// `power_of_two` and `least_load`.
+    /// Two kinds of consumers are gated on this set:
+    /// - `power_of_two` / `least_load` receive loads pushed via `update_loads`.
+    /// - `cache_aware` reads the same backend snapshot through the watch channel
+    ///   (`set_load_receiver`) for its gateway-global imbalance trigger and
+    ///   shortest-queue selection.
+    ///
+    /// Returning `cache_aware` here makes the monitor poll whenever it is active;
+    /// without it, a cache_aware-only deployment would never poll and the
+    /// global-load logic would silently fall back to local counters. Its
+    /// `update_loads` / `remove_worker` are no-ops, so being in the push and
+    /// cleanup loops is harmless.
     pub fn get_all_load_aware_policies(&self) -> Vec<Arc<dyn LoadBalancingPolicy>> {
         fn is_load_aware(name: &str) -> bool {
-            name == "power_of_two" || name == "least_load"
+            name == "power_of_two" || name == "least_load" || name == "cache_aware"
         }
 
         let mut policies = Vec::new();
@@ -741,6 +751,25 @@ mod tests {
         let registry = PolicyRegistry::new(PolicyConfig::Passthrough);
         registry.on_worker_added("m", Some("passthrough"));
         assert!(registry.get_all_load_aware_policies().is_empty());
+    }
+
+    #[test]
+    fn test_cache_aware_is_load_aware() {
+        // cache_aware consumes the backend load snapshot (via the watch channel),
+        // so it must be in the load-aware set that gates /v1/loads polling —
+        // otherwise its global-load imbalance/shortest-queue logic never receives
+        // data and silently falls back to local counters.
+        let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        registry.set_prefill_policy(cache_aware_policy());
+        let names: Vec<&str> = registry
+            .get_all_load_aware_policies()
+            .iter()
+            .map(|p| p.name())
+            .collect();
+        assert!(
+            names.contains(&"cache_aware"),
+            "cache_aware must be load-aware so the monitor polls /v1/loads; got {names:?}"
+        );
     }
 
     #[test]
