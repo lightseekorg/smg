@@ -446,7 +446,13 @@ async fn decode_video_frames(
                                 "smg_mm_timing video_decode_opencv_buffer_fallback"
                             );
                         }
-                        decode_video_bytes_with_tempfile(bytes, cfg).await
+                        decode_video_bytes_with_tempfile(bytes, cfg)
+                            .await
+                            .map_err(|fallback_error| {
+                                MediaConnectorError::VideoDecode(format!(
+                                    "buffered OpenCV decode failed: {error}; tempfile OpenCV fallback failed: {fallback_error}"
+                                ))
+                            })
                     }
                 }
             }

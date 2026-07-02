@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -27,19 +28,24 @@ class MemoryStreamReader final : public cv::IStreamReader {
   }
 
   long long seek(long long offset, int origin) override {
+    if (size_ > static_cast<size_t>(std::numeric_limits<long long>::max())) {
+      return -1;
+    }
+
+    const long long end = static_cast<long long>(size_);
     long long base = 0;
     if (origin == SEEK_CUR) {
       base = static_cast<long long>(position_);
     } else if (origin == SEEK_END) {
-      base = static_cast<long long>(size_);
+      base = end;
     } else if (origin != SEEK_SET) {
       return -1;
     }
 
-    const long long next = base + offset;
-    if (next < 0 || static_cast<size_t>(next) > size_) {
+    if (offset > end - base || offset < -base) {
       return -1;
     }
+    const long long next = base + offset;
     position_ = static_cast<size_t>(next);
     return next;
   }
