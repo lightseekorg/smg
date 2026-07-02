@@ -3,6 +3,8 @@ pub mod hasher;
 pub mod hub;
 pub mod jpeg_turbo;
 pub mod media;
+#[cfg(feature = "opencv-video")]
+mod opencv_buffer;
 pub mod registry;
 pub mod tracker;
 pub mod types;

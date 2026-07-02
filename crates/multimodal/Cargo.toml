@@ -49,6 +49,10 @@ criterion = { version = "0.8", features = ["html_reports"] }
 npyz = { version = "0.9", features = ["npz"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
 [[bench]]
 name = "image_preprocess"
 harness = false
