@@ -567,11 +567,21 @@ impl MeshKV {
     /// A peer absent longer than the grace still holds the deleted key's
     /// older insert in its op-log and replays it on reconnect; with the
     /// tombstone metadata gone, the stale insert lands on an empty entry
-    /// and resurrects the key. Collection is only safe at causal stability
-    /// — every live peer acked past the tombstone and absent peers
-    /// declared dead — so the caller must be the dead-node cleanup layer.
+    /// and resurrects the key. The driven path is
+    /// [`gc_stable_tombstones`](Self::gc_stable_tombstones).
     pub fn gc_tombstones(&self) -> usize {
         self.store.gc_tombstones()
+    }
+
+    /// Causally-stable tombstone GC: collect tombstones past the default
+    /// grace whose winning version `stable` confirms every live peer has
+    /// acked. The gossip controller drives this with a predicate built from
+    /// the per-peer send watermarks, so a collected tombstone can never be
+    /// replayed-around: every peer that could relay the dominated insert
+    /// already holds (and has compacted against) the tombstone.
+    pub fn gc_stable_tombstones(&self, stable: &dyn Fn(&str, (u64, ReplicaId)) -> bool) -> usize {
+        self.store
+            .gc_stable_tombstones(crate::crdt_kv::DEFAULT_TOMBSTONE_GRACE, stable)
     }
 
     /// Register a prefix for dead-node key sweeping: when
@@ -584,10 +594,12 @@ impl MeshKV {
     }
 
     /// Dead-node cleanup: tombstone the node's keys in every sweep-registered
-    /// namespace, then retire its replica-registry entries. Every survivor
-    /// runs this; concurrent tombstones converge, and a live (partitioned)
-    /// owner's reconcile re-assert overrules a premature sweep. Returns the
-    /// number of keys tombstoned.
+    /// namespace. Every survivor runs this; concurrent tombstones converge,
+    /// and a live (partitioned) owner's reconcile re-assert overrules a
+    /// premature sweep. The node's replica-registry entries are deliberately
+    /// retained so re-sweeps can attribute late-relayed keys; they retire via
+    /// [`retire_absent_replica_entries`](Self::retire_absent_replica_entries).
+    /// Returns the number of keys tombstoned.
     pub fn handle_node_removed(&self, node: &str) -> usize {
         let replica_keys = self.replica_keys_of(node);
         let dead_replicas: HashSet<ReplicaId> = replica_keys
@@ -613,11 +625,69 @@ impl MeshKV {
                 DeadKeyAttribution::NodeNameSuffix => self.sweep_node_suffix(prefix, node),
             };
         }
-        // Last so a concurrent sweep on another survivor can still attribute.
-        for key in &replica_keys {
+        swept
+    }
+
+    /// Retire replica-registry entries for nodes in neither membership nor
+    /// the removal quarantine, first sweeping any live key still attributed
+    /// to them (a key relayed after the quarantine's re-sweeps would
+    /// otherwise outlive its attribution as a permanent ghost). Returns the
+    /// number of entries retired.
+    pub fn retire_absent_replica_entries(&self, present: &HashSet<String>) -> usize {
+        let mut absent_keys = Vec::new();
+        let mut absent_replicas: HashSet<ReplicaId> = HashSet::new();
+        let mut absent_nodes: HashSet<String> = HashSet::new();
+        for key in self.store.keys() {
+            if !key.starts_with(REPLICA_PREFIX) {
+                continue;
+            }
+            let Some(node) = self.store.get(&key) else {
+                continue;
+            };
+            let node = String::from_utf8_lossy(&node);
+            if node == self.server_name || present.contains(node.as_ref()) {
+                continue;
+            }
+            if let Some(replica) = key
+                .strip_prefix(REPLICA_PREFIX)
+                .and_then(|id| ReplicaId::from_string(id).ok())
+            {
+                absent_replicas.insert(replica);
+            }
+            absent_nodes.insert(node.into_owned());
+            absent_keys.push(key);
+        }
+        if absent_keys.is_empty() {
+            return 0;
+        }
+        // Sweep any ghost key still attributed to the departed nodes before
+        // dropping their registry entries — this is the last pass that can
+        // attribute them. AuthorReplica keys go by op author; NodeNameSuffix
+        // keys (e.g. rl: shards) go by the node-name segment, which needs no
+        // registry entry, so they are swept here too rather than stranded.
+        let sweeps = self.dead_node_sweeps.read().clone();
+        for (prefix, attribution) in &sweeps {
+            let swept = match attribution {
+                DeadKeyAttribution::AuthorReplica => {
+                    self.sweep_authored_by(prefix, &absent_replicas)
+                }
+                DeadKeyAttribution::NodeNameSuffix => absent_nodes
+                    .iter()
+                    .map(|node| self.sweep_node_suffix(prefix, node))
+                    .sum(),
+            };
+            if swept > 0 {
+                tracing::warn!(
+                    swept,
+                    prefix = prefix.as_str(),
+                    "swept ghost keys of departed nodes at registry retirement"
+                );
+            }
+        }
+        for key in &absent_keys {
             self.delete_with_notify(key);
         }
-        swept
+        absent_keys.len()
     }
 
     /// Owner-side replica-registry maintenance: re-assert this incarnation's

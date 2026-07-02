@@ -308,6 +308,16 @@ fn dead_node_sweep_tombstones_authored_keys() {
         Some(b"v2".to_vec()),
         "survivor-owned key kept"
     );
+    assert_eq!(
+        survivor.replica_keys_of("dead-node").len(),
+        1,
+        "registry entries are retained at sweep time for late-key re-sweeps"
+    );
+
+    // Once the node is neither in membership nor held, and nothing live is
+    // attributed to it, its registry entries retire.
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1);
     assert!(
         survivor.replica_keys_of("dead-node").is_empty(),
         "dead node's replica-registry entries retired"
@@ -316,6 +326,55 @@ fn dead_node_sweep_tombstones_authored_keys() {
         survivor.replica_keys_of("survivor").len(),
         1,
         "survivor's own registry entry kept"
+    );
+}
+
+#[test]
+fn absent_entry_retirement_sweeps_ghost_keys_first() {
+    // A key relayed after the quarantine's re-sweeps would outlive its
+    // attribution as a permanent ghost; retirement sweeps it in the same
+    // pass before deleting the entries.
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_ns = dead.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    dead_ns.put("worker:late", b"v1".to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    let survivor_ns = survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    survivor.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+    deliver_crdt(&dead, &survivor);
+    assert!(survivor_ns.get("worker:late").is_some());
+
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1, "absent node's entry retires");
+    assert_eq!(
+        survivor_ns.get("worker:late"),
+        None,
+        "the ghost key is swept in the same pass"
+    );
+}
+
+#[test]
+fn absent_entry_retirement_sweeps_suffix_attributed_ghosts() {
+    // A suffix-attributed (rl:) key relayed after the dead node left
+    // holddown must also be swept at retirement — it carries no registry
+    // entry, so this is the last pass that can attribute it by node name.
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_rl = dead.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+    dead_rl.put("rl:global:dead-node", encode_epoch_count(1, 5).to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    let survivor_rl = survivor.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+    survivor.configure_dead_node_sweep("rl:", DeadKeyAttribution::NodeNameSuffix);
+    // The dead node also published a replica-registry entry (every node does).
+    deliver_crdt(&dead, &survivor);
+    assert!(survivor_rl.get("rl:global:dead-node").is_some());
+
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1, "absent node's registry entry retires");
+    assert_eq!(
+        survivor_rl.get("rl:global:dead-node"),
+        None,
+        "the suffix-attributed ghost shard is swept in the same pass"
     );
 }
 
@@ -378,10 +437,11 @@ fn reconcile_reasserts_own_registry_entry_after_premature_sweep() {
     deliver_crdt(&owner, &survivor);
 
     survivor.handle_node_removed("node-a");
+    survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
     deliver_crdt(&survivor, &owner);
     assert!(
         owner.replica_keys_of("node-a").is_empty(),
-        "the sweep tombstone reached the owner"
+        "the retirement tombstone reached the owner"
     );
 
     owner.reconcile_replica_registry();

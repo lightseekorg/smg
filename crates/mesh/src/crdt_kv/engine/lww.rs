@@ -466,7 +466,11 @@ impl NamespaceCrdtEngine for LwwEngine {
             .collect()
     }
 
-    fn gc_tombstones(&self, grace: Duration) -> usize {
+    fn gc_tombstones_where(
+        &self,
+        grace: Duration,
+        stable: &dyn Fn(&str, (u64, ReplicaId)) -> bool,
+    ) -> usize {
         let now = Instant::now();
         let mut removed = 0;
         // Collected keys' winning tombstone versions, for the log purge below.
@@ -494,6 +498,7 @@ impl NamespaceCrdtEngine for LwwEngine {
                         .is_none_or(|winner| {
                             winner.is_tombstone
                                 && now.saturating_duration_since(winner.created_at) >= grace
+                                && stable(&key, winner.version_key())
                         })
             });
             if let Some((key, versions)) = was_removed {

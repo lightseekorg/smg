@@ -44,6 +44,7 @@ use tracing::instrument;
 
 use super::{
     crdt_kv::CrdtWatermark,
+    gossip_controller::{PeerWatermarks, WatermarkRegistration},
     metrics::{record_ack, record_nack, record_peer_reconnect, update_peer_connections},
     mtls::MTLSManager,
     partition::PartitionDetector,
@@ -94,6 +95,10 @@ pub struct GossipService {
     /// registry, and chunk assembler shared with the client-side
     /// SyncStream handlers.
     mesh_kv: Option<Arc<crate::kv::MeshKV>>,
+    /// Shared per-peer ack watermark table (owned by the controller).
+    /// Server-side handlers register their peer's watermark once the peer
+    /// identifies, so the causal-stability GC sees both stream directions.
+    peer_watermarks: Option<PeerWatermarks>,
 }
 
 impl GossipService {
@@ -112,7 +117,15 @@ impl GossipService {
             mtls_manager: None,
             current_stream_batch: None,
             mesh_kv: None,
+            peer_watermarks: None,
         }
+    }
+
+    /// Attach the controller-owned per-peer ack watermark table so
+    /// server-side senders register their peers for causal-stability GC.
+    pub(crate) fn with_peer_watermarks(mut self, peer_watermarks: PeerWatermarks) -> Self {
+        self.peer_watermarks = Some(peer_watermarks);
+        self
     }
 
     /// Attach the shared stream RoundBatch reference. Server-side
@@ -419,6 +432,7 @@ impl Gossip for GossipService {
 
         let learned_peer_inbound = learned_peer.clone();
         let acked_inbound = acked.clone();
+        let peer_watermarks_inbound = self.peer_watermarks.clone();
         #[expect(
             clippy::disallowed_methods,
             reason = "server-side inbound handler bound to sync_stream lifetime; terminates when the stream closes"
@@ -430,6 +444,9 @@ impl Gossip for GossipService {
             let mut peer_id = String::new();
             update_peer_connections(&peer_id, true);
             let mut sequence: u64 = 0;
+            // Held for the stream's lifetime so its Drop deregisters on
+            // exit, unless a replacement stream already re-registered.
+            let mut _watermark_registration: Option<WatermarkRegistration> = None;
 
             loop {
                 let msg = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
@@ -458,6 +475,17 @@ impl Gossip for GossipService {
                         peer_id = msg.peer_id.clone();
                         update_peer_connections(&peer_id, true);
                         *learned_peer_inbound.write() = Some(peer_id.clone());
+                        // Register this stream's ack watermark for the
+                        // causal-stability GC; a reconnect replaces the
+                        // entry with this fresh (conservative) one, and the
+                        // registration drops with this stream.
+                        if let Some(watermarks) = &peer_watermarks_inbound {
+                            _watermark_registration = Some(WatermarkRegistration::new(
+                                watermarks.clone(),
+                                peer_id.clone(),
+                                acked_inbound.clone(),
+                            ));
+                        }
                     }
                 } else if msg.peer_id != peer_id {
                     log::warn!(
