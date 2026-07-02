@@ -33,6 +33,7 @@ use openai_protocol::{
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
+use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::routers::grpc::{
@@ -1484,11 +1485,11 @@ fn write_array_as_u16<F>(
     convert: F,
 ) -> std::io::Result<()>
 where
-    F: Fn(f32) -> u16 + Copy,
+    F: Fn(f32) -> u16 + Copy + Send + Sync,
 {
-    // Convert in bounded chunks so peak memory stays at ~CHUNK_VALUES u16s
-    // regardless of tensor size, on both the contiguous and strided paths.
-    const CHUNK_VALUES: usize = 256 * 1024;
+    // Bound the temporary buffer while leaving enough work to amortize
+    // parallel scheduling for large image and video tensors.
+    const CHUNK_VALUES: usize = 4 * 1024 * 1024;
 
     if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
@@ -1498,46 +1499,29 @@ where
         // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
     {
-        let mut converted: Vec<u16> = Vec::with_capacity(CHUNK_VALUES.min(encoder_slice.len()));
+        let capacity = CHUNK_VALUES.min(encoder_slice.len()) * size_of::<u16>();
+        let mut converted = vec![0u8; capacity];
         for chunk in encoder_slice.chunks(CHUNK_VALUES) {
-            converted.clear();
-            converted.extend(chunk.iter().map(|&value| convert(value)));
-            #[cfg(target_endian = "little")]
-            {
-                writer.write_all(bytemuck::cast_slice(converted.as_slice()))?;
-            }
-            #[cfg(not(target_endian = "little"))]
-            {
-                for value in &converted {
-                    writer.write_all(&value.to_le_bytes())?;
-                }
-            }
+            let output = &mut converted[..chunk.len() * size_of::<u16>()];
+            fill_f32_slice_as_u16_bytes(output, chunk, convert);
+            writer.write_all(output)?;
         }
         return Ok(());
     }
 
-    let mut converted = Vec::with_capacity(CHUNK_VALUES);
-    let mut flush = |converted: &mut Vec<u16>| -> std::io::Result<()> {
+    let mut converted = Vec::with_capacity(CHUNK_VALUES * size_of::<u16>());
+    let mut flush = |converted: &mut Vec<u8>| -> std::io::Result<()> {
         if converted.is_empty() {
             return Ok(());
         }
-        #[cfg(target_endian = "little")]
-        {
-            writer.write_all(bytemuck::cast_slice(converted.as_slice()))?;
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            for value in converted.iter() {
-                writer.write_all(&value.to_le_bytes())?;
-            }
-        }
+        writer.write_all(converted)?;
         converted.clear();
         Ok(())
     };
 
     for &value in encoder_input {
-        converted.push(convert(value));
-        if converted.len() == CHUNK_VALUES {
+        converted.extend_from_slice(&convert(value).to_le_bytes());
+        if converted.len() == CHUNK_VALUES * size_of::<u16>() {
             flush(&mut converted)?;
         }
     }
@@ -1576,10 +1560,10 @@ fn serialize_array_as_dtype(
 
 fn serialize_array_as_u16_bytes<F>(encoder_input: &ArrayD<f32>, convert: F) -> Vec<u8>
 where
-    F: Fn(f32) -> u16 + Copy,
+    F: Fn(f32) -> u16 + Copy + Send + Sync,
 {
     let element_count = encoder_input.len();
-    let mut converted = Vec::with_capacity(element_count);
+    let mut bytes = vec![0u8; element_count * size_of::<u16>()];
 
     if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
@@ -1589,22 +1573,52 @@ where
         // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
     {
-        converted.extend(encoder_slice.iter().map(|&value| convert(value)));
+        fill_f32_slice_as_u16_bytes(&mut bytes, encoder_slice, convert);
     } else {
-        converted.extend(encoder_input.iter().map(|&value| convert(value)));
+        fill_f32_values_as_u16_bytes(&mut bytes, encoder_input.iter().copied(), convert);
+    }
+    bytes
+}
+
+fn fill_f32_slice_as_u16_bytes<F>(bytes: &mut [u8], values: &[f32], convert: F)
+where
+    F: Fn(f32) -> u16 + Copy + Send + Sync,
+{
+    debug_assert_eq!(bytes.len(), values.len() * size_of::<u16>());
+    const MIN_OUTPUT_BYTES: usize = 1 << 19;
+    const MIN_VALUES_PER_TASK: usize = 32;
+    const MAX_TASKS: usize = 8;
+    let available = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let tasks = if bytes.len() < MIN_OUTPUT_BYTES {
+        1
+    } else {
+        (values.len() / MIN_VALUES_PER_TASK)
+            .min(available)
+            .clamp(1, MAX_TASKS)
+    };
+    if tasks == 1 {
+        fill_f32_values_as_u16_bytes(bytes, values.iter().copied(), convert);
+        return;
     }
 
-    #[cfg(target_endian = "little")]
-    {
-        bytemuck::cast_slice(&converted).to_vec()
-    }
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = Vec::with_capacity(element_count * std::mem::size_of::<u16>());
-        for value in converted {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        bytes
+    let chunk_values = values.len().div_ceil(tasks);
+    bytes
+        .par_chunks_mut(chunk_values * size_of::<u16>())
+        .zip(values.par_chunks(chunk_values))
+        .for_each(|(output, values)| {
+            fill_f32_values_as_u16_bytes(output, values.iter().copied(), convert);
+        });
+}
+
+fn fill_f32_values_as_u16_bytes<I, F>(bytes: &mut [u8], values: I, convert: F)
+where
+    I: IntoIterator<Item = f32>,
+    F: Fn(f32) -> u16 + Copy,
+{
+    for (output, value) in bytes.chunks_exact_mut(size_of::<u16>()).zip(values) {
+        output.copy_from_slice(&convert(value).to_le_bytes());
     }
 }
 
@@ -2439,5 +2453,25 @@ mod tests {
             .await
             .expect("preloaded entry must be returned without touching source");
         assert!(Arc::ptr_eq(&got, &cfg));
+    }
+
+    #[test]
+    fn parallel_u16_serialization_matches_scalar_conversion() {
+        let values: Vec<f32> = (0..300_000)
+            .map(|index| (index as f32 - 150_000.0) / 257.0)
+            .collect();
+        let array = ArrayD::from_shape_vec(IxDyn(&[values.len()]), values.clone()).unwrap();
+
+        for convert in [
+            f32_to_bf16_bits as fn(f32) -> u16,
+            f32_to_f16_bits as fn(f32) -> u16,
+        ] {
+            let actual = serialize_array_as_u16_bytes(&array, convert);
+            let expected: Vec<u8> = values
+                .iter()
+                .flat_map(|&value| convert(value).to_le_bytes())
+                .collect();
+            assert_eq!(actual, expected);
+        }
     }
 }
