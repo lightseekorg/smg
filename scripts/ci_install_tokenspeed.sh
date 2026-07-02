@@ -18,11 +18,6 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Keep imports hermetic to the venv. A cutlass build outside the venv (user
-# site-packages / node image) can shadow the pinned one and reintroduce the
-# ``cute.core.ThrMma`` failure even when the venv has the right version.
-export PYTHONNOUSERSITE=1
-
 # Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
@@ -102,28 +97,21 @@ export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a 10.0a}"
 
 # The kernel requirements leave ``nvidia-cutlass-dsl`` unpinned, and 4.6.0
 # dropped ``cute.core.ThrMma`` — which quack (pulled via flash-attn's cute
-# backend) uses, breaking ``import tokenspeed``. Constrain every resolve
-# below to the last compatible release.
+# backend) uses, breaking ``import tokenspeed``. Pin to the last compatible
+# release. Both UV_CONSTRAINT and PIP_CONSTRAINT are needed: the kernel's
+# setup.py shells out to ``pip install -r requirements/cuda.txt`` during the
+# native build (see _install_backend_build_requirements), and that subprocess
+# pip does not see UV_CONSTRAINT — without PIP_CONSTRAINT it pulls 4.6.0
+# alongside the pinned 4.5.2 and wins on sys.path.
 TOKENSPEED_CONSTRAINTS="$(mktemp)"
 echo "nvidia-cutlass-dsl==4.5.2" > "$TOKENSPEED_CONSTRAINTS"
 export UV_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
+export PIP_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
 
 # Preseed build-time tooling: ``./python`` and ``tokenspeed-kernel`` use
 # ``setuptools.build_meta`` without declaring ``setuptools`` in
 # ``build-system.requires``, and we install with ``--no-build-isolation``.
 uv pip install setuptools wheel pybind11
-
-# Self-hosted runners reuse ``.venv`` across jobs. An earlier unpinned run can
-# leave nvidia-cutlass-dsl 4.6.0 (``dsl_packages/`` layout) installed alongside
-# the pinned 4.5.2 (``python_packages/``); 4.6.0's ``.pth`` wins on sys.path and
-# it dropped ``cute.core.ThrMma``, so ``import tokenspeed`` fails even with the
-# pin. Purge any pre-existing cutlass-dsl so the constrained install below
-# leaves only 4.5.2.
-uv pip uninstall nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base \
-    nvidia-cutlass-dsl-libs-core nvidia-cutlass-dsl-libs-cu12 \
-    nvidia-cutlass-dsl-libs-cu13 2>/dev/null || true
-CUTLASS_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-rm -rf "${CUTLASS_SITE:?}"/nvidia_cutlass_dsl* "${CUTLASS_SITE:?}"/*cutlass*.pth
 
 uv pip install -e tokenspeed-kernel/python/ --no-build-isolation
 uv pip install -e tokenspeed-scheduler/
