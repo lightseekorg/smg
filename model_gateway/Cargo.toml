@@ -43,6 +43,7 @@ chrono.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 http.workspace = true
+libc.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
 prost-types.workspace = true

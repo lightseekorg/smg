@@ -627,6 +627,11 @@ pub(crate) fn write_tokenspeed_shm_mapped(
         let _ = remove_file(&path);
         return Err(error);
     }
+    if let Err(error) = reserve_tokenspeed_shm(&file, nbytes) {
+        drop(file);
+        let _ = remove_file(&path);
+        return Err(error);
+    }
 
     let mut mapping = match map_tokenspeed_shm(&file, nbytes) {
         Ok(mapping) => mapping,
@@ -657,6 +662,30 @@ pub(crate) fn write_tokenspeed_shm_mapped(
 #[expect(unsafe_code, reason = "memmap2 requires unsafe mapping creation")]
 fn map_tokenspeed_shm(file: &std::fs::File, nbytes: usize) -> std::io::Result<memmap2::MmapMut> {
     unsafe { memmap2::MmapOptions::new().len(nbytes).map_mut(file) }
+}
+
+#[cfg(target_os = "linux")]
+#[expect(unsafe_code, reason = "posix_fallocate is exposed through libc")]
+fn reserve_tokenspeed_shm(file: &std::fs::File, nbytes: usize) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let length = libc::off_t::try_from(nbytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TokenSpeed SHM reservation length does not fit in off_t",
+        )
+    })?;
+    let result = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, length) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(result))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reserve_tokenspeed_shm(_file: &std::fs::File, _nbytes: usize) -> std::io::Result<()> {
+    Ok(())
 }
 
 pub fn collect_tokenspeed_multimodal_inputs_shm_handles(

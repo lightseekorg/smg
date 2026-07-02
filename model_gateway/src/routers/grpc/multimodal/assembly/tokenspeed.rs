@@ -697,21 +697,33 @@ pub(in crate::routers::grpc::multimodal) fn serialize_deferred_bf16_tokenspeed_t
 
     if shm_enabled && nbytes >= min_shm_bytes {
         let timing_started = log_timing.then(Instant::now);
-        let handle = write_tokenspeed_shm_mapped(nbytes, |output| {
+        match write_tokenspeed_shm_mapped(nbytes, |output| {
             encoder_input
                 .fill_bf16_le_bytes(output)
                 .map_err(|error| std::io::Error::other(error.to_string()))
-        })?;
-        if log_timing {
-            info!(
-                nbytes,
-                elapsed_ms = timing_started
-                    .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-                    .unwrap_or_default(),
-                "smg_mm_timing tokenspeed_shm_write_deferred_bf16"
-            );
+        }) {
+            Ok(handle) => {
+                if log_timing {
+                    info!(
+                        nbytes,
+                        elapsed_ms = timing_started
+                            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                            .unwrap_or_default(),
+                        "smg_mm_timing tokenspeed_shm_write_deferred_bf16"
+                    );
+                }
+                return Ok(TokenSpeedTensor::shm(handle, shape, "bfloat16".to_string()));
+            }
+            Err(error) => {
+                use crate::observability::metrics::Metrics;
+                warn!(
+                    ?error,
+                    nbytes,
+                    "Failed to write deferred BF16 encoder input to SHM; falling back to inline transport"
+                );
+                Metrics::record_mm_shm_write_failure("tokenspeed");
+            }
         }
-        return Ok(TokenSpeedTensor::shm(handle, shape, "bfloat16".to_string()));
     }
 
     let mut data = vec![0; nbytes];

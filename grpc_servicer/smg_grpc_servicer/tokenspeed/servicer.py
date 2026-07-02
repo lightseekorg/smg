@@ -966,6 +966,15 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         try:
             for item_proto in mm_inputs.items:
+                if (
+                    item_proto.HasField("encoder_input")
+                    and item_proto.encoder_input.WhichOneof("payload") == "shm"
+                ):
+                    preserved_encoder_shm_names.add(
+                        self._validated_shm_name(item_proto.encoder_input.shm.name)
+                    )
+
+            for item_proto in mm_inputs.items:
                 item_started = time.perf_counter() if LOG_MM_TIMING else None
                 modality = self._modality_from_proto(item_proto.modality)
                 if not item_proto.HasField("encoder_input"):

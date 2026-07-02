@@ -356,9 +356,14 @@ impl DeferredNormalizedEncoderInput {
                 TransformError::ShapeError("deferred encoder input size overflow".to_string())
             })
         })?;
-        if data.len() != expected || channel_run == 0 {
+        let valid_channel_layout = channel_run != 0
+            && data.len().is_multiple_of(channel_run)
+            && (data.len() / channel_run).is_multiple_of(3);
+        if data.len() != expected || !valid_channel_layout {
             return Err(TransformError::InvalidShape {
-                expected: format!("{expected} deferred values with a non-zero channel run"),
+                expected: format!(
+                    "{expected} deferred values partitioned into complete RGB channel runs"
+                ),
                 actual: vec![data.len(), channel_run],
             });
         }
@@ -953,6 +958,34 @@ mod tests {
         let flat = inputs.encoder_input_flat().unwrap();
 
         assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn deferred_encoder_input_validates_rgb_channel_runs() {
+        let lut = [[0.0; 256]; 3];
+
+        assert!(DeferredNormalizedEncoderInput::new(vec![0; 6], vec![2, 3], lut, 4).is_err());
+        assert!(DeferredNormalizedEncoderInput::new(vec![0; 4], vec![1, 4], lut, 1).is_err());
+    }
+
+    #[test]
+    fn deferred_encoder_input_accessors_use_logical_shape() {
+        let lut = std::array::from_fn(|channel| {
+            std::array::from_fn(|value| value as f32 + channel as f32)
+        });
+        let deferred =
+            DeferredNormalizedEncoderInput::new(vec![0; 12], vec![1, 3, 2, 2], lut, 4).unwrap();
+        let mut inputs =
+            PreprocessedEncoderInputs::new_deferred_normalized(deferred, vec![1], vec![(2, 2)]);
+
+        assert_eq!(inputs.channels().unwrap(), 3);
+        assert_eq!(inputs.height().unwrap(), 2);
+        assert_eq!(inputs.width().unwrap(), 2);
+        assert_eq!(inputs.encoder_input_shape(), vec![1, 3, 2, 2]);
+        assert!(inputs.encoder_input_flat().is_err());
+
+        inputs.materialize_encoder_input().unwrap();
+        assert_eq!(inputs.encoder_input_flat().unwrap().len(), 12);
     }
 
     #[test]

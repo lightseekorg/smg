@@ -2,6 +2,7 @@ use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=src/opencv_buffer_capture.cpp");
+    println!("cargo:rerun-if-env-changed=OPENCV_INCLUDE_PATHS");
     if env::var_os("CARGO_FEATURE_OPENCV_VIDEO").is_none() {
         return Ok(());
     }
