@@ -292,6 +292,11 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
+          # Auto-register the served model at $0 cost so litellm's per-response cost
+          # lookup stops logging thousands of "This model isn't mapped yet" ERRORs
+          # (self-hosted models aren't in litellm's price map). sitecustomize runs at
+          # interpreter startup, inheriting into the tau2 subprocess's own venv.
+          export PYTHONPATH="$PWD/scripts/tau2/costmap_shim${PYTHONPATH:+:$PYTHONPATH}"
           # Serialize the launch->serve->teardown phase PER HOST. Blackwell runner
           # agents share one bare-metal machine (host network + the same 8 GPUs), so
           # two legs at once collide on ports and GPU memory. A host-wide flock runs
