@@ -436,7 +436,7 @@ async fn decode_video_frames(
             {
                 let opencv_bytes = bytes.clone();
                 let result = task::spawn_blocking(move || {
-                    decode_video_with_opencv_bytes_logged(&opencv_bytes, input_bytes, cfg)
+                    decode_video_with_opencv_bytes_logged(opencv_bytes, input_bytes, cfg)
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?;
@@ -468,7 +468,7 @@ async fn decode_video_frames(
             {
                 let opencv_bytes = bytes.clone();
                 let opencv_result = task::spawn_blocking(move || {
-                    decode_video_with_opencv_bytes_logged(&opencv_bytes, input_bytes, cfg)
+                    decode_video_with_opencv_bytes_logged(opencv_bytes, input_bytes, cfg)
                 })
                 .await
                 .map_err(MediaConnectorError::Blocking)?;
@@ -615,7 +615,7 @@ fn decode_video_with_opencv_logged(
 
 #[cfg(feature = "opencv-video")]
 fn decode_video_with_opencv_bytes_logged(
-    bytes: &[u8],
+    bytes: Bytes,
     input_bytes: usize,
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
@@ -720,7 +720,7 @@ fn decode_video_with_opencv_file(
 
 #[cfg(feature = "opencv-video")]
 fn decode_video_with_opencv_bytes(
-    bytes: &[u8],
+    bytes: Bytes,
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let active_decode = ActiveOpenCvDecode::enter();
@@ -730,10 +730,33 @@ fn decode_video_with_opencv_bytes(
 }
 
 #[cfg(feature = "opencv-video")]
-fn decode_video_from_opencv_capture(
-    mut capture: videoio::VideoCapture,
+trait OpenCvCaptureOwner {
+    fn capture_mut(&mut self) -> &mut videoio::VideoCapture;
+}
+
+#[cfg(feature = "opencv-video")]
+impl OpenCvCaptureOwner for videoio::VideoCapture {
+    fn capture_mut(&mut self) -> &mut videoio::VideoCapture {
+        self
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+impl OpenCvCaptureOwner for crate::opencv_buffer::BufferedCapture {
+    fn capture_mut(&mut self) -> &mut videoio::VideoCapture {
+        self.capture_mut()
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+fn decode_video_from_opencv_capture<C>(
+    mut capture: C,
     cfg: VideoFetchConfig,
-) -> Result<DecodedVideoFrames, MediaConnectorError> {
+) -> Result<DecodedVideoFrames, MediaConnectorError>
+where
+    C: OpenCvCaptureOwner,
+{
+    let capture = capture.capture_mut();
     let total_frames = capture
         .get(videoio::CAP_PROP_FRAME_COUNT)
         .map_err(opencv_decode_error)?
@@ -876,9 +899,9 @@ fn decode_video_from_opencv_capture(
 
 #[cfg(feature = "opencv-video")]
 fn open_opencv_video_capture_from_buffer(
-    bytes: &[u8],
+    bytes: Bytes,
     decoder_threads: i32,
-) -> Result<videoio::VideoCapture, MediaConnectorError> {
+) -> Result<crate::opencv_buffer::BufferedCapture, MediaConnectorError> {
     crate::opencv_buffer::open_capture(bytes, decoder_threads).map_err(|error| {
         MediaConnectorError::VideoDecode(format!("OpenCV could not open video buffer: {error}"))
     })

@@ -3,6 +3,7 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
+use bytes::Bytes;
 use opencv::{traits::OpenCVFromExtern, videoio};
 
 unsafe extern "C" {
@@ -15,13 +16,20 @@ unsafe extern "C" {
     ) -> *mut c_void;
 }
 
-pub(crate) fn open_capture(
-    bytes: &[u8],
-    decoder_threads: i32,
-) -> Result<videoio::VideoCapture, String> {
+pub(crate) struct BufferedCapture {
+    capture: videoio::VideoCapture,
+    _bytes: Bytes,
+}
+
+impl BufferedCapture {
+    pub(crate) fn capture_mut(&mut self) -> &mut videoio::VideoCapture {
+        &mut self.capture
+    }
+}
+
+pub(crate) fn open_capture(bytes: Bytes, decoder_threads: i32) -> Result<BufferedCapture, String> {
     let mut error = [0 as c_char; 512];
-    // SAFETY: the bridge only reads the buffer while the returned capture is
-    // alive. The caller retains `bytes` until it drops the capture after decode.
+    // SAFETY: `BufferedCapture` owns `bytes` for at least as long as the capture.
     let capture = unsafe {
         smg_opencv_capture_from_buffer(
             bytes.as_ptr(),
@@ -38,7 +46,10 @@ pub(crate) fn open_capture(
             .into_owned());
     }
 
-    // SAFETY: the bridge returns a heap-allocated cv::VideoCapture compatible
-    // with the opencv crate's generated ownership wrapper.
-    Ok(unsafe { videoio::VideoCapture::opencv_from_extern(capture) })
+    Ok(BufferedCapture {
+        // SAFETY: the bridge returns a heap-allocated cv::VideoCapture compatible
+        // with the opencv crate's generated ownership wrapper.
+        capture: unsafe { videoio::VideoCapture::opencv_from_extern(capture) },
+        _bytes: bytes,
+    })
 }
