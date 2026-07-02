@@ -495,7 +495,7 @@ impl WorkerMonitor {
 
     /// vLLM HTTP: derive load from the Prometheus `/metrics` endpoint.
     /// `vllm:gpu_cache_usage_perc` is the KV-cache usage ratio (0.0–1.0)
-    /// that maps onto `token_usage`. Returns `None` if none of the expected gauges are present.
+    /// that maps onto `token_usage`.
     async fn fetch_http_load_vllm(
         client: &reqwest::Client,
         worker: &Arc<dyn Worker>,
@@ -504,12 +504,10 @@ impl WorkerMonitor {
         let body = Self::authed_get(client, worker, &url).await?.text().await.ok()?;
         let m = PromScrape::parse(&body);
 
-        // Require at least one recognized gauge; otherwise treat as
-        // unavailable rather than reporting a misleading all-zero load.
-        if !m.has("vllm:gpu_cache_usage_perc")
-            && !m.has("vllm:num_requests_running")
-            && !m.has("vllm:num_requests_waiting")
-        {
+        // Require the KV-usage gauge: it is the signal load-aware routing acts
+        // on, and without it `token_usage` would default to `0.0` and make a
+        // worker of unknown pressure look idle.
+        if !m.has("vllm:gpu_cache_usage_perc") {
             return None;
         }
 
@@ -537,10 +535,10 @@ impl WorkerMonitor {
         let body = Self::authed_get(client, worker, &url).await?.text().await.ok()?;
         let m = PromScrape::parse(&body);
 
-        if !m.has("sglang:token_usage")
-            && !m.has("sglang:num_running_reqs")
-            && !m.has("sglang:num_queue_reqs")
-        {
+        // Require the KV-usage gauge — the load signal routing acts on.
+        // Without it `token_usage` would default to 0.0 and hide real
+        // KV pressure, so report unavailable instead.
+        if !m.has("sglang:token_usage") {
             return None;
         }
 
@@ -575,6 +573,12 @@ impl WorkerMonitor {
     /// Wrap a single scheduler snapshot as a one-rank `WorkerLoadResponse`.
     /// HTTP `/metrics` already aggregates across DP ranks, so a single
     /// synthetic rank is the correct shape.
+    ///
+    /// Such a snapshot carries the KV-usage ratio (`token_usage`) but no
+    /// absolute token counts (`max_total_num_tokens`/`num_used_tokens` stay
+    /// `0`), so `WorkerLoadResponse::has_absolute_token_data` reports `false`
+    /// for it — keeping it out of the DP-rank cache and the `/get_loads`
+    /// absolute-token scalar.
     fn single_rank(snapshot: SchedulerLoadSnapshot) -> WorkerLoadResponse {
         WorkerLoadResponse {
             dp_rank_count: 1,
@@ -817,11 +821,28 @@ async fn group_monitor_loop(
 
         let mut group_loads: HashMap<String, WorkerLoadResponse> = HashMap::new();
         let mut group_dp_loads: HashMap<String, HashMap<isize, isize>> = HashMap::new();
+        // Workers that responded but without absolute per-rank token data
+        // (ratio-only `/metrics` fallback). Their DP-cache entries must be
+        // evicted, not just left un-updated: a worker that previously served
+        // `/v1/loads` and later degrades to metrics-only would otherwise keep
+        // driving `select_and_increment_lowest_dp_load` off stale per-rank
+        // loads forever.
+        let mut dp_evict: Vec<String> = Vec::new();
         for (url, response) in results {
             if let Some(load) = response {
-                group_loads.insert(url.clone(), load.clone());
-                let dp_rank_loads = load.dp_rank_loads();
-                group_dp_loads.insert(url, dp_rank_loads);
+                // Only feed the DP-rank cache from responses that carry real
+                // absolute per-rank token counts. Ratio-only snapshots
+                // synthesized from Prometheus `/metrics` have
+                // `num_used_tokens == 0`, which would otherwise poison
+                // `select_and_increment_lowest_dp_load` with a fake `{0: 0}`
+                // entry and collapse DP routing onto rank 0. `token_usage`
+                // still reaches PowerOfTwo/cache_aware via `group_loads`.
+                if load.has_absolute_token_data() {
+                    group_dp_loads.insert(url.clone(), load.dp_rank_loads());
+                } else {
+                    dp_evict.push(url.clone());
+                }
+                group_loads.insert(url, load);
             }
         }
 
@@ -856,6 +877,11 @@ async fn group_monitor_loop(
             policy.update_loads(&group_loads);
         }
         monitor.worker_load_manager.update_dp_loads(&group_dp_loads);
+        // Purge stale per-rank loads for workers that degraded to ratio-only
+        // this tick, so they can no longer drive DP-rank selection.
+        if !dp_evict.is_empty() {
+            monitor.worker_load_manager.remove_workers(&dp_evict);
+        }
 
         // Re-export the freshly fetched loads as `smg_engine_*` gauges. Reuses
         // this poll's data; no extra fetch. Model label comes from the group.
@@ -1255,5 +1281,33 @@ sglang:utilization{model="llama"} 0.9
         assert_eq!(m.mean("sglang:token_usage"), 0.42);
         assert_eq!(m.sum("sglang:num_running_reqs"), 2.0);
         assert_eq!(m.sum("sglang:num_queue_reqs"), 4.0);
+    }
+
+    #[test]
+    fn metric_derived_snapshot_has_no_absolute_token_data() {
+        // A ratio-only snapshot (from `/metrics`) must not be treated as
+        // carrying absolute token counts: it stays out of the DP cache and
+        // the `/get_loads` scalar, even at high KV usage.
+        let resp = WorkerMonitor::single_rank(SchedulerLoadSnapshot {
+            token_usage: 0.75,
+            num_running_reqs: 3,
+            ..Default::default()
+        });
+        assert!(!resp.has_absolute_token_data());
+        assert_eq!(resp.total_used_tokens(), 0);
+        assert_eq!(resp.effective_token_usage(), 0.75);
+    }
+
+    #[test]
+    fn real_snapshot_with_capacity_has_absolute_token_data() {
+        // A snapshot from gRPC/`/v1/loads` reports KV capacity, so its
+        // absolute token fields are meaningful (even when idle).
+        let resp = WorkerMonitor::single_rank(SchedulerLoadSnapshot {
+            max_total_num_tokens: 8192,
+            num_used_tokens: 1024,
+            ..Default::default()
+        });
+        assert!(resp.has_absolute_token_data());
+        assert_eq!(resp.total_used_tokens(), 1024);
     }
 }
