@@ -382,6 +382,23 @@ pub trait VisionPreProcessor: Send + Sync {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError>;
 
+    /// Preprocess a batch of borrowed images.
+    ///
+    /// The default preserves existing behavior by cloning into owned
+    /// `DynamicImage`s and calling `preprocess`. Processors with bit-exact
+    /// borrowed paths can override this to avoid high-throughput image copies.
+    fn preprocess_image_refs(
+        &self,
+        images: &[&DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let owned = images
+            .iter()
+            .map(|image| (**image).clone())
+            .collect::<Vec<_>>();
+        self.preprocess(&owned, config)
+    }
+
     /// Preprocess one decoded video clip represented as sampled frames.
     ///
     /// Implementations that support video should emit the same primary
