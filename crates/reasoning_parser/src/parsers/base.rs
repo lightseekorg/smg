@@ -41,6 +41,22 @@ impl BaseReasoningParser {
             || (self.config.think_end_token.starts_with(text)
                 && self.config.think_end_token != text)
     }
+
+    /// Byte length of the longest trailing suffix of `text` that is a non-empty
+    /// proper prefix of `think_end_token`, so a split end token survives flushing.
+    fn trailing_end_token_prefix_len(&self, text: &str) -> usize {
+        let end = &self.config.think_end_token;
+        for (start, _) in text.char_indices() {
+            if start == 0 {
+                continue;
+            }
+            let suffix = &text[start..];
+            if end.starts_with(suffix) {
+                return suffix.len();
+            }
+        }
+        0
+    }
 }
 
 impl ReasoningParser for BaseReasoningParser {
@@ -127,9 +143,11 @@ impl ReasoningParser for BaseReasoningParser {
 
         // Continue with reasoning content
         if self.in_reasoning && self.config.stream_reasoning {
-            // Stream the content immediately
-            let reasoning_text = current_text;
-            self.buffer.clear();
+            // Hold back any trailing partial end token so a split token is not lost.
+            let hold = self.trailing_end_token_prefix_len(&current_text);
+            let split = current_text.len() - hold;
+            let reasoning_text = current_text[..split].to_string();
+            self.buffer = current_text[split..].to_string();
             Ok(ParserResult::reasoning(reasoning_text))
         } else if !self.in_reasoning {
             // Return current_text (buffer included), not just `text`, so a buffered
@@ -323,6 +341,54 @@ mod tests {
             .unwrap();
         assert_eq!(result3.normal_text, " normal");
         assert_eq!(result3.reasoning_text, "more");
+    }
+
+    #[test]
+    fn test_streaming_split_think_end_token() {
+        let mut parser = create_test_parser(true, true);
+
+        // Chunk ends mid end-token: emit "abc" as reasoning, buffer "</thi".
+        let result1 = parser
+            .parse_reasoning_streaming_incremental("abc</thi")
+            .unwrap();
+        assert_eq!(result1.reasoning_text, "abc");
+        assert_eq!(result1.normal_text, "");
+        assert!(parser.is_in_reasoning());
+
+        // Next chunk completes the token: reasoning ends, "xyz" is normal text.
+        let result2 = parser
+            .parse_reasoning_streaming_incremental("nk>xyz")
+            .unwrap();
+        assert_eq!(result2.reasoning_text, "");
+        assert_eq!(result2.normal_text, "xyz");
+        assert!(!parser.is_in_reasoning());
+    }
+
+    #[test]
+    fn test_streaming_split_unicode_think_end_token() {
+        let config = ParserConfig {
+            think_start_token: "◁think▷".to_string(),
+            think_end_token: "◁/think▷".to_string(),
+            stream_reasoning: true,
+            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
+            always_in_reasoning: true,
+        };
+        let mut parser = BaseReasoningParser::new(config);
+
+        // Split the multi-byte end token on a char boundary.
+        let result1 = parser
+            .parse_reasoning_streaming_incremental("abc◁/")
+            .unwrap();
+        assert_eq!(result1.reasoning_text, "abc");
+        assert_eq!(result1.normal_text, "");
+        assert!(parser.is_in_reasoning());
+
+        let result2 = parser
+            .parse_reasoning_streaming_incremental("think▷xyz")
+            .unwrap();
+        assert_eq!(result2.reasoning_text, "");
+        assert_eq!(result2.normal_text, "xyz");
+        assert!(!parser.is_in_reasoning());
     }
 
     #[test]
