@@ -19,7 +19,7 @@ name: Nightly tau2
 
 on:
   schedule:
-    - cron: "23 10 * * 2,4,6" # Tue/Thu/Sat 10:23 UTC = 03:23 PDT (alternates nights with nightly-bfcl; both are ~7h and share the Blackwell host)
+    - cron: "17 7 * * 2,4,6" # Tue/Thu/Sat 07:17 UTC = 00:17 PDT (alternates nights with nightly-bfcl; both are ~7h and share the Blackwell host)
   # PR sanity: only when the tau2 pipeline itself changes. Runs the H100 legs on a
   # quick single-domain, single-trial, small-task subset so the A/B is exercised
   # end-to-end (engine, tool/reasoning parsing, scoring) before merge.
