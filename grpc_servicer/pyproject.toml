@@ -12,6 +12,7 @@ dependencies = [
     "grpcio>=1.81.1",
     "grpcio-reflection>=1.81.1",
     "grpcio-health-checking>=1.81.1",
+    "prometheus-client>=0.20.0",
 ]
 readme = "README.md"
 license = "Apache-2.0"

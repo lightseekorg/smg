@@ -18,6 +18,7 @@ from concurrent import futures
 import grpc
 from grpc_health.v1 import health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
+from prometheus_client import CollectorRegistry
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.disagg_service import start_disagg_service
@@ -26,6 +27,11 @@ from sglang.srt.utils import kill_process_tree
 from sglang.utils import get_exception_traceback
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 
+from smg_grpc_servicer.metrics import (
+    SchedulerLoadCollector,
+    resolve_metrics_port,
+    start_metrics_sidecar,
+)
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
 from smg_grpc_servicer.sglang.scheduler_launcher import launch_scheduler_process_only
@@ -38,6 +44,7 @@ async def serve_grpc(
     server_args: ServerArgs,
     model_info: dict | None = None,
     on_request_manager_ready: Callable | None = None,
+    metrics_port: int | None = None,
 ):
     """Start the standalone gRPC server with integrated scheduler.
 
@@ -50,6 +57,8 @@ async def serve_grpc(
             server starts accepting requests. sglang's HTTP sidecar uses
             this to wire its admin endpoints to the scheduler, so the
             callback signature is a public contract.
+        metrics_port: Optional port for the best-effort Prometheus ``/metrics``
+            sidecar (falls back to ``SMG_METRICS_PORT``); ``None`` disables it.
     """
 
     # Start bootstrap server BEFORE launching scheduler processes (only in PREFILL mode)
@@ -155,6 +164,10 @@ async def serve_grpc(
     )
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
+    # Requested port only decides whether to start the sidecar; the servicer
+    # advertises the *bound* port set after a successful start (see below).
+    metrics_port = resolve_metrics_port(metrics_port)
+
     # Add SGLang service
     servicer = SGLangSchedulerServicer(
         request_manager=request_manager,
@@ -163,6 +176,8 @@ async def serve_grpc(
         model_info=model_info,
         scheduler_info=scheduler_info,
         health_servicer=health_servicer,
+        # Set to the bound port only after the sidecar starts (below).
+        metrics_port=None,
     )
     sglang_scheduler_pb2_grpc.add_SglangSchedulerServicer_to_server(servicer, server)
 
@@ -293,6 +308,20 @@ async def serve_grpc(
 
     await server.start()
 
+    # Best-effort Prometheus sidecar. In gRPC mode the scheduler runs in
+    # subprocesses, so a SchedulerLoadCollector re-exposes the request manager's
+    # in-process load rather than relying on a populated global registry.
+    metrics_sidecar = None
+    if metrics_port is not None:
+        registry = CollectorRegistry()
+        registry.register(SchedulerLoadCollector(servicer.load_snapshot))
+        metrics_sidecar = await start_metrics_sidecar(
+            server_args.host, metrics_port, registry=registry
+        )
+        # Advertise only the actually-bound port; leave it None if the bind failed.
+        if metrics_sidecar is not None:
+            servicer.metrics_port = metrics_sidecar.port
+
     # Start warmup in a separate thread
     warmup_thread = threading.Thread(
         target=_wait_and_warmup_grpc,
@@ -319,6 +348,9 @@ async def serve_grpc(
         # Mark unhealthy first so probes and load balancers stop routing new
         # requests before we drain.
         health_servicer.set_not_serving()
+
+        if metrics_sidecar is not None:
+            await metrics_sidecar.close()
 
         # Drain in-flight RPCs with the request manager's ZMQ sockets still
         # open, then tear it down. Closing ZMQ before server.stop() drops the

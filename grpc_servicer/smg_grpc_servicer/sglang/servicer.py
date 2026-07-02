@@ -202,6 +202,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         model_info: dict,
         scheduler_info: dict,
         health_servicer: SGLangHealthServicer | None = None,
+        metrics_port: int | None = None,
     ):
         """Initialize the standalone gRPC service."""
         self.request_manager = request_manager
@@ -211,6 +212,9 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         self.scheduler_info = scheduler_info
         self.start_time = time.time()
         self.health_servicer = health_servicer
+        # Advertised in GetServerInfo.server_args so the gateway can scrape the
+        # Prometheus sidecar; ``None`` when the sidecar is disabled.
+        self.metrics_port = metrics_port
         self.mm_receiver = None
         if (
             self.server_args.language_only
@@ -525,6 +529,29 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             num_labels=self.model_info.get("num_labels") or 0,
         )
 
+    def _metrics_server_args(self) -> dict:
+        """Sidecar address advertised in ``server_args`` for gateway discovery."""
+        from smg_grpc_servicer.metrics import metrics_server_args
+
+        return metrics_server_args(getattr(self.server_args, "host", "") or "", self.metrics_port)
+
+    def load_snapshot(self) -> dict[str, float]:
+        """Sync, non-blocking load snapshot for the Prometheus sidecar.
+
+        Reads only the request manager's in-process counters (no scheduler
+        communicator round-trip), so it is safe from a synchronous Prometheus
+        collect(). ``token_usage`` needs a scheduler round-trip and is reported
+        via ``GetLoads`` instead, so it is left at 0 here.
+        """
+        info = self.request_manager.get_server_info()
+        active = int(info.get("active_requests", 0) or 0)
+        return {
+            "num_running_reqs": float(active),
+            "num_waiting_reqs": 0.0,
+            "num_total_reqs": float(active),
+            "token_usage": 0.0,
+        }
+
     async def GetServerInfo(
         self,
         _request: sglang_scheduler_pb2.GetServerInfoRequest,
@@ -549,6 +576,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 return str(obj)
 
         serializable_args = make_serializable(server_args_dict)
+        serializable_args.update(self._metrics_server_args())
         server_args_struct.update(serializable_args)
 
         # Convert scheduler_info to Struct
