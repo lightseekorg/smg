@@ -14,7 +14,6 @@ use bytes::Bytes;
 #[cfg(feature = "opencv-video")]
 use opencv::{
     core::{Mat, Vector},
-    imgproc,
     prelude::*,
     videoio,
 };
@@ -779,7 +778,7 @@ where
 
     let sampled_frame_counts = counted_frame_indices(&frame_indices);
     let unique_frame_count = sampled_frame_counts.len();
-    let mut data = Vec::new();
+    let mut rgb_output = None;
     let mut frames = Vec::new();
     frames.try_reserve(frame_indices.len()).map_err(|e| {
         MediaConnectorError::VideoDecode(format!(
@@ -788,7 +787,6 @@ where
         ))
     })?;
     let mut bgr_frame = Mat::default();
-    let mut rgb_frame = Mat::default();
 
     let timeout = video_process_timeout();
     let started = Instant::now();
@@ -832,64 +830,52 @@ where
             continue;
         }
 
-        imgproc::cvt_color_def(&bgr_frame, &mut rgb_frame, imgproc::COLOR_BGR2RGB)
-            .map_err(opencv_decode_error)?;
-
-        let decoded_width = u32::try_from(rgb_frame.cols()).map_err(|_| {
+        let decoded_width = u32::try_from(bgr_frame.cols()).map_err(|_| {
             MediaConnectorError::VideoDecode(format!(
                 "OpenCV produced invalid RGB frame width: {}",
-                rgb_frame.cols()
+                bgr_frame.cols()
             ))
         })?;
-        let decoded_height = u32::try_from(rgb_frame.rows()).map_err(|_| {
+        let decoded_height = u32::try_from(bgr_frame.rows()).map_err(|_| {
             MediaConnectorError::VideoDecode(format!(
                 "OpenCV produced invalid RGB frame height: {}",
-                rgb_frame.rows()
+                bgr_frame.rows()
             ))
         })?;
-        let frame_size = rawvideo_frame_size(decoded_width, decoded_height)?;
-        let rgb_bytes = rgb_frame.data_bytes().map_err(opencv_decode_error)?;
-        if rgb_bytes.len() < frame_size {
-            return Err(MediaConnectorError::VideoDecode(format!(
-                "OpenCV produced {} RGB bytes for {decoded_width}x{decoded_height} frame, expected {frame_size}",
-                rgb_bytes.len()
-            )));
-        }
-
-        if data.is_empty() {
+        if rgb_output.is_none() {
+            let frame_size = rawvideo_frame_size(decoded_width, decoded_height)?;
             let decoded_bytes = frame_size.checked_mul(unique_frame_count).ok_or_else(|| {
                 MediaConnectorError::VideoDecode(
                     "decoded video byte size overflow while reserving RGB frames".to_string(),
                 )
             })?;
             ensure_decoded_byte_limit(decoded_bytes)?;
-            data.try_reserve_exact(decoded_bytes).map_err(|e| {
-                MediaConnectorError::VideoDecode(format!(
-                    "failed to reserve {decoded_bytes} decoded video bytes: {e}"
-                ))
-            })?;
+            rgb_output = Some(
+                crate::opencv_buffer::RgbOutputBuffer::with_capacity(decoded_bytes)
+                    .map_err(MediaConnectorError::VideoDecode)?,
+            );
         }
-
-        let new_len = data.len().checked_add(frame_size).ok_or_else(|| {
-            MediaConnectorError::VideoDecode(format!(
-                "decoded video byte size overflow while appending {frame_size} bytes"
-            ))
+        let output = rgb_output.as_mut().ok_or_else(|| {
+            MediaConnectorError::VideoDecode("missing OpenCV RGB output buffer".to_string())
+        })?;
+        let frame_size = rawvideo_frame_size(decoded_width, decoded_height)?;
+        let new_len = output.len().checked_add(frame_size).ok_or_else(|| {
+            MediaConnectorError::VideoDecode(
+                "decoded video byte size overflow while appending RGB frame".to_string(),
+            )
         })?;
         ensure_decoded_byte_limit(new_len)?;
-        data.try_reserve(frame_size).map_err(|e| {
-            MediaConnectorError::VideoDecode(format!(
-                "failed to reserve {frame_size} decoded video bytes: {e}"
-            ))
-        })?;
-        let offset = data.len();
-        data.extend_from_slice(&rgb_bytes[..frame_size]);
+        let (offset, len) = output
+            .push_bgr(&bgr_frame, decoded_width, decoded_height)
+            .map_err(MediaConnectorError::VideoDecode)?;
+        let frame = DecodedRgbFrame {
+            width: decoded_width,
+            height: decoded_height,
+            offset,
+            len,
+        };
         for _ in 0..repeat_count {
-            frames.push(DecodedRgbFrame {
-                width: decoded_width,
-                height: decoded_height,
-                offset,
-                len: frame_size,
-            });
+            frames.push(frame.clone());
         }
     }
 
@@ -906,10 +892,12 @@ where
         )));
     }
 
-    Ok(DecodedVideoFrames::Rgb(DecodedRgbVideo::new(
-        Bytes::from(data),
-        frames,
-    )))
+    let data = rgb_output
+        .ok_or_else(|| {
+            MediaConnectorError::VideoDecode("OpenCV produced no RGB output".to_string())
+        })?
+        .into_bytes();
+    Ok(DecodedVideoFrames::Rgb(DecodedRgbVideo::new(data, frames)))
 }
 
 #[cfg(feature = "opencv-video")]
