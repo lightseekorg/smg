@@ -485,6 +485,27 @@ async fn v1_realtime_ws(
     state.router.route_realtime_ws(req, &model).await
 }
 
+/// `GET /v1/responses` WebSocket upgrade. The model is taken from the `model`
+/// query parameter (the upgrade request carries no JSON body); per-event
+/// `response.create` payloads supply the rest of the request.
+async fn v1_responses_ws(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RealtimeQueryParams>,
+    req: Request,
+) -> Response {
+    let model = match params.model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing required 'model' query parameter",
+            )
+                .into_response();
+        }
+    };
+    state.router.route_responses_ws(req, &model).await
+}
+
 async fn v1_realtime_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -844,7 +865,12 @@ pub fn build_app(
     let realtime_routes = with_admission_layer(
         Router::new()
             .route("/v1/realtime", get(v1_realtime_ws))
-            .route("/v1/realtime/calls", post(v1_realtime_webrtc)),
+            .route("/v1/realtime/calls", post(v1_realtime_webrtc))
+            // `GET /v1/responses` WebSocket upgrade shares the realtime route
+            // group's middleware (auth + admission + tenant-meta, NO WASM — the
+            // WASM OnResponse phase drops the upgrade-future extensions). It
+            // coexists with `POST /v1/responses` (SSE) via the final `.merge()`.
+            .route("/v1/responses", get(v1_responses_ws)),
         &admission_mode,
         app_state.clone(),
     )
@@ -1439,7 +1465,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
     } else {
+        // Disable Nagle on inbound client connections (TCP_NODELAY) so small
+        // streaming frames — notably the first WebSocket Responses delta — are
+        // flushed immediately instead of waiting on a ~40ms delayed-ACK. Restores
+        // the original PR's NoDelayAcceptor, dropped in the standalone extraction.
+        // TODO(tls): apply the same to the bind_rustls path (compose NoDelay under
+        // the rustls acceptor) once verified against this axum_server version.
         axum_server::bind(addr)
+            .acceptor(axum_server::accept::NoDelayAcceptor::new())
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await

@@ -5,4 +5,5 @@ mod messages_api_test;
 mod parser_endpoints_test;
 mod request_formats_test;
 mod responses_api_test;
+mod responses_ws_test;
 mod streaming_tests;

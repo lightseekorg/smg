@@ -2,7 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    http::HeaderMap,
+    body::Body,
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        FromRequestParts, Request,
+    },
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
@@ -20,7 +25,7 @@ use super::{
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
     multimodal::MultimodalComponents,
     pipeline::RequestPipeline,
-    regular::responses,
+    regular::responses::{self, GrpcWsResponsesExecutor},
 };
 use crate::{
     app_context::AppContext,
@@ -29,6 +34,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
+        ws_responses::{serve_responses_ws, WsResponsesExecutor},
         RouterTrait,
     },
     worker::WorkerRegistry,
@@ -48,6 +54,10 @@ pub struct GrpcRouter {
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
     retry_config: RetryConfig,
+    /// Header→key mapping for storage request-context. The WS Responses upgrade
+    /// runs outside the middleware's task-local scope, so it rebuilds the scope
+    /// from these headers (empty = feature off, a no-op like the middleware).
+    storage_context_headers: std::collections::HashMap<String, String>,
 }
 
 impl GrpcRouter {
@@ -170,6 +180,7 @@ impl GrpcRouter {
             responses_context,
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
+            storage_context_headers: ctx.router_config.storage_context_headers.clone(),
         })
     }
 
@@ -364,6 +375,67 @@ impl GrpcRouter {
             )
             .await
         }
+    }
+
+    /// `GET /v1/responses` WebSocket dispatch.
+    ///
+    /// Validates the worker, rejects Harmony-backed models (unsupported on the
+    /// WS path in V1), then upgrades the connection and drives it through
+    /// [`GrpcWsResponsesExecutor`] over the regular Responses pipeline. Mirrors
+    /// the realtime WS upgrade: parts are split off the request and the
+    /// `WebSocketUpgrade` is extracted from them.
+    async fn route_responses_ws_impl(&self, req: Request<Body>, model_id: &str) -> Response {
+        let (mut parts, _body) = req.into_parts();
+
+        if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
+        {
+            return error_response;
+        }
+
+        if HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, model_id) {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                "Harmony-backed Responses are not supported on the WebSocket path in V1.",
+            )
+                .into_response();
+        }
+
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(ws) => ws,
+            Err(e) => return e.into_response(),
+        };
+        let headers = parts.headers.clone();
+
+        // Build a fresh context. The realtime-style WS route does NOT carry
+        // `storage_context_middleware`, and the upgrade future runs detached from
+        // this request's task, so `current_request_context()` is `None` here.
+        // Rebuild the storage scope directly from the request headers so
+        // store=true WS reads/writes are tenant/user-scoped like the HTTP path
+        // (no-op when `storage_context_headers` is unconfigured).
+        let request_context = crate::middleware::storage_context::build_storage_request_context(
+            &self.storage_context_headers,
+            &headers,
+        );
+        let responses_context = ResponsesContext::new(
+            Arc::new(self.pipeline.clone()),
+            self.shared_components.clone(),
+            self.responses_context.response_storage.clone(),
+            self.responses_context.conversation_storage.clone(),
+            self.responses_context.conversation_item_storage.clone(),
+            self.responses_context.mcp_orchestrator.clone(),
+            self.responses_context.mcp_format_registry.clone(),
+            request_context,
+        );
+        let executor: Arc<dyn WsResponsesExecutor> = Arc::new(GrpcWsResponsesExecutor::new(
+            self.worker_registry.clone(),
+            responses_context,
+        ));
+
+        debug!("Upgrading to /v1/responses WebSocket for model: {model_id}");
+
+        ws.on_upgrade(move |socket: WebSocket| async move {
+            serve_responses_ws(socket, headers, executor).await;
+        })
     }
 
     /// Main route_embeddings implementation
@@ -571,6 +643,10 @@ impl RouterTrait for GrpcRouter {
     ) -> Response {
         self.route_responses_impl(headers, tenant_meta, body, model_id)
             .await
+    }
+
+    async fn route_responses_ws(&self, req: Request<Body>, model_id: &str) -> Response {
+        self.route_responses_ws_impl(req, model_id).await
     }
 
     async fn cancel_response(&self, _headers: Option<&HeaderMap>, response_id: &str) -> Response {

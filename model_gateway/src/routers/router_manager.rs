@@ -821,6 +821,19 @@ impl RouterTrait for RouterManager {
         }
     }
 
+    async fn route_responses_ws(&self, req: Request<Body>, model: &str) -> Response {
+        let router = self.select_router_for_request(Some(model));
+        if let Some(router) = router {
+            router.route_responses_ws(req, model).await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for responses WebSocket request",
+            )
+                .into_response()
+        }
+    }
+
     async fn route_realtime_webrtc(&self, req: Request<Body>, model: &str) -> Response {
         let router = self.select_router_for_request(Some(model));
         if let Some(router) = router {

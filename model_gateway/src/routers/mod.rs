@@ -39,8 +39,10 @@ pub mod http;
 pub mod openai;
 pub mod parse;
 pub mod responses;
+pub mod responses_validation;
 pub mod router_manager;
 pub mod tokenize;
+pub mod ws_responses;
 
 pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience
@@ -280,6 +282,19 @@ pub trait RouterTrait: Send + Sync + Debug {
         (
             StatusCode::NOT_IMPLEMENTED,
             "Realtime WebSocket not implemented",
+        )
+            .into_response()
+    }
+
+    /// Route a `/v1/responses` WebSocket upgrade request.
+    ///
+    /// Mirrors [`Self::route_realtime_ws`]: routers that support the streamed
+    /// Responses WebSocket transport override this; the default rejects with
+    /// `501 Not Implemented`.
+    async fn route_responses_ws(&self, _req: Request<Body>, _model_id: &str) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Responses WebSocket not implemented",
         )
             .into_response()
     }
