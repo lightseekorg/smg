@@ -1,3 +1,5 @@
+#[cfg(feature = "opencv-video")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::HashSet,
     io::Write,
@@ -6,9 +8,6 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-
-#[cfg(feature = "opencv-video")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
@@ -779,6 +778,7 @@ where
     }
 
     let sampled_frame_counts = counted_frame_indices(&frame_indices);
+    let unique_frame_count = sampled_frame_counts.len();
     let mut data = Vec::new();
     let mut frames = Vec::new();
     frames.try_reserve(frame_indices.len()).map_err(|e| {
@@ -855,20 +855,35 @@ where
                 rgb_bytes.len()
             )));
         }
+
+        if data.is_empty() {
+            let decoded_bytes = frame_size.checked_mul(unique_frame_count).ok_or_else(|| {
+                MediaConnectorError::VideoDecode(
+                    "decoded video byte size overflow while reserving RGB frames".to_string(),
+                )
+            })?;
+            ensure_decoded_byte_limit(decoded_bytes)?;
+            data.try_reserve_exact(decoded_bytes).map_err(|e| {
+                MediaConnectorError::VideoDecode(format!(
+                    "failed to reserve {decoded_bytes} decoded video bytes: {e}"
+                ))
+            })?;
+        }
+
+        let new_len = data.len().checked_add(frame_size).ok_or_else(|| {
+            MediaConnectorError::VideoDecode(format!(
+                "decoded video byte size overflow while appending {frame_size} bytes"
+            ))
+        })?;
+        ensure_decoded_byte_limit(new_len)?;
+        data.try_reserve(frame_size).map_err(|e| {
+            MediaConnectorError::VideoDecode(format!(
+                "failed to reserve {frame_size} decoded video bytes: {e}"
+            ))
+        })?;
+        let offset = data.len();
+        data.extend_from_slice(&rgb_bytes[..frame_size]);
         for _ in 0..repeat_count {
-            let new_len = data.len().checked_add(frame_size).ok_or_else(|| {
-                MediaConnectorError::VideoDecode(format!(
-                    "decoded video byte size overflow while appending {frame_size} bytes"
-                ))
-            })?;
-            ensure_decoded_byte_limit(new_len)?;
-            data.try_reserve(frame_size).map_err(|e| {
-                MediaConnectorError::VideoDecode(format!(
-                    "failed to reserve {frame_size} decoded video bytes: {e}"
-                ))
-            })?;
-            let offset = data.len();
-            data.extend_from_slice(&rgb_bytes[..frame_size]);
             frames.push(DecodedRgbFrame {
                 width: decoded_width,
                 height: decoded_height,
@@ -1862,6 +1877,7 @@ mod tests {
         };
         let indices = super::opencv_frame_indices(1, 30.0, cfg);
         assert_eq!(indices, vec![0, 0, 0, 0]);
+        assert_eq!(super::counted_frame_indices(&indices), vec![(0, 4)]);
     }
 
     #[cfg(feature = "opencv-video")]
