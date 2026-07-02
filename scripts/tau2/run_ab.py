@@ -73,6 +73,8 @@ def run_tau2(
     max_concurrency: int,
     user_llm: str,
     data_dir: Path,
+    request_timeout: int = 0,
+    run_timeout: int = 0,
 ) -> None:
     """Run `tau2 run` for one arm+domain, then read back its results.json.
 
@@ -80,11 +82,24 @@ def run_tau2(
     with a per-call `api_base` pointing at this arm (via --agent-llm-args); the
     user uses the fixed gpt-5.2. Results land at
     <data_dir>/simulations/<save_to>/results.json.
+
+    Two fail-fast bounds keep one pathological task from consuming the whole CI
+    budget (a single Qwen3.6-27B airline sim once hung ~5h until the 6h job limit):
+    `request_timeout` caps each LiteLLM call so a degenerate generation errors out
+    instead of streaming for tens of minutes; `run_timeout` caps the whole domain
+    subprocess so a wedged `tau2 run` is killed and its domain left unscored (the
+    report renders "—") rather than blocking forever. Both are opt-in (0 = off).
     """
     save_to = f"ab_{arm.name}_{domain}"
-    agent_args = json.dumps(
-        {"api_base": arm.base_url.rstrip("/") + "/v1", "api_key": "smg-local", "temperature": 0.0}
-    )
+    agent_llm_args: dict[str, object] = {
+        "api_base": arm.base_url.rstrip("/") + "/v1",
+        "api_key": "smg-local",
+        "temperature": 0.0,
+    }
+    if request_timeout > 0:
+        # LiteLLM completion kwarg: hard per-request wall-clock cap.
+        agent_llm_args["timeout"] = request_timeout
+    agent_args = json.dumps(agent_llm_args)
     user_args = json.dumps({"temperature": 0.0})
     cmd = [
         tau2,
@@ -114,7 +129,17 @@ def run_tau2(
     # look for them regardless of any inherited $TAU2_DATA_DIR or whether tau2 is
     # installed editable vs into site-packages.
     env["TAU2_DATA_DIR"] = str(data_dir)
-    proc = subprocess.run(cmd, env=env, check=False)
+    try:
+        proc = subprocess.run(cmd, env=env, check=False, timeout=(run_timeout or None))
+    except subprocess.TimeoutExpired:
+        # tau2 is a single in-process asyncio run (no forked workers), so run() has
+        # already SIGKILLed it. Leave the domain unscored and move on; the servers
+        # are torn down by the workflow's own cleanup/nuke_gpus trap.
+        print(
+            f"WARNING: [{arm.name}/{domain}] timed out after {run_timeout}s; killed",
+            file=sys.stderr,
+        )
+        return
     if proc.returncode != 0:
         print(f"WARNING: [{arm.name}/{domain}] exited {proc.returncode}", file=sys.stderr)
     results_json = data_dir / "simulations" / save_to / "results.json"
@@ -213,6 +238,8 @@ def score_arm(
     max_concurrency: int,
     user_llm: str,
     data_dir: Path,
+    request_timeout: int = 0,
+    run_timeout: int = 0,
 ) -> None:
     """Run tau2 for every domain against one already-serving arm, filling arm.scores."""
     for domain in domains:
@@ -226,6 +253,8 @@ def score_arm(
             max_concurrency=max_concurrency,
             user_llm=user_llm,
             data_dir=data_dir,
+            request_timeout=request_timeout,
+            run_timeout=run_timeout,
         )
 
 
@@ -296,6 +325,18 @@ def main() -> int:
         help="tau2 --max-concurrency (concurrent simulations per arm; 0 = tau2 default)",
     )
     p.add_argument(
+        "--request-timeout",
+        type=int,
+        default=0,
+        help="per-LiteLLM-request timeout in seconds injected into the agent (0 = off)",
+    )
+    p.add_argument(
+        "--run-timeout",
+        type=int,
+        default=0,
+        help="per-domain `tau2 run` wall-clock cap in seconds; killed if exceeded (0 = off)",
+    )
+    p.add_argument(
         "--agent-model",
         default="Qwen/Qwen3.6-27B",
         help="served model name on both arms (used as openai/<name>)",
@@ -338,6 +379,8 @@ def main() -> int:
             max_concurrency=args.max_concurrency,
             user_llm=args.user_llm,
             data_dir=args.data_dir,
+            request_timeout=args.request_timeout,
+            run_timeout=args.run_timeout,
         )
         save_scores(arm, args.scores_out)
         print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
@@ -361,6 +404,8 @@ def main() -> int:
             max_concurrency=args.max_concurrency,
             user_llm=args.user_llm,
             data_dir=args.data_dir,
+            request_timeout=args.request_timeout,
+            run_timeout=args.run_timeout,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:

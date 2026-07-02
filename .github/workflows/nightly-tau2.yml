@@ -54,6 +54,14 @@ on:
         description: "Concurrent tau2 simulations per arm"
         required: false
         default: "16"
+      request_timeout:
+        description: "Per-LiteLLM-request timeout (s) for the agent; 0 = off"
+        required: false
+        default: "300"
+      run_timeout:
+        description: "Per-domain `tau2 run` wall-clock cap (s); 0 = off"
+        required: false
+        default: "5400"
       vllm_tool_parser:
         description: "Override pure-vLLM --tool-call-parser; empty = matrix default"
         required: false
@@ -229,6 +237,10 @@ jobs:
       # 30 on the heavy Blackwell legs). Dispatch `num_tasks` overrides all legs.
       NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || matrix.num_tasks) }}
       MAX_CONCURRENCY: ${{ github.event.inputs.max_concurrency || '16' }}
+      # Fail-fast bounds (see COMMON below). Per-request cap 300s catches a single
+      # degenerate generation; per-domain cap 5400s (90m) bounds a wedged `tau2 run`.
+      REQUEST_TIMEOUT: ${{ github.event.inputs.request_timeout || '300' }}
+      RUN_TIMEOUT: ${{ github.event.inputs.run_timeout || '5400' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -310,6 +322,11 @@ jobs:
             --tau2 "$TAU2_BIN" --data-dir "$DATA_DIR"
             --domains "$DOMAINS" --num-trials "$NUM_TRIALS" --num-tasks "$NUM_TASKS"
             --max-concurrency "$MAX_CONCURRENCY"
+            # Fail-fast bounds so one wedged simulation can't burn the whole 6h job
+            # (a Qwen3.6-27B airline sim once hung ~5h on a single 77-min request).
+            # --request-timeout caps each LiteLLM call; --run-timeout caps a whole
+            # domain (worst case 3 domains/arm x 90m = 270m, under timeout-minutes:360).
+            --request-timeout "$REQUEST_TIMEOUT" --run-timeout "$RUN_TIMEOUT"
           )
           if [ "$ARM_MODE" = sequential ]; then
             # Whole node per arm (TP=8), one at a time: score arm A, tear it down to
