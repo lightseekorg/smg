@@ -4,15 +4,15 @@ use std::{
     // (HashSet insert/remove/contains) and never cross .await boundaries.
     // See: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, ListParams},
+    api::Api,
     runtime::{
-        watcher::{watcher, Config},
+        reflector::{self, Store},
+        watcher::{watcher, Config, Event},
         WatchStreamExt,
     },
     Client,
@@ -89,7 +89,6 @@ impl ModelIdSource {
 pub struct ServiceDiscoveryConfig {
     pub enabled: bool,
     pub selector: HashMap<String, String>,
-    pub check_interval: Duration,
     pub port: u16,
     pub namespace: Option<String>,
     // PD mode specific configuration
@@ -163,7 +162,6 @@ impl Default for ServiceDiscoveryConfig {
         ServiceDiscoveryConfig {
             enabled: false,
             selector: HashMap::new(),
-            check_interval: Duration::from_secs(60),
             port: 8000,
             namespace: None,
             pd_mode: false,
@@ -354,6 +352,41 @@ impl PodInfo {
     }
 }
 
+/// Route a single worker-watcher `Event` to the right handler.
+///
+/// `Apply`/`InitApply` add (idempotent via the tracked set), `Delete` removes,
+/// and `InitDone` reconciles the tracked set against the `Store` snapshot. `Init`
+/// is just a relist-start marker.
+async fn dispatch_worker_event(
+    event: Event<Pod>,
+    store: &Store<Pod>,
+    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
+    app_context: Arc<AppContext>,
+    config: Arc<ServiceDiscoveryConfig>,
+    port: u16,
+) {
+    match event {
+        Event::Init => {
+            debug!("K8s worker watcher (re)list starting");
+        }
+        Event::Apply(pod) | Event::InitApply(pod) => {
+            if PodInfo::should_include(&pod, &config) {
+                if let Some(info) = PodInfo::from_pod(&pod, Some(&config)) {
+                    handle_pod_event(&info, tracked_pods, app_context, port, config.pd_mode).await;
+                }
+            }
+        }
+        Event::Delete(pod) => {
+            if let Some(info) = PodInfo::from_pod(&pod, Some(&config)) {
+                handle_pod_deletion(&info, tracked_pods, app_context, port).await;
+            }
+        }
+        Event::InitDone => {
+            reconcile_from_store(store, config, tracked_pods, app_context, port).await;
+        }
+    }
+}
+
 pub async fn start_service_discovery(
     config: ServiceDiscoveryConfig,
     app_context: Arc<AppContext>,
@@ -475,147 +508,44 @@ pub async fn start_service_discovery(
             }
         }
 
-        // Spawn a supervisor that runs periodic reconciliation and restarts it
-        // on panic. This is a safety net independent of the watcher: it catches
-        // missed events regardless of whether the watcher is healthy, restarting,
-        // or erroring out.
-        {
-            let reconcile_pods_api = pods.clone();
-            let reconcile_config = Arc::clone(&config_arc);
-            let reconcile_tracked = Arc::clone(&tracked_pods);
-            let reconcile_ctx = Arc::clone(&app_context);
-            let reconcile_interval = config.check_interval;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "reconciliation supervisor runs for the lifetime of the server"
-            )]
-            tokio::spawn(async move {
-                loop {
-                    let api = reconcile_pods_api.clone();
-                    let cfg = Arc::clone(&reconcile_config);
-                    let trk = Arc::clone(&reconcile_tracked);
-                    let ctx = Arc::clone(&reconcile_ctx);
-                    let handle = tokio::spawn(async move {
-                        // Delay the first tick so the watcher has time to populate initial state.
-                        let start = time::Instant::now() + reconcile_interval;
-                        let mut interval = time::interval_at(start, reconcile_interval);
-                        loop {
-                            interval.tick().await;
-                            reconcile_pods(
-                                &api,
-                                Arc::clone(&cfg),
-                                Arc::clone(&trk),
-                                Arc::clone(&ctx),
-                                port,
-                            )
-                            .await;
-                        }
-                    });
-                    if let Err(e) = handle.await {
-                        error!(
-                            "Periodic reconciliation task panicked: {} -- restarting after {}s",
-                            e,
-                            reconcile_interval.as_secs()
-                        );
-                        time::sleep(reconcile_interval).await;
-                    } else {
-                        break;
-                    }
+        // Informer: watcher → default_backoff (self-heal) → reflect into a Store.
+        //
+        // `default_backoff` makes the stream infinite: transient watch errors
+        // trigger an internal exponential-backoff reconnect (no manual restart
+        // loop). `reflect` keeps an in-memory `Store<Pod>` consistent with the
+        // API server while passing every `Event` through unchanged. A desync
+        // re-LIST surfaces as `Init…InitDone`, and `InitDone` drives
+        // `reconcile_from_store` — replacing the old periodic full-LIST reconcile.
+        let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
+        let (store_reader, store_writer) = reflector::store::<Pod>();
+        let mut stream = watcher(pods.clone(), watcher_config)
+            .default_backoff()
+            .reflect(store_writer)
+            .boxed();
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(event) => {
+                    dispatch_worker_event(
+                        event,
+                        &store_reader,
+                        Arc::clone(&tracked_pods),
+                        Arc::clone(&app_context),
+                        Arc::clone(&config_arc),
+                        port,
+                    )
+                    .await;
                 }
-            });
-            info!(
-                "Periodic reconciliation enabled | interval: {}s",
-                config.check_interval.as_secs()
-            );
-        }
-
-        let mut retry_delay = Duration::from_secs(1);
-        const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
-
-        loop {
-            let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
-            let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
-
-            let config_clone = Arc::clone(&config_arc);
-            let tracked_pods_clone = Arc::clone(&tracked_pods);
-
-            let filtered_stream = watcher_stream.filter_map(move |obj_res| {
-                let config_inner = Arc::clone(&config_clone);
-
-                async move {
-                    match obj_res {
-                        Ok(pod) => {
-                            if PodInfo::should_include(&pod, &config_inner) {
-                                Some(Ok(pod))
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => Some(Err(e)),
-                    }
-                }
-            });
-
-            let tracked_pods_clone2 = Arc::clone(&tracked_pods_clone);
-            let app_context_clone = Arc::clone(&app_context);
-            let config_clone2 = Arc::clone(&config_arc);
-
-            let watcher_ok = filtered_stream
-                .try_for_each(move |pod| {
-                    let tracked_pods_inner = Arc::clone(&tracked_pods_clone2);
-                    let app_context_inner = Arc::clone(&app_context_clone);
-                    let config_inner = Arc::clone(&config_clone2);
-
-                    async move {
-                        let pod_info = PodInfo::from_pod(&pod, Some(&config_inner));
-
-                        if let Some(pod_info) = pod_info {
-                            if pod.metadata.deletion_timestamp.is_some() {
-                                handle_pod_deletion(
-                                    &pod_info,
-                                    tracked_pods_inner,
-                                    app_context_inner,
-                                    port,
-                                )
-                                .await;
-                            } else {
-                                handle_pod_event(
-                                    &pod_info,
-                                    tracked_pods_inner,
-                                    app_context_inner,
-                                    port,
-                                    config_inner.pd_mode,
-                                )
-                                .await;
-                            }
-                        }
-                        Ok(())
-                    }
-                })
-                .await;
-
-            match watcher_ok {
-                Ok(()) => {
-                    retry_delay = Duration::from_secs(1);
-                }
-                Err(err) => {
-                    error!("Error in Kubernetes watcher: {}", err);
-                    warn!(
-                        "Retrying in {} seconds with exponential backoff",
-                        retry_delay.as_secs()
+                Err(e) => {
+                    error!(
+                        "K8s worker watcher error (auto-retrying with backoff): {}",
+                        e
                     );
-                    time::sleep(retry_delay).await;
-
-                    retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
                 }
             }
-
-            warn!(
-                "Kubernetes watcher exited, restarting in {} seconds",
-                config_arc.check_interval.as_secs()
-            );
-            time::sleep(config_arc.check_interval).await;
         }
+
+        warn!("K8s worker watcher stream ended unexpectedly");
     });
 
     Ok(handle)
@@ -892,41 +822,30 @@ fn compute_reconciliation_diff(
     (stale, missing)
 }
 
-/// Reconcile the tracked pod set with actual Kubernetes state.
+/// Reconcile the tracked pod set against the informer's in-memory `Store`
+/// snapshot.
 ///
-/// Performs a full pod list via the K8s API and compares with `tracked_pods`:
-/// - Pods in `tracked_pods` but no longer in K8s → submit `RemoveWorker` job
-/// - Healthy pods in K8s but missing from `tracked_pods` → submit `AddWorker` job
-///
-/// This closes two gaps in the event-driven watcher:
-/// 1. Missed deletion events (pod force-deleted, watcher down during delete)
-/// 2. Missed creation events (pod created while watcher was restarting)
-async fn reconcile_pods(
-    pods: &Api<Pod>,
+/// Runs on every `Event::InitDone` (initial sync + each re-LIST after a desync),
+/// replacing the old timer-driven full-LIST reconcile. The `Store` is kept
+/// consistent with the API server by the reflector, so this performs **zero**
+/// API calls:
+/// - Pods in `tracked_pods` but no longer in the `Store` → submit `RemoveWorker`
+/// - Healthy pods in the `Store` but missing from `tracked_pods` → submit `AddWorker`
+async fn reconcile_from_store(
+    store: &Store<Pod>,
     config: Arc<ServiceDiscoveryConfig>,
     tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
     app_context: Arc<AppContext>,
     port: u16,
 ) {
     let reconcile_start = time::Instant::now();
-    let label_selector = config.list_label_selector();
-    let list_params = if label_selector.is_empty() {
-        ListParams::default()
-    } else {
-        ListParams::default().labels(&label_selector)
-    };
-    let pod_list = match pods.list(&list_params).await {
-        Ok(list) => list,
-        Err(e) => {
-            error!("Reconciliation: failed to list pods: {}", e);
-            return;
-        }
-    };
 
-    // Build the set of live pods that match our selectors.
-    // Include all non-deleted pods regardless of health: the router's own health
-    // checker handles unhealthy workers. Only pods completely gone from K8s are stale.
-    let live_pods = build_live_pod_set(&pod_list.items, &config);
+    // Snapshot the informer cache (no API round-trip). Build the set of live pods
+    // that match our selectors. Include all non-deleted pods regardless of health:
+    // the router's own health checker handles unhealthy workers. Only pods
+    // completely gone from the cache are stale.
+    let snapshot: Vec<Pod> = store.state().iter().map(|p| (**p).clone()).collect();
+    let live_pods = build_live_pod_set(&snapshot, &config);
 
     // Diff: stale = tracked but not live, missing = live-and-healthy but not tracked
     let (stale, missing) = {
@@ -1042,137 +961,105 @@ async fn reconcile_pods(
     );
 }
 
-/// Start router node discovery for mesh cluster
+/// Apply a single router-watcher `Event` to the mesh `ClusterState`.
+///
+/// A real `Event::Delete` now marks a hard-deleted router pod `Down` — the old
+/// `.applied_objects()` stream dropped deletes, so hard-deleted routers were only
+/// ever detected via mesh SWIM timeout. The graceful-termination path
+/// (`deletion_timestamp` set on a still-applied object) is preserved.
+fn apply_router_event(
+    event: &Event<Pod>,
+    config: &ServiceDiscoveryConfig,
+    cluster_state: &ClusterState,
+    default_mesh_port: u16,
+) {
+    let (pod, is_delete) = match event {
+        Event::Apply(pod) | Event::InitApply(pod) => (pod, false),
+        Event::Delete(pod) => (pod, true),
+        Event::Init | Event::InitDone => return,
+    };
+
+    if !PodInfo::matches_selector(pod, &config.router_selector) {
+        return;
+    }
+    let Some(pod_info) = PodInfo::from_pod(pod, Some(config)) else {
+        return;
+    };
+    if !pod_info.is_router {
+        return;
+    }
+
+    let terminating = pod.metadata.deletion_timestamp.is_some();
+
+    if is_delete || terminating {
+        // Pod deleted or terminating: mark node Down.
+        let mut state = cluster_state.write();
+        if let Some(node) = state.get_mut(&pod_info.name) {
+            node.status = NodeStatus::Down as i32;
+            node.version += 1;
+            info!("Router node {} marked as Down (pod deleted)", pod_info.name);
+        } else {
+            debug!(
+                "Router node {} not found in cluster state (already removed)",
+                pod_info.name
+            );
+        }
+    } else if pod_info.is_healthy() {
+        // Pod is healthy: add or update node in cluster state.
+        let mesh_port = pod_info.mesh_port.unwrap_or(default_mesh_port);
+        let node_address = format!("{}:{}", pod_info.ip, mesh_port);
+        let mut state = cluster_state.write();
+        let existing_version = state.get(&pod_info.name).map(|n| n.version).unwrap_or(0);
+        let node_state = NodeState {
+            name: pod_info.name.clone(),
+            address: node_address,
+            status: NodeStatus::Alive as i32,
+            version: existing_version + 1,
+            metadata: HashMap::new(),
+        };
+        state.insert(pod_info.name.clone(), node_state.clone());
+        info!(
+            "Router node {} added/updated in mesh cluster (address: {})",
+            pod_info.name, node_state.address
+        );
+    } else {
+        // Pod is not healthy: mark as Suspected (unless already Down).
+        let mut state = cluster_state.write();
+        if let Some(node) = state.get_mut(&pod_info.name) {
+            if node.status != NodeStatus::Down as i32 {
+                node.status = NodeStatus::Suspected as i32;
+                node.version += 1;
+                debug!(
+                    "Router node {} marked as Suspected (pod not healthy)",
+                    pod_info.name
+                );
+            }
+        }
+    }
+}
+
+/// Start router node discovery for the mesh cluster.
+///
+/// Uses the informer self-healing watcher (`default_backoff`) and consumes real
+/// `Event`s. No `Store`/snapshot reconcile is needed here: the mesh CRDT/SWIM
+/// layer handles convergence; the watcher just feeds accurate up/down events.
 async fn start_router_discovery(
     config: Arc<ServiceDiscoveryConfig>,
     pods: Api<Pod>,
     cluster_state: ClusterState,
     default_mesh_port: u16,
 ) {
-    use std::collections::HashMap;
+    let watcher_config = build_watcher_config("router", &config.router_label_selector());
+    let mut stream = watcher(pods, watcher_config).default_backoff().boxed();
 
-    let mut retry_delay = Duration::from_secs(1);
-    const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
-
-    loop {
-        let watcher_config = build_watcher_config("router", &config.router_label_selector());
-        let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
-
-        let config_clone = Arc::clone(&config);
-
-        let filtered_stream = watcher_stream.filter_map(move |obj_res| {
-            let config_inner = Arc::clone(&config_clone);
-
-            async move {
-                match obj_res {
-                    Ok(pod) => {
-                        // Check if this pod matches router selector
-                        if PodInfo::matches_selector(&pod, &config_inner.router_selector) {
-                            Some(Ok(pod))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(e) => Some(Err(e)),
-                }
-            }
-        });
-
-        let config_clone2 = Arc::clone(&config);
-        let cluster_state_clone2 = cluster_state.clone();
-
-        match filtered_stream
-            .try_for_each(move |pod| {
-                let config_inner = Arc::clone(&config_clone2);
-                let cluster_state_inner = cluster_state_clone2.clone();
-
-                async move {
-                    let pod_info = PodInfo::from_pod(&pod, Some(&config_inner));
-
-                    if let Some(pod_info) = pod_info {
-                        if pod_info.is_router {
-                            let mesh_port = pod_info.mesh_port.unwrap_or(default_mesh_port);
-                            let node_address = format!("{}:{}", pod_info.ip, mesh_port);
-
-                            if pod.metadata.deletion_timestamp.is_some() {
-                                // Pod is being deleted, mark node as Down
-                                let mut state = cluster_state_inner.write();
-                                if let Some(node) = state.get_mut(&pod_info.name) {
-                                    node.status = NodeStatus::Down as i32;
-                                    node.version += 1;
-                                    info!(
-                                        "Router node {} marked as Down (pod deleted)",
-                                        pod_info.name
-                                    );
-                                } else {
-                                    debug!(
-                                        "Router node {} not found in cluster state (already removed)",
-                                        pod_info.name
-                                    );
-                                }
-                            } else if pod_info.is_healthy() {
-                                // Pod is healthy, add or update node in cluster state
-                                let mut state = cluster_state_inner.write();
-                                let existing_version = state
-                                    .get(&pod_info.name)
-                                    .map(|n| n.version)
-                                    .unwrap_or(0);
-
-                                let node_state = NodeState {
-                                    name: pod_info.name.clone(),
-                                    address: node_address,
-                                    status: NodeStatus::Alive as i32,
-                                    version: existing_version + 1,
-                                    metadata: HashMap::new(),
-                                };
-
-                                state.insert(pod_info.name.clone(), node_state.clone());
-                                info!(
-                                    "Router node {} added/updated in mesh cluster (address: {})",
-                                    pod_info.name, node_state.address
-                                );
-                            } else {
-                                // Pod is not healthy, mark as Suspected
-                                let mut state = cluster_state_inner.write();
-                                if let Some(node) = state.get_mut(&pod_info.name) {
-                                    if node.status != NodeStatus::Down as i32 {
-                                        node.status = NodeStatus::Suspected as i32;
-                                        node.version += 1;
-                                        debug!(
-                                            "Router node {} marked as Suspected (pod not healthy)",
-                                            pod_info.name
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-            })
-            .await
-        {
-            Ok(()) => {
-                retry_delay = Duration::from_secs(1);
-            }
-            Err(err) => {
-                error!("Error in router discovery watcher: {}", err);
-                warn!(
-                    "Retrying router discovery in {} seconds with exponential backoff",
-                    retry_delay.as_secs()
-                );
-                time::sleep(retry_delay).await;
-
-                retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
-            }
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => apply_router_event(&event, &config, &cluster_state, default_mesh_port),
+            Err(e) => error!("Router watcher error (auto-retrying with backoff): {}", e),
         }
-
-        warn!(
-            "Router discovery watcher exited, restarting in {} seconds",
-            config.check_interval.as_secs()
-        );
-        time::sleep(config.check_interval).await;
     }
+
+    warn!("Router watcher stream ended unexpectedly");
 }
 
 #[cfg(test)]
@@ -1333,7 +1220,6 @@ mod tests {
         ServiceDiscoveryConfig {
             enabled: true,
             selector: HashMap::new(),
-            check_interval: Duration::from_secs(60),
             port: 8080,
             namespace: None,
             pd_mode: true,
@@ -1344,6 +1230,158 @@ mod tests {
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
         }
+    }
+
+    fn create_regular_config() -> ServiceDiscoveryConfig {
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "sglang".to_string());
+        ServiceDiscoveryConfig {
+            enabled: true,
+            selector,
+            ..ServiceDiscoveryConfig::default()
+        }
+    }
+
+    fn create_regular_pod(name: &str, ip: &str) -> Pod {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".to_string(), "sglang".to_string());
+        let mut pod = create_k8s_pod(Some(name), Some(ip), Some("Running"), Some("True"), None);
+        pod.metadata.labels = Some(labels);
+        pod
+    }
+
+    // ---- Informer event dispatch tests ----
+
+    #[tokio::test]
+    async fn test_dispatch_worker_event_apply_then_delete() {
+        let config = Arc::new(create_regular_config());
+        let ctx = create_test_app_context();
+        let tracked = Arc::new(Mutex::new(HashSet::new()));
+        let (store_reader, _writer) = reflector::store::<Pod>();
+        let pod = create_regular_pod("w1", "10.0.0.1");
+
+        dispatch_worker_event(
+            Event::Apply(pod.clone()),
+            &store_reader,
+            Arc::clone(&tracked),
+            Arc::clone(&ctx),
+            Arc::clone(&config),
+            8000,
+        )
+        .await;
+        assert_eq!(
+            tracked.lock().expect("lock").len(),
+            1,
+            "Apply should add the pod"
+        );
+
+        dispatch_worker_event(
+            Event::Delete(pod),
+            &store_reader,
+            Arc::clone(&tracked),
+            Arc::clone(&ctx),
+            Arc::clone(&config),
+            8000,
+        )
+        .await;
+        assert_eq!(
+            tracked.lock().expect("lock").len(),
+            0,
+            "Delete should remove the pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_worker_event_init_apply_adds() {
+        let config = Arc::new(create_regular_config());
+        let ctx = create_test_app_context();
+        let tracked = Arc::new(Mutex::new(HashSet::new()));
+        let (store_reader, _writer) = reflector::store::<Pod>();
+        let pod = create_regular_pod("w1", "10.0.0.1");
+
+        dispatch_worker_event(
+            Event::InitApply(pod),
+            &store_reader,
+            Arc::clone(&tracked),
+            Arc::clone(&ctx),
+            Arc::clone(&config),
+            8000,
+        )
+        .await;
+        assert_eq!(
+            tracked.lock().expect("lock").len(),
+            1,
+            "InitApply should add the pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_worker_event_init_done_adds_missing_from_store() {
+        let config = Arc::new(create_regular_config());
+        let ctx = create_test_app_context();
+        let tracked = Arc::new(Mutex::new(HashSet::new()));
+
+        // Populate a Store as the informer would during a relist.
+        let (store_reader, mut writer) = reflector::store::<Pod>();
+        let pod = create_regular_pod("w1", "10.0.0.1");
+        writer.apply_watcher_event(&Event::Init);
+        writer.apply_watcher_event(&Event::InitApply(pod));
+        writer.apply_watcher_event(&Event::InitDone);
+
+        dispatch_worker_event(
+            Event::InitDone,
+            &store_reader,
+            Arc::clone(&tracked),
+            Arc::clone(&ctx),
+            Arc::clone(&config),
+            8000,
+        )
+        .await;
+        assert_eq!(
+            tracked.lock().expect("lock").len(),
+            1,
+            "InitDone reconcile should add the pod present in the Store snapshot"
+        );
+    }
+
+    #[test]
+    fn test_apply_router_event_delete_marks_down() {
+        let mut router_selector = HashMap::new();
+        router_selector.insert("role".to_string(), "router".to_string());
+        let config = ServiceDiscoveryConfig {
+            enabled: true,
+            router_selector,
+            ..ServiceDiscoveryConfig::default()
+        };
+
+        let cluster_state: ClusterState =
+            Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
+
+        // Build a router pod and pre-seed it as Alive via an Apply event.
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("role".to_string(), "router".to_string());
+        let mut pod = create_k8s_pod(
+            Some("r1"),
+            Some("10.1.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
+        pod.metadata.labels = Some(labels);
+
+        apply_router_event(&Event::Apply(pod.clone()), &config, &cluster_state, 7000);
+        assert_eq!(
+            cluster_state.read().get("r1").map(|n| n.status),
+            Some(NodeStatus::Alive as i32),
+            "Apply of a healthy router pod should mark it Alive"
+        );
+
+        apply_router_event(&Event::Delete(pod), &config, &cluster_state, 7000);
+        assert_eq!(
+            cluster_state.read().get("r1").map(|n| n.status),
+            Some(NodeStatus::Down as i32),
+            "Delete of a router pod should mark it Down"
+        );
     }
 
     #[test]
@@ -1374,7 +1412,6 @@ mod tests {
         let config = ServiceDiscoveryConfig::default();
         assert!(!config.enabled);
         assert!(config.selector.is_empty());
-        assert_eq!(config.check_interval, Duration::from_secs(60));
         assert_eq!(config.port, 8000);
         assert!(config.namespace.is_none());
         assert!(!config.pd_mode);

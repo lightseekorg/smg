@@ -1203,7 +1203,6 @@ impl CliArgs {
                 enabled: true,
                 namespace: self.service_discovery_namespace.clone(),
                 port: self.service_discovery_port,
-                check_interval_secs: 60,
                 selector: Self::parse_selector(&self.selector),
                 prefill_selector: Self::parse_selector(&self.prefill_selector),
                 decode_selector: Self::parse_selector(&self.decode_selector),
@@ -1401,7 +1400,6 @@ impl CliArgs {
             Some(ServiceDiscoveryConfig {
                 enabled: true,
                 selector: Self::parse_selector(&self.selector),
-                check_interval: std::time::Duration::from_secs(60),
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
                 pd_mode: self.pd_disaggregation,
