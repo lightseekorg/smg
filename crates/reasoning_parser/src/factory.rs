@@ -7,8 +7,8 @@ use parking_lot::RwLock;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
-        Step3Parser,
+        MiniMaxParser, MistralParser, NanoV3Parser, PassthroughParser, Qwen3Parser,
+        QwenThinkingParser, Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -143,6 +143,9 @@ impl ParserFactory {
         // appends <think> token at the beginning
         registry.register_parser("minimax", || Box::new(MiniMaxParser::new()));
 
+        // Magistral reasoning models use [THINK] / [/THINK], always_in_reasoning=false
+        registry.register_parser("mistral", || Box::new(MistralParser::new()));
+
         // uses <|START_THINKING|> / <|END_THINKING|>
         registry.register_parser("cohere_cmd", || Box::new(CohereCmdParser::new()));
 
@@ -199,6 +202,11 @@ impl ParserFactory {
         registry.register_pattern("minimax", "minimax");
         registry.register_pattern("minimax-m2", "minimax");
         registry.register_pattern("mm-m2", "minimax");
+
+        // Magistral is the reasoning member of the Mistral family. Match only
+        // `magistral` (not a broad `mistral`/`mixtral` substring) so plain
+        // Mistral-Small / Mixtral non-reasoning models are not misrouted here.
+        registry.register_pattern("magistral", "mistral");
 
         // Cohere Command models use <|START_THINKING|> / <|END_THINKING|>
         registry.register_pattern("command-r", "cohere_cmd");
@@ -319,6 +327,30 @@ mod tests {
         // Also test alternate patterns
         let mm = factory.create("mm-m2-chat");
         assert_eq!(mm.model_type(), "minimax");
+    }
+
+    #[test]
+    fn test_magistral_model() {
+        let factory = ParserFactory::new();
+
+        let magistral = factory.create("magistral-small-2506");
+        assert_eq!(magistral.model_type(), "mistral");
+
+        let magistral_cased = factory.create("Mistral/Magistral-Small");
+        assert_eq!(magistral_cased.model_type(), "mistral");
+    }
+
+    #[test]
+    fn test_plain_mistral_is_not_reasoning() {
+        // Plain Mistral / Mixtral models are NOT reasoning models and must fall
+        // back to passthrough rather than the Magistral reasoning parser.
+        let factory = ParserFactory::new();
+
+        let mistral_small = factory.create("mistral-small-3.1");
+        assert_eq!(mistral_small.model_type(), "passthrough");
+
+        let mixtral = factory.create("mixtral-8x7b");
+        assert_eq!(mixtral.model_type(), "passthrough");
     }
 
     #[test]
