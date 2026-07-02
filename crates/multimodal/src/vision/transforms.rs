@@ -83,7 +83,7 @@ pub fn deinterleave_rgb_to_planes(
     }
     let chunk = pixels.div_ceil(nthreads);
     let (mut rr, mut gg, mut bb) = (r_plane, g_plane, b_plane);
-    std::thread::scope(|s| {
+    par_scope(|s| {
         let mut p0 = 0usize;
         while p0 < pixels {
             let n = chunk.min(pixels - p0);
@@ -94,7 +94,7 @@ pub fn deinterleave_rgb_to_planes(
             gg = gt;
             bb = bt;
             let rgb_band = &rgb[p0 * 3..(p0 + n) * 3];
-            s.spawn(move || deinterleave_contiguous(rgb_band, rb, gb, bbnd, scale, bias));
+            s.spawn(move |_| deinterleave_contiguous(rgb_band, rb, gb, bbnd, scale, bias));
             p0 += n;
         }
     });
@@ -414,6 +414,34 @@ fn pil_clip8(v: i64) -> u8 {
     }
 }
 
+fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
+    const MAX_POOL_THREADS: usize = 64;
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(MAX_POOL_THREADS);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("smg-mm-preprocess-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+pub(crate) fn par_scope<'scope, OP, R>(op: OP) -> R
+where
+    OP: FnOnce(&rayon::Scope<'scope>) -> R + Send,
+    R: Send,
+{
+    match preprocess_pool() {
+        Some(pool) => pool.scope(op),
+        None => rayon::scope(op),
+    }
+}
+
 /// Number of threads to split an elementwise or row-banded preprocessing pass
 /// across. Each output row/element is independent, so banding work over threads
 /// yields BIT-IDENTICAL output: no shared accumulation and no inner-loop order
@@ -492,7 +520,7 @@ fn pil_resample_horizontal(
         );
     } else {
         let chunk_rows = rows.div_ceil(nthreads);
-        std::thread::scope(|s| {
+        par_scope(|s| {
             let (b, k) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut oy0 = 0usize;
@@ -501,7 +529,7 @@ fn pil_resample_horizontal(
                 let (band, tail) = rest.split_at_mut(n * row_out);
                 rest = tail;
                 let start = oy0;
-                s.spawn(move || {
+                s.spawn(move |_| {
                     pil_h_band(src, b, k, half, in_w, out_w, channels, start, band);
                 });
                 oy0 += n;
@@ -561,7 +589,7 @@ fn pil_resample_vertical(
         pil_v_band(src, &bounds, &kernels, half, width, channels, 0, &mut out);
     } else {
         let chunk_rows = out_h.div_ceil(nthreads);
-        std::thread::scope(|s| {
+        par_scope(|s| {
             let (b, k) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut oy0 = 0usize;
@@ -570,7 +598,7 @@ fn pil_resample_vertical(
                 let (band, tail) = rest.split_at_mut(n * row_out);
                 rest = tail;
                 let start = oy0;
-                s.spawn(move || pil_v_band(src, b, k, half, width, channels, start, band));
+                s.spawn(move |_| pil_v_band(src, b, k, half, width, channels, start, band));
                 oy0 += n;
             }
         });

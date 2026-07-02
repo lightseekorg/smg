@@ -32,8 +32,8 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            par_threads, pil_to_filter, resize, resize_bicubic_pil, resize_bicubic_pil_rgb,
-            resize_rgb_bytes, rgb_bytes, TransformError,
+            par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
+            resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, TransformError,
         },
     },
 };
@@ -423,7 +423,7 @@ impl QwenVLProcessorBase {
         } else {
             let chunk_blocks = n_blocks.div_ceil(nthreads);
             let planes_ref = &planes;
-            std::thread::scope(|s| {
+            par_scope(|s| {
                 let mut rest = &mut *region;
                 let mut b0 = 0usize;
                 while b0 < n_blocks {
@@ -431,7 +431,7 @@ impl QwenVLProcessorBase {
                     let (band, tail) = rest.split_at_mut(nb * block_out);
                     rest = tail;
                     let start = b0;
-                    s.spawn(move || {
+                    s.spawn(move |_| {
                         Self::patchify_block_band(
                             planes_ref,
                             width,
@@ -644,7 +644,7 @@ impl QwenVLProcessorBase {
             );
         } else {
             let chunk_blocks = n_blocks.div_ceil(nthreads);
-            std::thread::scope(|s| {
+            par_scope(|s| {
                 let mut rest = &mut *region;
                 let mut b0 = 0usize;
                 while b0 < n_blocks {
@@ -652,7 +652,7 @@ impl QwenVLProcessorBase {
                     let (band, tail) = rest.split_at_mut(nb * block_out);
                     rest = tail;
                     let start = b0;
-                    s.spawn(move || {
+                    s.spawn(move |_| {
                         Self::patchify_video_rgb_block_band(
                             frames,
                             width,
@@ -774,7 +774,7 @@ impl QwenVLProcessorBase {
             );
         } else {
             let chunk_blocks = n_blocks.div_ceil(nthreads);
-            std::thread::scope(|s| {
+            par_scope(|s| {
                 let mut rest = &mut *region;
                 let mut b0 = 0usize;
                 while b0 < n_blocks {
@@ -782,7 +782,7 @@ impl QwenVLProcessorBase {
                     let (band, tail) = rest.split_at_mut(nb * block_out);
                     rest = tail;
                     let start = b0;
-                    s.spawn(move || {
+                    s.spawn(move |_| {
                         Self::patchify_image_rgb_block_band(
                             raw,
                             width,
