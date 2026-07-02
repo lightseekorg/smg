@@ -113,6 +113,18 @@ export UV_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
 # ``build-system.requires``, and we install with ``--no-build-isolation``.
 uv pip install setuptools wheel pybind11
 
+# Self-hosted runners reuse ``.venv`` across jobs. An earlier unpinned run can
+# leave nvidia-cutlass-dsl 4.6.0 (``dsl_packages/`` layout) installed alongside
+# the pinned 4.5.2 (``python_packages/``); 4.6.0's ``.pth`` wins on sys.path and
+# it dropped ``cute.core.ThrMma``, so ``import tokenspeed`` fails even with the
+# pin. Purge any pre-existing cutlass-dsl so the constrained install below
+# leaves only 4.5.2.
+uv pip uninstall nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base \
+    nvidia-cutlass-dsl-libs-core nvidia-cutlass-dsl-libs-cu12 \
+    nvidia-cutlass-dsl-libs-cu13 2>/dev/null || true
+CUTLASS_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+rm -rf "${CUTLASS_SITE:?}"/nvidia_cutlass_dsl* "${CUTLASS_SITE:?}"/*cutlass*.pth
+
 uv pip install -e tokenspeed-kernel/python/ --no-build-isolation
 uv pip install -e tokenspeed-scheduler/
 uv pip install -e "./python" --no-build-isolation
