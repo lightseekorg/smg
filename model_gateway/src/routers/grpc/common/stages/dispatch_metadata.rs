@@ -18,15 +18,15 @@ pub(crate) struct DispatchMetadataStage;
 #[async_trait]
 impl PipelineStage for DispatchMetadataStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        let proto_request = ctx.state.proto_request.as_ref().ok_or_else(|| {
+        let execution_plan = ctx.state.execution_plan.as_ref().ok_or_else(|| {
             error!(
                 function = "DispatchMetadataStage::execute",
-                "Proto request not built"
+                "Execution plan not built"
             );
-            error::internal_error("proto_request_not_built", "Proto request not built")
+            error::internal_error("execution_plan_not_built", "Execution plan not built")
         })?;
 
-        let request_id = proto_request.request_id().to_string();
+        let request_id = execution_plan.request_id().to_string();
         let model = match &ctx.input.request_type {
             RequestType::Chat(req) => req.model.clone(),
             RequestType::Completion(req) => req.model.clone(),
@@ -47,7 +47,7 @@ impl PipelineStage for DispatchMetadataStage {
             .as_ref()
             .map(|w| match w {
                 WorkerSelection::Single { worker } => worker,
-                WorkerSelection::Dual { decode, .. } => decode,
+                WorkerSelection::Disaggregated { decode, .. } => decode,
             })
             .and_then(|w| w.metadata().spec.labels.get("weight_version").cloned())
             .unwrap_or_else(|| "default".to_string());

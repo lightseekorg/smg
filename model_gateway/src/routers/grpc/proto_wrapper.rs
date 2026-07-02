@@ -18,6 +18,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use rand::RngExt;
 use smg_grpc_client::{
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
@@ -32,6 +33,17 @@ use smg_grpc_client::{
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
+
+/// Backend-neutral encode->prefill bootstrap info for one multimodal item.
+///
+/// Backend wrappers translate this into their own proto shape when supported.
+#[derive(Clone, Debug)]
+pub(crate) struct EncodeItemBootstrapInfo {
+    pub item_index: u32,
+    pub bootstrap_host: String,
+    pub bootstrap_port: i32,
+    pub bootstrap_room: i64,
+}
 
 // =====================
 // Multimodal Data
@@ -121,9 +133,9 @@ pub struct TensorBytes {
     pub dtype: String,
 }
 
-/// TokenSpeed tensor with storage that can be either inline bytes or an
-/// already-published SHM handle. The latter lets SMG serialize large encoder
-/// inputs directly into SHM instead of building a temporary Vec<u8> first.
+/// TokenSpeed tensor with an explicit payload transport. Inline, SHM, and
+/// remote descriptors all converge here before becoming generated proto fields,
+/// so stages do not need to mutate `TensorData` oneofs directly.
 #[derive(Debug, Clone)]
 pub struct TokenSpeedTensor {
     pub storage: TokenSpeedTensorStorage,
@@ -135,6 +147,7 @@ pub struct TokenSpeedTensor {
 pub enum TokenSpeedTensorStorage {
     Inline(Vec<u8>),
     Shm(tokenspeed::ShmHandle),
+    Remote(tokenspeed::RemoteTensorHandle),
 }
 
 impl TokenSpeedTensor {
@@ -154,10 +167,58 @@ impl TokenSpeedTensor {
         }
     }
 
+    pub fn remote(handle: tokenspeed::RemoteTensorHandle, shape: Vec<u32>, dtype: String) -> Self {
+        Self {
+            storage: TokenSpeedTensorStorage::Remote(handle),
+            shape,
+            dtype,
+        }
+    }
+
+    pub fn try_export_nixl_remote(self, room: i64) -> Self {
+        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+            return self;
+        }
+
+        let Self {
+            storage,
+            shape,
+            dtype,
+        } = self;
+        let data = match storage {
+            TokenSpeedTensorStorage::Inline(data) => data,
+            storage => {
+                return Self {
+                    storage,
+                    shape,
+                    dtype,
+                };
+            }
+        };
+        if data.is_empty() {
+            return Self::inline(data, shape, dtype);
+        }
+
+        let nbytes = data.len() as u64;
+        match crate::routers::grpc::mm_rdma::export_pixel_buffer(room, data) {
+            Ok(descriptor) => Self::remote(
+                tokenspeed::RemoteTensorHandle {
+                    transport: "nixl".to_string(),
+                    descriptor,
+                    nbytes,
+                },
+                shape,
+                dtype,
+            ),
+            Err(data) => Self::inline(data, shape, dtype),
+        }
+    }
+
     pub fn nbytes(&self) -> usize {
         match &self.storage {
             TokenSpeedTensorStorage::Inline(data) => data.len(),
             TokenSpeedTensorStorage::Shm(handle) => handle.nbytes as usize,
+            TokenSpeedTensorStorage::Remote(handle) => handle.nbytes as usize,
         }
     }
 }
@@ -257,7 +318,25 @@ impl TrtllmMultimodalData {
 }
 
 impl TokenSpeedMultimodalData {
-    /// Convert to TokenSpeed proto MultimodalInputs.
+    /// Export inline encoder-input payloads over NIXL for normal TokenSpeed
+    /// Generate requests (single-worker and PD prefill legs). EPD encode uses
+    /// its own room-matched export path because the room must also be injected
+    /// into the encode->prefill handshake.
+    pub fn try_export_encoder_inputs_nixl_remote(mut self) -> Self {
+        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+            return self;
+        }
+        for item in &mut self.items {
+            let room = rand::rng().random_range(0..i64::MAX);
+            let placeholder = TokenSpeedTensor::inline(Vec::new(), Vec::new(), String::new());
+            let encoder_input = std::mem::replace(&mut item.encoder_input, placeholder);
+            item.encoder_input = encoder_input.try_export_nixl_remote(room);
+        }
+        self
+    }
+
+    /// Convert to TokenSpeed proto MultimodalInputs. The EPD prefill leg drops
+    /// each item's encoder_input afterward via `clear_mm_pixel_values`.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
         let shm_enabled = self.shm_enabled;
         let items = self
@@ -283,6 +362,8 @@ impl TokenSpeedMultimodalItem {
             .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled)))
             .collect::<HashMap<_, _>>();
 
+        let encoder_input = Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled));
+
         tokenspeed::MultimodalItem {
             modality: match self.modality {
                 TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
@@ -290,7 +371,7 @@ impl TokenSpeedMultimodalItem {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled)),
+            encoder_input,
             model_specific_tensors,
             placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -315,6 +396,10 @@ fn tokenspeed_tensor_to_proto(
         TokenSpeedTensorStorage::Shm(handle) => {
             Metrics::record_mm_tensor("tokenspeed", "shm", handle.nbytes as usize);
             tokenspeed::tensor_data::Payload::Shm(handle)
+        }
+        TokenSpeedTensorStorage::Remote(handle) => {
+            Metrics::record_mm_tensor("tokenspeed", "remote", handle.nbytes as usize);
+            tokenspeed::tensor_data::Payload::Remote(handle)
         }
     };
 
@@ -970,17 +1055,21 @@ impl ProtoGenerateRequest {
         self.clone()
     }
 
-    /// Strip multimodal inputs from the request.
+    /// Drop raw multimodal encoder tensors while keeping item metadata.
     ///
-    /// Used for the decode worker in PD disaggregation — the decode worker only
-    /// needs the KV cache from prefill, not the image pixel data. This avoids
-    /// transmitting ~40MB of pixel tensors to a worker that ignores them.
-    pub fn clear_mm_inputs(&mut self) {
+    /// Used by the EPD prefill leg: image embeddings arrive from encode workers,
+    /// but prefill still needs placeholders/model-specific metadata to slot them.
+    pub fn clear_mm_pixel_values(&mut self) {
         match self {
             Self::Sglang(req) => req.mm_inputs = None,
             Self::Vllm(req) => req.mm_inputs = None,
-            Self::TokenSpeed(req) => req.mm_inputs = None,
-            // TRT-LLM and MLX protos have no mm_inputs field
+            Self::TokenSpeed(req) => {
+                if let Some(mm) = req.mm_inputs.as_mut() {
+                    for item in &mut mm.items {
+                        item.encoder_input = None;
+                    }
+                }
+            }
             Self::Trtllm(_) | Self::Mlx(_) => {}
         }
     }
@@ -1041,6 +1130,64 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.kv_transfer_params_json = Some(json),
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params_json called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Set encode->prefill bootstrap info for backends that receive image embeddings
+    /// out-of-band from encode workers.
+    pub(crate) fn set_encode_bootstrap_info(&mut self, items: Vec<EncodeItemBootstrapInfo>) {
+        match self {
+            Self::TokenSpeed(req) => {
+                let items = items
+                    .into_iter()
+                    .map(|item| tokenspeed::EncodeItemBootstrapInfo {
+                        item_index: item.item_index,
+                        bootstrap_host: item.bootstrap_host,
+                        bootstrap_port: item.bootstrap_port,
+                        bootstrap_room: item.bootstrap_room,
+                    })
+                    .collect();
+                req.encode_bootstrap_info = Some(tokenspeed::EncodeBootstrapInfo { items });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!(
+                    "set_encode_bootstrap_info called on a backend without encode bootstrap info, ignoring"
+                );
+            }
+        }
+    }
+
+    /// Clear prefill-only encode bootstrap info from the decode-side request.
+    pub(crate) fn clear_encode_bootstrap_info(&mut self) {
+        match self {
+            Self::TokenSpeed(req) => req.encode_bootstrap_info = None,
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {}
+        }
+    }
+
+    /// Set the PD prefill->decode KV rendezvous params (TokenSpeed only).
+    ///
+    /// The gateway sends identical params to both the prefill and decode worker:
+    /// the prefill hosts the Mooncake bootstrap server at (`bootstrap_host`,
+    /// `bootstrap_port`) and the decode worker discovers it there, keyed by
+    /// `bootstrap_room`.
+    pub fn set_kv_bootstrap_info(
+        &mut self,
+        bootstrap_host: String,
+        bootstrap_port: i32,
+        bootstrap_room: i64,
+    ) {
+        match self {
+            Self::TokenSpeed(req) => {
+                req.kv_bootstrap_info = Some(tokenspeed::KvBootstrapInfo {
+                    bootstrap_host,
+                    bootstrap_port,
+                    bootstrap_room,
+                });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!("set_kv_bootstrap_info called on non-TokenSpeed request, ignoring");
             }
         }
     }
@@ -1874,6 +2021,42 @@ mod tests {
                 assert_eq!(handle.nbytes, 8);
             }
             _ => panic!("expected shm TensorData payload"),
+        }
+    }
+
+    #[test]
+    fn tokenspeed_remote_encoder_input_into_proto_uses_remote_payload() {
+        let proto = TokenSpeedMultimodalData {
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Image,
+                encoder_input: TokenSpeedTensor::remote(
+                    tokenspeed::RemoteTensorHandle {
+                        transport: "nixl".to_string(),
+                        descriptor: vec![1, 2, 3],
+                        nbytes: 8,
+                    },
+                    vec![1, 2],
+                    "bfloat16".to_string(),
+                ),
+                model_specific_tensors: HashMap::new(),
+                placeholder_token_id: Some(151655),
+                mm_placeholders: vec![(4, 2)],
+                content_hash: vec![7; 32],
+            }],
+            shm_enabled: true,
+        }
+        .into_proto();
+
+        let tensor = proto.items[0].encoder_input.as_ref().unwrap();
+        assert_eq!(tensor.shape, vec![1, 2]);
+        assert_eq!(tensor.dtype, "bfloat16");
+        match tensor.payload.as_ref() {
+            Some(tokenspeed::tensor_data::Payload::Remote(handle)) => {
+                assert_eq!(handle.transport, "nixl");
+                assert_eq!(handle.descriptor, vec![1, 2, 3]);
+                assert_eq!(handle.nbytes, 8);
+            }
+            _ => panic!("expected remote TensorData payload"),
         }
     }
 

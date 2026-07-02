@@ -141,9 +141,12 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::Single,
+            )), // No PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(ChatGenerateResponseProcessingStage::new(
                 processor,
                 streaming_processor,
@@ -173,9 +176,12 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(false)),
+            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::Single,
+            )),
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
         ];
 
@@ -203,9 +209,12 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(true)),
+            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
+                true,
+                ExecutionPlanKind::PrefillDecode,
+            )),
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
         ];
 
@@ -247,9 +256,70 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(
+                true,
+                ExecutionPlanKind::PrefillDecode,
+            )), // Inject PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(RequestExecutionStage::new()),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
+        }
+    }
+
+    /// Create an EPD (encode-prefill-decode) pipeline.
+    ///
+    /// Mirrors `new_pd`; request building emits an
+    /// `ExecutionPlan::EncodePrefillDecode` with
+    /// encode bootstrap info/jobs alongside the prefill/decode request. Request
+    /// building injects the encode bootstrap info and drops the prefill pixels when
+    /// present;
+    /// `inject_pd_metadata` stays false because TokenSpeed EPD uses the encode
+    /// bootstrap info rather than SGLang bootstrap metadata.
+    pub fn new_epd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            configured_tool_parser.clone(),
+            configured_reasoning_parser.clone(),
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+            metrics_labels::BACKEND_PD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(ChatGeneratePreparationStage::new()),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::EncodePrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(ChatGenerateRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::EncodePrefillDecode,
+            )), // No SGLang PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new()),
             Box::new(ChatGenerateResponseProcessingStage::new(
                 processor,
                 streaming_processor,
@@ -277,7 +347,7 @@ impl RequestPipeline {
             Box::new(ClientAcquisitionStage),
             Box::new(EmbeddingRequestBuildingStage::new()),
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(EmbeddingResponseProcessingStage::new()),
         ];
 
@@ -305,7 +375,7 @@ impl RequestPipeline {
             Box::new(ClientAcquisitionStage),
             Box::new(EmbeddingRequestBuildingStage::new()),
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(ClassifyResponseProcessingStage::new()),
         ];
 
@@ -351,9 +421,12 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(MessageRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::Single,
+            )), // No PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(MessageResponseProcessingStage::new(
                 processor,
                 streaming_processor,
@@ -398,9 +471,66 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(MessageRequestBuildingStage::new(
+                true,
+                ExecutionPlanKind::PrefillDecode,
+            )), // Inject PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(RequestExecutionStage::new()),
+            Box::new(MessageResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
+        }
+    }
+
+    /// Create a Messages API EPD (encode-prefill-decode) pipeline.
+    ///
+    /// Mirrors `new_messages_pd` with `ExecutionPlanKind::EncodePrefillDecode`,
+    /// so request building plans encode jobs and request execution dispatches
+    /// E/P/D together.
+    pub fn new_messages_epd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            configured_tool_parser.clone(),
+            configured_reasoning_parser.clone(),
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+            metrics_labels::BACKEND_PD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(MessagePreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::EncodePrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(MessageRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::EncodePrefillDecode,
+            )), // No SGLang PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new()),
             Box::new(MessageResponseProcessingStage::new(
                 processor,
                 streaming_processor,
@@ -445,9 +575,12 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(CompletionRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::Single,
+            )), // No PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
+            Box::new(RequestExecutionStage::new()),
             Box::new(CompletionResponseProcessingStage::new(
                 processor,
                 streaming_processor,
@@ -488,9 +621,63 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(CompletionRequestBuildingStage::new(
+                true,
+                ExecutionPlanKind::PrefillDecode,
+            )), // Inject PD metadata
             Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
+            Box::new(RequestExecutionStage::new()),
+            Box::new(CompletionResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
+        }
+    }
+
+    /// Create a Completion API EPD pipeline.
+    ///
+    /// Completion is text-only (no multimodal encode jobs), so this
+    /// exists so a TokenSpeed EPD deployment can serve completion requests via
+    /// `ExecutionPlan::EncodePrefillDecode` (which bypasses the runtime PD gate
+    /// that rejects TokenSpeed) rather than the prefill/decode path.
+    pub fn new_completion_epd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            metrics_labels::BACKEND_PD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(CompletionPreparationStage),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::EncodePrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(CompletionRequestBuildingStage::new(
+                false,
+                ExecutionPlanKind::EncodePrefillDecode,
+            )), // No SGLang PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new()),
             Box::new(CompletionResponseProcessingStage::new(
                 processor,
                 streaming_processor,

@@ -501,6 +501,7 @@ impl WorkerRegistry {
         let mut healthy_count = 0;
         let mut total_load = 0;
         let mut regular_count = 0;
+        let mut encode_count = 0;
         let mut prefill_count = 0;
         let mut decode_count = 0;
         let mut http_count = 0;
@@ -518,6 +519,7 @@ impl WorkerRegistry {
 
             match worker.worker_type() {
                 WorkerType::Regular => regular_count += 1,
+                WorkerType::Encode => encode_count += 1,
                 WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
             }
@@ -541,6 +543,7 @@ impl WorkerRegistry {
             unhealthy_workers: total_workers.saturating_sub(healthy_count),
             total_load,
             regular_workers: regular_count,
+            encode_workers: encode_count,
             prefill_workers: prefill_count,
             decode_workers: decode_count,
             http_workers: http_count,
@@ -1464,6 +1467,8 @@ pub struct WorkerRegistryStats {
     pub total_load: usize,
     /// Number of regular (non-PD) workers
     pub regular_workers: usize,
+    /// Number of encode workers (EPD mode)
+    pub encode_workers: usize,
     /// Number of prefill workers (PD mode)
     pub prefill_workers: usize,
     /// Number of decode workers (PD mode)
@@ -1567,6 +1572,29 @@ mod tests {
 
         registry.remove(&worker_id);
         assert!(registry.get(&worker_id).is_none());
+    }
+
+    #[test]
+    fn test_stats_counts_encode_workers() {
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://encode-worker:8080")
+                .worker_type(WorkerType::Encode)
+                .connection_mode(ConnectionMode::Grpc)
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build(),
+        );
+
+        registry.register(worker).unwrap();
+
+        let stats = registry.stats();
+        assert_eq!(stats.total_workers, 1);
+        assert_eq!(stats.encode_workers, 1);
+        assert_eq!(stats.prefill_workers, 0);
+        assert_eq!(stats.decode_workers, 0);
+        assert_eq!(stats.regular_workers, 0);
+        assert_eq!(stats.grpc_workers, 1);
     }
 
     #[test]

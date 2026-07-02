@@ -527,7 +527,9 @@ impl GrpcClient {
             }
             Self::TokenSpeed(client) => {
                 let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
-                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    MultimodalData::TokenSpeed(data) => {
+                        data.try_export_encoder_inputs_nixl_remote().into_proto()
+                    }
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_tokenspeed_request(tokenspeed_mm, |mm| {
@@ -618,7 +620,9 @@ impl GrpcClient {
             }
             Self::TokenSpeed(client) => {
                 let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
-                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    MultimodalData::TokenSpeed(data) => {
+                        data.try_export_encoder_inputs_nixl_remote().into_proto()
+                    }
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_tokenspeed_request(tokenspeed_mm, |mm| {

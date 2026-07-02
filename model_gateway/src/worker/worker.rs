@@ -622,6 +622,7 @@ impl WorkerTypeExt for WorkerType {
             WorkerType::Regular => metrics_labels::WORKER_REGULAR,
             WorkerType::Prefill => metrics_labels::WORKER_PREFILL,
             WorkerType::Decode => metrics_labels::WORKER_DECODE,
+            WorkerType::Encode => metrics_labels::WORKER_ENCODE,
         }
     }
 }

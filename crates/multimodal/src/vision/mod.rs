@@ -32,6 +32,7 @@
 pub mod preprocessor_config;
 pub mod processor;
 pub mod processors;
+pub(crate) mod scratch;
 pub mod transforms;
 
 // Re-export commonly used types

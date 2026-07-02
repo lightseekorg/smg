@@ -5,7 +5,9 @@ use openai_protocol::common::StringOrArray;
 pub mod client; // Used by core/
 pub(crate) mod common;
 pub(crate) mod context;
+pub(crate) mod epd_encode;
 pub(crate) mod harmony;
+pub(crate) mod mm_rdma;
 pub(crate) mod multimodal;
 pub(crate) mod pd_router; // Used by routers/factory
 pub(crate) mod pipeline;
