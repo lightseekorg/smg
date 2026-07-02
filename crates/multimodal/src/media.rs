@@ -400,9 +400,9 @@ impl MediaConnector {
                 "min_frames must be less than or equal to max_frames".to_string(),
             ));
         }
-        if cfg.sample_fps <= 0.0 {
+        if !cfg.sample_fps.is_finite() || cfg.sample_fps <= 0.0 {
             return Err(MediaConnectorError::VideoDecode(
-                "sample_fps must be greater than 0".to_string(),
+                "sample_fps must be finite and greater than 0".to_string(),
             ));
         }
 
@@ -619,7 +619,7 @@ fn decode_video_with_opencv_bytes_logged(
     input_bytes: usize,
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
-    let started = video_decode_timing_started();
+    let started = Instant::now();
     let result = decode_video_with_opencv_bytes(bytes, cfg);
     match &result {
         Ok(_) => log_video_decode_backend_timing("opencv_buffer", started, input_bytes, cfg, None),
@@ -789,6 +789,12 @@ fn decode_video_from_opencv_capture(
         // Skip-decode the frames between the current position and `idx` so the
         // following `read` lands on `idx` without a decoder flush/seek.
         while decoded_pos + 1 < idx as i64 {
+            if started.elapsed() >= timeout {
+                return Err(MediaConnectorError::VideoDecode(format!(
+                    "OpenCV timed out after {:.3} seconds",
+                    timeout.as_secs_f64()
+                )));
+            }
             if !capture.grab().map_err(opencv_decode_error)? {
                 return Err(MediaConnectorError::VideoDecode(format!(
                     "OpenCV could not grab intervening frame to reach sampled frame {idx}"
@@ -884,16 +890,21 @@ fn open_opencv_video_capture(
     decoder_threads: i32,
 ) -> Result<videoio::VideoCapture, MediaConnectorError> {
     let params = Vector::from_slice(&[videoio::CAP_PROP_N_THREADS, decoder_threads]);
-    let capture = videoio::VideoCapture::from_file_with_params(input, videoio::CAP_FFMPEG, &params)
-        .map_err(opencv_decode_error)?;
-    if capture.is_opened().map_err(opencv_decode_error)? {
-        return Ok(capture);
+    if let Ok(capture) =
+        videoio::VideoCapture::from_file_with_params(input, videoio::CAP_FFMPEG, &params)
+    {
+        if capture.is_opened().map_err(opencv_decode_error)? {
+            return Ok(capture);
+        }
     }
 
-    let capture =
-        videoio::VideoCapture::from_file(input, videoio::CAP_ANY).map_err(opencv_decode_error)?;
-    if capture.is_opened().map_err(opencv_decode_error)? {
-        return Ok(capture);
+    for backend in [videoio::CAP_FFMPEG, videoio::CAP_ANY] {
+        let Ok(capture) = videoio::VideoCapture::from_file(input, backend) else {
+            continue;
+        };
+        if capture.is_opened().map_err(opencv_decode_error)? {
+            return Ok(capture);
+        }
     }
 
     Err(MediaConnectorError::VideoDecode(format!(
