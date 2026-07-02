@@ -34,9 +34,6 @@ static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "opencv-video")]
 static AVAILABLE_OPENCV_CPUS: OnceLock<usize> = OnceLock::new();
-#[cfg(feature = "opencv-video")]
-static OPENCV_DECODER_THREADS_OVERRIDE: OnceLock<Option<i32>> = OnceLock::new();
-#[cfg(feature = "opencv-video")]
 const MAX_OPENCV_DECODER_THREADS: usize = 8;
 #[cfg(feature = "opencv-video")]
 const OPENCV_DECODE_BURST_COALESCE: Duration = Duration::from_millis(5);
@@ -944,12 +941,10 @@ struct ActiveOpenCvDecode {
 impl ActiveOpenCvDecode {
     fn enter() -> Self {
         ACTIVE_OPENCV_DECODES.fetch_add(1, Ordering::AcqRel);
-        if opencv_decoder_threads_override().is_none() {
-            // Let a burst of decode tasks become visible before dividing the
-            // CPU budget. The fixed window also covers blocking-pool ramp-up,
-            // where arrivals may briefly appear stable before the full burst.
-            std::thread::sleep(OPENCV_DECODE_BURST_COALESCE);
-        }
+        // Let a burst of decode tasks become visible before dividing the CPU
+        // budget. The fixed window also covers blocking-pool ramp-up, where
+        // arrivals may briefly appear stable before the full burst.
+        std::thread::sleep(OPENCV_DECODE_BURST_COALESCE);
         Self {
             count: ACTIVE_OPENCV_DECODES.load(Ordering::Acquire),
         }
@@ -969,26 +964,12 @@ impl Drop for ActiveOpenCvDecode {
 
 #[cfg(feature = "opencv-video")]
 fn opencv_decoder_threads(active_decodes: usize) -> i32 {
-    if let Some(threads) = opencv_decoder_threads_override() {
-        return threads;
-    }
-
     let available = *AVAILABLE_OPENCV_CPUS.get_or_init(|| {
         std::thread::available_parallelism()
             .map(|parallelism| parallelism.get())
             .unwrap_or(1)
     });
     adaptive_opencv_decoder_threads(available, active_decodes)
-}
-
-#[cfg(feature = "opencv-video")]
-fn opencv_decoder_threads_override() -> Option<i32> {
-    *OPENCV_DECODER_THREADS_OVERRIDE.get_or_init(|| {
-        std::env::var("SMG_OPENCV_DECODER_THREADS")
-            .ok()
-            .and_then(|value| value.parse::<i32>().ok())
-            .filter(|threads| *threads > 0)
-    })
 }
 
 #[cfg(feature = "opencv-video")]
