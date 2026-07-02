@@ -107,6 +107,8 @@ as of `tokenizer/src/*`.
 - Each `step` decodes the known prefix and the new slice; when the new slice produces additional
   UTF-8 text (and does not end in the replacement character `�`), it returns the incremental chunk
   and updates offsets. Otherwise it returns `None` and waits for more tokens.
+- Consumed tokens below the prefix window are drained after each successful step, so retained
+  history stays bounded regardless of generation length.
 - `step_batch` and `flush` offer convenience for batching and draining remaining text.
 
 ### `Sequence` (`sequence.rs`)

@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::traits::{self, TokenIdType};
 
-const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
+pub(crate) const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 
 /// DecodeStream will keep the state necessary to produce individual chunks of
 /// strings given an input stream of token_ids
@@ -71,6 +71,15 @@ impl DecodeStream {
             self.prefix_offset = self.read_offset;
             self.read_offset = self.all_token_ids.len();
 
+            // Drain tokens below the prefix window; they can no longer affect
+            // any future decode. Rebase offsets to keep retained history bounded.
+            if self.prefix_offset > 0 {
+                let drained = self.prefix_offset;
+                self.all_token_ids.drain(..drained);
+                self.prefix_offset -= drained;
+                self.read_offset -= drained;
+            }
+
             Ok(Some(new_text))
         } else {
             Ok(None)
@@ -109,7 +118,10 @@ impl DecodeStream {
         Ok(None)
     }
 
-    /// Get all tokens processed so far
+    /// Get the retained token window (sliding buffer, not full history).
+    ///
+    /// Consumed tokens are drained after each successful step to bound memory,
+    /// so this returns only the tokens still needed for incremental decoding.
     pub fn tokens(&self) -> &[u32] {
         &self.all_token_ids
     }
