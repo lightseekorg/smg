@@ -21,13 +21,8 @@ fi
 # Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
-# caught up.
-#
-# Bumped from 5e145af (2026-05-25): that ref left ``nvidia-cutlass-dsl``
-# unpinned in the kernel requirements, so the 4.6.0 release (2026-07-02,
-# which dropped ``cute.core.ThrMma``) floated in and broke ``import
-# tokenspeed`` via flash-attn's cute backend → quack. This ref pins
-# ``nvidia-cutlass-dsl==4.5.2``.
+# caught up. This ref pins nvidia-cutlass-dsl==4.5.2; older refs left it
+# unpinned and the 4.6.0 release broke the build.
 TOKENSPEED_REF="${TOKENSPEED_REF:-f6235c26f1c9333abf75dc0cb5402b1cd1aa10f1}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
