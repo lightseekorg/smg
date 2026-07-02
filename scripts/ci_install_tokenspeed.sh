@@ -18,6 +18,11 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
+# Keep imports hermetic to the venv. A cutlass build outside the venv (user
+# site-packages / node image) can shadow the pinned one and reintroduce the
+# ``cute.core.ThrMma`` failure even when the venv has the right version.
+export PYTHONNOUSERSITE=1
+
 # Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
@@ -139,6 +144,22 @@ echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
 uv pip uninstall tokenspeed-smg-grpc-proto tokenspeed-smg-grpc-servicer
 uv pip install -e crates/grpc_client/python/
 uv pip install -e grpc_servicer/
+
+# ── cutlass provenance (diagnostic) ─────────────────────────────────────────
+# quack 0.5.0 uses the deprecated ``cute.core.ThrMma`` shim (present in 4.5.2,
+# removed in 4.6.0). Identical pip installs have imported different cutlass
+# builds across runners, so surface exactly what loads and from where.
+echo "=== cutlass provenance ==="
+uv pip show nvidia-cutlass-dsl 2>/dev/null | grep -iE "^(Name|Version|Location):" || true
+python3 -c "
+import sys, cutlass, cutlass.cute.core as core
+print('import cutlass  ->', cutlass.__file__)
+print('cutlass version ->', getattr(cutlass, '__version__', '?'))
+print('cute.core file  ->', core.__file__)
+print('cute.core ThrMma->', hasattr(core, 'ThrMma'))
+print('sys.path:')
+[print('   ', p) for p in sys.path]
+" || true
 
 # ── Verification ──────────────────────────────────────────────────────────
 echo "=== TokenSpeed verification ==="
