@@ -18,6 +18,7 @@ pub mod pythonic;
 pub mod qwen;
 pub mod qwen_xml;
 pub mod step3;
+pub mod step3p5;
 
 // Shared helpers and utilities
 pub mod helpers;
@@ -38,3 +39,4 @@ pub use pythonic::PythonicParser;
 pub use qwen::QwenParser;
 pub use qwen_xml::QwenXmlParser;
 pub use step3::Step3Parser;
+pub use step3p5::Step3p5Parser;

@@ -8,6 +8,7 @@ pub mod nano_v3;
 pub mod passthrough;
 pub mod qwen3;
 pub mod step3;
+pub mod step3p5;
 
 pub use base::BaseReasoningParser;
 pub use cohere_cmd::CohereCmdParser;
@@ -19,3 +20,4 @@ pub use nano_v3::NanoV3Parser;
 pub use passthrough::PassthroughParser;
 pub use qwen3::{Qwen3Parser, QwenThinkingParser};
 pub use step3::Step3Parser;
+pub use step3p5::Step3p5Parser;

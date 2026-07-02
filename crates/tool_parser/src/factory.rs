@@ -11,7 +11,7 @@ use crate::{
     parsers::{
         CohereParser, DeepSeek31Parser, DeepSeekDsmlParser, DeepSeekParser, Glm4MoeParser,
         JsonParser, KimiK2Parser, LlamaParser, MinimaxM2Parser, MistralParser, PassthroughParser,
-        PythonicParser, QwenParser, QwenXmlParser, Step3Parser,
+        PythonicParser, QwenParser, QwenXmlParser, Step3Parser, Step3p5Parser,
     },
     traits::ToolParser,
 };
@@ -321,6 +321,7 @@ impl ParserFactory {
         registry.register_parser("glm45_moe", || Box::new(Glm4MoeParser::glm45()));
         registry.register_parser("glm47_moe", || Box::new(Glm4MoeParser::glm47()));
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
+        registry.register_parser("step3p5", || Box::new(Step3p5Parser::new()));
         registry.register_parser_with_structural_tag(
             "kimik2",
             || Box::new(KimiK2Parser::new()),
@@ -396,6 +397,12 @@ impl ParserFactory {
         // Step3 models
         registry.map_model("step3*", "step3");
         registry.map_model("Step-3*", "step3");
+        // Step-3.5 models use XML framing (longer patterns take precedence over step3*)
+        registry.map_model("step3.5*", "step3p5");
+        registry.map_model("step-3.5*", "step3p5");
+        registry.map_model("Step-3.5*", "step3p5");
+        registry.map_model("stepfun-ai/step3.5*", "step3p5");
+        registry.map_model("stepfun-ai/Step-3.5*", "step3p5");
 
         // Kimi models
         registry.map_model("kimi-k2*", "kimik2");
