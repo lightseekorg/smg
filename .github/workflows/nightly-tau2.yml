@@ -173,7 +173,7 @@ jobs:
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "moonshotai/Kimi-K2.6",
                "vllm_tool": "kimi_k2", "vllm_reason": "kimi_k2",
-               "smg_tool": "kimik2", "smg_reason": "kimi_k25",
+               "smg_tool": "kimik2", "smg_reason": "kimi_thinking",  # K2.6 template prefills <think> (always-in-reasoning); kimi_k25 is always_in_reasoning=false -> mis-splits reasoning
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
                "model_cache": "/raid/models", "arm_mode": "concurrent",
                "max_model_len": "auto", "num_tasks": 30},
