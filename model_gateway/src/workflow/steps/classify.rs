@@ -25,7 +25,7 @@ use crate::{
 const CLASSIFY_PROBE_TIMEOUT_SECS: u64 = 2;
 
 /// Known local backend `owned_by` values returned by `/v1/models`.
-const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm"];
+const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm", "nvidia"];
 
 /// Fetch `/v1/models` and check the `owned_by` field of the first model.
 /// Returns `Some("sglang")`, `Some("vllm")`, etc. if recognized as a local
@@ -161,5 +161,44 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{routing::get, Json, Router};
+    use reqwest::Client;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    use super::probe_models_owned_by;
+
+    #[tokio::test]
+    async fn probe_models_owned_by_accepts_nvidia_as_local() {
+        async fn models() -> Json<serde_json::Value> {
+            Json(json!({
+                "data": [{
+                    "id": "test-model",
+                    "object": "model",
+                    "owned_by": "nvidia"
+                }],
+                "object": "list"
+            }))
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/v1/models", get(models)))
+                .await
+                .unwrap();
+        });
+
+        let owned_by = probe_models_owned_by(&format!("http://{addr}"), 5, &Client::new(), None)
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(owned_by, "nvidia");
     }
 }

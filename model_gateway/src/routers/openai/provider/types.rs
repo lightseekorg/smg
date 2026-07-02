@@ -37,6 +37,21 @@ pub(crate) fn strip_sglang_fields(payload: &mut Value) {
     }
 }
 
+pub(crate) fn strip_default_sglang_fields(payload: &mut Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        for field in SGLANG_FIELDS {
+            if obj.get(*field).is_some_and(|value| {
+                value.is_null()
+                    || value == false
+                    || (matches!(*field, "separate_reasoning" | "stream_reasoning")
+                        && value == true)
+            }) {
+                obj.remove(*field);
+            }
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ProviderError {
     #[error("Unsupported endpoint: {0:?}")]
