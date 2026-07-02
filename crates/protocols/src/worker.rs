@@ -1155,7 +1155,7 @@ impl WorkerLoadResponse {
     pub fn total_running_waiting_reqs(&self) -> i64 {
         self.loads
             .iter()
-            .map(|l| (l.num_running_reqs + l.num_waiting_reqs) as i64)
+            .map(|l| i64::from(l.num_running_reqs) + i64::from(l.num_waiting_reqs))
             .sum()
     }
 
