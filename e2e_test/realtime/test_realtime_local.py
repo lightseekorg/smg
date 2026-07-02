@@ -146,6 +146,7 @@ async def _transcribe(url: str, headers: dict) -> str:
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.gpu(1)
+@pytest.mark.engine("vllm")
 class TestRealtimeLocalWebSocket:
     """Realtime WS transcription through the HTTP router to a local vLLM worker."""
 
