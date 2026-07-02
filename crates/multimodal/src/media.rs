@@ -921,7 +921,11 @@ fn open_opencv_video_capture(
     input: &str,
     decoder_threads: i32,
 ) -> Result<videoio::VideoCapture, MediaConnectorError> {
-    let params = Vector::from_slice(&[videoio::CAP_PROP_N_THREADS, decoder_threads]);
+    // CAP_PROP_N_THREADS has ID 70. Referencing the numeric ID keeps builds
+    // compatible with pre-4.8 headers; unsupported backends reject it and use
+    // the parameter-free fallback below.
+    const CAP_PROP_N_THREADS: i32 = 70;
+    let params = Vector::from_slice(&[CAP_PROP_N_THREADS, decoder_threads]);
     if let Ok(capture) =
         videoio::VideoCapture::from_file_with_params(input, videoio::CAP_FFMPEG, &params)
     {

@@ -1,3 +1,4 @@
+#include <opencv2/core/version.hpp>
 #include <opencv2/videoio.hpp>
 #include <opencv2/videoio/registry.hpp>
 
@@ -8,6 +9,20 @@
 #include <exception>
 #include <limits>
 #include <vector>
+
+namespace {
+
+void set_error(char* output, size_t capacity, const char* message) {
+  if (output == nullptr || capacity == 0) {
+    return;
+  }
+  std::snprintf(output, capacity, "%s", message);
+}
+
+}  // namespace
+
+#if CV_VERSION_MAJOR > 4 || \
+    (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 11)
 
 namespace {
 
@@ -56,13 +71,6 @@ class MemoryStreamReader final : public cv::IStreamReader {
   size_t position_ = 0;
 };
 
-void set_error(char* output, size_t capacity, const char* message) {
-  if (output == nullptr || capacity == 0) {
-    return;
-  }
-  std::snprintf(output, capacity, "%s", message);
-}
-
 }  // namespace
 
 extern "C" void* smg_opencv_capture_from_buffer(const uint8_t* data,
@@ -100,3 +108,15 @@ extern "C" void* smg_opencv_capture_from_buffer(const uint8_t* data,
   }
   return nullptr;
 }
+
+#else
+
+extern "C" void* smg_opencv_capture_from_buffer(const uint8_t*, size_t, int,
+                                                 char* error,
+                                                 size_t error_capacity) {
+  set_error(error, error_capacity,
+            "buffered video capture requires OpenCV 4.11 or newer");
+  return nullptr;
+}
+
+#endif
