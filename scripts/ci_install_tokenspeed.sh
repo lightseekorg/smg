@@ -21,9 +21,8 @@ fi
 # Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
-# caught up. This ref pins nvidia-cutlass-dsl==4.5.2; older refs left it
-# unpinned and the 4.6.0 release broke the build.
-TOKENSPEED_REF="${TOKENSPEED_REF:-f6235c26f1c9333abf75dc0cb5402b1cd1aa10f1}"
+# caught up.
+TOKENSPEED_REF="${TOKENSPEED_REF:-5e145afae8e5651cd66234e68c988c31aac6639f}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 
@@ -95,6 +94,14 @@ sudo apt-get install -y --no-install-recommends libssl-dev libopenmpi-dev cmake
 # ── TokenSpeed packages ────────────────────────────────────────────────────
 export MAX_JOBS="${MAX_JOBS:-16}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a 10.0a}"
+
+# The kernel requirements leave ``nvidia-cutlass-dsl`` unpinned, and 4.6.0
+# dropped ``cute.core.ThrMma`` — which quack (pulled via flash-attn's cute
+# backend) uses, breaking ``import tokenspeed``. Constrain every resolve
+# below to the last compatible release.
+TOKENSPEED_CONSTRAINTS="$(mktemp)"
+echo "nvidia-cutlass-dsl==4.5.2" > "$TOKENSPEED_CONSTRAINTS"
+export UV_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
 
 # Preseed build-time tooling: ``./python`` and ``tokenspeed-kernel`` use
 # ``setuptools.build_meta`` without declaring ``setuptools`` in
