@@ -54,6 +54,14 @@ on:
         description: "Concurrent tau2 simulations per arm"
         required: false
         default: "16"
+      request_timeout:
+        description: "Per-LiteLLM-request timeout (s) for the agent; 0 = off"
+        required: false
+        default: "300"
+      run_timeout:
+        description: "Per-domain `tau2 run` wall-clock cap (s); 0 = off"
+        required: false
+        default: "5400"
       vllm_tool_parser:
         description: "Override pure-vLLM --tool-call-parser; empty = matrix default"
         required: false
@@ -141,7 +149,7 @@ jobs:
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
                "model_cache": "/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 0},
+               "max_model_len": "auto", "num_tasks": 30},  # cap like Blackwell legs — dense 27B is slow; bounds runtime + skips the airline task-44 straggler
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
@@ -229,6 +237,10 @@ jobs:
       # 30 on the heavy Blackwell legs). Dispatch `num_tasks` overrides all legs.
       NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || matrix.num_tasks) }}
       MAX_CONCURRENCY: ${{ github.event.inputs.max_concurrency || '16' }}
+      # Fail-fast bounds (see COMMON below). Per-request cap 300s catches a single
+      # degenerate generation; per-domain cap 5400s (90m) bounds a wedged `tau2 run`.
+      REQUEST_TIMEOUT: ${{ github.event.inputs.request_timeout || '300' }}
+      RUN_TIMEOUT: ${{ github.event.inputs.run_timeout || '5400' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -280,6 +292,11 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
+          # Auto-register the served model at $0 cost so litellm's per-response cost
+          # lookup stops logging thousands of "This model isn't mapped yet" ERRORs
+          # (self-hosted models aren't in litellm's price map). sitecustomize runs at
+          # interpreter startup, inheriting into the tau2 subprocess's own venv.
+          export PYTHONPATH="$PWD/scripts/tau2/costmap_shim${PYTHONPATH:+:$PYTHONPATH}"
           # Serialize the launch->serve->teardown phase PER HOST. Blackwell runner
           # agents share one bare-metal machine (host network + the same 8 GPUs), so
           # two legs at once collide on ports and GPU memory. A host-wide flock runs
@@ -310,6 +327,11 @@ jobs:
             --tau2 "$TAU2_BIN" --data-dir "$DATA_DIR"
             --domains "$DOMAINS" --num-trials "$NUM_TRIALS" --num-tasks "$NUM_TASKS"
             --max-concurrency "$MAX_CONCURRENCY"
+            # Fail-fast bounds so one wedged simulation can't burn the whole 6h job
+            # (a Qwen3.6-27B airline sim once hung ~5h on a single 77-min request).
+            # --request-timeout caps each LiteLLM call; --run-timeout caps a whole
+            # domain (worst case 3 domains/arm x 90m = 270m, under timeout-minutes:360).
+            --request-timeout "$REQUEST_TIMEOUT" --run-timeout "$RUN_TIMEOUT"
           )
           if [ "$ARM_MODE" = sequential ]; then
             # Whole node per arm (TP=8), one at a time: score arm A, tear it down to
@@ -346,7 +368,8 @@ jobs:
         if: always()
         run: |
           {
-            echo "## τ²-bench A/B — ${{ matrix.name }} (${{ matrix.model }}, domains: $DOMAINS)"
+            # Job name already shows the model + runner; keep this heading lean.
+            echo "## τ²-bench A/B (domains: $DOMAINS)"
             cat "$RUNNER_TEMP/tau2_ab.md"
           } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Collect tau2 transcripts

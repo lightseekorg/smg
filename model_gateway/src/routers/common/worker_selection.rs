@@ -55,6 +55,11 @@ pub struct SelectWorkerRequest<'a> {
 
     /// Filter by runtime type (External, Sglang, Vllm, Trtllm). `None` = any.
     pub runtime_type: Option<RuntimeType>,
+
+    /// When `true`, restrict candidates to workers advertising realtime
+    /// capability (the `realtime` label). Used by the realtime routes so
+    /// they never proxy to a worker that can't serve realtime.
+    pub require_realtime_capable: bool,
 }
 
 impl<'a> WorkerSelector<'a> {
@@ -123,6 +128,7 @@ impl<'a> WorkerSelector<'a> {
         self.get_candidates(req)
             .into_iter()
             .filter(|w| w.supports_model(req.model_id))
+            .filter(|w| !req.require_realtime_capable || w.is_realtime_capable())
             .min_by_key(|w| w.load())
     }
 
@@ -140,7 +146,10 @@ impl<'a> WorkerSelector<'a> {
             Some(p) => filter_by_provider(workers, p),
             None => workers,
         };
-        candidates.iter().any(|w| w.supports_model(req.model_id))
+        candidates.iter().any(|w| {
+            w.supports_model(req.model_id)
+                && (!req.require_realtime_capable || w.is_realtime_capable())
+        })
     }
 
     /// Refresh model lists for healthy external workers in parallel.
@@ -272,5 +281,89 @@ async fn refresh_worker_models(
             tracing::warn!("Failed to fetch models from backend: {}", e);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::worker::HealthCheckConfig;
+
+    use super::*;
+    use crate::worker::BasicWorkerBuilder;
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
+
+    // Wildcard model support (no `.models()`), so `supports_model` is always true;
+    // this isolates the realtime-capability gate.
+    fn worker(url: &str, realtime: bool) -> Arc<dyn Worker> {
+        let mut b = BasicWorkerBuilder::new(url)
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check());
+        if realtime {
+            b = b.label("realtime", "true");
+        }
+        Arc::new(b.build())
+    }
+
+    #[tokio::test]
+    async fn requires_realtime_selects_only_labeled() {
+        let registry = WorkerRegistry::new();
+        registry.register_or_replace(worker("http://127.0.0.1:18080", false));
+        registry.register_or_replace(worker("http://127.0.0.1:18081", true));
+        let client = reqwest::Client::new();
+
+        let picked = WorkerSelector::new(&registry, &client)
+            .select_worker(&SelectWorkerRequest {
+                model_id: "m",
+                require_realtime_capable: true,
+                ..Default::default()
+            })
+            .await
+            .expect("a realtime-capable worker should be selected");
+        assert_eq!(picked.url(), "http://127.0.0.1:18081");
+    }
+
+    #[tokio::test]
+    async fn requires_realtime_errors_when_none_capable() {
+        let registry = WorkerRegistry::new();
+        registry.register_or_replace(worker("http://127.0.0.1:18080", false));
+        let client = reqwest::Client::new();
+
+        let res = WorkerSelector::new(&registry, &client)
+            .select_worker(&SelectWorkerRequest {
+                model_id: "m",
+                require_realtime_capable: true,
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            res.is_err(),
+            "no realtime-capable worker => selection fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_realtime_flag_any_worker_eligible() {
+        let registry = WorkerRegistry::new();
+        registry.register_or_replace(worker("http://127.0.0.1:18080", false));
+        let client = reqwest::Client::new();
+
+        let res = WorkerSelector::new(&registry, &client)
+            .select_worker(&SelectWorkerRequest {
+                model_id: "m",
+                ..Default::default()
+            })
+            .await;
+        assert!(res.is_ok(), "gate off => a plain worker is eligible");
+    }
+
+    #[test]
+    fn default_request_does_not_require_realtime() {
+        assert!(!SelectWorkerRequest::default().require_realtime_capable);
     }
 }

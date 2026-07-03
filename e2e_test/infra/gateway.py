@@ -361,12 +361,20 @@ class Gateway:
         timeout: float = 10.0,
         wait_ready: bool = True,
         ready_timeout: float = 60.0,
+        labels: dict[str, str] | None = None,
     ) -> tuple[bool, str | None]:
-        """Add a worker to the gateway. Returns (success, worker_id or error)."""
+        """Add a worker to the gateway. Returns (success, worker_id or error).
+
+        ``labels`` are attached to the worker's ``WorkerSpec`` (e.g.
+        ``{"realtime": "true"}`` to make it eligible for realtime routing).
+        """
+        body: dict = {"url": worker_url}
+        if labels:
+            body["labels"] = labels
         try:
             resp = httpx.post(
                 f"{self.base_url}/workers",
-                json={"url": worker_url},
+                json=body,
                 timeout=timeout,
             )
             if resp.status_code in (200, 202):

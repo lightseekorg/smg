@@ -51,7 +51,12 @@ def load_results(raw: dict) -> list[dict]:
 
 
 def domain_scores(results: list[dict], k: int) -> dict[str, float]:
-    """pass1 = mean reward over all trials; passk = mean over tasks of C(c,k)/C(n,k)."""
+    """pass1 = mean reward over all trials; passk = mean over tasks of C(c,k)/C(n,k).
+
+    Also reports the sample sizes behind those numbers: n_tasks (pass^k denominator)
+    and n_sims (total trials = pass^1 denominator), so the report can show how much
+    data backs each cell (and expose arm asymmetry when a domain is missing).
+    """
     by_task: dict[str, list[float]] = {}
     for r in results:
         by_task.setdefault(r["task_id"], []).append(r["reward"])
@@ -59,7 +64,7 @@ def domain_scores(results: list[dict], k: int) -> dict[str, float]:
     pass1 = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
     per_task = [passk(sum(1 for x in xs if x >= 1.0), len(xs), k) for xs in by_task.values()]
     passk_val = sum(per_task) / len(per_task) if per_task else 0.0
-    return {"pass1": pass1, "passk": passk_val}
+    return {"pass1": pass1, "passk": passk_val, "n_tasks": len(by_task), "n_sims": len(all_rewards)}
 
 
 def run_tau2(
@@ -73,6 +78,8 @@ def run_tau2(
     max_concurrency: int,
     user_llm: str,
     data_dir: Path,
+    request_timeout: int = 0,
+    run_timeout: int = 0,
 ) -> None:
     """Run `tau2 run` for one arm+domain, then read back its results.json.
 
@@ -80,11 +87,24 @@ def run_tau2(
     with a per-call `api_base` pointing at this arm (via --agent-llm-args); the
     user uses the fixed gpt-5.2. Results land at
     <data_dir>/simulations/<save_to>/results.json.
+
+    Two fail-fast bounds keep one pathological task from consuming the whole CI
+    budget (a single Qwen3.6-27B airline sim once hung ~5h until the 6h job limit):
+    `request_timeout` caps each LiteLLM call so a degenerate generation errors out
+    instead of streaming for tens of minutes; `run_timeout` caps the whole domain
+    subprocess so a wedged `tau2 run` is killed and its domain left unscored (the
+    report renders "—") rather than blocking forever. Both are opt-in (0 = off).
     """
     save_to = f"ab_{arm.name}_{domain}"
-    agent_args = json.dumps(
-        {"api_base": arm.base_url.rstrip("/") + "/v1", "api_key": "smg-local", "temperature": 0.0}
-    )
+    agent_llm_args: dict[str, object] = {
+        "api_base": arm.base_url.rstrip("/") + "/v1",
+        "api_key": "smg-local",
+        "temperature": 0.0,
+    }
+    if request_timeout > 0:
+        # LiteLLM completion kwarg: hard per-request wall-clock cap.
+        agent_llm_args["timeout"] = request_timeout
+    agent_args = json.dumps(agent_llm_args)
     user_args = json.dumps({"temperature": 0.0})
     cmd = [
         tau2,
@@ -114,7 +134,17 @@ def run_tau2(
     # look for them regardless of any inherited $TAU2_DATA_DIR or whether tau2 is
     # installed editable vs into site-packages.
     env["TAU2_DATA_DIR"] = str(data_dir)
-    proc = subprocess.run(cmd, env=env, check=False)
+    try:
+        proc = subprocess.run(cmd, env=env, check=False, timeout=(run_timeout or None))
+    except subprocess.TimeoutExpired:
+        # tau2 is a single in-process asyncio run (no forked workers), so run() has
+        # already SIGKILLed it. Leave the domain unscored and move on; the servers
+        # are torn down by the workflow's own cleanup/nuke_gpus trap.
+        print(
+            f"WARNING: [{arm.name}/{domain}] timed out after {run_timeout}s; killed",
+            file=sys.stderr,
+        )
+        return
     if proc.returncode != 0:
         print(f"WARNING: [{arm.name}/{domain}] exited {proc.returncode}", file=sys.stderr)
     results_json = data_dir / "simulations" / save_to / "results.json"
@@ -139,9 +169,18 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
         return "—" if x is None else f"{x * 100:+.2f}"
 
     rows, agg = [], {"pass1": {"b": [], "c": []}, "passk": {"b": [], "c": []}}
+    nsum = {"b": 0, "c": 0}
     for d in domains:
         b, c = baseline.scores.get(d, {}), candidate.scores.get(d, {})
-        row = {"domain": d}
+        row = {
+            "domain": d,
+            "n": {
+                "baseline": {"tasks": b.get("n_tasks"), "sims": b.get("n_sims")},
+                "candidate": {"tasks": c.get("n_tasks"), "sims": c.get("n_sims")},
+            },
+        }
+        nsum["b"] += b.get("n_sims") or 0
+        nsum["c"] += c.get("n_sims") or 0
         for m in ("pass1", "passk"):
             bv, cv = b.get(m), c.get(m)
             row[m] = {
@@ -174,30 +213,46 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
         b, c, dl = cell(d["baseline"]), cell(d["candidate"]), dcell(d["delta"])
         return f"**{b}** | **{c}** | **{dl}**" if bold else f"{b} | {c} | {dl}"
 
+    def ncol(n_b, n_c, bold=False):
+        s = f"{n_b or '—'}/{n_c or '—'}"
+        return f"**{s}**" if bold else s
+
     header = " | ".join(
         f"{baseline.name} {mlabel[m]} | {candidate.name} {mlabel[m]} | Δ" for m in metrics
     )
+    # No "τ²-bench A/B" title here — the workflow summary step owns that heading; this
+    # caption only adds what it lacks (which arm is which). Avoids a stacked duplicate.
     lines = [
-        f"# τ²-bench A/B — {candidate.name} (candidate) vs {baseline.name} (baseline)",
+        f"**{candidate.name}** (candidate) vs **{baseline.name}** (baseline)",
         "",
-        f"| domain | {header} |",
-        "|---" * (1 + 3 * len(metrics)) + "|",
+        f"| domain | N ({baseline.name}/{candidate.name}) | {header} |",
+        "|---" * (2 + 3 * len(metrics)) + "|",
     ]
     for r in rows:
-        lines.append(f"| {r['domain']} | " + " | ".join(triple(r[m]) for m in metrics) + " |")
+        n = r["n"]
+        lines.append(
+            f"| {r['domain']} | {ncol(n['baseline']['sims'], n['candidate']['sims'])} | "
+            + " | ".join(triple(r[m]) for m in metrics)
+            + " |"
+        )
     lines.append(
-        "| **overall** | " + " | ".join(triple(overall[m], bold=True) for m in metrics) + " |"
+        f"| **overall** | {ncol(nsum['b'], nsum['c'], bold=True)} | "
+        + " | ".join(triple(overall[m], bold=True) for m in metrics)
+        + " |"
     )
     lines += [
         "",
-        "_Same model · engine · checkpoint · sampling · user-sim (gpt-5.2) "
-        "on both arms — only the frontend differs, so Δ is the parsing layer._",
+        f"_N = simulations per arm (baseline/candidate) = tasks × {k} trials. "
+        "Same model · engine · checkpoint · sampling · user-sim (gpt-5.2) on both arms "
+        "— only the frontend differs, so Δ is the parsing layer._",
     ]
+    overall_out = dict(overall)
+    overall_out["n"] = {"baseline": nsum["b"], "candidate": nsum["c"]}
     payload = {
         "baseline": {"name": baseline.name, "scores": baseline.scores},
         "candidate": {"name": candidate.name, "scores": candidate.scores},
         "per_domain": rows,
-        "overall": overall,
+        "overall": overall_out,
     }
     return "\n".join(lines), payload
 
@@ -213,6 +268,8 @@ def score_arm(
     max_concurrency: int,
     user_llm: str,
     data_dir: Path,
+    request_timeout: int = 0,
+    run_timeout: int = 0,
 ) -> None:
     """Run tau2 for every domain against one already-serving arm, filling arm.scores."""
     for domain in domains:
@@ -226,6 +283,8 @@ def score_arm(
             max_concurrency=max_concurrency,
             user_llm=user_llm,
             data_dir=data_dir,
+            request_timeout=request_timeout,
+            run_timeout=run_timeout,
         )
 
 
@@ -296,6 +355,18 @@ def main() -> int:
         help="tau2 --max-concurrency (concurrent simulations per arm; 0 = tau2 default)",
     )
     p.add_argument(
+        "--request-timeout",
+        type=int,
+        default=0,
+        help="per-LiteLLM-request timeout in seconds injected into the agent (0 = off)",
+    )
+    p.add_argument(
+        "--run-timeout",
+        type=int,
+        default=0,
+        help="per-domain `tau2 run` wall-clock cap in seconds; killed if exceeded (0 = off)",
+    )
+    p.add_argument(
         "--agent-model",
         default="Qwen/Qwen3.6-27B",
         help="served model name on both arms (used as openai/<name>)",
@@ -338,6 +409,8 @@ def main() -> int:
             max_concurrency=args.max_concurrency,
             user_llm=args.user_llm,
             data_dir=args.data_dir,
+            request_timeout=args.request_timeout,
+            run_timeout=args.run_timeout,
         )
         save_scores(arm, args.scores_out)
         print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
@@ -361,6 +434,8 @@ def main() -> int:
             max_concurrency=args.max_concurrency,
             user_llm=args.user_llm,
             data_dir=args.data_dir,
+            request_timeout=args.request_timeout,
+            run_timeout=args.run_timeout,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:

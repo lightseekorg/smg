@@ -169,7 +169,32 @@ The `POST /workers` endpoint accepts additional fields:
 | `worker_type` | `regular` | Type: `regular`, `prefill`, or `decode` |
 | `priority` | `50` | Routing priority (0–100, higher = preferred) |
 | `cost` | `1.0` | Cost multiplier for cost-aware routing |
-| `labels` | `{}` | Arbitrary metadata |
+| `labels` | `{}` | Arbitrary metadata; e.g. `realtime: "true"` (see [Realtime-capable workers](#realtime-capable-workers)) |
+
+### Realtime-capable workers
+
+To route the [Realtime API](../reference/api/openai.md#realtime-api) — the WebSocket
+`/v1/realtime` endpoint, WebRTC `/v1/realtime/calls`, and the realtime REST endpoints —
+through the HTTP router to a **local** worker, mark that worker with the well-known
+`realtime` label. Only workers labeled `realtime: "true"` receive realtime traffic, so
+SMG never proxies a realtime connection to a worker that can't serve it.
+
+The worker must itself expose an OpenAI-compatible realtime endpoint. For example, vLLM
+serving a speech model with the realtime task (such as `Qwen/Qwen3-ASR-1.7B`) exposes
+`ws://<worker>/v1/realtime` for streaming transcription.
+
+```bash
+curl -X POST http://localhost:30000/workers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "http://asr-worker:8000",
+    "runtime": "vllm",
+    "labels": {"realtime": "true"}
+  }'
+```
+
+The same worker also serves batch transcription via `POST /v1/audio/transcriptions`,
+which the HTTP router forwards without requiring the `realtime` label.
 
 ## Verify
 
