@@ -31,15 +31,13 @@ use crate::{
     config::types::RetryConfig,
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
-    routers::{
-        common::{
-            header_utils::extract_auth_header,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
-        openai::realtime::{
+    routers::common::{
+        header_utils::extract_auth_header,
+        realtime::{
             rest::forward_realtime_rest, webrtc, webrtc::handle_realtime_webrtc,
-            ws::handle_realtime_ws, RealtimeRegistry,
+            ws::handle_realtime_ws, RealtimeLabels, RealtimeRegistry,
         },
+        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
     worker::{ProviderType, Worker, WorkerRegistry},
 };
@@ -202,6 +200,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
+            RealtimeLabels::OPENAI,
             &self.shared_components.client,
             worker,
             headers,
@@ -222,6 +221,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.session.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
+            RealtimeLabels::OPENAI,
             &self.shared_components.client,
             worker,
             headers,
@@ -241,6 +241,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let model = body.model.as_deref().unwrap_or_default();
         let worker = self.select_worker(model, headers).await;
         forward_realtime_rest(
+            RealtimeLabels::OPENAI,
             &self.shared_components.client,
             worker,
             headers,
@@ -268,6 +269,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         let worker = self.select_worker(model, Some(&parts.headers)).await;
 
         handle_realtime_ws(
+            RealtimeLabels::OPENAI,
             parts,
             model.to_owned(),
             worker,
@@ -323,6 +325,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             .unwrap_or_else(|| std::net::Ipv4Addr::UNSPECIFIED.into());
 
         handle_realtime_webrtc(
+            RealtimeLabels::OPENAI,
             parts.headers,
             parsed,
             worker,

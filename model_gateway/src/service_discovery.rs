@@ -1269,7 +1269,7 @@ mod tests {
         use crate::{
             config::RouterConfig, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
-            routers::openai::realtime::RealtimeRegistry, worker::WorkerService,
+            routers::common::realtime::RealtimeRegistry, worker::WorkerService,
         };
 
         let router_config = RouterConfig::builder()

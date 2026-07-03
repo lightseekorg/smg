@@ -8,6 +8,7 @@ use axum::{
 };
 use tracing::error;
 
+use super::RealtimeLabels;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::common::header_utils::extract_auth_header,
@@ -21,7 +22,12 @@ use crate::{
 ///
 /// The caller is responsible for worker selection; this function receives
 /// the pre-selected worker (or an error response).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared realtime REST proxy; each arg is distinct"
+)]
 pub(crate) async fn forward_realtime_rest(
+    labels: RealtimeLabels,
     client: &reqwest::Client,
     worker: Result<Arc<dyn Worker>, Response>,
     headers: Option<&HeaderMap>,
@@ -33,8 +39,8 @@ pub(crate) async fn forward_realtime_rest(
     let start = Instant::now();
 
     Metrics::record_router_request(
-        metrics_labels::ROUTER_OPENAI,
-        metrics_labels::BACKEND_EXTERNAL,
+        labels.router,
+        labels.backend,
         metrics_labels::CONNECTION_HTTP,
         model,
         endpoint_label,
@@ -45,8 +51,8 @@ pub(crate) async fn forward_realtime_rest(
         Ok(w) => w,
         Err(response) => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_HTTP,
                 model,
                 endpoint_label,
@@ -60,8 +66,8 @@ pub(crate) async fn forward_realtime_rest(
         Some(v) => v,
         None => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_HTTP,
                 model,
                 endpoint_label,
@@ -91,8 +97,8 @@ pub(crate) async fn forward_realtime_rest(
             let response = proxy_response(resp).await;
             if success {
                 Metrics::record_router_duration(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
+                    labels.router,
+                    labels.backend,
                     metrics_labels::CONNECTION_HTTP,
                     model,
                     endpoint_label,
@@ -100,8 +106,8 @@ pub(crate) async fn forward_realtime_rest(
                 );
             } else {
                 Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
+                    labels.router,
+                    labels.backend,
                     metrics_labels::CONNECTION_HTTP,
                     model,
                     endpoint_label,
@@ -114,8 +120,8 @@ pub(crate) async fn forward_realtime_rest(
             worker.record_outcome(502);
             error!(error = %e, endpoint, "Failed to forward realtime REST request");
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_HTTP,
                 model,
                 endpoint_label,
