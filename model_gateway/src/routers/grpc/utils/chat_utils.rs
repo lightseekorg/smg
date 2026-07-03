@@ -388,6 +388,20 @@ pub fn process_chat_messages(
                 "reasoning_effort".to_string(),
                 Value::String(reasoning_effort.clone()),
             );
+
+            // OpenAI semantics: reasoning_effort "none"/"minimal" means "do not
+            // produce reasoning". Many chat templates gate thinking on a boolean
+            // toggle and treat `reasoning_effort` only as a *level* (so "none"
+            // would otherwise still think). Translate the disable case to the
+            // thinking toggle = false. Templates use different key names
+            // (`enable_thinking` for GLM-4.x/5, Qwen3; `thinking` for
+            // DeepSeek-V3.1, Kimi-K2.5), so set both; the unused one is ignored.
+            // These are defaults only: an explicit chat_template_kwargs value
+            // (applied below) still wins.
+            if matches!(reasoning_effort.as_str(), "none" | "minimal") {
+                combined_template_kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
+                combined_template_kwargs.insert("thinking".to_string(), Value::Bool(false));
+            }
         }
 
         // Add any additional template kwargs from request

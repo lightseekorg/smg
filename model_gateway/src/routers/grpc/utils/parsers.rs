@@ -45,6 +45,40 @@ pub fn extract_thinking_from_kwargs(
     .and_then(|v| v.as_bool())
 }
 
+/// Map an OpenAI `reasoning_effort` value to a thinking preference.
+///
+/// OpenAI semantics: `"none"`/`"minimal"` mean "do not produce reasoning", so
+/// they map to thinking OFF (`Some(false)`). Level values (`"low"`/`"medium"`/
+/// `"high"`) don't toggle thinking on their own, so they return `None` (defer to
+/// the template default / explicit thinking kwarg).
+pub(crate) fn thinking_from_reasoning_effort(reasoning_effort: Option<&str>) -> Option<bool> {
+    match reasoning_effort {
+        Some("none") | Some("minimal") => Some(false),
+        _ => None,
+    }
+}
+
+/// Precedence for the effective thinking preference: an explicit template
+/// toggle (already extracted from kwargs) always wins; otherwise fall back to
+/// the OpenAI `reasoning_effort` mapping.
+fn resolve_thinking_pref(explicit: Option<bool>, reasoning_effort: Option<&str>) -> Option<bool> {
+    explicit.or_else(|| thinking_from_reasoning_effort(reasoning_effort))
+}
+
+/// Resolve the user's effective thinking preference, honoring an explicit
+/// template thinking kwarg first (it always wins), then falling back to the
+/// OpenAI `reasoning_effort` mapping.
+pub fn resolve_user_thinking(
+    kwargs: Option<&std::collections::HashMap<String, Value>>,
+    reasoning_effort: Option<&str>,
+    tokenizer: &dyn Tokenizer,
+) -> Option<bool> {
+    resolve_thinking_pref(
+        extract_thinking_from_kwargs(kwargs, tokenizer),
+        reasoning_effort,
+    )
+}
+
 /// Check if a reasoning parser is available for the given model
 pub(crate) fn check_reasoning_parser_availability(
     reasoning_parser_factory: &ReasoningParserFactory,
@@ -155,6 +189,35 @@ pub(crate) fn create_tool_parser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_thinking_pref_explicit_kwarg_wins() {
+        // An explicit template toggle always wins over the reasoning_effort mapping.
+        assert_eq!(resolve_thinking_pref(Some(true), Some("none")), Some(true));
+        assert_eq!(
+            resolve_thinking_pref(Some(false), Some("high")),
+            Some(false)
+        );
+        // No explicit toggle -> fall back to the reasoning_effort mapping.
+        assert_eq!(resolve_thinking_pref(None, Some("none")), Some(false));
+        assert_eq!(resolve_thinking_pref(None, Some("minimal")), Some(false));
+        assert_eq!(resolve_thinking_pref(None, Some("high")), None);
+        assert_eq!(resolve_thinking_pref(None, None), None);
+    }
+
+    #[test]
+    fn thinking_from_reasoning_effort_maps_disable_values() {
+        // "none"/"minimal" mean do-not-reason -> thinking OFF
+        assert_eq!(thinking_from_reasoning_effort(Some("none")), Some(false));
+        assert_eq!(thinking_from_reasoning_effort(Some("minimal")), Some(false));
+        // level values do not toggle thinking on their own
+        assert_eq!(thinking_from_reasoning_effort(Some("low")), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("medium")), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("high")), None);
+        // unspecified / unknown -> defer
+        assert_eq!(thinking_from_reasoning_effort(None), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("bogus")), None);
+    }
 
     #[test]
     fn create_reasoning_parser_returns_independent_instances() {

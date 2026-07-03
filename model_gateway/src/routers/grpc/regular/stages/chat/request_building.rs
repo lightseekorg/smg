@@ -99,8 +99,9 @@ impl PipelineStage for ChatRequestBuildingStage {
 
         let require_reasoning = ctx.tokenizer_arc().is_some_and(|tokenizer| {
             utils::should_mark_reasoning_started(
-                utils::extract_thinking_from_kwargs(
+                utils::resolve_user_thinking(
                     chat_request.chat_template_kwargs.as_ref(),
+                    chat_request.reasoning_effort.as_deref(),
                     tokenizer.as_ref(),
                 ),
                 tokenizer.as_ref(),
