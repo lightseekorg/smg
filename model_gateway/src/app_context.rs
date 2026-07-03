@@ -577,7 +577,7 @@ impl AppContextBuilder {
             .client
             .as_ref()
             .ok_or_else(|| "client must be set before load monitor".to_string())?;
-        self.worker_monitor = Some(Arc::new(WorkerMonitor::new(
+        let worker_monitor = Arc::new(WorkerMonitor::new(
             self.worker_registry
                 .as_ref()
                 .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?
@@ -589,7 +589,11 @@ impl AppContextBuilder {
             client.clone(),
             config.load_monitor_interval_secs,
             config.engine_metrics,
-        )));
+        ));
+        if let Some(ref registry) = self.policy_registry {
+            registry.set_load_receiver(Some(worker_monitor.subscribe()));
+        }
+        self.worker_monitor = Some(worker_monitor);
         Ok(self)
     }
 
@@ -661,12 +665,6 @@ impl AppContextBuilder {
             // and any other existing cache-aware policies.
             if let Some(ref registry) = self.policy_registry {
                 registry.set_kv_event_monitor(Some(Arc::clone(&monitor)));
-                // Wire the backend load snapshot so cache-aware policies can use
-                // the KV-usage imbalance trigger. `with_worker_monitor` ran
-                // earlier in the build chain, so this is already set.
-                if let Some(ref worker_monitor) = self.worker_monitor {
-                    registry.set_load_receiver(Some(worker_monitor.subscribe()));
-                }
             }
 
             self.kv_event_monitor = Some(monitor);

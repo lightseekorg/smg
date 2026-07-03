@@ -179,6 +179,18 @@ impl PolicyRegistry {
         }
     }
 
+    /// Inject all registry-held context into a cache-aware policy.
+    fn inject_policy_context(&self, policy: &Arc<dyn LoadBalancingPolicy>) {
+        {
+            let guard = self.kv_event_monitor.read();
+            Self::maybe_inject_monitor(policy, guard.as_ref());
+        }
+        {
+            let guard = self.load_rx.read();
+            Self::maybe_inject_load_rx(policy, guard.as_ref());
+        }
+    }
+
     /// Called when a worker is added
     /// Returns the policy that should be used for this worker's model
     pub fn on_worker_added(
@@ -294,20 +306,9 @@ impl PolicyRegistry {
     /// Create a policy from a type string (delegates to PolicyFactory)
     fn create_policy_from_type(&self, policy_type: &str) -> Arc<dyn LoadBalancingPolicy> {
         if policy_type == "cache_aware" {
-            let cache_aware = CacheAwarePolicy::new();
-            {
-                let guard = self.kv_event_monitor.read();
-                if let Some(ref monitor) = *guard {
-                    cache_aware.set_kv_event_monitor(Some(Arc::clone(monitor)));
-                }
-            }
-            {
-                let guard = self.load_rx.read();
-                if let Some(ref rx) = *guard {
-                    cache_aware.set_load_receiver(Some(rx.clone()));
-                }
-            }
-            Arc::new(cache_aware)
+            let policy: Arc<dyn LoadBalancingPolicy> = Arc::new(CacheAwarePolicy::new());
+            self.inject_policy_context(&policy);
+            policy
         } else {
             PolicyFactory::create_by_name(policy_type).unwrap_or_else(|| {
                 warn!("Unknown policy type '{}', using default", policy_type);
@@ -345,6 +346,7 @@ impl PolicyRegistry {
 
     /// Set the prefill policy for PD mode (lock-free, set once at startup)
     pub fn set_prefill_policy(&self, policy: Arc<dyn LoadBalancingPolicy>) {
+        self.inject_policy_context(&policy);
         // OnceLock::set returns Err if already set, which we ignore since
         // the policy should only be set once at startup
         let _ = self.prefill_policy.set(policy);
@@ -363,6 +365,7 @@ impl PolicyRegistry {
 
     /// Set the decode policy for PD mode (lock-free, set once at startup)
     pub fn set_decode_policy(&self, policy: Arc<dyn LoadBalancingPolicy>) {
+        self.inject_policy_context(&policy);
         // OnceLock::set returns Err if already set, which we ignore since
         // the policy should only be set once at startup
         let _ = self.decode_policy.set(policy);
@@ -384,13 +387,23 @@ impl PolicyRegistry {
             .unwrap_or_else(|| self.get_default_policy())
     }
 
-    /// Get all load-aware policies that need periodic load updates (lock-free).
+    /// Get all policies that require the worker load monitor to poll `/v1/loads`
+    /// (lock-free).
     ///
-    /// These are policies whose routing depends on the worker load monitor:
-    /// `power_of_two` and `least_load`.
+    /// Two kinds of consumers are gated on this set:
+    /// - `power_of_two` / `least_load` receive loads pushed via `update_loads`.
+    /// - `cache_aware` reads the same backend snapshot through the watch channel
+    ///   (`set_load_receiver`) for its gateway-global imbalance trigger and
+    ///   shortest-queue selection.
+    ///
+    /// Returning `cache_aware` here makes the monitor poll whenever it is active;
+    /// without it, a cache_aware-only deployment would never poll and the
+    /// global-load logic would silently fall back to local counters. Its
+    /// `update_loads` / `remove_worker` are no-ops, so being in the push and
+    /// cleanup loops is harmless.
     pub fn get_all_load_aware_policies(&self) -> Vec<Arc<dyn LoadBalancingPolicy>> {
         fn is_load_aware(name: &str) -> bool {
-            name == "power_of_two" || name == "least_load"
+            name == "power_of_two" || name == "least_load" || name == "cache_aware"
         }
 
         let mut policies = Vec::new();
@@ -488,7 +501,8 @@ impl PolicyRegistry {
     }
 
     /// Drop a removed worker's cached load report from all load-aware policies
-    /// (`power_of_two`, `least_load`).
+    /// (`power_of_two`, `least_load`; `cache_aware` is also included but its
+    /// `remove_worker` is a no-op).
     ///
     /// These policies cache per-worker load reports keyed by URL; without this
     /// their caches would grow unbounded under worker churn. Called on worker
@@ -570,7 +584,8 @@ impl std::fmt::Debug for PolicyRegistry {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerLoadResponse};
+    use tokio::sync::watch;
 
     use super::*;
     use crate::{
@@ -599,6 +614,58 @@ mod tests {
             eviction_interval_secs: 0,
             ..Default::default()
         }))
+    }
+
+    fn req_load(num_running_reqs: i32, num_waiting_reqs: i32) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            loads: vec![SchedulerLoadSnapshot {
+                num_running_reqs,
+                num_waiting_reqs,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn set_global_loads(
+        registry: &PolicyRegistry,
+        entries: Vec<(&str, WorkerLoadResponse)>,
+    ) -> watch::Sender<HashMap<String, WorkerLoadResponse>> {
+        let loads = entries
+            .into_iter()
+            .map(|(url, load)| (url.to_string(), load))
+            .collect();
+        let (tx, rx) = watch::channel(loads);
+        registry.set_load_receiver(Some(rx));
+        tx
+    }
+
+    fn workers_with_local_busy_first(
+        first_url: &str,
+        second_url: &str,
+        worker_type: WorkerType,
+    ) -> Vec<Arc<dyn Worker>> {
+        let workers = vec![
+            worker(first_url, worker_type),
+            worker(second_url, worker_type),
+        ];
+        for _ in 0..40 {
+            workers[0].increment_load();
+        }
+        workers
+    }
+
+    fn assert_selects_global_min(
+        policy: Arc<dyn LoadBalancingPolicy>,
+        workers: &[Arc<dyn Worker>],
+    ) {
+        let info = SelectWorkerInfo {
+            request_text: Some("hello"),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            assert_eq!(policy.select_worker(workers, &info), Some(0));
+        }
     }
 
     fn headers_with_key(key: &str) -> http::HeaderMap {
@@ -741,6 +808,81 @@ mod tests {
         let registry = PolicyRegistry::new(PolicyConfig::Passthrough);
         registry.on_worker_added("m", Some("passthrough"));
         assert!(registry.get_all_load_aware_policies().is_empty());
+    }
+
+    #[test]
+    fn test_cache_aware_is_load_aware() {
+        // cache_aware consumes the backend load snapshot (via the watch channel),
+        // so it must be in the load-aware set that gates /v1/loads polling —
+        // otherwise its global-load imbalance/shortest-queue logic never receives
+        // data and silently falls back to local counters.
+        let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        registry.set_prefill_policy(cache_aware_policy());
+        let names: Vec<&str> = registry
+            .get_all_load_aware_policies()
+            .iter()
+            .map(|p| p.name())
+            .collect();
+        assert!(
+            names.contains(&"cache_aware"),
+            "cache_aware must be load-aware so the monitor polls /v1/loads; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_label_selected_cache_aware_receives_global_loads() {
+        let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        let workers = workers_with_local_busy_first(
+            "http://label-0:8000",
+            "http://label-1:8000",
+            WorkerType::Regular,
+        );
+
+        let _tx = set_global_loads(
+            &registry,
+            vec![
+                ("http://label-0:8000", req_load(0, 0)),
+                ("http://label-1:8000", req_load(100, 0)),
+            ],
+        );
+
+        let policy = registry.on_worker_added("label-model", Some("cache_aware"));
+
+        // Local counters say worker 1 is idle, but the WorkerMonitor snapshot
+        // says worker 0 is the global minimum. The selected policy must follow
+        // the registry-injected receiver instead of silently falling back local.
+        assert_selects_global_min(policy, &workers);
+    }
+
+    #[test]
+    fn test_pd_cache_aware_policies_receive_global_loads_after_set() {
+        let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        let prefill_workers = workers_with_local_busy_first(
+            "http://prefill-0:8000",
+            "http://prefill-1:8000",
+            WorkerType::Prefill,
+        );
+        let decode_workers = workers_with_local_busy_first(
+            "http://decode-0:8000",
+            "http://decode-1:8000",
+            WorkerType::Decode,
+        );
+
+        let _tx = set_global_loads(
+            &registry,
+            vec![
+                ("http://prefill-0:8000", req_load(0, 0)),
+                ("http://prefill-1:8000", req_load(100, 0)),
+                ("http://decode-0:8000", req_load(0, 0)),
+                ("http://decode-1:8000", req_load(100, 0)),
+            ],
+        );
+
+        registry.set_prefill_policy(cache_aware_policy());
+        registry.set_decode_policy(cache_aware_policy());
+
+        assert_selects_global_min(registry.get_prefill_policy(), &prefill_workers);
+        assert_selects_global_min(registry.get_decode_policy(), &decode_workers);
     }
 
     #[test]
