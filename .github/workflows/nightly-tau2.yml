@@ -149,7 +149,7 @@ jobs:
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
                "model_cache": "/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 0},
+               "max_model_len": "auto", "num_tasks": 30},  # cap like Blackwell legs — dense 27B is slow; bounds runtime + skips the airline task-44 straggler
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
