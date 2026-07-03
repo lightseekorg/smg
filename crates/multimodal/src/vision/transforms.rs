@@ -485,10 +485,15 @@ where
 /// yields BIT-IDENTICAL output: no shared accumulation and no inner-loop order
 /// changes. Small images run serial to avoid thread-spawn overhead.
 pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
+    par_tasks(out_bytes, out_rows, 32)
+}
+
+/// Choose a bounded task count for independent preprocessing work items.
+pub(crate) fn par_tasks(out_bytes: usize, work_items: usize, min_items_per_task: usize) -> usize {
     const PAR_MIN_BYTES: usize = 1 << 19;
-    const MIN_ROWS_PER_THREAD: usize = 32;
     const MAX_THREADS: usize = 8;
-    if out_bytes < PAR_MIN_BYTES || out_rows < 2 * MIN_ROWS_PER_THREAD {
+    debug_assert!(min_items_per_task > 0);
+    if out_bytes < PAR_MIN_BYTES || work_items < 2 * min_items_per_task {
         return 1;
     }
     static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
@@ -497,7 +502,7 @@ pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
             .map(|n| n.get())
             .unwrap_or(1)
     });
-    (out_rows / MIN_ROWS_PER_THREAD)
+    (work_items / min_items_per_task)
         .min(avail)
         .clamp(1, MAX_THREADS)
 }

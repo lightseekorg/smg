@@ -32,7 +32,7 @@ use crate::{
         preprocessor_config::PreProcessorConfig,
         processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
         transforms::{
-            par_join, par_scope, par_threads, pil_to_filter, resize, resize_bicubic_pil,
+            par_join, par_scope, par_tasks, par_threads, pil_to_filter, resize, resize_bicubic_pil,
             resize_bicubic_pil_rgb, resize_rgb_bytes, rgb_bytes, NestedParallelismPermit,
             TransformError,
         },
@@ -150,6 +150,52 @@ fn prepare_video_rgb_frame<'a>(
             data: Cow::Borrowed(frame.data),
         })
     }
+}
+
+fn prepare_video_rgb_chunk<'a>(
+    frames: &[RgbFrameRef<'a>],
+    temporal_index: usize,
+    temporal_patch_size: usize,
+    target_width: u32,
+    target_height: u32,
+    filter: FilterType,
+    do_resize: bool,
+) -> Result<Vec<VideoFrameRgb<'a>>, TransformError> {
+    let mut prepared = Vec::with_capacity(temporal_patch_size);
+    let mut used_parallel_pair = false;
+    if temporal_patch_size == 2 {
+        let first = frames[(temporal_index * temporal_patch_size).min(frames.len() - 1)];
+        let second = frames[(temporal_index * temporal_patch_size + 1).min(frames.len() - 1)];
+        let both_resize = do_resize
+            && (first.width != target_width || first.height != target_height)
+            && (second.width != target_width || second.height != target_height);
+        if let Some(_permit) = both_resize
+            .then(NestedParallelismPermit::try_acquire)
+            .flatten()
+        {
+            let (first, second) = par_join(
+                || prepare_video_rgb_frame(first, target_width, target_height, filter, do_resize),
+                || prepare_video_rgb_frame(second, target_width, target_height, filter, do_resize),
+            );
+            prepared.push(first?);
+            prepared.push(second?);
+            used_parallel_pair = true;
+        }
+    }
+    if !used_parallel_pair {
+        for temporal_offset in 0..temporal_patch_size {
+            let frame_index =
+                (temporal_index * temporal_patch_size + temporal_offset).min(frames.len() - 1);
+            prepared.push(prepare_video_rgb_frame(
+                frames[frame_index],
+                target_width,
+                target_height,
+                filter,
+                do_resize,
+            )?);
+        }
+    }
+    Ok(prepared)
 }
 
 fn resize_dynamic_frame_to_raw(
@@ -1231,60 +1277,52 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             }
         }
 
-        let mut out_idx = 0;
-        let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
-        for gt in 0..grid_t {
-            frame_rgbs.clear();
-            let mut used_parallel_pair = false;
-            if temporal_patch_size == 2 {
-                let first = frames[(gt * temporal_patch_size).min(frames.len() - 1)];
-                let second = frames[(gt * temporal_patch_size + 1).min(frames.len() - 1)];
-                let both_resize = do_resize
-                    && (first.width != tw32 || first.height != th32)
-                    && (second.width != tw32 || second.height != th32);
-                if let Some(_permit) = both_resize
-                    .then(NestedParallelismPermit::try_acquire)
-                    .flatten()
-                {
-                    let (first, second) = par_join(
-                        || prepare_video_rgb_frame(first, tw32, th32, filter, do_resize),
-                        || prepare_video_rgb_frame(second, tw32, th32, filter, do_resize),
-                    );
-                    frame_rgbs.push(first?);
-                    frame_rgbs.push(second?);
-                    used_parallel_pair = true;
-                }
+        let values_per_group = grid_h * grid_w * patch_features;
+        let task_count = par_tasks(all_patches.len() * size_of::<f32>(), grid_t, 1);
+        let groups_per_task = grid_t.div_ceil(task_count);
+        let mut errors = (0..task_count).map(|_| None).collect::<Vec<_>>();
+        par_scope(|scope| {
+            for (task_index, (output_band, error_slot)) in all_patches
+                .chunks_mut(groups_per_task * values_per_group)
+                .zip(errors.iter_mut())
+                .enumerate()
+            {
+                let first_group = task_index * groups_per_task;
+                scope.spawn(move |_| {
+                    let outcome = (|| {
+                        for (group_offset, group_output) in
+                            output_band.chunks_mut(values_per_group).enumerate()
+                        {
+                            let temporal_index = first_group + group_offset;
+                            let prepared = prepare_video_rgb_chunk(
+                                frames,
+                                temporal_index,
+                                temporal_patch_size,
+                                tw32,
+                                th32,
+                                filter,
+                                do_resize,
+                            )?;
+                            let mut output_index = 0;
+                            self.patchify_video_rgb_chunk_into(
+                                &prepared,
+                                grid_h,
+                                grid_w,
+                                group_output,
+                                &mut output_index,
+                                &lut,
+                            )?;
+                            debug_assert_eq!(output_index, group_output.len());
+                        }
+                        Ok::<_, TransformError>(())
+                    })();
+                    *error_slot = outcome.err();
+                });
             }
-            if !used_parallel_pair {
-                for tp in 0..temporal_patch_size {
-                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
-                    let frame = frames[idx];
-                    if do_resize && (frame.width != tw32 || frame.height != th32) {
-                        frame_rgbs.push(VideoFrameRgb {
-                            width: tw32 as usize,
-                            height: th32 as usize,
-                            data: Cow::Owned(resize_rgb_frame_to_raw(frame, tw32, th32, filter)?),
-                        });
-                    } else {
-                        frame_rgbs.push(VideoFrameRgb {
-                            width: frame.width as usize,
-                            height: frame.height as usize,
-                            data: Cow::Borrowed(frame.data),
-                        });
-                    }
-                }
-            }
-
-            self.patchify_video_rgb_chunk_into(
-                &frame_rgbs,
-                grid_h,
-                grid_w,
-                &mut all_patches,
-                &mut out_idx,
-                &lut,
-            )?;
+        });
+        if let Some(error) = errors.into_iter().flatten().next() {
+            return Err(error);
         }
-        debug_assert_eq!(out_idx, all_patches.len());
 
         let encoder_input = Array2::from_shape_vec((num_patches, patch_features), all_patches)
             .map_err(|e| {
