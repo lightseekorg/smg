@@ -538,6 +538,44 @@ fn pil_h_band(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RGB row-band resampler: precomputed coeffs + dims + output band"
+)]
+fn pil_h_band_rgb(
+    src: &[u8],
+    bounds: &[(usize, usize)],
+    kernels: &[Vec<i64>],
+    half: i64,
+    in_w: usize,
+    out_w: usize,
+    oy0: usize,
+    out_band: &mut [u8],
+) {
+    let row_out = out_w * 3;
+    for (i, output_row) in out_band.chunks_mut(row_out).enumerate() {
+        let y = oy0 + i;
+        let row = &src[y * in_w * 3..(y + 1) * in_w * 3];
+        for output_x in 0..out_w {
+            let (source_x, source_columns) = bounds[output_x];
+            let kernel = &kernels[output_x];
+            let mut red = half;
+            let mut green = half;
+            let mut blue = half;
+            for (x, &coefficient) in kernel.iter().take(source_columns).enumerate() {
+                let source = (source_x + x) * 3;
+                red += row[source] as i64 * coefficient;
+                green += row[source + 1] as i64 * coefficient;
+                blue += row[source + 2] as i64 * coefficient;
+            }
+            let output = output_x * 3;
+            output_row[output] = pil_clip8(red);
+            output_row[output + 1] = pil_clip8(green);
+            output_row[output + 2] = pil_clip8(blue);
+        }
+    }
+}
+
 /// Resample interleaved `channels`-channel u8 data along the width axis.
 /// `src` is `rows * in_w * channels`; returns `rows * out_w * channels`.
 fn pil_resample_horizontal(
@@ -571,6 +609,35 @@ fn pil_resample_horizontal(
                     pil_h_band(src, b, k, half, in_w, out_w, channels, start, band);
                 });
                 oy0 += n;
+            }
+        });
+    }
+    out
+}
+
+fn pil_resample_horizontal_rgb(src: &[u8], rows: usize, in_w: usize, out_w: usize) -> Vec<u8> {
+    let (bounds, kernels) = pil_precompute_coeffs(in_w, out_w);
+    let half = 1_i64 << (PIL_PRECISION_BITS - 1);
+    let row_out = out_w * 3;
+    let mut out = vec![0_u8; rows * row_out];
+    let nthreads = par_threads(out.len(), rows);
+    if nthreads <= 1 {
+        pil_h_band_rgb(src, &bounds, &kernels, half, in_w, out_w, 0, &mut out);
+    } else {
+        let chunk_rows = rows.div_ceil(nthreads);
+        par_scope(|scope| {
+            let (bounds, kernels) = (&bounds, &kernels);
+            let mut rest = out.as_mut_slice();
+            let mut output_y = 0;
+            while output_y < rows {
+                let band_rows = chunk_rows.min(rows - output_y);
+                let (band, tail) = rest.split_at_mut(band_rows * row_out);
+                rest = tail;
+                let start = output_y;
+                scope.spawn(move |_| {
+                    pil_h_band_rgb(src, bounds, kernels, half, in_w, out_w, start, band);
+                });
+                output_y += band_rows;
             }
         });
     }
@@ -766,7 +833,11 @@ fn resize_bicubic_pil_bytes(
             pil_resample_vertical(data, in_h, in_w, out_h, 3)
         }
     } else {
-        let horiz = pil_resample_horizontal(data, in_h, in_w, out_w, 3);
+        let horiz = if joint_rgb {
+            pil_resample_horizontal_rgb(data, in_h, in_w, out_w)
+        } else {
+            pil_resample_horizontal(data, in_h, in_w, out_w, 3)
+        };
         if in_h == out_h {
             horiz
         } else {
