@@ -567,11 +567,12 @@ fn pil_h_band_rgb(
             let mut red = half;
             let mut green = half;
             let mut blue = half;
-            for (x, &coefficient) in kernel.iter().take(source_columns).enumerate() {
-                let source = (source_x + x) * 3;
-                red += row[source] as i64 * coefficient;
-                green += row[source + 1] as i64 * coefficient;
-                blue += row[source + 2] as i64 * coefficient;
+            let source_start = source_x * 3;
+            let source_end = (source_x + source_columns) * 3;
+            for (pixel, &coefficient) in row[source_start..source_end].chunks_exact(3).zip(kernel) {
+                red += pixel[0] as i64 * coefficient;
+                green += pixel[1] as i64 * coefficient;
+                blue += pixel[2] as i64 * coefficient;
             }
             let output = output_x * 3;
             output_row[output] = pil_clip8(red);
