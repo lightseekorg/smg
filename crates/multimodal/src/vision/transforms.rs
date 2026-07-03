@@ -697,7 +697,27 @@ fn pil_v_band_rgb(
         let output_y = oy0 + i;
         let (source_y, source_rows) = bounds[output_y];
         let kernel = &kernels[output_y];
-        for x in 0..width {
+        let blocked_width = width / 4 * 4;
+        for x in (0..blocked_width).step_by(4) {
+            let mut sums = [[half; 3]; 4];
+            for (y, &coefficient) in kernel.iter().take(source_rows).enumerate() {
+                let source = ((source_y + y) * width + x) * 3;
+                for (pixel, sums) in sums.iter_mut().enumerate() {
+                    let input = source + pixel * 3;
+                    sums[0] += src[input] as i64 * coefficient;
+                    sums[1] += src[input + 1] as i64 * coefficient;
+                    sums[2] += src[input + 2] as i64 * coefficient;
+                }
+            }
+            let output = x * 3;
+            for (pixel, sums) in sums.iter().enumerate() {
+                let target = output + pixel * 3;
+                output_row[target] = pil_clip8(sums[0]);
+                output_row[target + 1] = pil_clip8(sums[1]);
+                output_row[target + 2] = pil_clip8(sums[2]);
+            }
+        }
+        for x in blocked_width..width {
             let mut red = half;
             let mut green = half;
             let mut blue = half;
