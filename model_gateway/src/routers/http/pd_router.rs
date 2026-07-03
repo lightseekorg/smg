@@ -965,10 +965,15 @@ impl PDRouter {
             futures_util::pin_mut!(stream);
             // Reusable SSE encoder for the logprob-merge re-encode path.
             let mut encoder = SseEncoder::new();
+            // Whether the next chunk begins at an SSE line boundary (i.e. the
+            // previous chunk ended with an EOL); used to anchor the [DONE]
+            // sentinel detection when the match sits at the start of a chunk.
+            let mut at_line_start = true;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        let is_done = memmem::find(&chunk, b"data: [DONE]").is_some();
+                        let is_done = Self::chunk_contains_done_event(&chunk, at_line_start);
+                        at_line_start = chunk.last().is_some_and(|&b| b == b'\n' || b == b'\r');
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(
@@ -1205,6 +1210,36 @@ impl PDRouter {
         false
     }
 
+    /// Line-anchored detection of the SSE `data: [DONE]` terminal event in a
+    /// raw upstream chunk: a match must start at a line boundary and end at
+    /// an EOL or at the end of the chunk. Payload text that merely contains
+    /// those bytes never qualifies — real EOL bytes cannot occur inside a
+    /// `data:` payload (JSON escapes them), so line anchoring is sufficient.
+    ///
+    /// `at_line_start` says whether `chunk` begins at a line boundary. A
+    /// sentinel split across two chunks is not detected; the relay then
+    /// terminates via upstream EOF instead, which is benign.
+    fn chunk_contains_done_event(chunk: &[u8], at_line_start: bool) -> bool {
+        const DONE_EVENT: &[u8] = b"data: [DONE]";
+        let mut from = 0;
+        while let Some(pos) = memmem::find(&chunk[from..], DONE_EVENT) {
+            let start = from + pos;
+            let anchored = match start.checked_sub(1) {
+                None => at_line_start,
+                Some(prev) => chunk[prev] == b'\n' || chunk[prev] == b'\r',
+            };
+            let terminated = match chunk.get(start + DONE_EVENT.len()) {
+                None => true,
+                Some(&b) => b == b'\n' || b == b'\r',
+            };
+            if anchored && terminated {
+                return true;
+            }
+            from = start + 1;
+        }
+        false
+    }
+
     // Simple helper to merge logprobs in streaming responses
     // Optimized to reduce allocations in the merge path
     fn merge_streaming_logprobs(
@@ -1214,12 +1249,17 @@ impl PDRouter {
     ) -> Result<Bytes, ()> {
         // Skip non-data chunks
         let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
-        if !chunk_str.starts_with("data: ") || chunk_str.contains("[DONE]") {
+        if !chunk_str.starts_with("data: ") {
             return Err(());
         }
 
-        // Parse JSON from chunk
+        // Parse JSON from chunk. The `[DONE]` sentinel must be matched
+        // exactly, not by substring: payloads that merely contain that text
+        // still need their logprobs merged.
         let json_str = chunk_str.trim_start_matches("data: ").trim();
+        if json_str == "[DONE]" {
+            return Err(());
+        }
         let mut decode_json: Value = serde_json::from_str(json_str).map_err(|_| ())?;
 
         // Merge prefill logprobs if available
@@ -1517,6 +1557,71 @@ mod tests {
         };
         worker.set_status(status);
         Box::new(worker)
+    }
+
+    #[test]
+    fn test_done_detection_matches_real_sentinel() {
+        // Terminal sentinel alone in a chunk
+        assert!(PDRouter::chunk_contains_done_event(
+            b"data: [DONE]\n\n",
+            true
+        ));
+        // Sentinel following a data event in the same chunk
+        assert!(PDRouter::chunk_contains_done_event(
+            b"data: {\"choices\":[]}\n\ndata: [DONE]\n\n",
+            true
+        ));
+        // CRLF line endings
+        assert!(PDRouter::chunk_contains_done_event(
+            b"data: [DONE]\r\n\r\n",
+            true
+        ));
+        // Sentinel at end of chunk, trailing EOL split into the next chunk
+        assert!(PDRouter::chunk_contains_done_event(b"data: [DONE]", true));
+        // Chunk begins mid-stream but at a line boundary
+        assert!(PDRouter::chunk_contains_done_event(
+            b"\ndata: [DONE]\n\n",
+            false
+        ));
+    }
+
+    #[test]
+    fn test_done_detection_ignores_payload_text() {
+        // Regression: a model streaming SSE-handling code produced a delta
+        // whose arguments contained the literal text "// data: [DONE]"; the
+        // old substring scan treated it as the sentinel and silently cut the
+        // stream (no finish_reason, no terminal [DONE], upstream aborted).
+        assert!(!PDRouter::chunk_contains_done_event(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"// data: [DONE]\"}}]}}]}\n\n",
+            true
+        ));
+        // Line starts with the sentinel bytes but continues with payload
+        assert!(!PDRouter::chunk_contains_done_event(
+            b"data: [DONE]{\"x\":1}\n\n",
+            true
+        ));
+        // Chunk starts mid-line (previous chunk ended without an EOL), so a
+        // leading match is payload continuation, not an event line
+        assert!(!PDRouter::chunk_contains_done_event(
+            b"data: [DONE]\n\n",
+            false
+        ));
+    }
+
+    #[test]
+    fn test_merge_streaming_logprobs_sentinel_exact_match() {
+        let mut encoder = SseEncoder::new();
+        // The exact sentinel is skipped (caller forwards it verbatim)
+        assert!(
+            PDRouter::merge_streaming_logprobs(None, b"data: [DONE]\n\n", &mut encoder).is_err()
+        );
+        // A payload containing "[DONE]" as text is still processed
+        assert!(PDRouter::merge_streaming_logprobs(
+            None,
+            b"data: {\"text\":\"[DONE]\",\"meta_info\":{}}\n\n",
+            &mut encoder
+        )
+        .is_ok());
     }
 
     #[test]
