@@ -368,7 +368,8 @@ jobs:
         if: always()
         run: |
           {
-            echo "## τ²-bench A/B — ${{ matrix.name }} (${{ matrix.model }}, domains: $DOMAINS)"
+            # Job name already shows the model + runner; keep this heading lean.
+            echo "## τ²-bench A/B (domains: $DOMAINS)"
             cat "$RUNNER_TEMP/tau2_ab.md"
           } >> "$GITHUB_STEP_SUMMARY" || echo "no report produced for ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Collect tau2 transcripts

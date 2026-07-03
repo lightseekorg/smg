@@ -55,6 +55,39 @@ def test_build_report_delta_and_overall():
     assert payload["overall"]["passk"]["delta"] == pytest.approx(0.02)
 
 
+def test_domain_scores_reports_sample_counts():
+    results = [
+        {"task_id": "t1", "reward": 1.0},
+        {"task_id": "t1", "reward": 0.0},
+        {"task_id": "t2", "reward": 1.0},
+    ]
+    scores = run_ab.domain_scores(results, k=2)
+    assert scores["n_tasks"] == 2
+    assert scores["n_sims"] == 3
+
+
+def test_build_report_shows_sample_counts_and_no_duplicate_title():
+    base = run_ab.Arm(name="vllm", base_url="u")
+    cand = run_ab.Arm(name="smg", base_url="u")
+    base.scores = {
+        "retail": {"pass1": 0.80, "passk": 0.60, "n_tasks": 114, "n_sims": 228},
+        "airline": {"pass1": 0.74, "passk": 0.64, "n_tasks": 50, "n_sims": 100},
+    }
+    cand.scores = {"retail": {"pass1": 0.72, "passk": 0.58, "n_tasks": 114, "n_sims": 228}}
+    md, payload = run_ab.build_report(base, cand, ["retail", "airline"], k=2)
+    # per-domain sample counts render per arm (baseline/candidate), "—" when missing
+    assert "228/228" in md  # retail: both arms scored
+    assert "100/—" in md  # airline: candidate arm missing -> visibly asymmetric
+    # de-duped: build_report no longer emits its own "τ²-bench A/B" heading (the
+    # workflow summary step owns that title); arms are still identified.
+    assert "τ²-bench A/B" not in md
+    assert "candidate" in md and "baseline" in md
+    # JSON carries the counts, and overall N sums only over domains present per arm
+    assert payload["per_domain"][0]["n"]["baseline"]["sims"] == 228
+    assert payload["overall"]["n"]["baseline"] == 328  # retail 228 + airline 100
+    assert payload["overall"]["n"]["candidate"] == 228  # retail only
+
+
 def test_build_report_dedups_columns_at_k1():
     base = run_ab.Arm(name="vllm", base_url="u")
     cand = run_ab.Arm(name="smg", base_url="u")
