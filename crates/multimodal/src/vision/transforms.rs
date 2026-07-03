@@ -610,6 +610,38 @@ fn pil_v_band(
     }
 }
 
+fn pil_v_band_rgb(
+    src: &[u8],
+    bounds: &[(usize, usize)],
+    kernels: &[Vec<i64>],
+    half: i64,
+    width: usize,
+    oy0: usize,
+    out_band: &mut [u8],
+) {
+    let row_out = width * 3;
+    for (i, output_row) in out_band.chunks_mut(row_out).enumerate() {
+        let output_y = oy0 + i;
+        let (source_y, source_rows) = bounds[output_y];
+        let kernel = &kernels[output_y];
+        for x in 0..width {
+            let mut red = half;
+            let mut green = half;
+            let mut blue = half;
+            for (y, &coefficient) in kernel.iter().take(source_rows).enumerate() {
+                let source = ((source_y + y) * width + x) * 3;
+                red += src[source] as i64 * coefficient;
+                green += src[source + 1] as i64 * coefficient;
+                blue += src[source + 2] as i64 * coefficient;
+            }
+            let output = x * 3;
+            output_row[output] = pil_clip8(red);
+            output_row[output + 1] = pil_clip8(green);
+            output_row[output + 2] = pil_clip8(blue);
+        }
+    }
+}
+
 /// Resample interleaved `channels`-channel u8 data along the height axis.
 fn pil_resample_vertical(
     src: &[u8],
@@ -644,12 +676,41 @@ fn pil_resample_vertical(
     out
 }
 
+fn pil_resample_vertical_rgb(src: &[u8], in_h: usize, width: usize, out_h: usize) -> Vec<u8> {
+    let (bounds, kernels) = pil_precompute_coeffs(in_h, out_h);
+    let half = 1_i64 << (PIL_PRECISION_BITS - 1);
+    let row_out = width * 3;
+    let mut out = vec![0_u8; out_h * row_out];
+    let nthreads = par_threads(out.len(), out_h);
+    if nthreads <= 1 {
+        pil_v_band_rgb(src, &bounds, &kernels, half, width, 0, &mut out);
+    } else {
+        let chunk_rows = out_h.div_ceil(nthreads);
+        par_scope(|scope| {
+            let (bounds, kernels) = (&bounds, &kernels);
+            let mut rest = out.as_mut_slice();
+            let mut output_y = 0;
+            while output_y < out_h {
+                let rows = chunk_rows.min(out_h - output_y);
+                let (band, tail) = rest.split_at_mut(rows * row_out);
+                rest = tail;
+                let start = output_y;
+                scope.spawn(move |_| {
+                    pil_v_band_rgb(src, bounds, kernels, half, width, start, band);
+                });
+                output_y += rows;
+            }
+        });
+    }
+    out
+}
+
 /// Pillow-exact BICUBIC resize (RGB8), matching
 /// `PIL.Image.resize(.., BICUBIC)`.
 pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> DynamicImage {
     let rgb = image.to_rgb8();
     let (in_w, in_h) = rgb.dimensions();
-    let output = resize_bicubic_pil_bytes(rgb.as_raw(), in_w, in_h, out_w, out_h);
+    let output = resize_bicubic_pil_bytes(rgb.as_raw(), in_w, in_h, out_w, out_h, false);
     #[expect(
         clippy::expect_used,
         reason = "output is exactly out_w*out_h*3 bytes by construction"
@@ -679,7 +740,7 @@ pub fn resize_bicubic_pil_rgb(
             data.len()
         )));
     }
-    let output = resize_bicubic_pil_bytes(data, width, height, out_w, out_h);
+    let output = resize_bicubic_pil_bytes(data, width, height, out_w, out_h, true);
     RgbImage::from_raw(out_w, out_h, output).ok_or_else(|| {
         TransformError::ShapeError(format!(
             "failed to build PIL bicubic RGB image for {out_w}x{out_h}"
@@ -687,18 +748,33 @@ pub fn resize_bicubic_pil_rgb(
     })
 }
 
-fn resize_bicubic_pil_bytes(data: &[u8], in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> Vec<u8> {
+fn resize_bicubic_pil_bytes(
+    data: &[u8],
+    in_w: u32,
+    in_h: u32,
+    out_w: u32,
+    out_h: u32,
+    joint_rgb: bool,
+) -> Vec<u8> {
     let (in_w, in_h, out_w, out_h) = (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
     if in_w == out_w && in_h == out_h {
         data.to_vec()
     } else if in_w == out_w {
-        pil_resample_vertical(data, in_h, in_w, out_h, 3)
+        if joint_rgb {
+            pil_resample_vertical_rgb(data, in_h, in_w, out_h)
+        } else {
+            pil_resample_vertical(data, in_h, in_w, out_h, 3)
+        }
     } else {
         let horiz = pil_resample_horizontal(data, in_h, in_w, out_w, 3);
         if in_h == out_h {
             horiz
         } else {
-            pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
+            if joint_rgb {
+                pil_resample_vertical_rgb(&horiz, in_h, out_w, out_h)
+            } else {
+                pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
+            }
         }
     }
 }
