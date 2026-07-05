@@ -973,7 +973,9 @@ impl PDRouter {
                 match chunk_result {
                     Ok(chunk) => {
                         let is_done = Self::chunk_contains_done_event(&chunk, at_line_start);
-                        at_line_start = chunk.last().is_some_and(|&b| b == b'\n' || b == b'\r');
+                        if let Some(&last) = chunk.last() {
+                            at_line_start = last == b'\n' || last == b'\r';
+                        }
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(
@@ -1211,16 +1213,30 @@ impl PDRouter {
     }
 
     /// Line-anchored detection of the SSE `data: [DONE]` terminal event in a
-    /// raw upstream chunk: a match must start at a line boundary and end at
-    /// an EOL or at the end of the chunk. Payload text that merely contains
-    /// those bytes never qualifies — real EOL bytes cannot occur inside a
-    /// `data:` payload (JSON escapes them), so line anchoring is sufficient.
+    /// raw upstream chunk: a match must start at a line boundary and be
+    /// immediately followed by a complete empty-line event delimiter within
+    /// the same chunk. Payload text that merely contains those bytes never
+    /// qualifies — real EOL bytes cannot occur inside a `data:` payload
+    /// (JSON escapes them). Requiring the full delimiter also rejects
+    /// multi-line events like `data: [DONE]\ndata: x\n\n`, whose joined data
+    /// is not exactly `[DONE]`.
     ///
     /// `at_line_start` says whether `chunk` begins at a line boundary. A
-    /// sentinel split across two chunks is not detected; the relay then
-    /// terminates via upstream EOF instead, which is benign.
+    /// sentinel or delimiter split across chunks is never treated as
+    /// terminal — every byte is still forwarded and the relay then ends via
+    /// upstream EOF, so deferring is always safe while a false positive
+    /// kills a live stream.
     fn chunk_contains_done_event(chunk: &[u8], at_line_start: bool) -> bool {
         const DONE_EVENT: &[u8] = b"data: [DONE]";
+        // Length of the EOL sequence at `bytes[pos..]`: 2 for \r\n, 1 for a
+        // bare \r or \n, 0 if none.
+        fn eol_len_at(bytes: &[u8], pos: usize) -> usize {
+            match bytes.get(pos) {
+                Some(b'\r') => 1 + usize::from(bytes.get(pos + 1) == Some(&b'\n')),
+                Some(b'\n') => 1,
+                _ => 0,
+            }
+        }
         let mut from = 0;
         while let Some(pos) = memmem::find(&chunk[from..], DONE_EVENT) {
             let start = from + pos;
@@ -1228,12 +1244,12 @@ impl PDRouter {
                 None => at_line_start,
                 Some(prev) => chunk[prev] == b'\n' || chunk[prev] == b'\r',
             };
-            let terminated = match chunk.get(start + DONE_EVENT.len()) {
-                None => true,
-                Some(&b) => b == b'\n' || b == b'\r',
-            };
-            if anchored && terminated {
-                return true;
+            if anchored {
+                let line_end = start + DONE_EVENT.len();
+                let eol1 = eol_len_at(chunk, line_end);
+                if eol1 > 0 && eol_len_at(chunk, line_end + eol1) > 0 {
+                    return true;
+                }
             }
             from = start + 1;
         }
@@ -1576,8 +1592,6 @@ mod tests {
             b"data: [DONE]\r\n\r\n",
             true
         ));
-        // Sentinel at end of chunk, trailing EOL split into the next chunk
-        assert!(PDRouter::chunk_contains_done_event(b"data: [DONE]", true));
         // Chunk begins mid-stream but at a line boundary
         assert!(PDRouter::chunk_contains_done_event(
             b"\ndata: [DONE]\n\n",
@@ -1605,6 +1619,22 @@ mod tests {
         assert!(!PDRouter::chunk_contains_done_event(
             b"data: [DONE]\n\n",
             false
+        ));
+        // Sentinel bytes at end of chunk: could be a payload line split right
+        // after the prefix (e.g. `data: [DONE]` + `{"x":1}` in the next
+        // chunk), so the decision is deferred to the following chunk / EOF
+        assert!(!PDRouter::chunk_contains_done_event(b"data: [DONE]", true));
+        // Line EOL present but the empty-line event delimiter is incomplete;
+        // deferring avoids forwarding a truncated final frame to the client
+        assert!(!PDRouter::chunk_contains_done_event(
+            b"data: [DONE]\n",
+            true
+        ));
+        // Per SSE framing this is ONE event whose joined data is
+        // "[DONE]\nx", not the sentinel
+        assert!(!PDRouter::chunk_contains_done_event(
+            b"data: [DONE]\ndata: x\n\n",
+            true
         ));
     }
 
