@@ -1576,66 +1576,61 @@ mod tests {
     }
 
     #[test]
-    fn test_done_detection_matches_real_sentinel() {
-        // Terminal sentinel alone in a chunk
-        assert!(PDRouter::chunk_contains_done_event(
-            b"data: [DONE]\n\n",
-            true
-        ));
-        // Sentinel following a data event in the same chunk
-        assert!(PDRouter::chunk_contains_done_event(
-            b"data: {\"choices\":[]}\n\ndata: [DONE]\n\n",
-            true
-        ));
-        // CRLF line endings
-        assert!(PDRouter::chunk_contains_done_event(
-            b"data: [DONE]\r\n\r\n",
-            true
-        ));
-        // Chunk begins mid-stream but at a line boundary
-        assert!(PDRouter::chunk_contains_done_event(
-            b"\ndata: [DONE]\n\n",
-            false
-        ));
-    }
-
-    #[test]
-    fn test_done_detection_ignores_payload_text() {
-        // Regression: a model streaming SSE-handling code produced a delta
-        // whose arguments contained the literal text "// data: [DONE]"; the
-        // old substring scan treated it as the sentinel and silently cut the
-        // stream (no finish_reason, no terminal [DONE], upstream aborted).
-        assert!(!PDRouter::chunk_contains_done_event(
-            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"// data: [DONE]\"}}]}}]}\n\n",
-            true
-        ));
-        // Line starts with the sentinel bytes but continues with payload
-        assert!(!PDRouter::chunk_contains_done_event(
-            b"data: [DONE]{\"x\":1}\n\n",
-            true
-        ));
-        // Chunk starts mid-line (previous chunk ended without an EOL), so a
-        // leading match is payload continuation, not an event line
-        assert!(!PDRouter::chunk_contains_done_event(
-            b"data: [DONE]\n\n",
-            false
-        ));
-        // Sentinel bytes at end of chunk: could be a payload line split right
-        // after the prefix (e.g. `data: [DONE]` + `{"x":1}` in the next
-        // chunk), so the decision is deferred to the following chunk / EOF
-        assert!(!PDRouter::chunk_contains_done_event(b"data: [DONE]", true));
-        // Line EOL present but the empty-line event delimiter is incomplete;
-        // deferring avoids forwarding a truncated final frame to the client
-        assert!(!PDRouter::chunk_contains_done_event(
-            b"data: [DONE]\n",
-            true
-        ));
-        // Per SSE framing this is ONE event whose joined data is
-        // "[DONE]\nx", not the sentinel
-        assert!(!PDRouter::chunk_contains_done_event(
-            b"data: [DONE]\ndata: x\n\n",
-            true
-        ));
+    fn test_done_event_detection() {
+        // Production-incident payload: a delta whose arguments contained the
+        // literal sentinel text; the old substring scan treated it as
+        // terminal and silently killed the stream.
+        let incident: &[u8] = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"// data: [DONE]\"}}]}}]}\n\n";
+        // (chunk, chunk begins at a line boundary, expected, case)
+        let cases: &[(&[u8], bool, bool, &str)] = &[
+            (b"data: [DONE]\n\n", true, true, "standalone sentinel"),
+            (
+                b"data: {\"x\":1}\n\ndata: [DONE]\n\n",
+                true,
+                true,
+                "sentinel after a data event",
+            ),
+            (b"data: [DONE]\r\n\r\n", true, true, "CRLF endings"),
+            (
+                b"\ndata: [DONE]\n\n",
+                false,
+                true,
+                "line boundary inside the chunk",
+            ),
+            (incident, true, false, "sentinel text inside a JSON payload"),
+            (
+                b"data: [DONE]{\"x\":1}\n\n",
+                true,
+                false,
+                "line continues with payload",
+            ),
+            (b"data: [DONE]\n\n", false, false, "chunk starts mid-line"),
+            (
+                b"data: [DONE]",
+                true,
+                false,
+                "possibly a split payload line: defer",
+            ),
+            (
+                b"data: [DONE]\n",
+                true,
+                false,
+                "event delimiter incomplete: defer",
+            ),
+            (
+                b"data: [DONE]\ndata: x\n\n",
+                true,
+                false,
+                "one event, joined data is not [DONE]",
+            ),
+        ];
+        for (chunk, at_line_start, expected, case) in cases {
+            assert_eq!(
+                PDRouter::chunk_contains_done_event(chunk, *at_line_start),
+                *expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]
