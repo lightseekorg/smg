@@ -55,7 +55,7 @@ use crate::{
         metrics_server, otel_trace, runtime_metrics,
     },
     routers::{
-        conversations, openai::realtime::ws::RealtimeQueryParams, parse,
+        common::realtime::ws::RealtimeQueryParams, conversations, parse,
         responses as response_handlers, router_manager::RouterManager, tokenize, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},

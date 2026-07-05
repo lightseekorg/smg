@@ -20,8 +20,9 @@ use crate::{
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
     routers::{
-        common::openai_bridge::FormatRegistry, grpc::multimodal::MultimodalConfigRegistry,
-        openai::realtime::RealtimeRegistry, router_manager::RouterManager,
+        common::{openai_bridge::FormatRegistry, realtime::RealtimeRegistry},
+        grpc::multimodal::MultimodalConfigRegistry,
+        router_manager::RouterManager,
     },
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
     worker::{KvEventMonitor, WorkerMonitor, WorkerRegistry, WorkerService},

@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use super::{
     webrtc_bridge::{BridgeSetupError, WebRtcBridge},
-    RealtimeRegistry,
+    RealtimeLabels, RealtimeRegistry,
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
@@ -268,6 +268,7 @@ fn validate_sdp(bytes: &[u8]) -> Result<String, Response> {
     reason = "bridge setup requires all params"
 )]
 pub(crate) async fn handle_realtime_webrtc(
+    labels: RealtimeLabels,
     headers: HeaderMap,
     parsed: WebRtcParsedRequest,
     worker: Result<Arc<dyn Worker>, Response>,
@@ -281,8 +282,8 @@ pub(crate) async fn handle_realtime_webrtc(
         Ok(w) => w,
         Err(response) => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_WEBRTC,
                 &parsed.model,
                 metrics_labels::ENDPOINT_REALTIME,
@@ -293,7 +294,7 @@ pub(crate) async fn handle_realtime_webrtc(
     };
 
     // Resolve auth: user-provided or fall back to worker's API key
-    let auth_str = match resolve_auth(&parsed.model, auth_header, worker.api_key()) {
+    let auth_str = match resolve_auth(labels, &parsed.model, auth_header, worker.api_key()) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -323,6 +324,7 @@ pub(crate) async fn handle_realtime_webrtc(
 /// Resolve the effective auth string from user header or worker API key.
 #[expect(clippy::result_large_err, reason = "Response is inherently large")]
 fn resolve_auth(
+    labels: RealtimeLabels,
     model: &str,
     auth_header: Option<HeaderValue>,
     worker_api_key: Option<&String>,
@@ -333,8 +335,8 @@ fn resolve_auth(
             Ok(s) => Ok(s.to_string()),
             Err(_) => {
                 Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
+                    labels.router,
+                    labels.backend,
                     metrics_labels::CONNECTION_WEBRTC,
                     model,
                     metrics_labels::ENDPOINT_REALTIME,
@@ -349,8 +351,8 @@ fn resolve_auth(
         },
         None => {
             Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
+                labels.router,
+                labels.backend,
                 metrics_labels::CONNECTION_WEBRTC,
                 model,
                 metrics_labels::ENDPOINT_REALTIME,
@@ -486,4 +488,28 @@ async fn setup_and_spawn_bridge(
         .header("Content-Type", "application/sdp")
         .body(axum::body::Body::from(client_sdp_answer))
         .expect("static response builder")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+
+    use super::{parse_sdp, validate_sdp};
+
+    #[test]
+    fn validate_sdp_rejects_non_v0() {
+        assert!(validate_sdp(b"not-an-sdp-offer").is_err());
+    }
+
+    #[test]
+    fn validate_sdp_rejects_empty() {
+        assert!(validate_sdp(b"").is_err());
+    }
+
+    #[test]
+    fn parse_sdp_requires_model() {
+        // Empty/whitespace query model is rejected before SDP validation.
+        let body = Bytes::from_static(b"v=0\r\n");
+        assert!(parse_sdp(&body, "   ").is_err());
+    }
 }

@@ -232,6 +232,60 @@ curl http://localhost:30000/v1/models
 
 ---
 
+### Audio Transcriptions
+
+Transcribe an audio file (batch). Requires a worker serving an ASR model.
+
+```
+POST /v1/audio/transcriptions
+```
+
+Sent as `multipart/form-data` with fields `file` (the audio) and `model`, plus optional
+`language`, `prompt`, `response_format`, `temperature`, and `stream`.
+
+```bash
+curl http://localhost:30000/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F model=Qwen/Qwen3-ASR-1.7B
+```
+
+---
+
+### Realtime API
+
+SMG proxies the OpenAI Realtime API to a realtime-capable worker. Both the OpenAI router
+(to an upstream provider) and the HTTP router (to a **local** worker labeled
+[`realtime: "true"`](../../getting-started/multiple-workers.md#realtime-capable-workers))
+support it. SMG relays frames verbatim, so the worker must speak the OpenAI Realtime
+protocol — for local workers, for example vLLM serving an ASR model with the realtime task.
+
+| Endpoint | Transport | Purpose |
+|----------|-----------|---------|
+| `GET /v1/realtime` | WebSocket | Bidirectional realtime session (e.g. live streaming transcription) |
+| `POST /v1/realtime/calls` | WebRTC (SDP) | Browser/WebRTC realtime session |
+| `POST /v1/realtime/sessions` | HTTP | Create a realtime session |
+| `POST /v1/realtime/client_secrets` | HTTP | Mint an ephemeral client secret |
+| `POST /v1/realtime/transcription_sessions` | HTTP | Create a realtime transcription session |
+
+#### WebSocket example
+
+```python
+# pip install websockets
+import asyncio, websockets
+
+async def main():
+    url = "ws://localhost:30000/v1/realtime?model=Qwen/Qwen3-ASR-1.7B"
+    headers = {"Authorization": "Bearer your-api-key"}
+    async with websockets.connect(url, additional_headers=headers) as ws:
+        # Send realtime events (session.update, input_audio_buffer.append, ...)
+        # and receive transcription/response events from the worker.
+        ...
+
+asyncio.run(main())
+```
+
+---
+
 ## Error Responses
 
 ### Error Format
