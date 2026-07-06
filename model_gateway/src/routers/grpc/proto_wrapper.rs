@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     fs::{read_dir, remove_file, OpenOptions},
-    io::{BufWriter, Write},
+    io::Write,
     path::{Path, PathBuf},
     process,
     sync::{
@@ -18,6 +18,9 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use memmap2::MmapOptions;
+#[cfg(target_os = "linux")]
+use rustix::fs::FallocateFlags;
 use smg_grpc_client::{
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
@@ -416,7 +419,10 @@ pub fn tokenspeed_mm_shm_min_bytes() -> usize {
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
-    write_tokenspeed_shm_with(data.len(), |file| file.write_all(data))
+    write_tokenspeed_shm_with(data.len(), |output| {
+        output.copy_from_slice(data);
+        Ok(())
+    })
 }
 
 /// Whether SMG can actually create+write files under `/dev/shm`. Probed once;
@@ -500,38 +506,38 @@ fn sweep_orphan_tokenspeed_shm_once() {
 // ShmTensorHandle offset support + a per-segment refcount so the segment is
 // unlinked exactly once after all its tensors are consumed. Cleanliness / fewer
 // files, not a measured speed win (tmpfs makes per-file syscalls negligible).
+#[expect(
+    unsafe_code,
+    reason = "mapping a new, exclusively owned, fixed-length SHM file"
+)]
 pub fn write_tokenspeed_shm_with(
     nbytes: usize,
-    write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> std::io::Result<()>,
+    write_fn: impl FnOnce(&mut [u8]) -> std::io::Result<()>,
 ) -> std::io::Result<tokenspeed::ShmHandle> {
     sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();
     let path = tokenspeed_shm_path(&name);
     // create_new (no clobber) + owner-only mode in world-writable /dev/shm.
     let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
+    opts.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
     let file = opts.open(&path)?;
-    let mut writer = BufWriter::new(file);
-    if let Err(error) = write_fn(&mut writer) {
-        drop(writer);
-        let _ = remove_file(&path);
-        return Err(error);
-    }
-    if let Err(error) = writer.flush().and_then(|()| {
-        if writer.get_ref().metadata()?.len() != nbytes as u64 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "TokenSpeed SHM writer produced an unexpected byte length",
-            ));
-        }
-        Ok(())
-    }) {
-        drop(writer);
+    let result = if nbytes == 0 {
+        write_fn(&mut [])
+    } else {
+        reserve_tokenspeed_shm_file(&file, nbytes).and_then(|()| {
+            // SAFETY: this process exclusively owns the newly created file,
+            // reserves its full length before mapping, and does not expose or
+            // truncate it until the callback and mapping have both dropped.
+            let mut mapping = unsafe { MmapOptions::new().len(nbytes).map_mut(&file)? };
+            write_fn(&mut mapping)
+        })
+    };
+    if let Err(error) = result {
         let _ = remove_file(&path);
         return Err(error);
     }
@@ -542,6 +548,21 @@ pub fn write_tokenspeed_shm_with(
         nbytes: nbytes as u64,
         owner_id: format!("smg:{}", process::id()),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn reserve_tokenspeed_shm_file(file: &std::fs::File, nbytes: usize) -> std::io::Result<()> {
+    Ok(rustix::fs::fallocate(
+        file,
+        FallocateFlags::empty(),
+        0,
+        nbytes as u64,
+    )?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reserve_tokenspeed_shm_file(file: &std::fs::File, nbytes: usize) -> std::io::Result<()> {
+    file.set_len(nbytes as u64)
 }
 
 pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
@@ -1875,6 +1896,22 @@ mod tests {
             }
             _ => panic!("expected shm TensorData payload"),
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tokenspeed_shm_writer_exposes_complete_mapped_payload() {
+        let expected = [0x12, 0x34, 0x56, 0x78];
+        let handle = write_tokenspeed_shm_with(expected.len(), |output| {
+            output.copy_from_slice(&expected);
+            Ok(())
+        })
+        .unwrap();
+        let payload = std::fs::read(tokenspeed_shm_path(&handle.name));
+        cleanup_tokenspeed_shm_handles(std::slice::from_ref(&handle));
+
+        assert_eq!(payload.unwrap(), expected);
+        assert!(!tokenspeed_shm_path(&handle.name).exists());
     }
 
     fn inline_tensor_data(tensor: &tokenspeed::TensorData) -> &[u8] {

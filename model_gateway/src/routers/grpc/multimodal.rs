@@ -11,7 +11,6 @@
 
 use std::{
     collections::HashMap,
-    io::Write,
     mem::size_of,
     path::Path,
     sync::{Arc, OnceLock},
@@ -1399,8 +1398,8 @@ fn serialize_array_as_tokenspeed_tensor(
 
     if shm_enabled && nbytes >= tokenspeed_mm_shm_min_bytes() {
         let started = Instant::now();
-        match write_tokenspeed_shm_with(nbytes, |file| {
-            write_array_as_dtype(file, encoder_input, &dtype)
+        match write_tokenspeed_shm_with(nbytes, |output| {
+            fill_array_as_dtype(output, encoder_input, &dtype)
         }) {
             Ok(handle) => {
                 if log_mm_timing_enabled() {
@@ -1429,15 +1428,36 @@ fn serialize_array_as_tokenspeed_tensor(
     TokenSpeedTensor::inline(data, shape, dtype)
 }
 
-fn write_array_as_dtype(
-    writer: &mut impl Write,
+fn fill_array_as_dtype(
+    output: &mut [u8],
     encoder_input: &ArrayViewD<'_, f32>,
     dtype: &str,
 ) -> std::io::Result<()> {
+    let element_size = if dtype == "bfloat16" || dtype == "float16" {
+        size_of::<u16>()
+    } else {
+        size_of::<f32>()
+    };
+    if output.len() != encoder_input.len() * element_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "encoder input output buffer has an unexpected byte length",
+        ));
+    }
+
     match dtype {
-        "float32" => write_array_as_f32(writer, encoder_input),
-        "bfloat16" => write_array_as_u16(writer, encoder_input, f32_to_bf16_bits),
-        "float16" => write_array_as_u16(writer, encoder_input, f32_to_f16_bits),
+        "float32" => {
+            fill_array_as_f32_bytes(output, encoder_input);
+            Ok(())
+        }
+        "bfloat16" => {
+            fill_array_as_u16_bytes(output, encoder_input, f32_to_bf16_bits);
+            Ok(())
+        }
+        "float16" => {
+            fill_array_as_u16_bytes(output, encoder_input, f32_to_f16_bits);
+            Ok(())
+        }
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported TokenSpeed encoder input dtype: {other}"),
@@ -1445,10 +1465,7 @@ fn write_array_as_dtype(
     }
 }
 
-fn write_array_as_f32(
-    writer: &mut impl Write,
-    encoder_input: &ArrayViewD<'_, f32>,
-) -> std::io::Result<()> {
+fn fill_array_as_f32_bytes(output: &mut [u8], encoder_input: &ArrayViewD<'_, f32>) {
     if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
         // logical (row-major) order. A non-C-contiguous array (e.g. a
@@ -1457,41 +1474,26 @@ fn write_array_as_f32(
         // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
     {
-        return write_f32_slice(writer, encoder_slice);
+        #[cfg(target_endian = "little")]
+        output.copy_from_slice(bytemuck::cast_slice(encoder_slice));
+        #[cfg(not(target_endian = "little"))]
+        fill_f32_values_as_bytes(output, encoder_slice.iter().copied());
+        return;
     }
 
-    for value in encoder_input {
-        writer.write_all(&value.to_le_bytes())?;
-    }
-    Ok(())
+    fill_f32_values_as_bytes(output, encoder_input.iter().copied());
 }
 
-fn write_f32_slice(writer: &mut impl Write, values: &[f32]) -> std::io::Result<()> {
-    #[cfg(target_endian = "little")]
-    {
-        writer.write_all(bytemuck::cast_slice(values))
-    }
-    #[cfg(not(target_endian = "little"))]
-    {
-        for value in values {
-            writer.write_all(&value.to_le_bytes())?;
-        }
-        Ok(())
+fn fill_f32_values_as_bytes(output: &mut [u8], values: impl IntoIterator<Item = f32>) {
+    for (output, value) in output.chunks_exact_mut(size_of::<f32>()).zip(values) {
+        output.copy_from_slice(&value.to_le_bytes());
     }
 }
 
-fn write_array_as_u16<F>(
-    writer: &mut impl Write,
-    encoder_input: &ArrayViewD<'_, f32>,
-    convert: F,
-) -> std::io::Result<()>
+fn fill_array_as_u16_bytes<F>(output: &mut [u8], encoder_input: &ArrayViewD<'_, f32>, convert: F)
 where
     F: Fn(f32) -> u16 + Copy + Send + Sync,
 {
-    // Bound the temporary buffer while leaving enough work to amortize
-    // parallel scheduling for large image and video tensors.
-    const CHUNK_VALUES: usize = 4 * 1024 * 1024;
-
     if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
         // logical (row-major) order. A non-C-contiguous array (e.g. a
@@ -1500,33 +1502,10 @@ where
         // because it would serialize such arrays in the wrong dimension order.
         .as_slice()
     {
-        let capacity = CHUNK_VALUES.min(encoder_slice.len()) * size_of::<u16>();
-        let mut converted = vec![0u8; capacity];
-        for chunk in encoder_slice.chunks(CHUNK_VALUES) {
-            let output = &mut converted[..chunk.len() * size_of::<u16>()];
-            fill_f32_slice_as_u16_bytes(output, chunk, convert);
-            writer.write_all(output)?;
-        }
-        return Ok(());
+        fill_f32_slice_as_u16_bytes(output, encoder_slice, convert);
+    } else {
+        fill_f32_values_as_u16_bytes(output, encoder_input.iter().copied(), convert);
     }
-
-    let mut converted = Vec::with_capacity(CHUNK_VALUES * size_of::<u16>());
-    let mut flush = |converted: &mut Vec<u8>| -> std::io::Result<()> {
-        if converted.is_empty() {
-            return Ok(());
-        }
-        writer.write_all(converted)?;
-        converted.clear();
-        Ok(())
-    };
-
-    for &value in encoder_input {
-        converted.extend_from_slice(&convert(value).to_le_bytes());
-        if converted.len() == CHUNK_VALUES * size_of::<u16>() {
-            flush(&mut converted)?;
-        }
-    }
-    flush(&mut converted)
 }
 
 fn serialize_array_as_dtype(
@@ -1565,19 +1544,7 @@ where
 {
     let element_count = encoder_input.len();
     let mut bytes = vec![0u8; element_count * size_of::<u16>()];
-
-    if let Some(encoder_slice) = encoder_input
-        // Fast path only for C-contiguous arrays, whose memory order equals
-        // logical (row-major) order. A non-C-contiguous array (e.g. a
-        // Fortran-contiguous view) falls through to logical `.iter()` below;
-        // `as_slice_memory_order()` is deliberately NOT used as a fallback
-        // because it would serialize such arrays in the wrong dimension order.
-        .as_slice()
-    {
-        fill_f32_slice_as_u16_bytes(&mut bytes, encoder_slice, convert);
-    } else {
-        fill_f32_values_as_u16_bytes(&mut bytes, encoder_input.iter().copied(), convert);
-    }
+    fill_array_as_u16_bytes(&mut bytes, encoder_input, convert);
     bytes
 }
 
@@ -2463,9 +2430,9 @@ mod tests {
             .collect();
         let array = ArrayD::from_shape_vec(IxDyn(&[values.len()]), values.clone()).unwrap();
 
-        for convert in [
-            f32_to_bf16_bits as fn(f32) -> u16,
-            f32_to_f16_bits as fn(f32) -> u16,
+        for (dtype, convert) in [
+            ("bfloat16", f32_to_bf16_bits as fn(f32) -> u16),
+            ("float16", f32_to_f16_bits as fn(f32) -> u16),
         ] {
             let actual = serialize_array_as_u16_bytes(&array.view(), convert);
             let expected: Vec<u8> = values
@@ -2473,6 +2440,10 @@ mod tests {
                 .flat_map(|&value| convert(value).to_le_bytes())
                 .collect();
             assert_eq!(actual, expected);
+
+            let mut direct = vec![0; expected.len()];
+            fill_array_as_dtype(&mut direct, &array.view(), dtype).unwrap();
+            assert_eq!(direct, expected);
         }
     }
 
@@ -2495,11 +2466,14 @@ mod tests {
             ArrayD::from_shape_vec(IxDyn(&[3, 2]).f(), vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0])
                 .unwrap();
         let fortran_item = slice_array_axis0(&fortran_array, 1, 1).unwrap();
-        let expected = [2.0_f32, 5.0]
+        let expected: Vec<u8> = [2.0_f32, 5.0]
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
         assert!(fortran_item.as_slice().is_none());
+        let mut direct = vec![0; expected.len()];
+        fill_array_as_dtype(&mut direct, &fortran_item, "float32").unwrap();
+        assert_eq!(direct, expected);
         assert_eq!(serialize_array(&fortran_item), (expected, vec![1, 2]));
     }
 }
