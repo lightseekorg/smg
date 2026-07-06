@@ -27,7 +27,7 @@ use llm_multimodal::{
     PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
-use ndarray::{ArrayD, Axis, Slice};
+use ndarray::{ArrayD, ArrayViewD, Axis, Slice};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
@@ -1198,11 +1198,11 @@ fn precomputed_multimodal_item_count(
     Ok(item_count)
 }
 
-fn encoder_input_for_item(
-    preprocessed: &PreprocessedEncoderInputs,
+fn encoder_input_for_item<'a>(
+    preprocessed: &'a PreprocessedEncoderInputs,
     field_layouts: &HashMap<String, FieldLayout>,
     item_index: usize,
-) -> Result<ArrayD<f32>> {
+) -> Result<ArrayViewD<'a, f32>> {
     // The field layout key remains "pixel_values" because it mirrors the
     // HuggingFace/vLLM vision kwargs contract. Internally this tensor is the
     // modality encoder input we pass to TokenSpeed.
@@ -1290,7 +1290,7 @@ fn content_hash_for_item(
     }
 }
 
-fn slice_array_axis0(array: &ArrayD<f32>, start: usize, len: usize) -> Result<ArrayD<f32>> {
+fn slice_array_axis0(array: &ArrayD<f32>, start: usize, len: usize) -> Result<ArrayViewD<'_, f32>> {
     let end = start
         .checked_add(len)
         .ok_or_else(|| anyhow::anyhow!("array slice range overflow"))?;
@@ -1299,9 +1299,7 @@ fn slice_array_axis0(array: &ArrayD<f32>, start: usize, len: usize) -> Result<Ar
         end <= rows,
         "array first-dimension slice {start}..{end} exceeds {rows}"
     );
-    Ok(array
-        .slice_axis(Axis(0), Slice::from(start..end))
-        .to_owned())
+    Ok(array.slice_axis(Axis(0), Slice::from(start..end)))
 }
 
 fn tensor_sizes_from_model_specific(
@@ -1341,10 +1339,10 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
 
 /// Serialize the primary encoder input ndarray to raw little-endian f32 bytes + shape.
 fn serialize_encoder_input(preprocessed: &PreprocessedEncoderInputs) -> (Vec<u8>, Vec<u32>) {
-    serialize_array(&preprocessed.encoder_input)
+    serialize_array(&preprocessed.encoder_input.view())
 }
 
-fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
+fn serialize_array(encoder_input: &ArrayViewD<'_, f32>) -> (Vec<u8>, Vec<u32>) {
     let encoder_bytes: Vec<u8> = if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
         // logical (row-major) order. A non-C-contiguous array (e.g. a
@@ -1375,7 +1373,7 @@ fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
 
 /// Serialize encoder input to the requested wire dtype.
 fn serialize_array_as_tokenspeed_tensor(
-    encoder_input: &ArrayD<f32>,
+    encoder_input: &ArrayViewD<'_, f32>,
     dtype: &str,
     shm_enabled: bool,
 ) -> TokenSpeedTensor {
@@ -1433,7 +1431,7 @@ fn serialize_array_as_tokenspeed_tensor(
 
 fn write_array_as_dtype(
     writer: &mut impl Write,
-    encoder_input: &ArrayD<f32>,
+    encoder_input: &ArrayViewD<'_, f32>,
     dtype: &str,
 ) -> std::io::Result<()> {
     match dtype {
@@ -1447,7 +1445,10 @@ fn write_array_as_dtype(
     }
 }
 
-fn write_array_as_f32(writer: &mut impl Write, encoder_input: &ArrayD<f32>) -> std::io::Result<()> {
+fn write_array_as_f32(
+    writer: &mut impl Write,
+    encoder_input: &ArrayViewD<'_, f32>,
+) -> std::io::Result<()> {
     if let Some(encoder_slice) = encoder_input
         // Fast path only for C-contiguous arrays, whose memory order equals
         // logical (row-major) order. A non-C-contiguous array (e.g. a
@@ -1481,7 +1482,7 @@ fn write_f32_slice(writer: &mut impl Write, values: &[f32]) -> std::io::Result<(
 
 fn write_array_as_u16<F>(
     writer: &mut impl Write,
-    encoder_input: &ArrayD<f32>,
+    encoder_input: &ArrayViewD<'_, f32>,
     convert: F,
 ) -> std::io::Result<()>
 where
@@ -1529,7 +1530,7 @@ where
 }
 
 fn serialize_array_as_dtype(
-    encoder_input: &ArrayD<f32>,
+    encoder_input: &ArrayViewD<'_, f32>,
     dtype: &str,
 ) -> (Vec<u8>, Vec<u32>, String) {
     match canonical_float_dtype(dtype).as_deref() {
@@ -1558,7 +1559,7 @@ fn serialize_array_as_dtype(
     }
 }
 
-fn serialize_array_as_u16_bytes<F>(encoder_input: &ArrayD<f32>, convert: F) -> Vec<u8>
+fn serialize_array_as_u16_bytes<F>(encoder_input: &ArrayViewD<'_, f32>, convert: F) -> Vec<u8>
 where
     F: Fn(f32) -> u16 + Copy + Send + Sync,
 {
@@ -1777,7 +1778,7 @@ fn canonical_float_dtype(dtype: &str) -> Option<String> {
     }
 }
 
-fn array_shape(encoder_input: &ArrayD<f32>) -> Vec<u32> {
+fn array_shape(encoder_input: &ArrayViewD<'_, f32>) -> Vec<u32> {
     encoder_input.shape().iter().map(|&d| d as u32).collect()
 }
 
@@ -1888,7 +1889,7 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 mod tests {
     use std::{fs, mem::size_of};
 
-    use ndarray::IxDyn;
+    use ndarray::{IxDyn, ShapeBuilder};
     use openai_protocol::common::{ImageUrl, VideoUrl};
     use tempfile::TempDir;
 
@@ -2466,12 +2467,39 @@ mod tests {
             f32_to_bf16_bits as fn(f32) -> u16,
             f32_to_f16_bits as fn(f32) -> u16,
         ] {
-            let actual = serialize_array_as_u16_bytes(&array, convert);
+            let actual = serialize_array_as_u16_bytes(&array.view(), convert);
             let expected: Vec<u8> = values
                 .iter()
                 .flat_map(|&value| convert(value).to_le_bytes())
                 .collect();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn encoder_input_slice_is_borrowed_and_serializes_in_logical_order() {
+        let array =
+            ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+
+        let item = slice_array_axis0(&array, 1, 1).unwrap();
+
+        assert_eq!(item.as_ptr(), array.as_ptr().wrapping_add(2));
+        assert_eq!(item.shape(), &[1, 2]);
+        let expected = [3.0_f32, 4.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        assert_eq!(serialize_array(&item), (expected, vec![1, 2]));
+
+        let fortran_array =
+            ArrayD::from_shape_vec(IxDyn(&[3, 2]).f(), vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0])
+                .unwrap();
+        let fortran_item = slice_array_axis0(&fortran_array, 1, 1).unwrap();
+        let expected = [2.0_f32, 5.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        assert!(fortran_item.as_slice().is_none());
+        assert_eq!(serialize_array(&fortran_item), (expected, vec![1, 2]));
     }
 }
