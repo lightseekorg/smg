@@ -3,13 +3,7 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::{
-    cell::RefCell,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        OnceLock,
-    },
-};
+use std::cell::RefCell;
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -18,6 +12,8 @@ use fast_image_resize::{
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4};
 use thiserror::Error;
+
+use super::execution::{scope as parallel_scope, task_count};
 
 /// Errors that can occur during image transformations.
 #[derive(Error, Debug)]
@@ -89,7 +85,7 @@ pub fn deinterleave_rgb_to_planes(
     }
     let chunk = pixels.div_ceil(nthreads);
     let (mut rr, mut gg, mut bb) = (r_plane, g_plane, b_plane);
-    par_scope(|s| {
+    parallel_scope(|s| {
         let mut p0 = 0usize;
         while p0 < pixels {
             let n = chunk.min(pixels - p0);
@@ -420,91 +416,12 @@ fn pil_clip8(v: i64) -> u8 {
     }
 }
 
-fn preprocess_pool() -> Option<&'static rayon::ThreadPool> {
-    const MAX_POOL_THREADS: usize = 64;
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let threads = std::thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1)
-            .min(MAX_POOL_THREADS);
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|index| format!("smg-mm-preprocess-{index}"))
-            .build()
-            .ok()
-    })
-    .as_ref()
-}
-
-static NESTED_PARALLELISM_IN_USE: AtomicBool = AtomicBool::new(false);
-
-pub(crate) struct NestedParallelismPermit;
-
-impl NestedParallelismPermit {
-    pub(crate) fn try_acquire() -> Option<Self> {
-        NESTED_PARALLELISM_IN_USE
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-            .then_some(Self)
-    }
-}
-
-impl Drop for NestedParallelismPermit {
-    fn drop(&mut self) {
-        NESTED_PARALLELISM_IN_USE.store(false, Ordering::Release);
-    }
-}
-
-pub(crate) fn par_scope<'scope, OP, R>(op: OP) -> R
-where
-    OP: FnOnce(&rayon::Scope<'scope>) -> R + Send,
-    R: Send,
-{
-    match preprocess_pool() {
-        Some(pool) => pool.scope(op),
-        None => rayon::scope(op),
-    }
-}
-
-pub(crate) fn par_join<A, B, RA, RB>(left: A, right: B) -> (RA, RB)
-where
-    A: FnOnce() -> RA + Send,
-    B: FnOnce() -> RB + Send,
-    RA: Send,
-    RB: Send,
-{
-    match preprocess_pool() {
-        Some(pool) => pool.join(left, right),
-        None => rayon::join(left, right),
-    }
-}
-
 /// Number of threads to split an elementwise or row-banded preprocessing pass
 /// across. Each output row/element is independent, so banding work over threads
 /// yields BIT-IDENTICAL output: no shared accumulation and no inner-loop order
 /// changes. Small images run serial to avoid thread-spawn overhead.
 pub(crate) fn par_threads(out_bytes: usize, out_rows: usize) -> usize {
-    par_tasks(out_bytes, out_rows, 32)
-}
-
-/// Choose a bounded task count for independent preprocessing work items.
-pub(crate) fn par_tasks(out_bytes: usize, work_items: usize, min_items_per_task: usize) -> usize {
-    const PAR_MIN_BYTES: usize = 1 << 19;
-    const MAX_THREADS: usize = 8;
-    debug_assert!(min_items_per_task > 0);
-    if out_bytes < PAR_MIN_BYTES || work_items < 2 * min_items_per_task {
-        return 1;
-    }
-    static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
-    let avail = *AVAILABLE_PARALLELISM.get_or_init(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
-    (work_items / min_items_per_task)
-        .min(avail)
-        .clamp(1, MAX_THREADS)
+    task_count(out_bytes, out_rows, 32)
 }
 
 /// Process output rows `[oy0, oy0 + out_band.len()/row_out)` of the horizontal
@@ -602,7 +519,7 @@ fn pil_resample_horizontal(
         );
     } else {
         let chunk_rows = rows.div_ceil(nthreads);
-        par_scope(|s| {
+        parallel_scope(|s| {
             let (b, k) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut oy0 = 0usize;
@@ -631,7 +548,7 @@ fn pil_resample_horizontal_rgb(src: &[u8], rows: usize, in_w: usize, out_w: usiz
         pil_h_band_rgb(src, &bounds, &kernels, half, in_w, out_w, 0, &mut out);
     } else {
         let chunk_rows = rows.div_ceil(nthreads);
-        par_scope(|scope| {
+        parallel_scope(|scope| {
             let (bounds, kernels) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut output_y = 0;
@@ -752,7 +669,7 @@ fn pil_resample_vertical(
         pil_v_band(src, &bounds, &kernels, half, width, channels, 0, &mut out);
     } else {
         let chunk_rows = out_h.div_ceil(nthreads);
-        par_scope(|s| {
+        parallel_scope(|s| {
             let (b, k) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut oy0 = 0usize;
@@ -779,7 +696,7 @@ fn pil_resample_vertical_rgb(src: &[u8], in_h: usize, width: usize, out_h: usize
         pil_v_band_rgb(src, &bounds, &kernels, half, width, 0, &mut out);
     } else {
         let chunk_rows = out_h.div_ceil(nthreads);
-        par_scope(|scope| {
+        parallel_scope(|scope| {
             let (bounds, kernels) = (&bounds, &kernels);
             let mut rest = out.as_mut_slice();
             let mut output_y = 0;
@@ -866,12 +783,10 @@ fn resize_bicubic_pil_bytes(
         };
         if in_h == out_h {
             horiz
+        } else if joint_rgb {
+            pil_resample_vertical_rgb(&horiz, in_h, out_w, out_h)
         } else {
-            if joint_rgb {
-                pil_resample_vertical_rgb(&horiz, in_h, out_w, out_h)
-            } else {
-                pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
-            }
+            pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
         }
     }
 }
