@@ -1,0 +1,10 @@
+{
+  "simulations": [
+    {"task_id": "task_1", "trial": 0, "reward_info": {"reward": 1.0}},
+    {"task_id": "task_1", "trial": 1, "reward_info": {"reward": 1.0}},
+    {"task_id": "task_2", "trial": 0, "reward_info": {"reward": 1.0}},
+    {"task_id": "task_2", "trial": 1, "reward_info": {"reward": 0.0}},
+    {"task_id": "task_3", "trial": 0, "reward_info": {"reward": 0.0}},
+    {"task_id": "task_3", "trial": 1, "reward_info": {"reward": 0.0}}
+  ]
+}

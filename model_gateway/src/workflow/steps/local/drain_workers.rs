@@ -130,8 +130,8 @@ mod tests {
             middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
             routers::{
-                common::openai_bridge, grpc::multimodal::MultimodalConfigRegistry,
-                openai::realtime::RealtimeRegistry,
+                common::{openai_bridge, realtime::RealtimeRegistry},
+                grpc::multimodal::MultimodalConfigRegistry,
             },
             worker::{WorkerRegistry, WorkerService},
         };

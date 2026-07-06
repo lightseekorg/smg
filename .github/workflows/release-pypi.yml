@@ -21,7 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu, macos, windows]
-        target: [x86_64, aarch64]
+        # aarch64 is added via the `include` entries below so the linux build can
+        # pin a newer manylinux image; the base manylinux2014 toolchain is too old
+        # to compile aws-lc-sys for aarch64 (no stdatomic.h / no armv8.4 -march).
+        target: [x86_64]
         manylinux: [auto]
         include:
           - os: ubuntu
@@ -40,6 +43,9 @@ jobs:
           - os: ubuntu
             platform: linux
             target: aarch64
+            # manylinux2014's aarch64 cross-gcc is too old for aws-lc-sys 0.41;
+            # 2_28 (AlmaLinux 8) has stdatomic.h + armv8.4 support.
+            manylinux: "2_28"
           # musllinux
           - os: ubuntu
             platform: linux
@@ -156,10 +162,18 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Hermetic Python so twine pulls a modern `packaging` (>= 24.2); the
+      # runner's system packaging can't parse Metadata 2.4 (PEP 639
+      # License-Expression/License-File) and rejects the wheels.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Upload to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
         run: |
-          pip install twine
+          pip install -U twine
           twine upload dist/* --verbose

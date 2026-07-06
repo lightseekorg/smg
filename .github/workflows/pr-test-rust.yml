@@ -403,6 +403,7 @@ jobs:
       completions: ${{ steps.filter.outputs.completions }}
       agentic: ${{ steps.filter.outputs.agentic }}
       embeddings: ${{ steps.filter.outputs.embeddings }}
+      realtime: ${{ steps.filter.outputs.realtime }}
       go-bindings: ${{ steps.filter.outputs.go-bindings }}
       rust-ci: ${{ steps.filter.outputs.rust-ci }}
     steps:
@@ -454,6 +455,8 @@ jobs:
               - 'e2e_test/completions/**'
             embeddings:
               - 'e2e_test/embeddings/**'
+            realtime:
+              - 'e2e_test/realtime/**'
             go-bindings:
               - 'e2e_test/bindings_go/**'
             rust-ci:
@@ -583,6 +586,26 @@ jobs:
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/embeddings
       extra_deps: "sentence-transformers"
+    secrets: inherit
+
+  e2e-1gpu-realtime:
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.realtime == 'true')))
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: vllm
+      gpu_tier: "1"
+      runner: 1-gpu-h100
+      timeout: 25
+      test_timeout: 20
+      test_dirs: e2e_test/realtime
     secrets: inherit
 
   e2e-1gpu-gateway:

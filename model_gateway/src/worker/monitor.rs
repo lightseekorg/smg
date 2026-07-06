@@ -52,7 +52,9 @@ use std::{
 };
 
 use futures::future;
-use openai_protocol::worker::{WorkerGroupKey, WorkerLoadResponse, WorkerStatus};
+use openai_protocol::worker::{
+    RuntimeType, SchedulerLoadSnapshot, WorkerGroupKey, WorkerLoadResponse, WorkerStatus,
+};
 use parking_lot::{Mutex, RwLock};
 use tokio::{
     sync::{broadcast, watch},
@@ -67,6 +69,72 @@ use crate::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimal Prometheus text-format scraper: metric name -> sample values
+/// (one per label-set). Only the flat `name{labels} value` / `name value`
+/// gauge lines that the engine load fetchers look up are collected;
+/// `#` comment lines and unparsable values are skipped, and histogram or
+/// summary buckets are simply never queried by name.
+struct PromScrape {
+    samples: HashMap<String, Vec<f64>>,
+}
+
+impl PromScrape {
+    fn parse(text: &str) -> Self {
+        let mut samples: HashMap<String, Vec<f64>> = HashMap::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Line shape: `name{labels} value [timestamp]`. Split the head
+            // (`name{labels}`) from the tail at the end of the label block so
+            // spaces inside quoted label values don't confuse the split; fall
+            // back to the first whitespace for unlabeled metrics. Then take
+            // the FIRST tail token as the value, ignoring any optional
+            // trailing timestamp.
+            let (head, tail) = match line.rfind('}') {
+                Some(close) => (&line[..=close], &line[close + 1..]),
+                None => match line.split_once(char::is_whitespace) {
+                    Some(split) => split,
+                    None => continue,
+                },
+            };
+            let Some(value) = tail.split_whitespace().next() else {
+                continue;
+            };
+            let Ok(value) = value.parse::<f64>() else {
+                continue;
+            };
+            let name = head.split('{').next().unwrap_or(head).trim();
+            samples.entry(name.to_string()).or_default().push(value);
+        }
+        Self { samples }
+    }
+
+    /// Sum across all label-set samples for `name` (0.0 if absent). Right for
+    /// additive counts like running/waiting requests across DP ranks.
+    fn sum(&self, name: &str) -> f64 {
+        self.samples
+            .get(name)
+            .map(|v| v.iter().sum())
+            .unwrap_or(0.0)
+    }
+
+    /// Mean across all label-set samples for `name` (0.0 if absent). Right for
+    /// ratios like KV-cache usage that must not be double-counted.
+    fn mean(&self, name: &str) -> f64 {
+        match self.samples.get(name) {
+            Some(v) if !v.is_empty() => v.iter().sum::<f64>() / v.len() as f64,
+            _ => 0.0,
+        }
+    }
+
+    /// True when at least one sample exists for `name`.
+    fn has(&self, name: &str) -> bool {
+        self.samples.get(name).is_some_and(|v| !v.is_empty())
+    }
+}
 
 /// DP rank load cache used by load-aware routing policies.
 ///
@@ -397,36 +465,149 @@ impl WorkerMonitor {
         handles.insert(key, GroupState { handle, interval });
     }
 
-    /// Fetch load via HTTP `GET /v1/loads?include=core,disagg,queues,memory`.
+    /// Fetch load over HTTP, dispatching on the worker's runtime type.
     ///
-    /// Extra sections beyond `core` degrade gracefully: engines that do not
-    /// report them simply omit the fields, which deserialize to `None`.
-    ///
-    /// Returns `None` on transport failure, non-success status, JSON
-    /// parse failure, or an empty `loads` array.
+    /// Each engine exposes load differently, so there is no single portable
+    /// endpoint. Every backend is normalized into a single-rank [`WorkerLoadResponse`] whose
+    /// `token_usage` field drives the load-aware policies. Returns `None` on
+    /// failure so the caller records the load as unavailable (`-1`).
     pub(crate) async fn fetch_http_load(
         client: &reqwest::Client,
         worker: &Arc<dyn Worker>,
     ) -> Option<WorkerLoadResponse> {
-        let url = worker.url();
-        let load_url = format!("{url}/v1/loads?include=core,disagg,queues,memory");
-        let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
+        match worker.metadata().spec.runtime_type {
+            RuntimeType::Vllm => Self::fetch_http_load_vllm(client, worker).await,
+            RuntimeType::Sglang => Self::fetch_http_load_sglang(client, worker).await,
+            // Unspecified / custom engines that do serve `/v1/loads`, plus
+            // the mock worker used in tests.
+            _ => Self::fetch_http_load_native(client, worker).await,
+        }
+    }
+
+    /// Legacy path: `GET /v1/loads?include=core,disagg,queues,memory`.
+    /// Served by SGLang custom builds and the mock worker.
+    ///
+    /// Extra sections beyond `core` degrade gracefully: engines that do not
+    /// report them simply omit the fields, which deserialize to `None`.
+    ///
+    /// Returns `None` on transport failure, non-success status, JSON parse
+    /// failure, or an empty `loads` array.
+    async fn fetch_http_load_native(
+        client: &reqwest::Client,
+        worker: &Arc<dyn Worker>,
+    ) -> Option<WorkerLoadResponse> {
+        let url = format!(
+            "{}/v1/loads?include=core,disagg,queues,memory",
+            worker.url()
+        );
+        let resp = Self::authed_get(client, worker, &url).await?;
+        let response: WorkerLoadResponse = resp.json().await.ok()?;
+        (!response.loads.is_empty()).then_some(response)
+    }
+
+    /// vLLM HTTP: derive load from the Prometheus `/metrics` endpoint.
+    /// The KV-cache usage ratio (0.0–1.0) maps onto `token_usage`; it is
+    /// exposed as `vllm:gpu_cache_usage_perc` in vLLM v0 and renamed to
+    /// `vllm:kv_cache_usage_perc` in vLLM v1, so accept either.
+    async fn fetch_http_load_vllm(
+        client: &reqwest::Client,
+        worker: &Arc<dyn Worker>,
+    ) -> Option<WorkerLoadResponse> {
+        let url = format!("{}/metrics", worker.url());
+        let body = Self::authed_get(client, worker, &url)
+            .await?
+            .text()
+            .await
+            .ok()?;
+        let m = PromScrape::parse(&body);
+
+        // Require the KV-usage gauge: it is the signal load-aware routing acts
+        // on, and without it `token_usage` would default to `0.0` and make a
+        // worker of unknown pressure look idle. v0 and v1 name it differently.
+        let kv_usage = ["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc"]
+            .into_iter()
+            .find(|name| m.has(name))?;
+
+        Some(Self::single_rank(SchedulerLoadSnapshot {
+            num_running_reqs: m.sum("vllm:num_requests_running") as i32,
+            num_waiting_reqs: m.sum("vllm:num_requests_waiting") as i32,
+            token_usage: m.mean(kv_usage),
+            cache_hit_rate: m.mean("vllm:gpu_prefix_cache_hit_rate"),
+            ..Default::default()
+        }))
+    }
+
+    /// SGLang HTTP: try the custom `/v1/loads` endpoint first (some builds
+    /// serve it), then fall back to the Prometheus `/metrics` gauges. The
+    /// KV-usage ratio (0.0–1.0) is `<prefix>token_usage`, where SGLang used
+    /// the `sglang:` metric prefix through v0.5.3 and switched to `sglang_`
+    /// in v0.5.4+, so detect whichever is present and use it throughout.
+    async fn fetch_http_load_sglang(
+        client: &reqwest::Client,
+        worker: &Arc<dyn Worker>,
+    ) -> Option<WorkerLoadResponse> {
+        if let Some(resp) = Self::fetch_http_load_native(client, worker).await {
+            return Some(resp);
+        }
+
+        let url = format!("{}/metrics", worker.url());
+        let body = Self::authed_get(client, worker, &url)
+            .await?
+            .text()
+            .await
+            .ok()?;
+        let m = PromScrape::parse(&body);
+
+        // Require the KV-usage gauge — the load signal routing acts on.
+        // Without it `token_usage` would default to 0.0 and hide real KV
+        // pressure, so report unavailable instead. Pick the prefix off it.
+        let prefix = ["sglang:", "sglang_"]
+            .into_iter()
+            .find(|p| m.has(&format!("{p}token_usage")))?;
+
+        Some(Self::single_rank(SchedulerLoadSnapshot {
+            num_running_reqs: m.sum(&format!("{prefix}num_running_reqs")) as i32,
+            num_waiting_reqs: m.sum(&format!("{prefix}num_queue_reqs")) as i32,
+            token_usage: m.mean(&format!("{prefix}token_usage")),
+            gen_throughput: m.mean(&format!("{prefix}gen_throughput")),
+            cache_hit_rate: m.mean(&format!("{prefix}cache_hit_rate")),
+            utilization: m.mean(&format!("{prefix}utilization")),
+            ..Default::default()
+        }))
+    }
+
+    /// Shared authenticated GET with the standard timeout. Returns `None` on
+    /// transport error or non-success status.
+    async fn authed_get(
+        client: &reqwest::Client,
+        worker: &Arc<dyn Worker>,
+        url: &str,
+    ) -> Option<reqwest::Response> {
+        let mut req = client.get(url).timeout(REQUEST_TIMEOUT);
         if let Some(key) = worker.api_key() {
             req = req.bearer_auth(key);
         }
-
-        let resp = match req.send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => return None,
-        };
-
-        let response: WorkerLoadResponse = resp.json().await.ok()?;
-
-        if response.loads.is_empty() {
-            return None;
+        match req.send().await {
+            Ok(r) if r.status().is_success() => Some(r),
+            _ => None,
         }
+    }
 
-        Some(response)
+    /// Wrap a single scheduler snapshot as a one-rank `WorkerLoadResponse`.
+    /// HTTP `/metrics` already aggregates across DP ranks, so a single
+    /// synthetic rank is the correct shape.
+    ///
+    /// Such a snapshot carries the KV-usage ratio (`token_usage`) but no
+    /// absolute token counts (`max_total_num_tokens`/`num_used_tokens` stay
+    /// `0`), so `WorkerLoadResponse::has_absolute_token_data` reports `false`
+    /// for it — keeping it out of the DP-rank cache and the `/get_loads`
+    /// absolute-token scalar.
+    fn single_rank(snapshot: SchedulerLoadSnapshot) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            dp_rank_count: 1,
+            loads: vec![snapshot],
+            ..Default::default()
+        }
     }
 
     /// Fetch load via the gRPC `GetLoads` RPC. Only supported for SGLang
@@ -663,11 +844,19 @@ async fn group_monitor_loop(
 
         let mut group_loads: HashMap<String, WorkerLoadResponse> = HashMap::new();
         let mut group_dp_loads: HashMap<String, HashMap<isize, isize>> = HashMap::new();
+        let mut dp_evict: Vec<String> = Vec::new();
         for (url, response) in results {
             if let Some(load) = response {
-                group_loads.insert(url.clone(), load.clone());
-                let dp_rank_loads = load.dp_rank_loads();
-                group_dp_loads.insert(url, dp_rank_loads);
+                // Only feed the DP-rank cache from responses that carry real
+                // absolute per-rank token counts. Ratio-only snapshots,
+                // which would otherwise poison with a fake `{0: 0}`
+                // entry and collapse DP routing onto rank 0.
+                if load.has_absolute_token_data() {
+                    group_dp_loads.insert(url.clone(), load.dp_rank_loads());
+                } else {
+                    dp_evict.push(url.clone());
+                }
+                group_loads.insert(url, load);
             }
         }
 
@@ -702,6 +891,10 @@ async fn group_monitor_loop(
             policy.update_loads(&group_loads);
         }
         monitor.worker_load_manager.update_dp_loads(&group_dp_loads);
+
+        if !dp_evict.is_empty() {
+            monitor.worker_load_manager.remove_workers(&dp_evict);
+        }
 
         // Re-export the freshly fetched loads as `smg_engine_*` gauges. Reuses
         // this poll's data; no extra fetch. Model label comes from the group.
@@ -1029,5 +1222,144 @@ mod worker_monitor_tests {
             Arc::weak_count(&monitor) >= 2,
             "expected at least one Weak from the event task and one from the group loop"
         );
+    }
+}
+
+#[cfg(test)]
+mod prom_scrape_tests {
+    use super::*;
+
+    // Trimmed sample mirroring the fields observed on a live vLLM v0.7.3
+    // `/metrics` endpoint (dev ORD cluster).
+    const VLLM_METRICS: &str = r#"
+# HELP vllm:num_requests_running Number of requests currently running on GPU.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="llama"} 3.0
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="llama"} 5.0
+# HELP vllm:gpu_cache_usage_perc GPU KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc{model_name="llama"} 0.75
+vllm:generation_tokens_total{model_name="llama"} 123456.0
+"#;
+
+    const SGLANG_METRICS: &str = r#"
+sglang:num_running_reqs{model="llama"} 2.0
+sglang:num_queue_reqs{model="llama"} 4.0
+sglang:token_usage{model="llama"} 0.42
+sglang:utilization{model="llama"} 0.9
+"#;
+
+    #[test]
+    fn parses_gauges_ignoring_comments_and_labels() {
+        let m = PromScrape::parse(VLLM_METRICS);
+        assert!(m.has("vllm:num_requests_running"));
+        assert_eq!(m.sum("vllm:num_requests_running"), 3.0);
+        assert_eq!(m.sum("vllm:num_requests_waiting"), 5.0);
+        assert_eq!(m.mean("vllm:gpu_cache_usage_perc"), 0.75);
+        assert!(!m.has("vllm:does_not_exist"));
+        assert_eq!(m.sum("vllm:does_not_exist"), 0.0);
+        assert_eq!(m.mean("vllm:does_not_exist"), 0.0);
+    }
+
+    #[test]
+    fn sum_adds_ranks_mean_averages_ratios() {
+        // Two DP-rank series for the same gauge name.
+        let text = "g{dp=\"0\"} 10\ng{dp=\"1\"} 30\nr{dp=\"0\"} 0.2\nr{dp=\"1\"} 0.8\n";
+        let m = PromScrape::parse(text);
+        assert_eq!(m.sum("g"), 40.0); // counts add
+        assert_eq!(m.mean("r"), 0.5); // ratios average
+    }
+
+    #[test]
+    fn vllm_metrics_map_onto_token_usage_snapshot() {
+        let m = PromScrape::parse(VLLM_METRICS);
+        let snap = SchedulerLoadSnapshot {
+            num_running_reqs: m.sum("vllm:num_requests_running") as i32,
+            num_waiting_reqs: m.sum("vllm:num_requests_waiting") as i32,
+            token_usage: m.mean("vllm:gpu_cache_usage_perc"),
+            ..Default::default()
+        };
+        let resp = WorkerMonitor::single_rank(snap);
+        assert_eq!(resp.dp_rank_count, 1);
+        assert_eq!(resp.effective_token_usage(), 0.75);
+        assert_eq!(resp.loads[0].num_running_reqs, 3);
+        assert_eq!(resp.loads[0].num_waiting_reqs, 5);
+    }
+
+    #[test]
+    fn sglang_metrics_map_onto_token_usage_snapshot() {
+        let m = PromScrape::parse(SGLANG_METRICS);
+        assert_eq!(m.mean("sglang:token_usage"), 0.42);
+        assert_eq!(m.sum("sglang:num_running_reqs"), 2.0);
+        assert_eq!(m.sum("sglang:num_queue_reqs"), 4.0);
+    }
+
+    #[test]
+    fn sglang_v054_underscore_prefix_is_recognized() {
+        // SGLang v0.5.4+ renamed the metric prefix `sglang:` -> `sglang_`.
+        let v054 = "sglang_token_usage{model=\"llama\"} 0.5\n\
+                    sglang_num_running_reqs{model=\"llama\"} 7\n\
+                    sglang_num_queue_reqs{model=\"llama\"} 1\n";
+        let m = PromScrape::parse(v054);
+        assert!(!m.has("sglang:token_usage"));
+        let prefix = ["sglang:", "sglang_"]
+            .into_iter()
+            .find(|p| m.has(&format!("{p}token_usage")));
+        assert_eq!(prefix, Some("sglang_"));
+        assert_eq!(m.mean("sglang_token_usage"), 0.5);
+        assert_eq!(m.sum("sglang_num_running_reqs"), 7.0);
+    }
+
+    #[test]
+    fn parse_ignores_trailing_timestamp_and_label_spaces() {
+        // Optional trailing timestamp must not be read as the value, and a
+        // space inside a quoted label value must not split the head early.
+        let text = "vllm:gpu_cache_usage_perc{model_name=\"my model\"} 0.75 1719849600000\n";
+        let m = PromScrape::parse(text);
+        assert_eq!(m.mean("vllm:gpu_cache_usage_perc"), 0.75);
+    }
+
+    #[test]
+    fn vllm_v1_kv_cache_usage_metric_is_recognized() {
+        // vLLM v1 renamed the gauge from `gpu_cache_usage_perc` to
+        // `kv_cache_usage_perc`; the fetcher accepts either name.
+        let v1 = "vllm:kv_cache_usage_perc{model_name=\"llama\"} 0.6\n";
+        let m = PromScrape::parse(v1);
+        assert!(!m.has("vllm:gpu_cache_usage_perc"));
+        let kv_usage = ["vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc"]
+            .into_iter()
+            .find(|name| m.has(name));
+        assert_eq!(kv_usage, Some("vllm:kv_cache_usage_perc"));
+        assert_eq!(m.mean("vllm:kv_cache_usage_perc"), 0.6);
+    }
+
+    #[test]
+    fn metric_derived_snapshot_has_no_absolute_token_data() {
+        // A ratio-only snapshot (from `/metrics`) must not be treated as
+        // carrying absolute token counts: it stays out of the DP cache and
+        // the `/get_loads` scalar, even at high KV usage.
+        let resp = WorkerMonitor::single_rank(SchedulerLoadSnapshot {
+            token_usage: 0.75,
+            num_running_reqs: 3,
+            ..Default::default()
+        });
+        assert!(!resp.has_absolute_token_data());
+        assert_eq!(resp.total_used_tokens(), 0);
+        assert_eq!(resp.effective_token_usage(), 0.75);
+    }
+
+    #[test]
+    fn real_snapshot_with_capacity_has_absolute_token_data() {
+        // A snapshot from gRPC/`/v1/loads` reports KV capacity, so its
+        // absolute token fields are meaningful (even when idle).
+        let resp = WorkerMonitor::single_rank(SchedulerLoadSnapshot {
+            max_total_num_tokens: 8192,
+            num_used_tokens: 1024,
+            ..Default::default()
+        });
+        assert!(resp.has_absolute_token_data());
+        assert_eq!(resp.total_used_tokens(), 1024);
     }
 }

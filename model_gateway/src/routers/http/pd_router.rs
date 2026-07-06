@@ -7,6 +7,7 @@ use axum::{
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use futures_util::StreamExt;
 use memchr::memmem;
 use openai_protocol::{
@@ -518,7 +519,7 @@ impl PDRouter {
                 "data: {}\n\n",
                 serde_json::to_string(&json!({ "error": error_payload })).unwrap_or_default()
             );
-            let error_stream = tokio_stream::once(Ok(axum::body::Bytes::from(sse_data)));
+            let error_stream = tokio_stream::once(Ok(Bytes::from(sse_data)));
 
             let decode_url = decode.url().to_string();
             self.create_streaming_response(
@@ -944,7 +945,7 @@ impl PDRouter {
     )]
     fn create_streaming_response(
         &self,
-        stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+        stream: impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
         status: StatusCode,
         prefill_logprobs: Option<Value>,
         return_logprob: bool,
@@ -964,10 +965,17 @@ impl PDRouter {
             futures_util::pin_mut!(stream);
             // Reusable SSE encoder for the logprob-merge re-encode path.
             let mut encoder = SseEncoder::new();
+            // Whether the next chunk begins at an SSE line boundary (i.e. the
+            // previous chunk ended with an EOL); used to anchor the [DONE]
+            // sentinel detection when the match sits at the start of a chunk.
+            let mut at_line_start = true;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        let is_done = memmem::find(&chunk, b"data: [DONE]").is_some();
+                        let is_done = Self::chunk_contains_done_event(&chunk, at_line_start);
+                        if let Some(&last) = chunk.last() {
+                            at_line_start = last == b'\n' || last == b'\r';
+                        }
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(
@@ -1012,13 +1020,26 @@ impl PDRouter {
         AttachedBody::wrap_response(response, load_guards)
     }
 
+    /// Build a non-streaming PD response with `Content-Type: application/json`.
+    ///
+    /// Axum's `(StatusCode, Bytes).into_response()` defaults to
+    /// `application/octet-stream`, which breaks OpenAI-style JSON clients.
+    fn non_stream_pd_json_response(status: StatusCode, body: Bytes) -> Response {
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+    }
+
     // Helper to process non-streaming decode response with logprob merging
     async fn process_non_streaming_response(
         &self,
         res: reqwest::Response,
         status: StatusCode,
         return_logprob: bool,
-        prefill_body: Option<bytes::Bytes>,
+        prefill_body: Option<Bytes>,
     ) -> Response {
         let response = res.bytes().await;
         let decode_body = match response {
@@ -1030,11 +1051,11 @@ impl PDRouter {
         };
 
         if !return_logprob {
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         }
 
         let Some(prefill_body) = prefill_body else {
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         };
 
         // Merge logprobs from prefill and decode
@@ -1043,17 +1064,17 @@ impl PDRouter {
             serde_json::from_slice::<Value>(&decode_body),
         ) else {
             warn!("Failed to parse responses for logprob merging");
-            return (status, decode_body).into_response();
+            return Self::non_stream_pd_json_response(status, decode_body);
         };
 
         Self::merge_logprobs_in_json(&prefill_json, &mut decode_json);
 
         // Return merged response
         match serde_json::to_vec(&decode_json) {
-            Ok(body) => (status, body).into_response(),
+            Ok(body) => Self::non_stream_pd_json_response(status, Bytes::from(body)),
             Err(e) => {
                 error!("Failed to serialize merged response: {}", e);
-                (status, decode_body).into_response()
+                Self::non_stream_pd_json_response(status, decode_body)
             }
         }
     }
@@ -1064,7 +1085,7 @@ impl PDRouter {
         prefill_response: reqwest::Response,
         prefill_url: &str,
         return_logprob: bool,
-    ) -> Result<(StatusCode, Option<bytes::Bytes>), Response> {
+    ) -> Result<(StatusCode, Option<Bytes>), Response> {
         let prefill_status = StatusCode::from_u16(prefill_response.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -1191,21 +1212,70 @@ impl PDRouter {
         false
     }
 
+    /// Line-anchored detection of the SSE `data: [DONE]` terminal event in a
+    /// raw upstream chunk: a match must start at a line boundary and be
+    /// immediately followed by a complete empty-line event delimiter within
+    /// the same chunk. Payload text that merely contains those bytes never
+    /// qualifies — real EOL bytes cannot occur inside a `data:` payload
+    /// (JSON escapes them). Requiring the full delimiter also rejects
+    /// multi-line events like `data: [DONE]\ndata: x\n\n`, whose joined data
+    /// is not exactly `[DONE]`.
+    ///
+    /// `at_line_start` says whether `chunk` begins at a line boundary. A
+    /// sentinel or delimiter split across chunks is never treated as
+    /// terminal — every byte is still forwarded and the relay then ends via
+    /// upstream EOF, so deferring is always safe while a false positive
+    /// kills a live stream.
+    fn chunk_contains_done_event(chunk: &[u8], at_line_start: bool) -> bool {
+        const DONE_EVENT: &[u8] = b"data: [DONE]";
+        // Length of the EOL sequence at `bytes[pos..]`: 2 for \r\n, 1 for a
+        // bare \r or \n, 0 if none.
+        fn eol_len_at(bytes: &[u8], pos: usize) -> usize {
+            match bytes.get(pos) {
+                Some(b'\r') => 1 + usize::from(bytes.get(pos + 1) == Some(&b'\n')),
+                Some(b'\n') => 1,
+                _ => 0,
+            }
+        }
+        let mut from = 0;
+        while let Some(pos) = memmem::find(&chunk[from..], DONE_EVENT) {
+            let start = from + pos;
+            let anchored = match start.checked_sub(1) {
+                None => at_line_start,
+                Some(prev) => chunk[prev] == b'\n' || chunk[prev] == b'\r',
+            };
+            if anchored {
+                let line_end = start + DONE_EVENT.len();
+                let eol1 = eol_len_at(chunk, line_end);
+                if eol1 > 0 && eol_len_at(chunk, line_end + eol1) > 0 {
+                    return true;
+                }
+            }
+            from = start + 1;
+        }
+        false
+    }
+
     // Simple helper to merge logprobs in streaming responses
     // Optimized to reduce allocations in the merge path
     fn merge_streaming_logprobs(
         prefill_logprobs: Option<&Value>,
         decode_chunk: &[u8],
         encoder: &mut SseEncoder,
-    ) -> Result<bytes::Bytes, ()> {
+    ) -> Result<Bytes, ()> {
         // Skip non-data chunks
         let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
-        if !chunk_str.starts_with("data: ") || chunk_str.contains("[DONE]") {
+        if !chunk_str.starts_with("data: ") {
             return Err(());
         }
 
-        // Parse JSON from chunk
+        // Parse JSON from chunk. The `[DONE]` sentinel must be matched
+        // exactly, not by substring: payloads that merely contain that text
+        // still need their logprobs merged.
         let json_str = chunk_str.trim_start_matches("data: ").trim();
+        if json_str == "[DONE]" {
+            return Err(());
+        }
         let mut decode_json: Value = serde_json::from_str(json_str).map_err(|_| ())?;
 
         // Merge prefill logprobs if available
@@ -1506,6 +1576,80 @@ mod tests {
     }
 
     #[test]
+    fn test_done_event_detection() {
+        // Production-incident payload: a delta whose arguments contained the
+        // literal sentinel text; the old substring scan treated it as
+        // terminal and silently killed the stream.
+        let incident: &[u8] = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"// data: [DONE]\"}}]}}]}\n\n";
+        // (chunk, chunk begins at a line boundary, expected, case)
+        let cases: &[(&[u8], bool, bool, &str)] = &[
+            (b"data: [DONE]\n\n", true, true, "standalone sentinel"),
+            (
+                b"data: {\"x\":1}\n\ndata: [DONE]\n\n",
+                true,
+                true,
+                "sentinel after a data event",
+            ),
+            (b"data: [DONE]\r\n\r\n", true, true, "CRLF endings"),
+            (
+                b"\ndata: [DONE]\n\n",
+                false,
+                true,
+                "line boundary inside the chunk",
+            ),
+            (incident, true, false, "sentinel text inside a JSON payload"),
+            (
+                b"data: [DONE]{\"x\":1}\n\n",
+                true,
+                false,
+                "line continues with payload",
+            ),
+            (b"data: [DONE]\n\n", false, false, "chunk starts mid-line"),
+            (
+                b"data: [DONE]",
+                true,
+                false,
+                "possibly a split payload line: defer",
+            ),
+            (
+                b"data: [DONE]\n",
+                true,
+                false,
+                "event delimiter incomplete: defer",
+            ),
+            (
+                b"data: [DONE]\ndata: x\n\n",
+                true,
+                false,
+                "one event, joined data is not [DONE]",
+            ),
+        ];
+        for (chunk, at_line_start, expected, case) in cases {
+            assert_eq!(
+                PDRouter::chunk_contains_done_event(chunk, *at_line_start),
+                *expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_streaming_logprobs_sentinel_exact_match() {
+        let mut encoder = SseEncoder::new();
+        // The exact sentinel is skipped (caller forwards it verbatim)
+        assert!(
+            PDRouter::merge_streaming_logprobs(None, b"data: [DONE]\n\n", &mut encoder).is_err()
+        );
+        // A payload containing "[DONE]" as text is still processed
+        assert!(PDRouter::merge_streaming_logprobs(
+            None,
+            b"data: {\"text\":\"[DONE]\",\"meta_info\":{}}\n\n",
+            &mut encoder
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn test_build_post_uses_dp_base_url_for_logical_worker() {
         let router = create_test_pd_router();
         let worker = BasicWorkerBuilder::new("http://127.0.0.1:30000")
@@ -1710,7 +1854,7 @@ mod tests {
             assert_eq!(prefill_ref.load(), 1);
             assert_eq!(decode_ref.load(), 1);
 
-            tx.send(bytes::Bytes::from("test data")).unwrap();
+            tx.send(Bytes::from("test data")).unwrap();
 
             sleep(Duration::from_millis(10)).await;
 
