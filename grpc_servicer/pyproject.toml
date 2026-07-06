@@ -37,7 +37,9 @@ sglang = ["sglang>=0.5.13"]
 # smg-grpc-proto>=0.4.7 is the first release that ships mlx_engine_pb2;
 # without this floor, installing [mlx] against an older proto build would
 # crash at import time when smg_grpc_servicer.mlx.server runs.
-mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0"]
+# transformers<5.13: 5.13.0 regressed AutoTokenizer.register on string keys,
+# which mlx-lm's NewlineTokenizer registration hits at import.
+mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0", "transformers<5.13"]
 # TokenSpeed itself is installed from source (no PyPI release); these are the
 # extra runtime deps the KV-event bridge needs on top of a TokenSpeed install.
 tokenspeed = ["pyzmq>=25.0.0", "msgspec>=0.18.0"]
