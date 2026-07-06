@@ -167,12 +167,6 @@ fn build_plan(
     workers: Option<&WorkerSelection>,
 ) -> Result<EncodePlan> {
     let workers = workers.ok_or_else(|| anyhow!("Worker selection stage not completed"))?;
-    let encode_assignments = workers
-        .encode_assignments()
-        .filter(|assignments| !assignments.is_empty())
-        .ok_or_else(|| anyhow!("Encode planning requires EPD worker selection"))?
-        .to_vec();
-
     let items = prepare_items(precomputed, clients, Some(workers))?;
     if items.is_empty() {
         return Ok(EncodePlan {
@@ -180,6 +174,12 @@ fn build_plan(
             dispatch: EncodeDispatchPlan::new(Vec::new()),
         });
     }
+
+    let encode_assignments = workers
+        .encode_assignments()
+        .filter(|assignments| !assignments.is_empty())
+        .ok_or_else(|| anyhow!("Encode planning requires EPD worker selection"))?
+        .to_vec();
 
     if encode_assignments.len() != items.len() {
         return Err(anyhow!(

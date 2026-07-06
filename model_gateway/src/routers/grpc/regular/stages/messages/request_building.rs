@@ -96,8 +96,7 @@ impl PipelineStage for MessageRequestBuildingStage {
         // In EPD, request building also mints the encode->prefill rooms and
         // carries the encode dispatch plan into the execution plan.
         let mut encode_plan = None;
-        let multimodal_data = if let Some(intermediate) =
-            processed_messages.multimodal_intermediate
+        let multimodal_data = if let Some(intermediate) = processed_messages.multimodal_intermediate
         {
             let planned_encode =
                 helpers::plan_epd_encode(&intermediate, clients, ctx.state.workers.as_ref())

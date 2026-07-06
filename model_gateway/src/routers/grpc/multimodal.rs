@@ -945,10 +945,6 @@ fn expand_tokens(
 /// Assemble backend-specific multimodal data from the intermediate.
 ///
 /// Called in request_building after worker selection, when the backend is known.
-#[expect(
-    clippy::unreachable,
-    reason = "MLX multimodal rejected by caller before reaching here"
-)]
 pub(crate) async fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
@@ -1136,7 +1132,7 @@ fn tokenspeed_assembly_options(
     skip_pixel_values: bool,
 ) -> TokenSpeedAssemblyOptions {
     TokenSpeedAssemblyOptions {
-        shm_enabled: resolve_tokenspeed_shm_enabled(workers),
+        shm_enabled: resolve_tokenspeed_shm_enabled(workers, skip_pixel_values),
         encoder_input_dtype: tokenspeed_encoder_input_dtype(modality, workers),
         skip_pixel_values,
     }
