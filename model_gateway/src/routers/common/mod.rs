@@ -11,6 +11,8 @@
 //! - [`mcp_utils`] — Model Context Protocol tool-call orchestration
 //! - [`persistence_utils`] — response/conversation persistence
 //!   helpers shared across the chat / responses / messages routes
+//! - [`realtime`] — Realtime API transport (WS/WebRTC/REST relay +
+//!   session registry) shared by the OpenAI and HTTP routers
 //! - [`worker_selection`] — per-request worker-selection helpers used
 //!   by every routing path (regular, PD, fallback, external provider)
 //! - [`retry`] — generic async retry executor + backoff calculator,
@@ -24,6 +26,7 @@ pub mod header_utils;
 pub mod mcp_utils;
 pub mod openai_bridge;
 pub mod persistence_utils;
+pub mod realtime;
 pub mod retry;
 pub mod sse;
 pub mod worker_selection;

@@ -111,6 +111,21 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["embedding"],
     },
+    # Realtime ASR (speech-to-text). Served with the realtime architecture so
+    # vLLM exposes `ws /v1/realtime`; `TORCH_SDPA` avoids the bundled flash-attn
+    # CUTE kernel that rejects some GPU archs (e.g. GB300 / sm_103).
+    "Qwen/Qwen3-ASR-1.7B": {
+        "model": _resolve_model_path("Qwen/Qwen3-ASR-1.7B"),
+        "tp": 1,
+        "features": ["realtime", "transcription", "audio"],
+        "vllm_args": [
+            "--hf-overrides",
+            '{"architectures":["Qwen3ASRRealtimeGeneration"]}',
+            "--mm-encoder-attn-backend",
+            "TORCH_SDPA",
+            "--enforce-eager",
+        ],
+    },
     # GPT-OSS models (Harmony)
     "openai/gpt-oss-20b": {
         "model": _resolve_model_path("openai/gpt-oss-20b"),

@@ -1145,6 +1145,20 @@ impl WorkerLoadResponse {
         self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
     }
 
+    /// Whether this response carries real absolute per-rank token counts
+    /// (as opposed to a ratio-only snapshot synthesized from Prometheus
+    /// `/metrics`, which knows KV *usage* but not token capacity).
+    ///
+    /// A running engine always reports its KV token capacity, so a positive
+    /// `max_total_num_tokens` on any rank marks the absolute-token fields
+    /// (`num_used_tokens`, `dp_rank_loads`, `total_used_tokens`) as
+    /// meaningful. Callers that need absolute tokens — the `/get_loads`
+    /// scalar and the DP-rank load cache — should gate on this so a
+    /// ratio-only snapshot is not read as "0 tokens used".
+    pub fn has_absolute_token_data(&self) -> bool {
+        self.loads.iter().any(|l| l.max_total_num_tokens > 0)
+    }
+
     /// Total queued (waiting, uncached) tokens summed across all DP ranks.
     pub fn total_waiting_uncached_tokens(&self) -> i64 {
         self.loads

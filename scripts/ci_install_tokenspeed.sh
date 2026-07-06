@@ -95,6 +95,19 @@ sudo apt-get install -y --no-install-recommends libssl-dev libopenmpi-dev cmake
 export MAX_JOBS="${MAX_JOBS:-16}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a 10.0a}"
 
+# The kernel requirements leave ``nvidia-cutlass-dsl`` unpinned, and 4.6.0
+# dropped ``cute.core.ThrMma`` — which quack (pulled via flash-attn's cute
+# backend) uses, breaking ``import tokenspeed``. Pin to the last compatible
+# release. Both UV_CONSTRAINT and PIP_CONSTRAINT are needed: the kernel's
+# setup.py shells out to ``pip install -r requirements/cuda.txt`` during the
+# native build (see _install_backend_build_requirements), and that subprocess
+# pip does not see UV_CONSTRAINT — without PIP_CONSTRAINT it pulls 4.6.0
+# alongside the pinned 4.5.2 and wins on sys.path.
+TOKENSPEED_CONSTRAINTS="$(mktemp)"
+echo "nvidia-cutlass-dsl==4.5.2" > "$TOKENSPEED_CONSTRAINTS"
+export UV_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
+export PIP_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
+
 # Preseed build-time tooling: ``./python`` and ``tokenspeed-kernel`` use
 # ``setuptools.build_meta`` without declaring ``setuptools`` in
 # ``build-system.requires``, and we install with ``--no-build-isolation``.
@@ -131,6 +144,22 @@ echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
 uv pip uninstall tokenspeed-smg-grpc-proto tokenspeed-smg-grpc-servicer
 uv pip install -e crates/grpc_client/python/
 uv pip install -e grpc_servicer/
+
+# ── cutlass provenance (diagnostic) ─────────────────────────────────────────
+# quack 0.5.0 uses the deprecated ``cute.core.ThrMma`` shim (present in 4.5.2,
+# removed in 4.6.0). Identical pip installs have imported different cutlass
+# builds across runners, so surface exactly what loads and from where.
+echo "=== cutlass provenance ==="
+uv pip show nvidia-cutlass-dsl 2>/dev/null | grep -iE "^(Name|Version|Location):" || true
+python3 -c "
+import sys, cutlass, cutlass.cute.core as core
+print('import cutlass  ->', cutlass.__file__)
+print('cutlass version ->', getattr(cutlass, '__version__', '?'))
+print('cute.core file  ->', core.__file__)
+print('cute.core ThrMma->', hasattr(core, 'ThrMma'))
+print('sys.path:')
+[print('   ', p) for p in sys.path]
+" || true
 
 # ── Verification ──────────────────────────────────────────────────────────
 echo "=== TokenSpeed verification ==="
