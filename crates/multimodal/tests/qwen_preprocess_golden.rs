@@ -75,7 +75,7 @@ fn video_grid(result: &llm_multimodal::vision::PreprocessedEncoderInputs) -> &[i
 fn fnv1a_patch_u8(values: &[f32]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for value in values {
-        let byte = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+        let byte = (value * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }

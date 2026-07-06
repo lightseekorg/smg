@@ -530,10 +530,11 @@ impl QwenVLProcessorBase {
 
         let t_bar =
             num_frames.div_ceil(self.config.temporal_patch_size) * self.config.temporal_patch_size;
-        let resized_pixels = (t_bar * h_bar * w_bar) as f64;
+        let resized_pixels = t_bar as f64 * h_bar as f64 * w_bar as f64;
         if resized_pixels > self.config.max_pixels as f64 {
-            let beta =
-                ((num_frames * height * width) as f64 / self.config.max_pixels as f64).sqrt();
+            let beta = (t_bar as f64 * height as f64 * width as f64
+                / self.config.max_pixels as f64)
+                .sqrt();
             h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
             w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
             h_bar = h_bar.max(factor);
@@ -1660,6 +1661,26 @@ mod tests {
         assert_eq!(w % 28, 0);
         assert!(h * w >= processor.min_pixels());
         assert!(h * w <= processor.max_pixels());
+    }
+
+    #[test]
+    fn test_smart_resize_video_uses_padded_frame_budget() {
+        let processor = QwenVLProcessorBase::new(QwenVLConfig {
+            patch_size: 16,
+            merge_size: 2,
+            min_pixels: 1,
+            max_pixels: 16_777_216,
+            temporal_patch_size: 2,
+            mean: [0.5; 3],
+            std: [0.5; 3],
+            model_name: "test-qwen-vl-video-budget",
+        });
+
+        let (height, width) = processor.smart_resize_video(1, 3000, 3000).unwrap();
+        let padded_frames = 2;
+
+        assert!(height <= 3000 && width <= 3000);
+        assert!(padded_frames * height * width <= processor.max_pixels());
     }
 
     #[test]
