@@ -949,7 +949,7 @@ fn expand_tokens(
     clippy::unreachable,
     reason = "MLX multimodal rejected by caller before reaching here"
 )]
-pub(crate) fn assemble_multimodal_data(
+pub(crate) async fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
@@ -968,10 +968,15 @@ pub(crate) fn assemble_multimodal_data(
                 ensure_image_only(&precomputed, "TRT-LLM")?;
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
-            GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
-                precomputed,
-                workers,
-            )?)),
+            GrpcClient::TokenSpeed(_) => {
+                let options = tokenspeed_assembly_options(precomputed.modality, workers);
+                let data = tokio::task::spawn_blocking(move || {
+                    assemble_tokenspeed_with_options(precomputed, options)
+                })
+                .await
+                .context("TokenSpeed multimodal assembly task failed")??;
+                Ok(MultimodalData::TokenSpeed(data))
+            }
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
             ),
@@ -1056,18 +1061,41 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
     TrtllmMultimodalData { image_data }
 }
 
+#[cfg(test)]
 fn assemble_tokenspeed(
     intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
 ) -> Result<TokenSpeedMultimodalData> {
+    let options = tokenspeed_assembly_options(intermediate.modality, workers);
+    assemble_tokenspeed_with_options(intermediate, options)
+}
+
+struct TokenSpeedAssemblyOptions {
+    shm_enabled: bool,
+    encoder_input_dtype: String,
+}
+
+fn tokenspeed_assembly_options(
+    modality: Modality,
+    workers: Option<&WorkerSelection>,
+) -> TokenSpeedAssemblyOptions {
+    TokenSpeedAssemblyOptions {
+        shm_enabled: resolve_tokenspeed_shm_enabled(workers),
+        encoder_input_dtype: tokenspeed_encoder_input_dtype(modality, workers),
+    }
+}
+
+fn assemble_tokenspeed_with_options(
+    intermediate: PrecomputedMultimodalIntermediate,
+    options: TokenSpeedAssemblyOptions,
+) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
-    // Resolve the multimodal tensor transport once per request: `shm` always on,
-    // `auto` only when the worker is verified to share /dev/shm (matching
-    // namespace token), otherwise inline. See `worker_shares_dev_shm`.
-    let shm_enabled = resolve_tokenspeed_shm_enabled(workers);
+    let TokenSpeedAssemblyOptions {
+        shm_enabled,
+        encoder_input_dtype,
+    } = options;
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
-    let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
     let patch_offsets = intermediate
         .patch_offsets
         .clone()

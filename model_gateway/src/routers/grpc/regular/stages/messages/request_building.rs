@@ -88,16 +88,23 @@ impl PipelineStage for MessageRequestBuildingStage {
         }
 
         // Assemble backend-specific multimodal data now that the backend is known
-        let multimodal_data = processed_messages
-            .multimodal_intermediate
-            .map(|intermediate| {
-                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
-            })
-            .transpose()
-            .map_err(|e| {
+        let multimodal_data = if let Some(intermediate) = processed_messages.multimodal_intermediate
+        {
+            Some(
+                assemble_multimodal_data(
+                    intermediate,
+                    builder_client,
+                    ctx.state.workers.as_ref(),
+                )
+                .await
+                .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
                 error::bad_request("multimodal_not_supported", format!("{e}"))
-        })?;
+                })?,
+            )
+        } else {
+            None
+        };
 
         let user_thinking = match &messages_request.thinking {
             Some(messages::ThinkingConfig::Enabled { .. })

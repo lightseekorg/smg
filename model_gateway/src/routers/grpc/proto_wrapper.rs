@@ -552,12 +552,15 @@ pub fn write_tokenspeed_shm_with(
 
 #[cfg(target_os = "linux")]
 fn reserve_tokenspeed_shm_file(file: &std::fs::File, nbytes: usize) -> std::io::Result<()> {
-    Ok(rustix::fs::fallocate(
-        file,
-        FallocateFlags::empty(),
-        0,
-        nbytes as u64,
-    )?)
+    match rustix::fs::fallocate(file, FallocateFlags::empty(), 0, nbytes as u64) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error == rustix::io::Errno::OPNOTSUPP || error == rustix::io::Errno::NOSYS =>
+        {
+            file.set_len(nbytes as u64)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
