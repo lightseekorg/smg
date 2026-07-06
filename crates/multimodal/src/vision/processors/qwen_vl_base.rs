@@ -532,7 +532,8 @@ impl QwenVLProcessorBase {
             num_frames.div_ceil(self.config.temporal_patch_size) * self.config.temporal_patch_size;
         let resized_pixels = t_bar as f64 * h_bar as f64 * w_bar as f64;
         if resized_pixels > self.config.max_pixels as f64 {
-            let beta = (t_bar as f64 * height as f64 * width as f64
+            // HF uses padded frames for the threshold but actual frames for beta.
+            let beta = (num_frames as f64 * height as f64 * width as f64
                 / self.config.max_pixels as f64)
                 .sqrt();
             h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
@@ -1664,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_resize_video_uses_padded_frame_budget() {
+    fn test_smart_resize_video_matches_hf_actual_frame_beta() {
         let processor = QwenVLProcessorBase::new(QwenVLConfig {
             patch_size: 16,
             merge_size: 2,
@@ -1677,10 +1678,10 @@ mod tests {
         });
 
         let (height, width) = processor.smart_resize_video(1, 3000, 3000).unwrap();
-        let padded_frames = 2;
 
-        assert!(height <= 3000 && width <= 3000);
-        assert!(padded_frames * height * width <= processor.max_pixels());
+        // Hugging Face uses the padded frame count for the threshold, but the
+        // actual frame count for beta. Preserve that behavior for parity.
+        assert_eq!((height, width), (4096, 4096));
     }
 
     #[test]

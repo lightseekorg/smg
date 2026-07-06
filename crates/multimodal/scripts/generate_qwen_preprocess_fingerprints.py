@@ -13,7 +13,10 @@ from PIL import Image
 from PIL import __version__ as pillow_version
 from transformers import Qwen2VLImageProcessor
 from transformers import __version__ as transformers_version
-from transformers.models.qwen3_vl.video_processing_qwen3_vl import smart_resize
+from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
+    Qwen3VLVideoProcessor,
+    smart_resize,
+)
 
 CASES = ((37, 23), (259, 194))
 
@@ -63,62 +66,45 @@ def processor_cases(name: str, processor: Qwen2VLImageProcessor) -> list[dict]:
     return results
 
 
-def qwen3_video_case() -> dict:
+def qwen3_video_case(processor: Qwen3VLVideoProcessor) -> dict:
     width, height = 37, 35
     seeds = (3, 101, 177)
-    patch_size = 16
-    merge_size = 2
     temporal_patch_size = 2
     target_height, target_width = smart_resize(
         len(seeds),
         height,
         width,
         temporal_factor=temporal_patch_size,
-        factor=patch_size * merge_size,
+        factor=32,
         min_pixels=65536,
         max_pixels=16777216,
     )
+    # Keep PIL as the resize oracle for SMG's PIL-compatible kernel, then use
+    # the real HF video processor for temporal padding and patchification.
     frames = [
-        np.asarray(
-            make_image(width, height, seed).resize(
-                (target_width, target_height),
-                Image.Resampling.BICUBIC,
-            )
+        make_image(width, height, seed).resize(
+            (target_width, target_height),
+            Image.Resampling.BICUBIC,
         )
         for seed in seeds
     ]
-    while len(frames) % temporal_patch_size:
-        frames.append(frames[-1])
-
-    grid_t = len(frames) // temporal_patch_size
-    grid_h = target_height // patch_size
-    grid_w = target_width // patch_size
-    patch_rows = grid_h // merge_size
-    patch_cols = grid_w // merge_size
-    patchified = []
-    for temporal in range(grid_t):
-        frame_window = frames[temporal * temporal_patch_size : (temporal + 1) * temporal_patch_size]
-        for patch_row in range(patch_rows):
-            for patch_col in range(patch_cols):
-                for merge_row in range(merge_size):
-                    for merge_col in range(merge_size):
-                        y = (patch_row * merge_size + merge_row) * patch_size
-                        x = (patch_col * merge_size + merge_col) * patch_size
-                        for channel in range(3):
-                            for frame in frame_window:
-                                patchified.append(
-                                    frame[y : y + patch_size, x : x + patch_size, channel]
-                                )
-    values = np.concatenate([patch.reshape(-1) for patch in patchified])
-    patch_features = 3 * temporal_patch_size * patch_size * patch_size
+    output = processor(
+        videos=[frames],
+        do_resize=False,
+        do_normalize=False,
+        do_sample_frames=False,
+        return_tensors="pt",
+    )
+    values = output["pixel_values_videos"].cpu().numpy()
+    patch_u8 = np.rint(values * 255.0).astype(np.uint8)
     return {
         "model": "qwen3_vl",
         "width": width,
         "height": height,
         "frame_count": len(seeds),
-        "shape": [grid_t * grid_h * grid_w, patch_features],
-        "grid_thw": [grid_t, grid_h, grid_w],
-        "fnv1a_patch_u8": fingerprint_bytes(values),
+        "shape": list(values.shape),
+        "grid_thw": output["video_grid_thw"][0].tolist(),
+        "fnv1a_patch_u8": fingerprint_bytes(patch_u8),
     }
 
 
@@ -143,12 +129,22 @@ def main() -> None:
         image_std=[0.5, 0.5, 0.5],
         resample=Image.Resampling.BICUBIC,
     )
+    qwen3_video = Qwen3VLVideoProcessor(
+        patch_size=16,
+        merge_size=2,
+        temporal_patch_size=2,
+        size={"shortest_edge": 65536, "longest_edge": 16777216},
+        image_mean=[0.5, 0.5, 0.5],
+        image_std=[0.5, 0.5, 0.5],
+        resample=Image.Resampling.BICUBIC,
+        do_sample_frames=False,
+    )
     document = {
         "generator": "generate_qwen_preprocess_fingerprints.py",
         "transformers": transformers_version,
         "pillow": pillow_version,
         "cases": processor_cases("qwen2_vl", qwen2) + processor_cases("qwen3_vl", qwen3),
-        "video_cases": [qwen3_video_case()],
+        "video_cases": [qwen3_video_case(qwen3_video)],
     }
     print(json.dumps(document, indent=2, sort_keys=True))
 
