@@ -382,26 +382,15 @@ pub fn process_chat_messages(
         let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
         let mut combined_template_kwargs = HashMap::with_capacity(kwargs_capacity);
 
-        // Add reasoning_effort if present (like Python does)
+        // Add reasoning_effort if present (like Python does): some templates read
+        // it as a *level*. The thinking on/off projection is applied separately
+        // via `ChatTemplateParams.thinking` below, so the tokenizer sets the
+        // model's own toggle key.
         if let Some(reasoning_effort) = &request.reasoning_effort {
             combined_template_kwargs.insert(
                 "reasoning_effort".to_string(),
                 Value::String(reasoning_effort.clone()),
             );
-
-            // OpenAI semantics: reasoning_effort "none"/"minimal" means "do not
-            // produce reasoning". Many chat templates gate thinking on a boolean
-            // toggle and treat `reasoning_effort` only as a *level* (so "none"
-            // would otherwise still think). Translate the disable case to the
-            // thinking toggle = false. Templates use different key names
-            // (`enable_thinking` for GLM-4.x/5, Qwen3; `thinking` for
-            // DeepSeek-V3.1, Kimi-K2.5), so set both; the unused one is ignored.
-            // These are defaults only: an explicit chat_template_kwargs value
-            // (applied below) still wins.
-            if matches!(reasoning_effort.as_str(), "none" | "minimal") {
-                combined_template_kwargs.insert("enable_thinking".to_string(), Value::Bool(false));
-                combined_template_kwargs.insert("thinking".to_string(), Value::Bool(false));
-            }
         }
 
         // Add any additional template kwargs from request
@@ -421,6 +410,12 @@ pub fn process_chat_messages(
             add_generation_prompt: true,
             tools: tools_json.as_deref(),
             template_kwargs: final_template_kwargs,
+            // Project OpenAI `reasoning_effort` (none/minimal) onto the model's
+            // thinking toggle; the tokenizer applies it under the correct key.
+            // An explicit chat_template_kwargs toggle still wins (in apply).
+            thinking: openai_protocol::chat::thinking_from_reasoning_effort(
+                request.reasoning_effort.as_deref(),
+            ),
             ..Default::default()
         };
 

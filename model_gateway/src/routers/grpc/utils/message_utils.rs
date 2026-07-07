@@ -5,8 +5,6 @@
 //! instead of `ChatCompletionRequest` / `ChatMessage`.
 #![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
-use std::collections::HashMap;
-
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     traits::Tokenizer,
@@ -74,35 +72,21 @@ pub fn process_messages(
         .transpose()
         .map_err(|e| format!("Failed to serialize tools: {e}"))?;
 
-    // Step 5: Build template kwargs from ThinkingConfig
-    let mut combined_template_kwargs = HashMap::new();
-
-    // Pass both `enable_thinking` (Qwen3) and `thinking` (Kimi-K2.5) since
-    // different model templates use different kwarg names for the same concept.
-    // Adaptive mode is treated as "thinking on"; the model decides whether to actually emit it.
-    match &request.thinking {
-        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => {
-            combined_template_kwargs.insert("enable_thinking".to_string(), json!(true));
-            combined_template_kwargs.insert("thinking".to_string(), json!(true));
-        }
-        Some(ThinkingConfig::Disabled) => {
-            combined_template_kwargs.insert("enable_thinking".to_string(), json!(false));
-            combined_template_kwargs.insert("thinking".to_string(), json!(false));
-        }
-        None => {} // Let template use its default behavior
-    }
-
-    let final_template_kwargs = if combined_template_kwargs.is_empty() {
-        None
-    } else {
-        Some(&combined_template_kwargs)
+    // Step 5: Project the Anthropic ThinkingConfig onto a thinking on/off
+    // preference. Adaptive is treated as "thinking on"; the model decides
+    // whether to actually emit it. The tokenizer applies this under the model's
+    // own toggle key (`enable_thinking`/`thinking`) in `apply`.
+    let thinking = match &request.thinking {
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => Some(true),
+        Some(ThinkingConfig::Disabled) => Some(false),
+        None => None, // Let template use its default behavior
     };
 
     // Step 6: Apply chat template
     let params = ChatTemplateParams {
         add_generation_prompt: true,
         tools: tools_json.as_deref(),
-        template_kwargs: final_template_kwargs,
+        thinking,
         ..Default::default()
     };
 

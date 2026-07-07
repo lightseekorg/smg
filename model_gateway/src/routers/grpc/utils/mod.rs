@@ -25,6 +25,4 @@ pub(crate) use parsers::{
 };
 // `pub` (not `pub(crate)`) so the Go bindings can reuse the gateway's reasoning
 // detection instead of duplicating it.
-pub use parsers::{
-    extract_thinking_from_kwargs, resolve_user_thinking, should_mark_reasoning_started,
-};
+pub use parsers::{resolve_user_thinking, should_mark_reasoning_started};

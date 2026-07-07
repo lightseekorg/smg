@@ -4,6 +4,7 @@ use llm_tokenizer::{
     chat_template::{ThinkingKeyName, ThinkingToggle},
     traits::Tokenizer,
 };
+use openai_protocol::chat::thinking_from_reasoning_effort;
 use reasoning_parser::{ParserFactory as ReasoningParserFactory, ReasoningParser};
 use serde_json::Value;
 use tool_parser::{
@@ -32,7 +33,7 @@ pub fn should_mark_reasoning_started(
 /// Only checks the key that the template actually uses (e.g. `enable_thinking`
 /// for Qwen3, `thinking` for Kimi-K2.5). This prevents mismatches where the
 /// user passes the wrong key name and the template ignores it.
-pub fn extract_thinking_from_kwargs(
+pub(crate) fn extract_thinking_from_kwargs(
     kwargs: Option<&std::collections::HashMap<String, Value>>,
     tokenizer: &dyn Tokenizer,
 ) -> Option<bool> {
@@ -45,22 +46,10 @@ pub fn extract_thinking_from_kwargs(
     .and_then(|v| v.as_bool())
 }
 
-/// Map an OpenAI `reasoning_effort` value to a thinking preference.
-///
-/// OpenAI semantics: `"none"`/`"minimal"` mean "do not produce reasoning", so
-/// they map to thinking OFF (`Some(false)`). Level values (`"low"`/`"medium"`/
-/// `"high"`) don't toggle thinking on their own, so they return `None` (defer to
-/// the template default / explicit thinking kwarg).
-pub(crate) fn thinking_from_reasoning_effort(reasoning_effort: Option<&str>) -> Option<bool> {
-    match reasoning_effort {
-        Some("none") | Some("minimal") => Some(false),
-        _ => None,
-    }
-}
-
 /// Precedence for the effective thinking preference: an explicit template
 /// toggle (already extracted from kwargs) always wins; otherwise fall back to
-/// the OpenAI `reasoning_effort` mapping.
+/// the protocol-level OpenAI `reasoning_effort` mapping
+/// ([`thinking_from_reasoning_effort`]).
 fn resolve_thinking_pref(explicit: Option<bool>, reasoning_effort: Option<&str>) -> Option<bool> {
     explicit.or_else(|| thinking_from_reasoning_effort(reasoning_effort))
 }
@@ -203,20 +192,6 @@ mod tests {
         assert_eq!(resolve_thinking_pref(None, Some("minimal")), Some(false));
         assert_eq!(resolve_thinking_pref(None, Some("high")), None);
         assert_eq!(resolve_thinking_pref(None, None), None);
-    }
-
-    #[test]
-    fn thinking_from_reasoning_effort_maps_disable_values() {
-        // "none"/"minimal" mean do-not-reason -> thinking OFF
-        assert_eq!(thinking_from_reasoning_effort(Some("none")), Some(false));
-        assert_eq!(thinking_from_reasoning_effort(Some("minimal")), Some(false));
-        // level values do not toggle thinking on their own
-        assert_eq!(thinking_from_reasoning_effort(Some("low")), None);
-        assert_eq!(thinking_from_reasoning_effort(Some("medium")), None);
-        assert_eq!(thinking_from_reasoning_effort(Some("high")), None);
-        // unspecified / unknown -> defer
-        assert_eq!(thinking_from_reasoning_effort(None), None);
-        assert_eq!(thinking_from_reasoning_effort(Some("bogus")), None);
     }
 
     #[test]

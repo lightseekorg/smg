@@ -2,7 +2,7 @@
 
 use llm_tokenizer::traits::Tokenizer;
 use openai_protocol::chat::ChatCompletionRequest;
-use smg::routers::grpc::utils::{extract_thinking_from_kwargs, should_mark_reasoning_started};
+use smg::routers::grpc::utils::{resolve_user_thinking, should_mark_reasoning_started};
 use uuid::Uuid;
 
 /// Helper function to generate tool call ID (matches router implementation)
@@ -32,7 +32,11 @@ pub(crate) fn chat_requires_reasoning(
     tokenizer: &dyn Tokenizer,
 ) -> bool {
     should_mark_reasoning_started(
-        extract_thinking_from_kwargs(request.chat_template_kwargs.as_ref(), tokenizer),
+        resolve_user_thinking(
+            request.chat_template_kwargs.as_ref(),
+            request.reasoning_effort.as_deref(),
+            tokenizer,
+        ),
         tokenizer,
     )
 }

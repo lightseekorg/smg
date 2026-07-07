@@ -320,6 +320,25 @@ pub struct ChatCompletionRequest {
     pub other: Map<String, Value>,
 }
 
+/// Map an OpenAI `reasoning_effort` to a thinking on/off preference.
+///
+/// This is the protocol-level interpretation of "does the caller want
+/// reasoning?" — independent of any model/template. `reasoning_effort` is a
+/// *level* (`"low"`/`"medium"`/`"high"`) plus the vendor-extension `"none"`.
+///
+/// Both `"none"` and `"minimal"` map to thinking OFF (`Some(false)`).
+/// `"minimal"` is treated as an off-signal deliberately: templates that expose
+/// only a boolean thinking toggle (GLM/Qwen3) cannot do "a little" reasoning,
+/// so the lowest OpenAI level is the closest available "do not reason".
+/// Level values return `None` — no opinion, defer to the template default or an
+/// explicit thinking kwarg.
+pub fn thinking_from_reasoning_effort(reasoning_effort: Option<&str>) -> Option<bool> {
+    match reasoning_effort {
+        Some("none") | Some("minimal") => Some(false),
+        _ => None,
+    }
+}
+
 // ============================================================================
 // Validation Functions
 // ============================================================================
@@ -749,4 +768,23 @@ pub struct ChatStreamChoice {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::thinking_from_reasoning_effort;
+
+    #[test]
+    fn thinking_from_reasoning_effort_maps_disable_values() {
+        // "none"/"minimal" mean do-not-reason -> thinking OFF.
+        assert_eq!(thinking_from_reasoning_effort(Some("none")), Some(false));
+        assert_eq!(thinking_from_reasoning_effort(Some("minimal")), Some(false));
+        // Level values do not toggle thinking on their own.
+        assert_eq!(thinking_from_reasoning_effort(Some("low")), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("medium")), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("high")), None);
+        // Unspecified / unknown -> defer.
+        assert_eq!(thinking_from_reasoning_effort(None), None);
+        assert_eq!(thinking_from_reasoning_effort(Some("bogus")), None);
+    }
 }

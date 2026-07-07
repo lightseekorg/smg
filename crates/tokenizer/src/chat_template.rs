@@ -48,6 +48,16 @@ pub enum ThinkingKeyName {
     Thinking,
 }
 
+impl ThinkingKeyName {
+    /// The template kwarg name this toggle uses.
+    pub fn as_kwarg(self) -> &'static str {
+        match self {
+            ThinkingKeyName::EnableThinking => "enable_thinking",
+            ThinkingKeyName::Thinking => "thinking",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingToggle {
     /// Template has no thinking toggle. The model either always reasons
@@ -466,6 +476,11 @@ pub struct ChatTemplateParams<'a> {
     /// Special tokens to inject into the template context.
     /// Many templates reference `{{ bos_token }}`, `{{ eos_token }}`, etc.
     pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
+    /// Resolved thinking preference. When `Some`, `apply` sets the template's
+    /// own thinking-toggle key (`enable_thinking`/`thinking`, per detection) to
+    /// this value as a default. An explicit `template_kwargs` entry for that
+    /// key still wins.
+    pub thinking: Option<bool>,
 }
 
 /// JSON separator pair passed through HuggingFace's `tojson` filter.
@@ -1064,6 +1079,23 @@ impl ChatTemplateState {
                  https://huggingface.co/docs/transformers/main/en/chat_templating",
             )
         })?;
+
+        // Apply the resolved thinking preference under the template's own toggle
+        // key (`enable_thinking` vs `thinking`, per detection). Injected as a
+        // default: an explicit `template_kwargs` entry for that key still wins.
+        if let (Some(thinking), Some(key)) = (params.thinking, self.thinking_key_name) {
+            let mut kwargs = params.template_kwargs.cloned().unwrap_or_default();
+            kwargs
+                .entry(key.as_kwarg().to_string())
+                .or_insert(serde_json::Value::Bool(thinking));
+            let params = ChatTemplateParams {
+                template_kwargs: Some(&kwargs),
+                thinking: None,
+                ..params
+            };
+            return render_chat_template(env, messages, params);
+        }
+
         render_chat_template(env, messages, params)
     }
 
@@ -1189,5 +1221,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "<s>hello");
+    }
+
+    #[test]
+    fn thinking_param_sets_template_key_and_explicit_wins() {
+        use std::collections::HashMap;
+
+        // Template echoes the enable_thinking value so we can observe what was set.
+        let state = ChatTemplateState::new(Some("{{ enable_thinking }}".to_string())).unwrap();
+        assert_eq!(
+            state.thinking_key_name(),
+            Some(ThinkingKeyName::EnableThinking)
+        );
+
+        // thinking = Some(false) injects enable_thinking=false under the model's key.
+        let out = state
+            .apply(
+                &[],
+                ChatTemplateParams {
+                    thinking: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out, "false");
+
+        // An explicit template_kwargs entry overrides the injected default.
+        let mut kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+        kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+        let out = state
+            .apply(
+                &[],
+                ChatTemplateParams {
+                    thinking: Some(false),
+                    template_kwargs: Some(&kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out, "true");
     }
 }
