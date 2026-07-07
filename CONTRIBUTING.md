@@ -7,6 +7,7 @@ document is the front door. The detailed guides live under
 
 - **Code of Conduct**: [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — applies to
   every interaction in this repo and in community spaces.
+- **Governance**: For how the project is governed — roles, decision making, and how maintainers are added — see [GOVERNANCE.md](GOVERNANCE.md).
 - **How to contribute code**: [`docs/contributing/index.md`](./docs/contributing/index.md)
 - **Development environment**: [`docs/contributing/development.md`](./docs/contributing/development.md)
 - **Code style**: [`docs/contributing/code-style.md`](./docs/contributing/code-style.md)
