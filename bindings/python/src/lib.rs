@@ -1228,13 +1228,6 @@ impl Router {
                     .as_ref()
                     .map(|c| c.to_auth_control_plane_config()),
                 mesh_server_config: if self.enable_mesh {
-                    let self_name = self.mesh_server_name.clone().unwrap_or_else(|| {
-                        use rand::{distr::Alphanumeric, RngExt};
-                        let random_string: String = (0..4)
-                            .map(|_| rand::rng().sample(Alphanumeric) as char)
-                            .collect();
-                        format!("Mesh_{random_string}")
-                    });
                     let peer = self
                         .mesh_peer_urls
                         .first()
@@ -1264,6 +1257,19 @@ impl Router {
                             "Invalid value for {advertise_field}='{advertise_host}': mesh advertise address cannot be unspecified; set mesh_advertise_host to a routable node IP"
                         )));
                     }
+                    // Stable default: derive from the (routable, per-node-unique)
+                    // advertise address so the mesh identity — and the
+                    // deterministic worker-id namespace keyed on it — survives
+                    // restarts. ':' is the rl shard-key separator, hence '-'.
+                    let self_name = match self.mesh_server_name.clone() {
+                        Some(name) => {
+                            config::validate_mesh_server_name(&name).map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(e.to_string())
+                            })?;
+                            name
+                        }
+                        None => format!("Mesh_{}", advertise_addr.to_string().replace(':', "-")),
+                    };
                     Some(smg_mesh::MeshServerConfig {
                         self_name,
                         bind_addr,
