@@ -29,6 +29,13 @@ ts_kv_events = _load("tokenspeed/kv_events.py", "ts_kv_events")
 shared = _load("kv_events.py", "shared_kv_events")
 
 
+def test_tokenspeed_servicer_imports_current_kv_events_path():
+    source = (_SERVICER_ROOT / "tokenspeed" / "servicer.py").read_text()
+
+    assert "from tokenspeed.runtime.pd.kv_events import KVEventBatch" in source
+    assert "tokenspeed.runtime.disaggregation.kv.kv_events" not in source
+
+
 class _Args:
     """Minimal stand-in for TokenSpeed's ServerArgs."""
 

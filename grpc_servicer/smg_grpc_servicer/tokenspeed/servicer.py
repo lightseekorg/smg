@@ -30,13 +30,13 @@ from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
 from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
 from smg_grpc_proto.generated import common_pb2, tokenspeed_scheduler_pb2
-from tokenspeed.runtime.disaggregation.kv.kv_events import KVEventBatch
 from tokenspeed.runtime.multimodal.inputs import (
     Modality,
     MultimodalDataItem,
     MultimodalInputs,
 )
 from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
+from tokenspeed.runtime.pd.kv_events import KVEventBatch
 
 from smg_grpc_servicer.kv_events import endpoint_for_rank, stream_kv_events
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
