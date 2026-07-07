@@ -1081,19 +1081,24 @@ impl ChatTemplateState {
         })?;
 
         // Apply the resolved thinking preference under the template's own toggle
-        // key (`enable_thinking` vs `thinking`, per detection). Injected as a
-        // default: an explicit `template_kwargs` entry for that key still wins.
+        // key (`enable_thinking` vs `thinking`, per detection). Skip entirely
+        // (no clone) when the caller already set that key explicitly — the
+        // explicit value wins.
         if let (Some(thinking), Some(key)) = (params.thinking, self.thinking_key_name) {
-            let mut kwargs = params.template_kwargs.cloned().unwrap_or_default();
-            kwargs
-                .entry(key.as_kwarg().to_string())
-                .or_insert(serde_json::Value::Bool(thinking));
-            let params = ChatTemplateParams {
-                template_kwargs: Some(&kwargs),
-                thinking: None,
-                ..params
-            };
-            return render_chat_template(env, messages, params);
+            let kwarg_key = key.as_kwarg();
+            if params
+                .template_kwargs
+                .is_none_or(|k| !k.contains_key(kwarg_key))
+            {
+                let mut kwargs = params.template_kwargs.cloned().unwrap_or_default();
+                kwargs.insert(kwarg_key.to_string(), serde_json::Value::Bool(thinking));
+                let params = ChatTemplateParams {
+                    template_kwargs: Some(&kwargs),
+                    thinking: None,
+                    ..params
+                };
+                return render_chat_template(env, messages, params);
+            }
         }
 
         render_chat_template(env, messages, params)

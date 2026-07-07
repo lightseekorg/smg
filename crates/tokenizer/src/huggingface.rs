@@ -486,14 +486,18 @@ fn detect_renderer_from_config(dir: &std::path::Path) -> Renderer {
 // ---------------------------------------------------------------------------
 // DeepSeek V3.2 / V4 dispatch shims
 // ---------------------------------------------------------------------------
-/// Derive the V3.2 / V4 thinking mode from `template_kwargs`. Only the
-/// `thinking` key is honored, matching sglang's DeepSeek serving path and
-/// the `ThinkingKeyName::Thinking` contract reported by this tokenizer.
+/// Derive the V3.2 / V4 thinking mode. These native encoders bypass
+/// `ChatTemplateState::apply`, so this is where the resolved thinking preference
+/// is consumed. An explicit `template_kwargs["thinking"]` wins; otherwise fall
+/// back to `params.thinking` (resolved from `reasoning_effort` / Anthropic
+/// `ThinkingConfig`) — same precedence as the Jinja path. Default off, matching
+/// the `ThinkingKeyName::Thinking` / `DefaultOff` contract reported here.
 fn derive_thinking_mode(params: &ChatTemplateParams) -> deepseek_v32::ThinkingMode {
     let enabled = params
         .template_kwargs
         .and_then(|k| k.get("thinking"))
         .and_then(serde_json::Value::as_bool)
+        .or(params.thinking)
         .unwrap_or(false);
     if enabled {
         deepseek_v32::ThinkingMode::Thinking
@@ -577,4 +581,65 @@ fn apply_deepseek_v4(
     };
     deepseek_v4::encode_messages(msgs, thinking_mode, &encode_params)
         .map_err(|e| Error::msg(format!("DeepSeek V4 encode failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::derive_thinking_mode;
+    use crate::{chat_template::ChatTemplateParams, encoders::deepseek_v32::ThinkingMode};
+
+    fn thinking_kwargs(value: bool) -> HashMap<String, serde_json::Value> {
+        HashMap::from([("thinking".to_string(), serde_json::Value::Bool(value))])
+    }
+
+    // Regression: DeepSeek V3.2/V4 bypass ChatTemplateState::apply, so the
+    // resolved `params.thinking` (from reasoning_effort / Anthropic ThinkingConfig)
+    // must be honored here — with an explicit `template_kwargs["thinking"]` still
+    // winning. Same precedence as the Jinja path.
+    #[test]
+    fn derive_thinking_mode_honors_params_thinking_and_explicit_override() {
+        // No signal at all -> Chat (default off).
+        assert!(matches!(
+            derive_thinking_mode(&ChatTemplateParams::default()),
+            ThinkingMode::Chat
+        ));
+
+        // params.thinking is the fallback when there is no explicit kwarg.
+        assert!(matches!(
+            derive_thinking_mode(&ChatTemplateParams {
+                thinking: Some(true),
+                ..Default::default()
+            }),
+            ThinkingMode::Thinking
+        ));
+        assert!(matches!(
+            derive_thinking_mode(&ChatTemplateParams {
+                thinking: Some(false),
+                ..Default::default()
+            }),
+            ThinkingMode::Chat
+        ));
+
+        // An explicit template_kwargs["thinking"] wins over params.thinking.
+        let on = thinking_kwargs(true);
+        assert!(matches!(
+            derive_thinking_mode(&ChatTemplateParams {
+                thinking: Some(false),
+                template_kwargs: Some(&on),
+                ..Default::default()
+            }),
+            ThinkingMode::Thinking
+        ));
+        let off = thinking_kwargs(false);
+        assert!(matches!(
+            derive_thinking_mode(&ChatTemplateParams {
+                thinking: Some(true),
+                template_kwargs: Some(&off),
+                ..Default::default()
+            }),
+            ThinkingMode::Chat
+        ));
+    }
 }
