@@ -11,9 +11,10 @@ use crate::routers::{
     grpc::{
         client::GenerateRequestBuildOptions,
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, PreparationOutput, RequestContext},
-        multimodal::assemble_multimodal_data,
-        proto_wrapper::ProtoRequest,
+        context::{
+            ClientSelection, ExecutionPlan, ExecutionPlanKind, PreparationOutput, RequestContext,
+        },
+        multimodal::{assemble_multimodal_data, assemble_multimodal_data_after_encode},
         utils,
     },
 };
@@ -24,11 +25,15 @@ use crate::routers::{
 /// and CreateMessageRequest sampling parameters.
 pub(crate) struct MessageRequestBuildingStage {
     inject_pd_metadata: bool,
+    plan_kind: ExecutionPlanKind,
 }
 
 impl MessageRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, plan_kind: ExecutionPlanKind) -> Self {
+        Self {
+            inject_pd_metadata,
+            plan_kind,
+        }
     }
 }
 
@@ -57,10 +62,10 @@ impl PipelineStage for MessageRequestBuildingStage {
 
         let messages_request = ctx.messages_request_arc();
 
-        // Get client for building request (use prefill client if PD mode)
+        // Get client for building request (use prefill client in disaggregated mode)
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
         let PreparationOutput::Messages {
@@ -87,21 +92,36 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data now that the backend is known.
+        // In EPD, request building also mints the encode->prefill rooms and
+        // carries the encode dispatch plan into the execution plan.
+        let mut encode_plan = None;
         let multimodal_data = if let Some(intermediate) = processed_messages.multimodal_intermediate
         {
-            Some(
-                assemble_multimodal_data(
+            let planned_encode =
+                helpers::plan_epd_encode(&intermediate, clients, ctx.state.workers.as_ref())
+                    .map_err(|e| {
+                        error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to plan EPD encode");
+                        error::bad_request("multimodal_not_supported", format!("{e}"))
+                    })?;
+            let is_encode_routed = planned_encode.is_some();
+            encode_plan = planned_encode;
+
+            let assembled = if is_encode_routed {
+                assemble_multimodal_data_after_encode(
                     intermediate,
                     builder_client,
                     ctx.state.workers.as_ref(),
                 )
                 .await
-                .map_err(|e| {
+            } else {
+                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                    .await
+            };
+            Some(assembled.map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
                 error::bad_request("multimodal_not_supported", format!("{e}"))
-                })?,
-            )
+            })?)
         } else {
             None
         };
@@ -145,7 +165,28 @@ impl PipelineStage for MessageRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
+        // EPD: request building minted the per-item encode bootstrap info and
+        // planned the encode-worker dispatch. Inject the bootstrap info into the
+        // prefill request; the dispatch plan stays attached to ExecutionPlan.
+        let encode_dispatch = if let Some(plan) = encode_plan {
+            let (bootstrap_info, dispatch) = plan.into_parts();
+            proto_request.set_encode_bootstrap_info(bootstrap_info);
+            Some(dispatch)
+        } else {
+            None
+        };
+
+        // EPD: inject the prefill->decode KV rendezvous (mirrors the chat path).
+        // No-op unless the backend carries it in the request.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);
+        }
+
+        ctx.state.execution_plan = Some(ExecutionPlan::generate(
+            self.plan_kind,
+            proto_request,
+            encode_dispatch,
+        ));
         Ok(None)
     }
 

@@ -233,6 +233,11 @@ impl TokenSpeedSchedulerClient {
             token_ids_logprob: body.token_ids_logprob.clone().unwrap_or_default(),
             stream: body.stream,
             mm_inputs: None,
+            // EPD bootstrap info injected later by the EPD pipeline, if applicable:
+            // `encode_bootstrap_info` (E->P embedding) and
+            // `kv_bootstrap_info` (P->D KV).
+            encode_bootstrap_info: None,
+            kv_bootstrap_info: None,
         })
     }
 

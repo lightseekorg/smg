@@ -151,6 +151,9 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
             (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
+            // EPD only runs on gRPC; the HTTP arm never reaches a real router
+            // (the factory errors), but the match must stay exhaustive.
+            (_, RoutingMode::EncodePrefillDecode { .. }) => router_ids::GRPC_EPD,
             (ConnectionMode::Http, RoutingMode::Gemini { .. }) => router_ids::HTTP_GEMINI,
             (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
@@ -183,27 +186,34 @@ impl RouterManager {
         self.routers.len()
     }
 
-    /// Selects a router by weighting all four router types (grpc-pd, http-pd, grpc-regular,
-    /// http-regular) by their worker counts. PD routers only receive weight when both prefill
-    /// and decode workers are present on the same protocol; an incomplete pair contributes 0.
+    /// Selects a router by weighting available router types by their worker counts.
+    /// PD routers only receive weight when both prefill and decode workers are
+    /// present on the same protocol; EPD requires encode, prefill, and decode
+    /// workers over gRPC. Incomplete role sets contribute 0.
     ///
     /// Weighting the router selection lets operators gradually migrate traffic between
     /// HTTP / gRPC and regular / prefill-decode disaggregation workers.
     fn pick_router_by_weights(
         &self,
+        grpc_epd: usize,
         grpc_pd: usize,
         http_pd: usize,
         grpc_regular: usize,
         http_regular: usize,
     ) -> Option<Arc<dyn RouterTrait>> {
-        let options: [(usize, &RouterId); 4] = [
+        let options: [(usize, &RouterId); 5] = [
+            (grpc_epd, &router_ids::GRPC_EPD),
             (grpc_pd, &router_ids::GRPC_PD),
             (http_pd, &router_ids::HTTP_PD),
             (grpc_regular, &router_ids::GRPC_REGULAR),
             (http_regular, &router_ids::HTTP_REGULAR),
         ];
 
-        let total: usize = options.iter().map(|(w, _)| w).sum();
+        let total: usize = options
+            .iter()
+            .filter(|(weight, router_id)| *weight > 0 && self.routers.contains_key(*router_id))
+            .map(|(weight, _)| *weight)
+            .sum();
         if total == 0 {
             return None;
         }
@@ -211,6 +221,9 @@ impl RouterManager {
         let pick = ((rand::random::<f64>() * total as f64) as usize).min(total - 1);
         let mut cum = 0usize;
         for (weight, router_id) in &options {
+            if *weight == 0 || !self.routers.contains_key(*router_id) {
+                continue;
+            }
             cum += weight;
             if pick < cum {
                 return self.routers.get(*router_id).map(|r| r.clone());
@@ -238,6 +251,7 @@ impl RouterManager {
             }
         }
 
+        let mut grpc_encode = 0;
         let mut grpc_prefill = 0;
         let mut http_prefill = 0;
         let mut grpc_decode = 0;
@@ -247,6 +261,8 @@ impl RouterManager {
 
         for w in workers {
             match (w.worker_type(), w.connection_mode()) {
+                (WorkerType::Encode, ConnectionMode::Grpc) => grpc_encode += 1,
+                (WorkerType::Encode, ConnectionMode::Http) => {}
                 (WorkerType::Prefill, ConnectionMode::Grpc) => grpc_prefill += 1,
                 (WorkerType::Prefill, ConnectionMode::Http) => http_prefill += 1,
                 (WorkerType::Decode, ConnectionMode::Grpc) => grpc_decode += 1,
@@ -256,9 +272,19 @@ impl RouterManager {
             }
         }
 
+        let grpc_epd_ready = grpc_encode > 0
+            && grpc_prefill > 0
+            && grpc_decode > 0
+            && self.routers.contains_key(&router_ids::GRPC_EPD);
+        let grpc_epd = if grpc_epd_ready {
+            grpc_encode + grpc_prefill + grpc_decode
+        } else {
+            0
+        };
+
         // We need at least one prefill and one decode worker to handle requests
         // in PD disaggregation mode.
-        let grpc_pd = if grpc_prefill > 0 && grpc_decode > 0 {
+        let grpc_pd = if !grpc_epd_ready && grpc_prefill > 0 && grpc_decode > 0 {
             grpc_prefill + grpc_decode
         } else {
             0
@@ -269,7 +295,7 @@ impl RouterManager {
             0
         };
 
-        self.pick_router_by_weights(grpc_pd, http_pd, grpc_regular, http_regular)
+        self.pick_router_by_weights(grpc_epd, grpc_pd, http_pd, grpc_regular, http_regular)
     }
 
     fn requires_explicit_generate_model(&self, model_id: &str) -> bool {
@@ -914,6 +940,30 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct EpdStubRouter;
+
+    #[async_trait]
+    impl RouterTrait for EpdStubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn route_generate(
+            &self,
+            _headers: Option<&HeaderMap>,
+            _tenant_meta: &TenantRequestMeta,
+            _body: &GenerateRequest,
+            _model_id: &str,
+        ) -> Response {
+            (StatusCode::OK, "epd-routed").into_response()
+        }
+
+        fn router_type(&self) -> &'static str {
+            "epd"
+        }
+    }
+
     fn test_manager(enable_igw: bool) -> Arc<RouterManager> {
         let mut manager =
             RouterManager::new(Arc::new(WorkerRegistry::new()), reqwest::Client::new());
@@ -1012,5 +1062,39 @@ mod tests {
             (pd_ratio - expected).abs() < tolerance,
             "PD ratio {pd_ratio:.3} was outside expected {expected} ± {tolerance}",
         );
+    }
+
+    #[test]
+    fn weighted_routing_selects_epd_for_grpc_epd_workers() {
+        let registry = Arc::new(WorkerRegistry::new());
+
+        for (idx, wtype) in [WorkerType::Encode, WorkerType::Prefill, WorkerType::Decode]
+            .into_iter()
+            .enumerate()
+        {
+            let mut labels = HashMap::new();
+            labels.insert("model_id".to_string(), "model-x".to_string());
+            let worker = BasicWorkerBuilder::new(format!("http://epd-w{idx}:8080"))
+                .worker_type(wtype)
+                .connection_mode(ConnectionMode::Grpc)
+                .labels(labels)
+                .circuit_breaker_config(CircuitBreakerConfig::default())
+                .build();
+            registry.register(Arc::new(worker)).unwrap();
+        }
+
+        let mut manager = RouterManager::new(registry, reqwest::Client::new());
+        manager.enable_igw = true;
+        let manager = Arc::new(manager);
+        manager.register_router(router_ids::GRPC_PD, Arc::new(PdStubRouter));
+        manager.register_router(router_ids::GRPC_EPD, Arc::new(EpdStubRouter));
+
+        for _ in 0..100 {
+            let router = manager
+                .select_router_for_request(Some("model-x"))
+                .expect("expected EPD router");
+
+            assert_eq!(router.router_type(), "epd");
+        }
     }
 }
