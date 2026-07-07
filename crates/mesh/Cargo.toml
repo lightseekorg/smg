@@ -37,7 +37,7 @@ bytes = "1"
 crdts = "7.3"
 futures = "0.3"
 metrics = "0.24.6"
-num-bigint = "0.4"
+num-bigint = "0.5"
 prost = "0.14.4"
 prost-types = "0.14.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
