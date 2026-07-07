@@ -970,17 +970,47 @@ pub(crate) async fn assemble_multimodal_data(
             }
             GrpcClient::TokenSpeed(_) => {
                 let options = tokenspeed_assembly_options(precomputed.modality, workers);
-                let data = tokio::task::spawn_blocking(move || {
+                let pending = tokio::task::spawn_blocking(move || {
                     assemble_tokenspeed_with_options(precomputed, options)
+                        .map(PendingTokenSpeedAssembly::new)
                 })
                 .await
                 .context("TokenSpeed multimodal assembly task failed")??;
-                Ok(MultimodalData::TokenSpeed(data))
+                Ok(MultimodalData::TokenSpeed(pending.into_inner()?))
             }
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
             ),
         },
+    }
+}
+
+/// Owns SHM-backed assembly output until the awaiting task accepts it.
+///
+/// Dropping a `spawn_blocking` join handle does not cancel its task. If the
+/// request future is cancelled, Tokio drops the completed task output instead;
+/// this guard unlinks any SHM files before that output is discarded.
+struct PendingTokenSpeedAssembly {
+    data: Option<TokenSpeedMultimodalData>,
+}
+
+impl PendingTokenSpeedAssembly {
+    fn new(data: TokenSpeedMultimodalData) -> Self {
+        Self { data: Some(data) }
+    }
+
+    fn into_inner(mut self) -> Result<TokenSpeedMultimodalData> {
+        self.data
+            .take()
+            .context("pending TokenSpeed assembly is missing data")
+    }
+}
+
+impl Drop for PendingTokenSpeedAssembly {
+    fn drop(&mut self) {
+        if let Some(data) = &self.data {
+            cleanup_tokenspeed_items_encoder_shm(&data.items, None);
+        }
     }
 }
 
@@ -1889,6 +1919,51 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn pending_tokenspeed_shm_assembly() -> (PendingTokenSpeedAssembly, std::path::PathBuf) {
+        let handle = write_tokenspeed_shm_with(4, |output| {
+            output.copy_from_slice(&[1, 2, 3, 4]);
+            Ok(())
+        })
+        .unwrap();
+        let path = Path::new("/dev/shm").join(&handle.name);
+        let data = TokenSpeedMultimodalData {
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Image,
+                encoder_input: TokenSpeedTensor::shm(handle, vec![2], "bfloat16".to_string()),
+                model_specific_tensors: HashMap::new(),
+                placeholder_token_id: None,
+                mm_placeholders: vec![],
+                content_hash: vec![],
+            }],
+            shm_enabled: true,
+        };
+        (PendingTokenSpeedAssembly::new(data), path)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pending_tokenspeed_assembly_cleans_shm_when_dropped() {
+        let (pending, path) = pending_tokenspeed_shm_assembly();
+        assert!(path.exists());
+
+        drop(pending);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pending_tokenspeed_assembly_transfers_shm_ownership() {
+        let (pending, path) = pending_tokenspeed_shm_assembly();
+        let data = pending.into_inner().unwrap();
+        assert!(path.exists());
+
+        cleanup_tokenspeed_items_encoder_shm(&data.items, None);
+
+        assert!(!path.exists());
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
