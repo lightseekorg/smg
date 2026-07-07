@@ -24,6 +24,7 @@ owners (`*`) in CODEOWNERS. Current core maintainers:
 
 - Simo Lin ([@slin1237](https://github.com/slin1237))
 - Chang Su ([@CatherineSue](https://github.com/CatherineSue))
+- Keyang Ru ([@key4ng](https://github.com/key4ng))
 
 ## Decision Making
 
