@@ -89,6 +89,14 @@ impl PipelineStage for GenerateRequestBuildingStage {
             ctx.state.workers.as_ref(),
         );
 
+        // NOTE (issue #227): string `stop` sequences are intentionally NOT
+        // drained for the native /generate endpoint. Its streaming path builds
+        // no router-side StopSequenceDecoder, so clearing the stop would let the
+        // worker over-generate and stream untrimmed text past the stop. String
+        // stops are handled only on the chat/completions/messages paths, which
+        // trim in every response mode; native /generate keeps the pre-existing
+        // 400 for SGLang string stops until a streaming decoder exists.
+
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);

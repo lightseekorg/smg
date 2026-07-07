@@ -11,7 +11,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
-    stop::StopSequenceDecoderBuilder,
+    stop::{MatchedStop, StopSequenceDecoderBuilder},
     traits::{Encoding, Tokenizer},
     StopSequenceDecoder,
 };
@@ -514,6 +514,58 @@ pub fn create_stop_decoder(
     }
 
     builder.build()
+}
+
+/// Refine worker-reported stop metadata with router-side stop knowledge
+/// (issue #227).
+///
+/// SGLang workers under `skip_tokenizer_init` never see string stops: the
+/// router drains them (`resolve_sglang_string_stops`) and matches them itself
+/// via `StopSequenceDecoder`. Two artifacts are corrected here:
+///   1. The router decoder matched a string stop the worker ran past
+///      (multi-token stops): `finish_reason` must be `stop` and `matched_stop`
+///      the matched string — not the worker's `length`.
+///   2. The worker halted on a *converted* single-token stop and reported the
+///      numeric token id: map the id back to the user's stop string when its
+///      decoded text equals one, matching what vLLM reports for the same
+///      request.
+///
+/// EOS and user-provided `stop_token_ids` are untouched: numeric ids are only
+/// rewritten when they decode to an exact user stop string, and the worker's
+/// `finish_reason` is only overridden by an actual decoder sequence match.
+pub fn refine_stop_metadata(
+    worker_finish_reason: &str,
+    worker_matched_stop: Option<Value>,
+    decoder_matched: Option<&MatchedStop>,
+    user_stops: Option<&[String]>,
+    tokenizer: &Arc<dyn Tokenizer>,
+) -> (String, Option<Value>) {
+    // Case 1: the router-side decoder matched a string stop — authoritative.
+    if let Some(MatchedStop::Sequence(seq)) = decoder_matched {
+        return ("stop".to_string(), Some(Value::String(seq.clone())));
+    }
+
+    // Case 2: numeric matched_stop whose decoded text equals a user stop
+    // string (the id was synthesized from that string at request-build time).
+    if let (Some(Value::Number(n)), Some(stops)) = (&worker_matched_stop, user_stops) {
+        if let Some(id) = n.as_u64().and_then(|v| u32::try_from(v).ok()) {
+            if let Ok(text) = tokenizer.decode(&[id], false) {
+                if stops.contains(&text) {
+                    return ("stop".to_string(), Some(Value::String(text)));
+                }
+            }
+        }
+    }
+
+    (worker_finish_reason.to_string(), worker_matched_stop)
+}
+
+/// View an OpenAI `stop` parameter as a slice of stop strings.
+pub fn stop_param_as_slice(stops: &StringOrArray) -> &[String] {
+    match stops {
+        StringOrArray::String(s) => std::slice::from_ref(s),
+        StringOrArray::Array(arr) => arr.as_slice(),
+    }
 }
 
 /// Parse tool calls from JSON schema constrained response
@@ -1063,5 +1115,70 @@ mod tests {
             vstart < qpos,
             "image must precede the question (vstart={vstart}, qpos={qpos}).\n--- rendered ---\n{rendered}"
         );
+    }
+
+    // ---- refine_stop_metadata (issue #227) ----
+
+    mod refine_stop_metadata_tests {
+        use std::sync::Arc;
+
+        use llm_tokenizer::{mock::MockTokenizer, stop::MatchedStop, traits::Tokenizer};
+        use serde_json::{json, Value};
+
+        use crate::routers::grpc::utils::refine_stop_metadata;
+
+        fn tok() -> Arc<dyn Tokenizer> {
+            // Mock vocab: "." => 6 (decode(6) == ".")
+            Arc::new(MockTokenizer::new())
+        }
+
+        #[test]
+        fn decoder_sequence_match_is_authoritative() {
+            // Worker over-generated to max_tokens ("length"); the router
+            // decoder matched the multi-token string stop.
+            let stops = vec!["\n\nHuman:".to_string()];
+            let matched = MatchedStop::Sequence("\n\nHuman:".to_string());
+            let (reason, ms) =
+                refine_stop_metadata("length", None, Some(&matched), Some(&stops), &tok());
+            assert_eq!(reason, "stop");
+            assert_eq!(ms, Some(Value::String("\n\nHuman:".to_string())));
+        }
+
+        #[test]
+        fn numeric_matched_stop_mapped_back_to_user_string() {
+            // Converted single-token stop: worker halted on token 6 (".").
+            let stops = vec![".".to_string()];
+            let (reason, ms) =
+                refine_stop_metadata("stop", Some(json!(6)), None, Some(&stops), &tok());
+            assert_eq!(reason, "stop");
+            assert_eq!(ms, Some(Value::String(".".to_string())));
+        }
+
+        #[test]
+        fn numeric_matched_stop_not_a_user_stop_untouched() {
+            // EOS token id (999 => "<eos>") is not a user stop — keep as-is.
+            let stops = vec![".".to_string()];
+            let (reason, ms) =
+                refine_stop_metadata("stop", Some(json!(999)), None, Some(&stops), &tok());
+            assert_eq!(reason, "stop");
+            assert_eq!(ms, Some(json!(999)));
+        }
+
+        #[test]
+        fn decoder_token_match_keeps_worker_verdict() {
+            // Decoder stopped on a token id (EOS) — worker's values stand.
+            let matched = MatchedStop::TokenId(999);
+            let (reason, ms) =
+                refine_stop_metadata("stop", Some(json!(999)), Some(&matched), None, &tok());
+            assert_eq!(reason, "stop");
+            assert_eq!(ms, Some(json!(999)));
+        }
+
+        #[test]
+        fn no_match_passes_through() {
+            let (reason, ms) = refine_stop_metadata("length", None, None, None, &tok());
+            assert_eq!(reason, "length");
+            assert_eq!(ms, None);
+        }
     }
 }

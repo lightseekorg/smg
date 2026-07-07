@@ -21,6 +21,19 @@ pub enum SequenceDecoderOutput {
     StoppedWithText(String),
 }
 
+/// Which stop condition halted the decoder.
+///
+/// Recorded when the decoder transitions to the stopped state so callers can
+/// report the matched stop back to clients (e.g. OpenAI `matched_stop`,
+/// Anthropic `stop_sequence`) without re-deriving it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchedStop {
+    /// A string stop sequence matched (the original, un-tokenized sequence).
+    Sequence(String),
+    /// A stop token id matched (e.g. EOS or a user-provided stop_token_id).
+    TokenId(TokenIdType),
+}
+
 /// Configuration for stop sequences
 #[derive(Debug, Clone, Default)]
 pub struct StopSequenceConfig {
@@ -77,6 +90,12 @@ pub struct StopSequenceDecoder {
     jail_max_bytes: usize,
     /// Whether we've stopped
     stopped: bool,
+    /// Which stop condition halted us (set when `stopped` becomes true).
+    matched_stop: Option<MatchedStop>,
+    /// Owned copies of the Aho-Corasick patterns, in automaton order
+    /// (hidden then visible, empty strings filtered) — maps a match's
+    /// pattern index back to the original stop sequence.
+    patterns: Vec<String>,
     /// True when there are no string stop sequences (only token-level stops).
     /// In this mode the jail buffer is bypassed entirely for lower overhead.
     token_only: bool,
@@ -90,12 +109,14 @@ impl StopSequenceDecoder {
         skip_special_tokens: bool,
     ) -> Self {
         // Build Aho-Corasick automaton from all stop sequences
-        // Hidden sequences come first, then visible sequences
-        let mut patterns: Vec<&str> = config
+        // Hidden sequences come first, then visible sequences. Owned copies are
+        // kept so a match's pattern index can be mapped back to the original
+        // stop sequence (see `matched_stop`).
+        let mut patterns: Vec<String> = config
             .stop_sequences
             .iter()
             .filter(|s| !s.is_empty())
-            .map(|s| s.as_str())
+            .cloned()
             .collect();
         let visible_boundary_idx = patterns.len();
         patterns.extend(
@@ -103,7 +124,7 @@ impl StopSequenceDecoder {
                 .visible_stop_sequences
                 .iter()
                 .filter(|s| !s.is_empty())
-                .map(|s| s.as_str()),
+                .cloned(),
         );
 
         // Precompute the maximum stop sequence length in bytes.
@@ -126,7 +147,7 @@ impl StopSequenceDecoder {
                 clippy::expect_used,
                 reason = "AhoCorasick::new with pre-filtered non-empty &str patterns is practically infallible"
             )]
-            Some(AhoCorasick::new(patterns).expect("Failed to build Aho-Corasick automaton"))
+            Some(AhoCorasick::new(&patterns).expect("Failed to build Aho-Corasick automaton"))
         };
 
         let token_only = aho_corasick.is_none();
@@ -139,6 +160,8 @@ impl StopSequenceDecoder {
             jail_buffer: String::new(),
             jail_max_bytes,
             stopped: false,
+            matched_stop: None,
+            patterns,
             token_only,
         }
     }
@@ -152,6 +175,7 @@ impl StopSequenceDecoder {
         // Check for token-level stops first
         if self.config.stop_tokens.contains(&token_id) {
             self.stopped = true;
+            self.matched_stop = Some(MatchedStop::TokenId(token_id));
 
             // Flush any jailed text before stopping - use mem::take to avoid clone
             if !self.jail_buffer.is_empty() {
@@ -164,6 +188,7 @@ impl StopSequenceDecoder {
 
         if self.config.visible_stop_tokens.contains(&token_id) {
             self.stopped = true;
+            self.matched_stop = Some(MatchedStop::TokenId(token_id));
 
             // Include jailed text plus the stop token
             let stop_text = self
@@ -208,6 +233,9 @@ impl StopSequenceDecoder {
             let input = Input::new(&self.jail_buffer).span(search_start..self.jail_buffer.len());
             if let Some(mat) = ac.find(input) {
                 self.stopped = true;
+                self.matched_stop = Some(MatchedStop::Sequence(
+                    self.patterns[mat.pattern().as_usize()].clone(),
+                ));
                 let is_visible = mat.pattern().as_usize() >= self.visible_boundary_idx;
 
                 if is_visible {
@@ -287,11 +315,21 @@ impl StopSequenceDecoder {
         self.stopped
     }
 
+    /// Which stop condition halted decoding, if any.
+    ///
+    /// `Some` iff [`Self::is_stopped`] is true. Distinguishes a matched string
+    /// stop sequence (with the original sequence) from a matched stop token id,
+    /// so callers can report `finish_reason`/`matched_stop` accurately.
+    pub fn matched_stop(&self) -> Option<&MatchedStop> {
+        self.matched_stop.as_ref()
+    }
+
     /// Reset the decoder state
     pub fn reset(&mut self) {
         self.jail_buffer.clear();
         self.sequence.clear();
         self.stopped = false;
+        self.matched_stop = None;
     }
 }
 
@@ -791,5 +829,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_matched_stop_records_sequence() {
+        let tokenizer = Arc::new(MockTokenizer::new());
+        // "Hello world" spans token 1 ("Hello") and token 2 (" world")
+        let config = StopSequenceConfig::default().with_stop_sequence("Hello world");
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        assert!(decoder.matched_stop().is_none());
+        let _ = decoder.process_token(1).unwrap();
+        let _ = decoder.process_token(2).unwrap();
+        assert!(decoder.is_stopped());
+        assert_eq!(
+            decoder.matched_stop(),
+            Some(&super::MatchedStop::Sequence("Hello world".to_string()))
+        );
+
+        decoder.reset();
+        assert!(decoder.matched_stop().is_none());
+    }
+
+    #[test]
+    fn test_matched_stop_records_token_id() {
+        let tokenizer = Arc::new(MockTokenizer::new());
+        let config = StopSequenceConfig::default().with_stop_token(999);
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        let _ = decoder.process_token(999).unwrap();
+        assert!(decoder.is_stopped());
+        assert_eq!(
+            decoder.matched_stop(),
+            Some(&super::MatchedStop::TokenId(999))
+        );
     }
 }
