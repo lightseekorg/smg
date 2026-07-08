@@ -389,6 +389,8 @@ struct Router {
     assignment_mode: String,
     max_payload_size: usize,
     dp_aware: bool,
+    multimodal_tensor_transport: Option<String>,
+    multimodal_shm_min_bytes: Option<usize>,
     dp_minimum_tokens_scheduler: bool,
     api_key: Option<String>,
     log_dir: Option<String>,
@@ -785,6 +787,12 @@ impl Router {
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .enable_wasm(self.enable_wasm)
             .dp_aware(self.dp_aware)
+            .multimodal_tensor_transport(
+                self.multimodal_tensor_transport
+                    .as_deref()
+                    .and_then(config::TransportMode::parse),
+            )
+            .multimodal_shm_min_bytes(self.multimodal_shm_min_bytes)
             .routing_key_override(config::RoutingKeyOverrideConfig {
                 enabled: self.routing_key_override,
                 eviction_interval_secs: self.eviction_interval_secs,
@@ -834,6 +842,8 @@ impl Router {
         assignment_mode = String::from("random"),
         max_payload_size = 512 * 1024 * 1024,
         dp_aware = false,
+        multimodal_tensor_transport = None,
+        multimodal_shm_min_bytes = None,
         dp_minimum_tokens_scheduler = false,
         api_key = None,
         log_dir = None,
@@ -959,6 +969,8 @@ impl Router {
         assignment_mode: String,
         max_payload_size: usize,
         dp_aware: bool,
+        multimodal_tensor_transport: Option<String>,
+        multimodal_shm_min_bytes: Option<usize>,
         dp_minimum_tokens_scheduler: bool,
         api_key: Option<String>,
         log_dir: Option<String>,
@@ -1100,6 +1112,8 @@ impl Router {
             assignment_mode,
             max_payload_size,
             dp_aware,
+            multimodal_tensor_transport,
+            multimodal_shm_min_bytes,
             dp_minimum_tokens_scheduler,
             api_key,
             log_dir,

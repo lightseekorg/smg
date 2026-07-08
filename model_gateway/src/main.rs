@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use openai_protocol::worker::TransportMode;
 use rand::{distr::Alphanumeric, RngExt};
 use smg::{
     config::{
@@ -144,6 +145,12 @@ enum Commands {
         #[command(flatten)]
         args: CliArgs,
     },
+}
+
+/// Parse the `--multimodal-tensor-transport` value into a `TransportMode`.
+fn parse_transport_mode(value: &str) -> Result<TransportMode, String> {
+    TransportMode::parse(value)
+        .ok_or_else(|| format!("invalid value '{value}'; expected inline, shm, or auto"))
 }
 
 #[derive(Parser, Debug)]
@@ -307,6 +314,17 @@ struct CliArgs {
     /// gauges, polling even without a load-aware routing policy.
     #[arg(long, default_value_t = false, help_heading = "Load Monitoring")]
     engine_metrics: bool,
+
+    /// Multimodal tensor transport mode: `inline` (default), `shm` (same-host
+    /// /dev/shm), or `auto` (shm only when the worker shares /dev/shm). A
+    /// per-worker `WorkerSpec.multimodal_tensor_transport` overrides this.
+    #[arg(long, value_parser = parse_transport_mode, help_heading = "Multimodal")]
+    multimodal_tensor_transport: Option<TransportMode>,
+
+    /// Minimum multimodal tensor size (bytes) before the SHM transport is used.
+    /// Overridable per worker via `WorkerSpec.multimodal_shm_min_bytes`.
+    #[arg(long, help_heading = "Multimodal")]
+    multimodal_shm_min_bytes: Option<usize>,
 
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
@@ -1338,6 +1356,8 @@ impl CliArgs {
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
             .engine_metrics(self.engine_metrics)
+            .multimodal_tensor_transport(self.multimodal_tensor_transport)
+            .multimodal_shm_min_bytes(self.multimodal_shm_min_bytes)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -1705,6 +1725,37 @@ mod tests {
         assert!(
             server_config.router_config.engine_metrics,
             "engine_metrics must survive into ServerConfig via to_server_config"
+        );
+    }
+
+    /// The multimodal transport flags must reach both `RouterConfig` and the
+    /// wrapped `ServerConfig.router_config`. Two-path config-plumbing guard.
+    #[test]
+    fn multimodal_transport_flows_into_both_configs() {
+        let cli = cli_args_from(&[
+            "--multimodal-tensor-transport",
+            "shm",
+            "--multimodal-shm-min-bytes",
+            "1024",
+        ]);
+
+        let router_config = cli.to_router_config(vec![], vec![]).unwrap();
+        assert_eq!(
+            router_config.multimodal_tensor_transport,
+            Some(TransportMode::Shm),
+            "transport mode must reach RouterConfig via to_router_config"
+        );
+        assert_eq!(router_config.multimodal_shm_min_bytes, Some(1024));
+
+        let server_config = cli.to_server_config(router_config).unwrap();
+        assert_eq!(
+            server_config.router_config.multimodal_tensor_transport,
+            Some(TransportMode::Shm),
+            "transport mode must survive into ServerConfig via to_server_config"
+        );
+        assert_eq!(
+            server_config.router_config.multimodal_shm_min_bytes,
+            Some(1024)
         );
     }
 

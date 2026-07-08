@@ -109,6 +109,10 @@ pub struct TokenSpeedMultimodalData {
     /// transport? Computed upstream from the transport mode and (for `auto`)
     /// worker locality, so `into_proto` does not re-read the environment.
     pub shm_enabled: bool,
+    /// Resolved per-request SHM size threshold (bytes): tensors smaller than this
+    /// stay inline even when `shm_enabled`. Computed upstream (worker override →
+    /// router config → env → default) so `into_proto` does not re-read the env.
+    pub shm_min_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -276,17 +280,18 @@ impl TokenSpeedMultimodalData {
     /// each item's encoder_input afterward via `clear_mm_pixel_values`.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
         let shm_enabled = self.shm_enabled;
+        let shm_min_bytes = self.shm_min_bytes;
         let items = self
             .items
             .into_iter()
-            .map(|item| item.into_proto(shm_enabled))
+            .map(|item| item.into_proto(shm_enabled, shm_min_bytes))
             .collect();
         tokenspeed::MultimodalInputs { items }
     }
 }
 
 impl TokenSpeedMultimodalItem {
-    fn into_proto(self, shm_enabled: bool) -> tokenspeed::MultimodalItem {
+    fn into_proto(self, shm_enabled: bool, shm_min_bytes: usize) -> tokenspeed::MultimodalItem {
         let placeholders = self
             .mm_placeholders
             .into_iter()
@@ -296,10 +301,14 @@ impl TokenSpeedMultimodalItem {
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
-            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled)))
+            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled, shm_min_bytes)))
             .collect::<HashMap<_, _>>();
 
-        let encoder_input = Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled));
+        let encoder_input = Some(tokenspeed_tensor_to_proto(
+            self.encoder_input,
+            shm_enabled,
+            shm_min_bytes,
+        ));
 
         tokenspeed::MultimodalItem {
             modality: match self.modality {
@@ -319,6 +328,7 @@ impl TokenSpeedMultimodalItem {
 fn tokenspeed_tensor_to_proto(
     value: TokenSpeedTensor,
     shm_enabled: bool,
+    shm_min_bytes: usize,
 ) -> tokenspeed::TensorData {
     use crate::observability::metrics::Metrics;
     let TokenSpeedTensor {
@@ -328,7 +338,9 @@ fn tokenspeed_tensor_to_proto(
     } = value;
     let payload = match storage {
         // Inline storage is metered inside tokenspeed_tensor_payload.
-        TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data, shm_enabled),
+        TokenSpeedTensorStorage::Inline(data) => {
+            tokenspeed_tensor_payload(data, shm_enabled, shm_min_bytes)
+        }
         // Encoder input already written directly to SHM upstream — meter it here.
         TokenSpeedTensorStorage::Shm(handle) => {
             Metrics::record_mm_tensor("tokenspeed", "shm", handle.nbytes as usize);
@@ -343,17 +355,25 @@ fn tokenspeed_tensor_to_proto(
     }
 }
 
-fn tensor_bytes_to_tokenspeed(value: TensorBytes, shm_enabled: bool) -> tokenspeed::TensorData {
+fn tensor_bytes_to_tokenspeed(
+    value: TensorBytes,
+    shm_enabled: bool,
+    shm_min_bytes: usize,
+) -> tokenspeed::TensorData {
     let TensorBytes { data, shape, dtype } = value;
 
     tokenspeed::TensorData {
         shape,
         dtype,
-        payload: Some(tokenspeed_tensor_payload(data, shm_enabled)),
+        payload: Some(tokenspeed_tensor_payload(data, shm_enabled, shm_min_bytes)),
     }
 }
 
-fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::tensor_data::Payload {
+fn tokenspeed_tensor_payload(
+    data: Vec<u8>,
+    shm_enabled: bool,
+    min_bytes: usize,
+) -> tokenspeed::tensor_data::Payload {
     use crate::observability::metrics::Metrics;
     let log_timing = log_tokenspeed_mm_timing_enabled();
     let nbytes = data.len();
@@ -365,7 +385,6 @@ fn tokenspeed_tensor_payload(data: Vec<u8>, shm_enabled: bool) -> tokenspeed::te
         return tokenspeed::tensor_data::Payload::Inline(data);
     }
 
-    let min_bytes = tokenspeed_mm_shm_min_bytes();
     if nbytes < min_bytes {
         if log_timing {
             tracing::info!(
@@ -410,27 +429,6 @@ fn log_tokenspeed_mm_timing_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Multimodal tensor transport mode for the TokenSpeed backend.
-///
-/// This only governs multimodal tensor payloads (encoder inputs and
-/// model-specific tensors); prompt `input_ids` are always sent inline. Set via
-/// `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`.
-pub fn tokenspeed_mm_tensor_transport_mode() -> String {
-    std::env::var("SMG_TOKENSPEED_MM_TENSOR_TRANSPORT")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-}
-
-/// Minimum multimodal tensor size (bytes) before the SHM transport is used.
-/// Set via `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`. Defaults to 64 KiB.
-pub fn tokenspeed_mm_shm_min_bytes() -> usize {
-    std::env::var("SMG_TOKENSPEED_MM_SHM_MIN_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(64 * 1024)
-}
-
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<common::ShmHandle> {
@@ -442,7 +440,7 @@ fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<common::ShmHandle> {
 
 /// Whether SMG can actually create+write files under `/dev/shm`. Probed once;
 /// when false the SHM transport cannot work, so `auto`/`shm` must stay inline.
-pub fn tokenspeed_shm_dev_writable() -> bool {
+pub fn mm_shm_dev_writable() -> bool {
     static WRITABLE: OnceLock<bool> = OnceLock::new();
     *WRITABLE.get_or_init(|| {
         let name = format!("smg-tokenspeed-probe-{}", process::id());
@@ -1863,6 +1861,7 @@ mod tests {
                 content_hash: vec![7; 32],
             }],
             shm_enabled: false,
+            shm_min_bytes: 0,
         }
         .into_proto();
 
@@ -1905,6 +1904,7 @@ mod tests {
                 content_hash: vec![7; 32],
             }],
             shm_enabled: false,
+            shm_min_bytes: 0,
         }
         .into_proto();
 
@@ -1930,6 +1930,7 @@ mod tests {
                 dtype: "uint32".to_string(),
             },
             false,
+            0,
         );
 
         assert_eq!(
@@ -1963,6 +1964,7 @@ mod tests {
                 content_hash: vec![7; 32],
             }],
             shm_enabled: true,
+            shm_min_bytes: 0,
         }
         .into_proto();
 

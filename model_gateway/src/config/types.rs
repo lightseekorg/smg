@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use openai_protocol::worker::HealthCheckConfig as ProtocolHealthCheckConfig;
+pub use openai_protocol::worker::TransportMode;
 use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
 pub use smg_data_connector::{
@@ -43,6 +44,16 @@ pub struct RouterConfig {
     /// observability from routing.
     #[serde(default)]
     pub engine_metrics: bool,
+    /// Global multimodal tensor transport mode (`inline` | `shm` | `auto`).
+    /// Per-worker `WorkerSpec.multimodal_tensor_transport` overrides this; when
+    /// unset, falls back to `SMG_MM_TENSOR_TRANSPORT`, then `inline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_tensor_transport: Option<TransportMode>,
+    /// Global minimum multimodal tensor size (bytes) before SHM transport is used.
+    /// Per-worker `WorkerSpec.multimodal_shm_min_bytes` overrides this; falls back
+    /// to `SMG_MM_SHM_MIN_BYTES`, then 64 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_shm_min_bytes: Option<usize>,
     pub dp_aware: bool,
     #[serde(default)]
     pub dp_minimum_tokens_scheduler: bool,
@@ -743,6 +754,8 @@ impl Default for RouterConfig {
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
             engine_metrics: false,
+            multimodal_tensor_transport: None,
+            multimodal_shm_min_bytes: None,
             dp_aware: false,
             dp_minimum_tokens_scheduler: false,
             api_key: None,

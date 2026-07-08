@@ -41,6 +41,7 @@ pub(crate) use detect::{chat_modalities, has_multimodal_content_messages};
 pub(crate) use process::{
     process_multimodal, process_multimodal_messages, resolve_placeholder_token,
 };
+pub(crate) use transport::init_mm_transport_defaults;
 
 /// Whether verbose multimodal timing logs are enabled via `SMG_LOG_MM_TIMING`.
 /// Read from the environment once and cached; the flag is not expected to change

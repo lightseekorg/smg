@@ -670,6 +670,17 @@ pub struct WorkerSpec {
     /// Falls back to the global `load_monitor_interval_secs` from router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_monitor_interval_secs: Option<u64>,
+
+    /// Per-worker multimodal tensor transport override (`inline` | `shm` | `auto`).
+    /// Overrides the router-level `multimodal_tensor_transport` for this worker
+    /// (e.g. force `shm` for a co-located worker, `inline` for a remote one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_tensor_transport: Option<TransportMode>,
+
+    /// Per-worker minimum multimodal tensor size (bytes) before the SHM transport
+    /// is used. Overrides the router-level `multimodal_shm_min_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal_shm_min_bytes: Option<usize>,
 }
 
 impl WorkerSpec {
@@ -700,7 +711,62 @@ impl WorkerSpec {
             resilience: ResilienceUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
+            multimodal_tensor_transport: None,
+            multimodal_shm_min_bytes: None,
         }
+    }
+}
+
+/// Multimodal tensor transport mode for large payloads.
+///
+/// - `Inline`: always carry tensor bytes in the gRPC message.
+/// - `Shm`: use same-host `/dev/shm` when SMG can write it.
+/// - `Auto`: use `/dev/shm` only when the receiving worker is verified to share
+///   SMG's `/dev/shm`; otherwise fall back to inline.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    #[default]
+    Inline,
+    Shm,
+    Auto,
+}
+
+impl TransportMode {
+    /// Parse from a case-insensitive string (`inline` | `shm` | `auto`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "inline" => Some(Self::Inline),
+            "shm" => Some(Self::Shm),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// Canonical lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Shm => "shm",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+impl std::fmt::Display for TransportMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TransportMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+            .ok_or_else(|| format!("invalid transport mode '{s}'; expected inline|shm|auto"))
     }
 }
 

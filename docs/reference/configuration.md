@@ -937,16 +937,28 @@ smg \
 | `JWT_JWKS_URI` | `--jwt-jwks-uri` | JWKS URI |
 | `CONTROL_PLANE_API_KEYS` | `--control-plane-api-keys` | Control plane API keys |
 
-### TokenSpeed Multimodal Tensor Transport
+### Multimodal Tensor Transport
 
-These env-only variables tune how the router ships preprocessed multimodal
-tensors (image/video encoder inputs) to a TokenSpeed worker. They do not affect
+Controls how the router ships preprocessed multimodal tensors (image/video
+encoder inputs and model-specific tensors) to the worker. This does not affect
 accuracy — the inline and shared-memory paths produce byte-identical tensors.
+Shared memory is currently used by the TokenSpeed backend.
+
+Resolution precedence (highest first): per-worker `WorkerSpec` override →
+router config / CLI flag → `SMG_MM_*` environment variable → built-in default.
+
+| CLI Flag | Config / WorkerSpec field | Default | Description |
+|----------|---------------------------|---------|-------------|
+| `--multimodal-tensor-transport` | `multimodal_tensor_transport` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (use `/dev/shm` whenever the router can write it — the operator asserts co-location), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. |
+| `--multimodal-shm-min-bytes` | `multimodal_shm_min_bytes` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
+
+Both settings can be overridden per worker via the matching `WorkerSpec` fields
+(e.g. force `shm` for a co-located worker and `inline` for a remote one).
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (always use `/dev/shm`), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. No locality configuration is needed. |
-| `SMG_TOKENSPEED_MM_SHM_MIN_BYTES` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
+| `SMG_MM_TENSOR_TRANSPORT` | `inline` | Env fallback for `--multimodal-tensor-transport`. Legacy alias: `SMG_TOKENSPEED_MM_TENSOR_TRANSPORT`. |
+| `SMG_MM_SHM_MIN_BYTES` | `65536` | Env fallback for `--multimodal-shm-min-bytes`. Legacy alias: `SMG_TOKENSPEED_MM_SHM_MIN_BYTES`. |
 | `SMG_LOG_MM_TIMING` | `false` | Log per-stage multimodal preprocessing/assembly timing at `INFO`. Accepts `1`/`true`/`yes`. |
 
 The TokenSpeed gRPC servicer (worker side) reads two companion variables:

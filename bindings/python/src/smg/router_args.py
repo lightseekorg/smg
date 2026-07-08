@@ -72,6 +72,8 @@ class RouterArgs:
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
     bucket_adjust_interval_secs: int = 5
     dp_aware: bool = False
+    multimodal_tensor_transport: str | None = None
+    multimodal_shm_min_bytes: int | None = None
     routing_key_override: bool = False
     dp_minimum_tokens_scheduler: bool = False
     enable_igw: bool = False  # Enable IGW (Inter-Gateway) mode for multi-model support
@@ -563,6 +565,21 @@ class RouterArgs:
             type=int,
             default=RouterArgs.load_monitor_interval,
             help="Interval in seconds between load monitor checks for PowerOfTwo routing (default: 10)",
+        )
+
+        # Multimodal tensor transport
+        parser.add_argument(
+            f"--{prefix}multimodal-tensor-transport",
+            type=str,
+            choices=["inline", "shm", "auto"],
+            default=RouterArgs.multimodal_tensor_transport,
+            help="Multimodal tensor transport mode: inline (default), shm, or auto",
+        )
+        parser.add_argument(
+            f"--{prefix}multimodal-shm-min-bytes",
+            type=int,
+            default=RouterArgs.multimodal_shm_min_bytes,
+            help="Minimum multimodal tensor size (bytes) before the SHM transport is used",
         )
 
         # Logging configuration

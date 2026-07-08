@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use openai_protocol::worker::TransportMode;
 use smg_mcp::McpConfig;
 
 use super::{
@@ -210,6 +211,18 @@ impl RouterConfigBuilder {
 
     pub fn engine_metrics(mut self, enabled: bool) -> Self {
         self.config.engine_metrics = enabled;
+        self
+    }
+
+    /// Global multimodal tensor transport mode (per-worker specs can override).
+    pub fn multimodal_tensor_transport(mut self, mode: Option<TransportMode>) -> Self {
+        self.config.multimodal_tensor_transport = mode;
+        self
+    }
+
+    /// Global minimum multimodal tensor size (bytes) before SHM transport is used.
+    pub fn multimodal_shm_min_bytes(mut self, bytes: Option<usize>) -> Self {
+        self.config.multimodal_shm_min_bytes = bytes;
         self
     }
 

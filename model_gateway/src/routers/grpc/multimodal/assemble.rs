@@ -19,7 +19,7 @@ use super::{
         model_specific_to_tensor_bytes, serialize_array_as_tokenspeed_tensor,
         serialize_encoder_input, serialize_model_specific, slice_array_axis0,
     },
-    transport::{resolve_tokenspeed_shm_enabled, tokenspeed_encoder_input_dtype},
+    transport::{mm_encoder_input_dtype, resolve_mm_shm_enabled, resolve_mm_shm_min_bytes},
     MultimodalIntermediate, PrecomputedMultimodalIntermediate,
 };
 use crate::routers::grpc::{
@@ -213,6 +213,7 @@ pub(crate) fn assemble_tokenspeed(
 
 struct TokenSpeedAssemblyOptions {
     shm_enabled: bool,
+    shm_min_bytes: usize,
     encoder_input_dtype: String,
     skip_pixel_values: bool,
 }
@@ -223,8 +224,9 @@ fn tokenspeed_assembly_options(
     skip_pixel_values: bool,
 ) -> TokenSpeedAssemblyOptions {
     TokenSpeedAssemblyOptions {
-        shm_enabled: resolve_tokenspeed_shm_enabled(workers, skip_pixel_values),
-        encoder_input_dtype: tokenspeed_encoder_input_dtype(modality, workers),
+        shm_enabled: resolve_mm_shm_enabled(workers, skip_pixel_values),
+        shm_min_bytes: resolve_mm_shm_min_bytes(workers),
+        encoder_input_dtype: mm_encoder_input_dtype(modality, workers),
         skip_pixel_values,
     }
 }
@@ -237,6 +239,7 @@ fn assemble_tokenspeed_with_options(
     let total_started = Instant::now();
     let TokenSpeedAssemblyOptions {
         shm_enabled,
+        shm_min_bytes,
         encoder_input_dtype,
         skip_pixel_values,
     } = options;
@@ -284,6 +287,7 @@ fn assemble_tokenspeed_with_options(
                 &item_encoder_input,
                 &encoder_input_dtype,
                 shm_enabled,
+                shm_min_bytes,
             )
         };
         let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
@@ -339,7 +343,11 @@ fn assemble_tokenspeed_with_options(
         );
     }
 
-    Ok(TokenSpeedMultimodalData { items, shm_enabled })
+    Ok(TokenSpeedMultimodalData {
+        items,
+        shm_enabled,
+        shm_min_bytes,
+    })
 }
 
 fn precomputed_multimodal_item_count(
@@ -537,6 +545,7 @@ mod tests {
                 content_hash: vec![],
             }],
             shm_enabled: true,
+            shm_min_bytes: 0,
         };
         (PendingTokenSpeedAssembly::new(data), path)
     }

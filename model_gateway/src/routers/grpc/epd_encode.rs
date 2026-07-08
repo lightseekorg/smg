@@ -77,15 +77,17 @@ pub(crate) enum PreparedEncodeItem {
     TokenSpeed {
         item: Option<TokenSpeedMultimodalItem>,
         shm_enabled: bool,
+        shm_min_bytes: usize,
         cleanup_on_drop: bool,
     },
 }
 
 impl PreparedEncodeItem {
-    fn tokenspeed(item: TokenSpeedMultimodalItem, shm_enabled: bool) -> Self {
+    fn tokenspeed(item: TokenSpeedMultimodalItem, shm_enabled: bool, shm_min_bytes: usize) -> Self {
         Self::TokenSpeed {
             item: Some(item),
             shm_enabled,
+            shm_min_bytes,
             cleanup_on_drop: true,
         }
     }
@@ -99,6 +101,7 @@ impl PreparedEncodeItem {
             Self::TokenSpeed {
                 item,
                 shm_enabled,
+                shm_min_bytes,
                 cleanup_on_drop,
             } => {
                 let item = item
@@ -111,6 +114,7 @@ impl PreparedEncodeItem {
                         TokenSpeedMultimodalData {
                             items: vec![item],
                             shm_enabled: *shm_enabled,
+                            shm_min_bytes: *shm_min_bytes,
                         }
                         .into_proto(),
                     ),
@@ -254,10 +258,11 @@ fn prepare_tokenspeed_items(
 ) -> Result<Vec<PreparedEncodeItem>> {
     let tokenspeed_mm = assemble_tokenspeed(precomputed, workers, false)?;
     let shm_enabled = tokenspeed_mm.shm_enabled;
+    let shm_min_bytes = tokenspeed_mm.shm_min_bytes;
     Ok(tokenspeed_mm
         .items
         .into_iter()
-        .map(|item| PreparedEncodeItem::tokenspeed(item, shm_enabled))
+        .map(|item| PreparedEncodeItem::tokenspeed(item, shm_enabled, shm_min_bytes))
         .collect())
 }
 

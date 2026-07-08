@@ -1,31 +1,155 @@
 //! Multimodal tensor transport resolution.
 //!
 //! Decides how large multimodal tensors travel from the gateway to the worker:
-//! the SHM-vs-inline transport mode, the encoder-input wire dtype, and the
-//! `/dev/shm` namespace verification that makes the SHM path safe. All values
-//! resolve from environment + worker labels today.
+//! the SHM-vs-inline transport mode, its size threshold, the encoder-input wire
+//! dtype, and the `/dev/shm` namespace verification that makes the SHM path safe.
+//!
+//! Resolution precedence for the transport mode and SHM threshold:
+//! per-worker `WorkerSpec` override → router config (seeded once at startup via
+//! [`init_mm_transport_defaults`]) → `SMG_MM_*` env (with the legacy
+//! `SMG_TOKENSPEED_MM_*` names as a fallback) → built-in default (`inline`,
+//! 64 KiB).
 
 use std::sync::{Arc, OnceLock};
 
 use llm_multimodal::Modality;
+use openai_protocol::worker::TransportMode;
 use tracing::{info, warn};
 
-use crate::routers::grpc::{
-    context::WorkerSelection,
-    proto_wrapper::{
-        tokenspeed_mm_shm_min_bytes, tokenspeed_mm_tensor_transport_mode,
-        tokenspeed_shm_dev_writable,
-    },
-};
+use crate::routers::grpc::{context::WorkerSelection, proto_wrapper::mm_shm_dev_writable};
 
-pub(super) fn tokenspeed_encoder_input_dtype(
+const DEFAULT_SHM_MIN_BYTES: usize = 64 * 1024;
+
+/// Router-level transport defaults, resolved once at startup from `RouterConfig`
+/// (falling back to env, then built-in defaults). Per-worker `WorkerSpec`
+/// overrides take precedence over these at request time.
+#[derive(Debug, Clone, Copy)]
+struct MmTransportDefaults {
+    mode: TransportMode,
+    shm_min_bytes: usize,
+}
+
+static DEFAULTS: OnceLock<MmTransportDefaults> = OnceLock::new();
+
+/// Seed the process-wide transport defaults from router config. Config values
+/// win; unset values fall back to env, then the built-in defaults. Call once at
+/// startup before serving; idempotent (first call wins).
+pub(crate) fn init_mm_transport_defaults(
+    mode: Option<TransportMode>,
+    shm_min_bytes: Option<usize>,
+) {
+    let resolved = MmTransportDefaults {
+        mode: mode
+            .or_else(mm_tensor_transport_mode_from_env)
+            .unwrap_or_default(),
+        shm_min_bytes: shm_min_bytes
+            .or_else(mm_shm_min_bytes_from_env)
+            .unwrap_or(DEFAULT_SHM_MIN_BYTES),
+    };
+    let _ = DEFAULTS.set(resolved);
+    log_transport_config_once(resolved);
+}
+
+/// The resolved router-level defaults. If [`init_mm_transport_defaults`] was
+/// never called (e.g. in tests), resolve lazily from env + built-in defaults.
+fn mm_transport_defaults() -> MmTransportDefaults {
+    if let Some(defaults) = DEFAULTS.get() {
+        return *defaults;
+    }
+    MmTransportDefaults {
+        mode: mm_tensor_transport_mode_from_env().unwrap_or_default(),
+        shm_min_bytes: mm_shm_min_bytes_from_env().unwrap_or(DEFAULT_SHM_MIN_BYTES),
+    }
+}
+
+fn mm_tensor_transport_mode_from_env() -> Option<TransportMode> {
+    let raw = env_first(&[
+        "SMG_MM_TENSOR_TRANSPORT",
+        "SMG_TOKENSPEED_MM_TENSOR_TRANSPORT",
+    ])?;
+    match TransportMode::parse(&raw) {
+        Some(mode) => Some(mode),
+        None => {
+            log_unknown_transport_once(&raw);
+            None
+        }
+    }
+}
+
+fn mm_shm_min_bytes_from_env() -> Option<usize> {
+    env_first(&["SMG_MM_SHM_MIN_BYTES", "SMG_TOKENSPEED_MM_SHM_MIN_BYTES"])?
+        .parse::<usize>()
+        .ok()
+}
+
+/// First non-empty value among the given env var names (later names are
+/// deprecated aliases kept for backward compatibility).
+fn env_first(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Resolve whether large multimodal tensors should use the SHM transport for
+/// this request: per-worker override → router default. `shm` forces SHM whenever
+/// SMG can write `/dev/shm` (the operator asserts co-location); `auto` also
+/// requires the receiving worker leg to be verified as sharing SMG's `/dev/shm`;
+/// `inline` (the default) keeps the gRPC path.
+pub(super) fn resolve_mm_shm_enabled(
+    workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
+) -> bool {
+    let mode =
+        worker_transport_mode_override(workers).unwrap_or_else(|| mm_transport_defaults().mode);
+    match mode {
+        TransportMode::Shm => mm_shm_dev_writable(),
+        TransportMode::Auto => {
+            worker_shares_dev_shm(workers, skip_pixel_values) && mm_shm_dev_writable()
+        }
+        TransportMode::Inline => false,
+    }
+}
+
+/// Resolve the SHM size threshold (bytes) for this request: per-worker override
+/// → router default.
+pub(super) fn resolve_mm_shm_min_bytes(workers: Option<&WorkerSelection>) -> usize {
+    worker_shm_min_bytes_override(workers).unwrap_or_else(|| mm_transport_defaults().shm_min_bytes)
+}
+
+fn worker_transport_mode_override(workers: Option<&WorkerSelection>) -> Option<TransportMode> {
+    primary_worker(workers)?
+        .metadata()
+        .spec
+        .multimodal_tensor_transport
+}
+
+fn worker_shm_min_bytes_override(workers: Option<&WorkerSelection>) -> Option<usize> {
+    primary_worker(workers)?
+        .metadata()
+        .spec
+        .multimodal_shm_min_bytes
+}
+
+/// The worker whose per-worker overrides apply: the single worker, or the
+/// prefill leg in disaggregated mode (mirrors the encoder-dtype override).
+fn primary_worker(workers: Option<&WorkerSelection>) -> Option<&Arc<dyn crate::worker::Worker>> {
+    match workers? {
+        WorkerSelection::Single { worker } => Some(worker),
+        WorkerSelection::Disaggregated { prefill, .. } => Some(prefill),
+    }
+}
+
+pub(super) fn mm_encoder_input_dtype(
     modality: Modality,
     workers: Option<&WorkerSelection>,
 ) -> String {
-    if let Some(dtype) = tokenspeed_encoder_input_dtype_from_env(modality) {
+    if let Some(dtype) = mm_encoder_input_dtype_from_env(modality) {
         return dtype;
     }
-    if let Some(dtype) = tokenspeed_encoder_input_dtype_from_worker(workers) {
+    if let Some(dtype) = mm_encoder_input_dtype_from_worker(workers) {
         return dtype;
     }
     // Default to bf16 on the wire: the engine casts encoder_input to the model
@@ -35,7 +159,7 @@ pub(super) fn tokenspeed_encoder_input_dtype(
     "bfloat16".to_string()
 }
 
-fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
+fn mm_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
     static IMAGE_DTYPE: OnceLock<Option<String>> = OnceLock::new();
     static VIDEO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
     static AUDIO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
@@ -61,12 +185,8 @@ fn cached_env_dtype(cell: &'static OnceLock<Option<String>>, name: &str) -> Opti
         .clone()
 }
 
-fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>) -> Option<String> {
-    let worker = match workers? {
-        WorkerSelection::Single { worker } => worker,
-        WorkerSelection::Disaggregated { prefill, .. } => prefill,
-    };
-    worker
+fn mm_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>) -> Option<String> {
+    primary_worker(workers)?
         .metadata()
         .spec
         .labels
@@ -75,47 +195,24 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
         .cloned()
 }
 
-/// Resolve whether large multimodal tensors should use the SHM transport for
-/// this request. `shm` and `auto` require the receiving worker leg to share
-/// SMG's `/dev/shm`; anything else (including unset or `inline`) keeps the
-/// inline gRPC path.
-pub(super) fn resolve_tokenspeed_shm_enabled(
-    workers: Option<&WorkerSelection>,
-    skip_pixel_values: bool,
-) -> bool {
-    let mode = tokenspeed_mm_tensor_transport_mode();
-    log_tokenspeed_transport_config_once(&mode);
-    match mode.as_str() {
-        // SHM only ever happens when SMG can actually write /dev/shm.
-        "shm" | "auto" => {
-            worker_shares_dev_shm(workers, skip_pixel_values) && tokenspeed_shm_dev_writable()
-        }
-        "" | "inline" => false,
-        other => {
-            log_unknown_tokenspeed_transport_once(other);
-            false
-        }
-    }
-}
-
-fn log_tokenspeed_transport_config_once(mode: &str) {
+fn log_transport_config_once(defaults: MmTransportDefaults) {
     static LOGGED: OnceLock<()> = OnceLock::new();
     LOGGED.get_or_init(|| {
         info!(
-            mode,
-            shm_min_bytes = tokenspeed_mm_shm_min_bytes(),
-            dev_writable = tokenspeed_shm_dev_writable(),
-            "TokenSpeed multimodal tensor transport configured"
+            mode = %defaults.mode,
+            shm_min_bytes = defaults.shm_min_bytes,
+            dev_writable = mm_shm_dev_writable(),
+            "Multimodal tensor transport configured"
         );
     });
 }
 
-fn log_unknown_tokenspeed_transport_once(value: &str) {
+fn log_unknown_transport_once(value: &str) {
     static WARNED: OnceLock<()> = OnceLock::new();
     WARNED.get_or_init(|| {
         warn!(
             value,
-            "Unknown SMG_TOKENSPEED_MM_TENSOR_TRANSPORT value; expected inline|shm|auto, using inline"
+            "Unknown multimodal tensor transport value; expected inline|shm|auto, using inline"
         );
     });
 }
