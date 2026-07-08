@@ -14,9 +14,9 @@ use smg_grpc_client::{
 
 use crate::routers::grpc::{
     proto_wrapper::{
-        cleanup_tokenspeed_shm_handles, collect_tokenspeed_generate_request_shm_handles,
-        finish_tokenspeed_request, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
-        ProtoStream,
+        cleanup_mm_shm_handles, collect_tokenspeed_generate_request_shm_handles,
+        collect_vllm_generate_request_shm_handles, finish_tokenspeed_request, ProtoEmbedComplete,
+        ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream,
     },
     MultimodalData,
 };
@@ -397,8 +397,14 @@ impl GrpcClient {
                 Ok(ProtoStream::Sglang(stream))
             }
             (Self::Vllm(client), ProtoGenerateRequest::Vllm(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await?;
-                Ok(ProtoStream::Vllm(stream))
+                let shm_handles = collect_vllm_generate_request_shm_handles(&boxed_req);
+                match client.generate(*boxed_req).await {
+                    Ok(stream) => Ok(ProtoStream::Vllm(stream)),
+                    Err(error) => {
+                        cleanup_mm_shm_handles(&shm_handles);
+                        Err(error)
+                    }
+                }
             }
             (Self::Trtllm(client), ProtoGenerateRequest::Trtllm(boxed_req)) => {
                 let stream = client.generate(*boxed_req).await?;
@@ -413,7 +419,7 @@ impl GrpcClient {
                 match client.generate(*boxed_req).await {
                     Ok(stream) => Ok(ProtoStream::TokenSpeed(stream)),
                     Err(error) => {
-                        cleanup_tokenspeed_shm_handles(&shm_handles);
+                        cleanup_mm_shm_handles(&shm_handles);
                         Err(error)
                     }
                 }

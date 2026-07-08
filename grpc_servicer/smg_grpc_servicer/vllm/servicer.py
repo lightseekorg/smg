@@ -21,6 +21,7 @@ import zmq
 import zmq.asyncio
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
+from smg_grpc_servicer import mm_shm
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
 from vllm.distributed.kv_events import KVEventBatch
@@ -78,7 +79,8 @@ def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
     torch_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
     if torch_dtype is None:
         raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
-    return torch.frombuffer(bytearray(td.data), dtype=torch_dtype).reshape(*td.shape)
+    payload = mm_shm.tensor_payload_bytes(td)
+    return torch.frombuffer(bytearray(payload), dtype=torch_dtype).reshape(*td.shape)
 
 
 try:
@@ -487,6 +489,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             kv_role=kv_role,
             kv_engine_id=kv_engine_id,
             data_parallel_size=parallel.data_parallel_size,
+            shm_namespace_id=mm_shm.shm_namespace_id(),
         )
 
     async def GetLoads(

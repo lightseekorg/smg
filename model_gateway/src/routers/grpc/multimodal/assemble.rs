@@ -72,7 +72,7 @@ async fn assemble_multimodal_data_impl(
             }
             GrpcClient::Vllm(_) => {
                 ensure_image_only(&precomputed, "vLLM")?;
-                Ok(MultimodalData::Vllm(assemble_vllm(precomputed)))
+                Ok(MultimodalData::Vllm(assemble_vllm(precomputed, workers)))
             }
             GrpcClient::Trtllm(_) => {
                 ensure_image_only(&precomputed, "TRT-LLM")?;
@@ -168,7 +168,10 @@ fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMul
     }
 }
 
-fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
+fn assemble_vllm(
+    intermediate: PrecomputedMultimodalIntermediate,
+    workers: Option<&WorkerSelection>,
+) -> VllmMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
@@ -190,6 +193,8 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
         batched_keys,
         flat_keys,
         keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
+        shm_enabled: resolve_mm_shm_enabled(workers, false),
+        shm_min_bytes: resolve_mm_shm_min_bytes(workers),
     }
 }
 

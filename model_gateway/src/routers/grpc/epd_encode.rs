@@ -17,7 +17,7 @@ use super::{
     context::{ClientSelection, WorkerSelection},
     multimodal::{assemble_tokenspeed, MultimodalIntermediate, PrecomputedMultimodalIntermediate},
     proto_wrapper::{
-        cleanup_tokenspeed_items_encoder_shm, cleanup_tokenspeed_shm_handles,
+        cleanup_mm_shm_handles, cleanup_tokenspeed_items_encoder_shm,
         collect_tokenspeed_multimodal_inputs_shm_handles, EncodeItemBootstrapInfo,
         TokenSpeedMultimodalData, TokenSpeedMultimodalItem,
     },
@@ -136,7 +136,7 @@ struct TokenSpeedShmCleanupGuard(Vec<common_proto::ShmHandle>);
 
 impl Drop for TokenSpeedShmCleanupGuard {
     fn drop(&mut self) {
-        cleanup_tokenspeed_shm_handles(&self.0);
+        cleanup_mm_shm_handles(&self.0);
     }
 }
 
