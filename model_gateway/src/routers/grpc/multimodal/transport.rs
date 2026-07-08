@@ -63,10 +63,12 @@ fn mm_transport_defaults() -> MmTransportDefaults {
 }
 
 fn mm_tensor_transport_mode_from_env() -> Option<TransportMode> {
-    let raw = env_first(&[
+    static LEGACY_WARNED: OnceLock<()> = OnceLock::new();
+    let raw = env_with_deprecated_alias(
         "SMG_MM_TENSOR_TRANSPORT",
         "SMG_TOKENSPEED_MM_TENSOR_TRANSPORT",
-    ])?;
+        &LEGACY_WARNED,
+    )?;
     match TransportMode::parse(&raw) {
         Some(mode) => Some(mode),
         None => {
@@ -77,20 +79,43 @@ fn mm_tensor_transport_mode_from_env() -> Option<TransportMode> {
 }
 
 fn mm_shm_min_bytes_from_env() -> Option<usize> {
-    env_first(&["SMG_MM_SHM_MIN_BYTES", "SMG_TOKENSPEED_MM_SHM_MIN_BYTES"])?
-        .parse::<usize>()
-        .ok()
+    static LEGACY_WARNED: OnceLock<()> = OnceLock::new();
+    env_with_deprecated_alias(
+        "SMG_MM_SHM_MIN_BYTES",
+        "SMG_TOKENSPEED_MM_SHM_MIN_BYTES",
+        &LEGACY_WARNED,
+    )?
+    .parse::<usize>()
+    .ok()
 }
 
-/// First non-empty value among the given env var names (later names are
-/// deprecated aliases kept for backward compatibility).
-fn env_first(names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    })
+/// Read the canonical env var, falling back to the deprecated alias. When the
+/// value comes from the alias, log a one-time migration warning (guarded by
+/// `warned`, one warning per variable).
+fn env_with_deprecated_alias(
+    canonical: &str,
+    deprecated: &str,
+    warned: &OnceLock<()>,
+) -> Option<String> {
+    if let Some(value) = read_env_nonempty(canonical) {
+        return Some(value);
+    }
+    let value = read_env_nonempty(deprecated)?;
+    warned.get_or_init(|| {
+        warn!(
+            deprecated,
+            canonical,
+            "Deprecated multimodal transport env var is set; migrate to the canonical name"
+        );
+    });
+    Some(value)
+}
+
+fn read_env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Resolve whether large multimodal tensors should use the SHM transport for
@@ -133,12 +158,21 @@ fn worker_shm_min_bytes_override(workers: Option<&WorkerSelection>) -> Option<us
         .multimodal_shm_min_bytes
 }
 
-/// The worker whose per-worker overrides apply: the single worker, or the
-/// prefill leg in disaggregated mode (mirrors the encoder-dtype override).
+/// The worker whose per-worker overrides apply. Multimodal tensors are sent to
+/// wherever the vision encoder runs: the encode worker in EPD (so its spec wins),
+/// otherwise the single/prefill worker that does the encoding itself.
 fn primary_worker(workers: Option<&WorkerSelection>) -> Option<&Arc<dyn crate::worker::Worker>> {
     match workers? {
         WorkerSelection::Single { worker } => Some(worker),
-        WorkerSelection::Disaggregated { prefill, .. } => Some(prefill),
+        WorkerSelection::Disaggregated {
+            encode_assignments,
+            prefill,
+            ..
+        } => encode_assignments
+            .as_ref()
+            .and_then(|assignments| assignments.first())
+            .map(|assignment| &assignment.worker)
+            .or(Some(prefill)),
     }
 }
 

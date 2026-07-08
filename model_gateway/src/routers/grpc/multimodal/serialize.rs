@@ -462,4 +462,33 @@ mod tests {
         assert_eq!(direct, expected);
         assert_eq!(serialize_array(&fortran_item), (expected, vec![1, 2]));
     }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn shm_min_bytes_threshold_gates_inline_vs_shm() {
+        use std::path::Path;
+
+        use crate::routers::grpc::proto_wrapper::TokenSpeedTensorStorage;
+
+        // float32 = 4 bytes/elem; threshold of 16 bytes falls at 4 elements.
+        let below = ArrayD::from_shape_vec(IxDyn(&[3]), vec![1.0_f32, 2.0, 3.0]).unwrap();
+        let at = ArrayD::from_shape_vec(IxDyn(&[4]), vec![1.0_f32, 2.0, 3.0, 4.0]).unwrap();
+
+        // Below the threshold: stays inline even with SHM enabled.
+        let tensor = serialize_array_as_tokenspeed_tensor(&below.view(), "float32", true, 16);
+        assert!(matches!(tensor.storage, TokenSpeedTensorStorage::Inline(_)));
+
+        // At/above the threshold: uses SHM (/dev/shm is writable on Linux CI).
+        let tensor = serialize_array_as_tokenspeed_tensor(&at.view(), "float32", true, 16);
+        match tensor.storage {
+            TokenSpeedTensorStorage::Shm(handle) => {
+                let path = Path::new("/dev/shm").join(&handle.name);
+                assert!(path.exists());
+                let _ = std::fs::remove_file(&path);
+            }
+            TokenSpeedTensorStorage::Inline(_) => {
+                panic!("expected SHM at/above the threshold when /dev/shm is writable")
+            }
+        }
+    }
 }
