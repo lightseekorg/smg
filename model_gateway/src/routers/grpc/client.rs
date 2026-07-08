@@ -15,8 +15,8 @@ use smg_grpc_client::{
 use crate::routers::grpc::{
     proto_wrapper::{
         cleanup_mm_shm_handles, collect_tokenspeed_generate_request_shm_handles,
-        collect_vllm_generate_request_shm_handles, finish_tokenspeed_request, ProtoEmbedComplete,
-        ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream,
+        collect_vllm_generate_request_shm_handles, finish_tokenspeed_request, finish_vllm_request,
+        ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream,
     },
     MultimodalData,
 };
@@ -495,15 +495,16 @@ impl GrpcClient {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let req = client.build_generate_request_from_chat(
-                    request_id,
-                    body,
-                    processed_text,
-                    token_ids,
-                    vllm_mm,
-                    options.tool_constraints,
-                )?;
-                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+                finish_vllm_request(vllm_mm, |mm| {
+                    client.build_generate_request_from_chat(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
             Self::Trtllm(client) => {
                 let trtllm_mm = options.multimodal_inputs.map(|mm| match mm {
@@ -586,15 +587,16 @@ impl GrpcClient {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let req = client.build_generate_request_from_messages(
-                    request_id,
-                    body,
-                    processed_text,
-                    token_ids,
-                    vllm_mm,
-                    options.tool_constraints,
-                )?;
-                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+                finish_vllm_request(vllm_mm, |mm| {
+                    client.build_generate_request_from_messages(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
             Self::Trtllm(client) => {
                 let trtllm_mm = options.multimodal_inputs.map(|mm| match mm {

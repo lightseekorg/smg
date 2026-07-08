@@ -8,6 +8,7 @@ oneof shape (``inline`` | ``shm`` | ``remote``) via ``common.proto``.
 """
 
 import os
+import stat
 
 # Unlink each /dev/shm segment right after the worker reads it (default on) so
 # same-host SHM tensors don't accumulate. Disable with
@@ -39,7 +40,12 @@ def tensor_payload_bytes_from_shm(shm_handle) -> bytes:
     path = os.path.join("/dev/shm", name)
     fd = None
     try:
-        fd = os.open(path, os.O_RDONLY)
+        # O_NOFOLLOW: never follow a symlink at the final path component, so a
+        # crafted name that resolves to a pre-existing symlink in /dev/shm can't
+        # redirect the read. Then require a regular file (fail closed otherwise).
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"TensorData.shm is not a regular file: {shm_handle.name!r}")
         raw = os.pread(fd, int(shm_handle.nbytes), int(shm_handle.offset))
     finally:
         if fd is not None:
@@ -66,6 +72,9 @@ def validated_shm_name(name: str) -> str:
     return name
 
 
+_shm_namespace_id_cache: str | None = None
+
+
 def shm_namespace_id() -> str:
     """Identity of this process's ``/dev/shm`` tmpfs: ``<boot_id>:<st_dev>``.
 
@@ -75,12 +84,17 @@ def shm_namespace_id() -> str:
     separate containers sharing it via ``--ipc``/bind-mount, where mount
     namespaces differ but the underlying superblock (``st_dev``) is the same. The
     router compares this token to its own to decide the SHM tensor transport.
-    Empty string if it can't be determined.
+    Empty string if it can't be determined. Cached: both components are static
+    for the process lifetime, and this is read on every GetServerInfo.
     """
+    global _shm_namespace_id_cache
+    if _shm_namespace_id_cache is not None:
+        return _shm_namespace_id_cache
     try:
         with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
             boot_id = f.read().strip()
         shm_dev = os.stat("/dev/shm").st_dev
-        return f"{boot_id}:{shm_dev}"
+        _shm_namespace_id_cache = f"{boot_id}:{shm_dev}"
     except OSError:
-        return ""
+        _shm_namespace_id_cache = ""
+    return _shm_namespace_id_cache

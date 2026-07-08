@@ -463,9 +463,12 @@ fn vllm_tensor_payload(
 }
 
 fn log_tokenspeed_mm_timing_enabled() -> bool {
-    std::env::var("SMG_LOG_MM_TIMING")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SMG_LOG_MM_TIMING")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -684,6 +687,27 @@ pub(crate) fn finish_tokenspeed_request(
         .unwrap_or_default();
     match build(tokenspeed_mm) {
         Ok(req) => Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req))),
+        Err(error) => {
+            cleanup_mm_shm_handles(&shm_handles);
+            Err(error)
+        }
+    }
+}
+
+/// Build a vLLM generate request, cleaning up any `/dev/shm` segments backing
+/// `vllm_mm` if the build fails. `into_proto` may write SHM files before the
+/// request is fully assembled (sampling/tool validation), so a build error must
+/// unlink them or the worker — which never receives the request — leaks them.
+pub(crate) fn finish_vllm_request(
+    vllm_mm: Option<vllm::MultimodalInputs>,
+    build: impl FnOnce(Option<vllm::MultimodalInputs>) -> Result<vllm::GenerateRequest, String>,
+) -> Result<ProtoGenerateRequest, String> {
+    let shm_handles = vllm_mm
+        .as_ref()
+        .map(collect_vllm_multimodal_inputs_shm_handles)
+        .unwrap_or_default();
+    match build(vllm_mm) {
+        Ok(req) => Ok(ProtoGenerateRequest::Vllm(Box::new(req))),
         Err(error) => {
             cleanup_mm_shm_handles(&shm_handles);
             Err(error)

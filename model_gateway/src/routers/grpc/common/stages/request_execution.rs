@@ -657,6 +657,11 @@ impl RequestExecutionStage {
         // Decode reuses proto_request as-is; same request_id as the prefill leg is
         // load-bearing for NIXL P/D correlation on vLLM < 0.13
         let mut decode_request = proto_request;
+        // Decode doesn't run the vision encoder (it receives KV via the P/D
+        // transfer), so drop the multimodal inputs — mirrors the parallel PD
+        // path. Load-bearing for SHM: prefill already read and unlinked the
+        // /dev/shm segments, so a reused ShmHandle here would be unreadable.
+        decode_request.clear_mm_pixel_values();
         if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
             decode_request.set_data_parallel_rank(rank as i32);
         }
