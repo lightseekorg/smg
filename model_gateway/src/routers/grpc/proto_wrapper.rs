@@ -22,6 +22,7 @@ use memmap2::MmapOptions;
 #[cfg(target_os = "linux")]
 use rustix::fs::FallocateFlags;
 use smg_grpc_client::{
+    common_proto::{self as common},
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
     sglang_proto::{self as sglang, generate_complete::MatchedStop as SglangMatchedStop},
@@ -148,7 +149,7 @@ pub struct TokenSpeedTensor {
 #[derive(Debug, Clone)]
 pub enum TokenSpeedTensorStorage {
     Inline(Vec<u8>),
-    Shm(tokenspeed::ShmHandle),
+    Shm(common::ShmHandle),
 }
 
 impl TokenSpeedTensor {
@@ -160,7 +161,7 @@ impl TokenSpeedTensor {
         }
     }
 
-    pub fn shm(handle: tokenspeed::ShmHandle, shape: Vec<u32>, dtype: String) -> Self {
+    pub fn shm(handle: common::ShmHandle, shape: Vec<u32>, dtype: String) -> Self {
         Self {
             storage: TokenSpeedTensorStorage::Shm(handle),
             shape,
@@ -432,7 +433,7 @@ pub fn tokenspeed_mm_shm_min_bytes() -> usize {
 
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
+fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<common::ShmHandle> {
     write_tokenspeed_shm_with(data.len(), |output| {
         output.copy_from_slice(data);
         Ok(())
@@ -527,7 +528,7 @@ fn sweep_orphan_tokenspeed_shm_once() {
 pub fn write_tokenspeed_shm_with(
     nbytes: usize,
     write_fn: impl FnOnce(&mut [u8]) -> std::io::Result<()>,
-) -> std::io::Result<tokenspeed::ShmHandle> {
+) -> std::io::Result<common::ShmHandle> {
     sweep_orphan_tokenspeed_shm_once();
     let name = next_tokenspeed_shm_name();
     let path = tokenspeed_shm_path(&name);
@@ -556,7 +557,7 @@ pub fn write_tokenspeed_shm_with(
         return Err(error);
     }
 
-    Ok(tokenspeed::ShmHandle {
+    Ok(common::ShmHandle {
         name,
         offset: 0,
         nbytes: nbytes as u64,
@@ -584,7 +585,7 @@ fn reserve_tokenspeed_shm_file(file: &std::fs::File, nbytes: usize) -> std::io::
 
 pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
     inputs: &tokenspeed::MultimodalInputs,
-) -> Vec<tokenspeed::ShmHandle> {
+) -> Vec<common::ShmHandle> {
     let mut handles = Vec::new();
     for item in &inputs.items {
         collect_optional_tokenspeed_tensor_shm_handles(item.encoder_input.as_ref(), &mut handles);
@@ -597,7 +598,7 @@ pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
 
 pub fn collect_tokenspeed_generate_request_shm_handles(
     request: &tokenspeed::GenerateRequest,
-) -> Vec<tokenspeed::ShmHandle> {
+) -> Vec<common::ShmHandle> {
     request
         .mm_inputs
         .as_ref()
@@ -605,7 +606,7 @@ pub fn collect_tokenspeed_generate_request_shm_handles(
         .unwrap_or_default()
 }
 
-pub fn cleanup_tokenspeed_shm_handles(handles: &[tokenspeed::ShmHandle]) {
+pub fn cleanup_tokenspeed_shm_handles(handles: &[common::ShmHandle]) {
     for handle in handles {
         let Some(name) = validate_tokenspeed_shm_name_for_cleanup(&handle.name) else {
             tracing::warn!(
@@ -684,7 +685,7 @@ pub(crate) fn cleanup_tokenspeed_items_encoder_shm(
 
 fn collect_optional_tokenspeed_tensor_shm_handles(
     tensor: Option<&tokenspeed::TensorData>,
-    handles: &mut Vec<tokenspeed::ShmHandle>,
+    handles: &mut Vec<common::ShmHandle>,
 ) {
     let Some(tensor) = tensor else {
         return;
@@ -694,7 +695,7 @@ fn collect_optional_tokenspeed_tensor_shm_handles(
 
 fn collect_tokenspeed_tensor_shm_handles(
     tensor: &tokenspeed::TensorData,
-    handles: &mut Vec<tokenspeed::ShmHandle>,
+    handles: &mut Vec<common::ShmHandle>,
 ) {
     if let Some(tokenspeed::tensor_data::Payload::Shm(handle)) = &tensor.payload {
         handles.push(handle.clone());
@@ -1947,7 +1948,7 @@ mod tests {
             items: vec![TokenSpeedMultimodalItem {
                 modality: TokenSpeedModality::Image,
                 encoder_input: TokenSpeedTensor::shm(
-                    tokenspeed::ShmHandle {
+                    common::ShmHandle {
                         name: "smg-test-shm".to_string(),
                         offset: 0,
                         nbytes: 8,

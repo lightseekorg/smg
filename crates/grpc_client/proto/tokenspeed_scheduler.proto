@@ -178,26 +178,11 @@ message TensorData {
     bytes inline = 3;
     // Same-host CPU shared memory path. This is the preferred large-payload
     // transport when SMG and TokenSpeed share /dev/shm.
-    ShmHandle shm = 4;
+    smg.grpc.common.ShmHandle shm = 4;
     // Cross-node or non-shared-memory transport descriptor. NIXL is the
     // expected remote transport for distributed multimodal tensor payloads.
-    RemoteTensorHandle remote = 5;
+    smg.grpc.common.RemoteTensorHandle remote = 5;
   }
-}
-
-message ShmHandle {
-  string name = 1;
-  uint64 offset = 2;
-  uint64 nbytes = 3;
-  // Producer/lifetime owner. Used by implementations to coordinate cleanup.
-  string owner_id = 4;
-}
-
-message RemoteTensorHandle {
-  // Examples: "nixl", "ucx", "object_store".
-  string transport = 1;
-  bytes descriptor = 2;
-  uint64 nbytes = 3;
 }
 
 // Where a multimodal item's tokens sit inside input_ids.

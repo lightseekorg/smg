@@ -1253,7 +1253,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     @staticmethod
     def _tensor_payload_bytes_from_shm(
-        shm_handle: tokenspeed_scheduler_pb2.ShmHandle,
+        shm_handle: common_pb2.ShmHandle,
     ) -> bytes:
         name = TokenSpeedSchedulerServicer._validated_shm_name(shm_handle.name)
 

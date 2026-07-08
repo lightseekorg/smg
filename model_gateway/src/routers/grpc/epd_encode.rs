@@ -7,8 +7,8 @@
 use anyhow::{anyhow, Result};
 use rand::RngExt;
 use smg_grpc_client::{
+    common_proto,
     tokenspeed_encoder::{tokenspeed_encoder_proto as tokenspeed_encoder, TokenSpeedEncoderClient},
-    tokenspeed_proto,
 };
 use uuid::Uuid;
 
@@ -128,7 +128,7 @@ impl PreparedEncodeItem {
     }
 }
 
-struct TokenSpeedShmCleanupGuard(Vec<tokenspeed_proto::ShmHandle>);
+struct TokenSpeedShmCleanupGuard(Vec<common_proto::ShmHandle>);
 
 impl Drop for TokenSpeedShmCleanupGuard {
     fn drop(&mut self) {
