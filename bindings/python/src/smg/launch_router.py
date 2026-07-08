@@ -98,6 +98,13 @@ Examples:
     --decode http://decode1:8001 --decode http://decode2:8001 \\
     --prefill-policy cache_aware --decode-policy power_of_two
 
+  # EPD disaggregated mode
+  python -m smg.launch_router --epd-disaggregation \\
+    --encode http://encode1:8000 9000 \\
+    --prefill http://prefill1:8000 9001 \\
+    --decode http://decode1:8001 \\
+    --encode-policy consistent_hashing
+
     """,
         formatter_class=CustomHelpFormatter,
     )

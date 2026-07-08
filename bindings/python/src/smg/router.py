@@ -248,20 +248,32 @@ class Router:
     def from_args(args: RouterArgs) -> Router:
         """Create a router from a RouterArgs instance."""
 
-        args_dict = vars(args)
+        args_dict = vars(args).copy()
         # Convert RouterArgs to _Router parameters
         args_dict["worker_urls"] = (
             []
-            if args_dict["service_discovery"] or args_dict["pd_disaggregation"]
+            if (
+                args_dict["service_discovery"]
+                or args_dict["pd_disaggregation"]
+                or args_dict["epd_disaggregation"]
+            )
             else args_dict["worker_urls"]
         )
         args_dict["policy"] = policy_from_str(args_dict["policy"])
+        args_dict["encode_urls"] = (
+            args_dict["encode_urls"] if args_dict["epd_disaggregation"] else None
+        )
         args_dict["prefill_urls"] = (
-            args_dict["prefill_urls"] if args_dict["pd_disaggregation"] else None
+            args_dict["prefill_urls"]
+            if args_dict["pd_disaggregation"] or args_dict["epd_disaggregation"]
+            else None
         )
         args_dict["decode_urls"] = (
-            args_dict["decode_urls"] if args_dict["pd_disaggregation"] else None
+            args_dict["decode_urls"]
+            if args_dict["pd_disaggregation"] or args_dict["epd_disaggregation"]
+            else None
         )
+        args_dict["encode_policy"] = policy_from_str(args_dict["encode_policy"])
         args_dict["prefill_policy"] = policy_from_str(args_dict["prefill_policy"])
         args_dict["decode_policy"] = policy_from_str(args_dict["decode_policy"])
 
