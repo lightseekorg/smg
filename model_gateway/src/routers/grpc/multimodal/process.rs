@@ -444,6 +444,7 @@ fn expand_tokens(
     let mut placeholders = Vec::new();
     let mut patch_offsets: Option<Vec<(u32, u32)>> = im_token_id.map(|_| Vec::new());
     let mut replacement_idx = 0;
+    let mut extra_placeholders = 0usize;
 
     for &token in token_ids {
         if token == placeholder_id && replacement_idx < replacements.len() {
@@ -477,6 +478,11 @@ fn expand_tokens(
             });
             replacement_idx += 1;
         } else {
+            // A placeholder token seen after all replacements are consumed is
+            // left in place (unchanged behavior) but counted so we can warn.
+            if token == placeholder_id {
+                extra_placeholders += 1;
+            }
             expanded.push(token);
         }
     }
@@ -486,6 +492,13 @@ fn expand_tokens(
             expected = replacements.len(),
             found = replacement_idx,
             "Fewer placeholder tokens found in sequence than expected"
+        );
+    }
+    if extra_placeholders > 0 {
+        warn!(
+            extra_placeholders,
+            replacements = replacements.len(),
+            "More placeholder tokens than replacements; extra placeholders left unexpanded"
         );
     }
 
@@ -577,5 +590,25 @@ mod tests {
         assert_eq!(patch.len(), 2);
         assert_eq!(patch[0], (2, 3)); // offset=2, length=3
         assert_eq!(patch[1], (6, 3)); // offset=6, length=3
+    }
+
+    #[test]
+    fn test_expand_tokens_more_placeholders_than_replacements() {
+        // Two placeholder tokens but only one replacement: the first is
+        // expanded, the second is left in place unchanged (and warned about).
+        let token_ids = vec![1, 100, 2, 100, 3];
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![50, 50],
+        }];
+
+        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+
+        // Output is unchanged behavior: excess placeholder (100) stays as-is.
+        assert_eq!(result.token_ids, vec![1, 50, 50, 2, 100, 3]);
+        assert_eq!(result.placeholders.len(), 1);
+        assert_eq!(result.placeholders[0].offset, 1);
+        assert_eq!(result.placeholders[0].length, 2);
     }
 }

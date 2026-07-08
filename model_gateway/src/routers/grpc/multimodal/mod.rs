@@ -13,7 +13,10 @@
 //! - [`transport`]: SHM-vs-inline transport resolution and `/dev/shm`
 //!   namespace verification.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use llm_multimodal::{
     FieldLayout, ImageFrame, Modality, PlaceholderRange, PreprocessedEncoderInputs, VideoClip,
@@ -40,10 +43,15 @@ pub(crate) use process::{
 };
 
 /// Whether verbose multimodal timing logs are enabled via `SMG_LOG_MM_TIMING`.
+/// Read from the environment once and cached; the flag is not expected to change
+/// at runtime, and this is called on every multimodal request.
 fn log_mm_timing_enabled() -> bool {
-    std::env::var("SMG_LOG_MM_TIMING")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SMG_LOG_MM_TIMING")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 /// Output of the multimodal processing pipeline.
