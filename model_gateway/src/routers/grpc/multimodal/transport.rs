@@ -80,13 +80,18 @@ fn mm_tensor_transport_mode_from_env() -> Option<TransportMode> {
 
 fn mm_shm_min_bytes_from_env() -> Option<usize> {
     static LEGACY_WARNED: OnceLock<()> = OnceLock::new();
-    env_with_deprecated_alias(
+    let raw = env_with_deprecated_alias(
         "SMG_MM_SHM_MIN_BYTES",
         "SMG_TOKENSPEED_MM_SHM_MIN_BYTES",
         &LEGACY_WARNED,
-    )?
-    .parse::<usize>()
-    .ok()
+    )?;
+    match raw.parse::<usize>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            log_invalid_shm_min_bytes_once(&raw);
+            None
+        }
+    }
 }
 
 /// Read the canonical env var, falling back to the deprecated alias. When the
@@ -247,6 +252,16 @@ fn log_unknown_transport_once(value: &str) {
         warn!(
             value,
             "Unknown multimodal tensor transport value; expected inline|shm|auto, using inline"
+        );
+    });
+}
+
+fn log_invalid_shm_min_bytes_once(value: &str) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        warn!(
+            value,
+            "Invalid multimodal SHM min-bytes value; expected a non-negative integer, using default"
         );
     });
 }
