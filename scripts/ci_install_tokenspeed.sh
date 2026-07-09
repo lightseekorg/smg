@@ -49,10 +49,13 @@ if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
     sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends \
-        cuda-nvcc-13-0 \
-        cuda-cudart-dev-13-0 \
-        cuda-libraries-dev-13-0
+    # Install the FULL CUDA 13.0 toolkit (not a piecemeal nvcc + cudart +
+    # libraries set) so the system headers are a complete, self-consistent match
+    # for the system nvcc -- mirrors the proven TRT-LLM lane (ci_install_trtllm.sh
+    # installs cuda-toolkit-13-0). A partial system toolkit makes the kernel build
+    # fall back to torch's bundled cu13 headers, whose crt/host_runtime.h is a
+    # different patch level and breaks the nvcc-generated launch stubs.
+    sudo apt-get install -y cuda-toolkit-13-0
     # apt installs under /usr/local/cuda-13.0; expose the /usr/local/cuda
     # alias the job-level ``CUDA_HOME: /usr/local/cuda`` env expects.
     if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
@@ -65,18 +68,25 @@ fi
 export CUDA_HOME
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
-# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
-# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and
-# doesn't pass ``-I$CUDA_HOME/include``; expose the headers via CPATH /
-# CPLUS_INCLUDE_PATH so the compile picks them up. CUDA 13 relocated the CCCL
-# headers (Thrust/CUB/libcu++) into ``include/cccl``, and the kernel's trtllm
-# sources need them; put that dir first (matches TokenSpeed's own
-# test/ci_system/install_deps.sh). Without it the CUDA 13 kernel build fails
-# with ``error: '__cudaLaunch' was not declared`` for sm_90a.
-_cuda_inc="${CUDA_HOME}/include/cccl:${CUDA_HOME}/include"
+# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime extensions
+# (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and doesn't pass
+# ``-I$CUDA_HOME/include``; expose the system CUDA headers via CPATH so those
+# g++ compiles find them (CUDA 13 keeps CCCL under ``include/cccl``).
+_cuda_inc="${CUDA_HOME}/include:${CUDA_HOME}/include/cccl"
 export CPATH="${_cuda_inc}${CPATH:+:$CPATH}"
 export CPLUS_INCLUDE_PATH="${_cuda_inc}${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 export C_INCLUDE_PATH="${_cuda_inc}${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
+
+# nvcc drives the host-compilation of its OWN generated launch stubs, which must
+# see the crt/host_runtime.h matching the nvcc that generated them. torch's
+# +cu130 wheels drop their own copy under site-packages/nvidia/cu13/include, and
+# torch's CUDAExtension puts that dir on the nvcc command line -- shadowing
+# nvcc's built-in system headers. When the pip cu13 patch level differs from the
+# system nvcc, the stub calls the 2-arg __cudaLaunch the system nvcc emits while
+# the pip header only #defines the 1-arg macro form -> "'__cudaLaunch' was not
+# declared". Prepend the system include so it wins over torch's bundled headers
+# on every nvcc invocation (the host stub compile included).
+export NVCC_PREPEND_FLAGS="-I${CUDA_HOME}/include ${NVCC_PREPEND_FLAGS:-}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 # ``git clone --branch`` only accepts branch/tag names, not SHAs, so we
@@ -155,6 +165,9 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     echo "CPATH=$CPATH" >> "$GITHUB_ENV"
     echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >> "$GITHUB_ENV"
     echo "C_INCLUDE_PATH=$C_INCLUDE_PATH" >> "$GITHUB_ENV"
+    # Persist so worker-side JIT kernel builds (spawned by pytest) also force the
+    # system headers ahead of torch's bundled cu13 copy.
+    echo "NVCC_PREPEND_FLAGS=$NVCC_PREPEND_FLAGS" >> "$GITHUB_ENV"
 fi
 if [ -n "${GITHUB_PATH:-}" ]; then
     # Make ``nvcc`` discoverable to downstream steps (pytest spawns the
