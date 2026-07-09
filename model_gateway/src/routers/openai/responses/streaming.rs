@@ -61,7 +61,7 @@ use crate::{
         error,
         grpc::utils::error_type_from_status,
         openai::{
-            context::{RequestContext, StreamingEventContext, StreamingRequest},
+            context::{RequestContext, StorageHandles, StreamingEventContext, StreamingRequest},
             mcp::{
                 build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
                 mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
@@ -568,6 +568,46 @@ pub(super) fn send_final_response_event(
     }
 }
 
+async fn persist_mcp_streaming_response(
+    mut response_json: Value,
+    preserved_response_id: Option<&str>,
+    state: &ToolLoopState,
+    session: &McpToolSession<'_>,
+    original_request: &ResponsesRequest,
+    previous_response_id: Option<&str>,
+    storage: &StorageHandles,
+) {
+    if let Some(id) = preserved_response_id {
+        if let Some(obj) = response_json.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(id.to_string()));
+        }
+    }
+    inject_mcp_metadata_streaming(&mut response_json, state, session);
+
+    restore_original_tools(&mut response_json, original_request, Some(session));
+    patch_response_with_request_metadata(
+        &mut response_json,
+        original_request,
+        previous_response_id,
+    );
+
+    if let Err(err) = persist_conversation_items(
+        storage.conversation.clone(),
+        storage.conversation_item.clone(),
+        storage.response.clone(),
+        &response_json,
+        original_request,
+        storage.request_context.clone(),
+    )
+    .await
+    {
+        warn!(
+            "Failed to persist conversation items (stream + MCP): {}",
+            err
+        );
+    }
+}
+
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
@@ -984,11 +1024,32 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                             if data.as_ref() == "[DONE]" {
                                 let done_block = format!("{raw_block}\n\n");
-                                if tx.send(Ok(Bytes::from(done_block))).is_err() {
-                                    return;
+                                let done_sent = tx.send(Ok(Bytes::from(done_block))).is_ok();
+                                let current_response_id = handler
+                                    .original_response_id()
+                                    .map(str::to_string)
+                                    .or_else(|| preserved_response_id.clone());
+                                if should_store {
+                                    if let Some(response_json) =
+                                        handler.accumulator.into_final_response()
+                                    {
+                                        persist_mcp_streaming_response(
+                                            response_json,
+                                            current_response_id.as_deref(),
+                                            &state,
+                                            &session,
+                                            &original_request,
+                                            previous_response_id.as_deref(),
+                                            &storage,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 record_regular_worker_outcome(worker.as_ref(), status);
                                 record_router_outcome!(status);
+                                if !done_sent {
+                                    return;
+                                }
                                 return;
                             }
 
@@ -1159,37 +1220,17 @@ pub(super) fn handle_streaming_with_tool_interception(
                     None
                 };
 
-                if let Some(mut response_json) = final_response_json {
-                    if let Some(ref id) = preserved_response_id {
-                        if let Some(obj) = response_json.as_object_mut() {
-                            obj.insert("id".to_string(), Value::String(id.clone()));
-                        }
-                    }
-                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
-
-                    restore_original_tools(&mut response_json, &original_request, Some(&session));
-                    patch_response_with_request_metadata(
-                        &mut response_json,
+                if let Some(response_json) = final_response_json {
+                    persist_mcp_streaming_response(
+                        response_json,
+                        preserved_response_id.as_deref(),
+                        &state,
+                        &session,
                         &original_request,
                         previous_response_id.as_deref(),
-                    );
-
-                    // Always persist conversation items and response (even without conversation)
-                    if let Err(err) = persist_conversation_items(
-                        storage.conversation.clone(),
-                        storage.conversation_item.clone(),
-                        storage.response.clone(),
-                        &response_json,
-                        &original_request,
-                        storage.request_context.clone(),
+                        &storage,
                     )
-                    .await
-                    {
-                        warn!(
-                            "Failed to persist conversation items (stream + MCP): {}",
-                            err
-                        );
-                    }
+                    .await;
                 }
 
                 let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
