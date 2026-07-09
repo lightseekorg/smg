@@ -327,6 +327,40 @@ class Gateway:
         except (httpx.RequestError, httpx.TimeoutException):
             return False
 
+    def metrics_raw(self, timeout: float = 5.0) -> str:
+        """Fetch the raw Prometheus exposition text from the gateway's
+        metrics port (``/metrics``)."""
+        resp = httpx.get(f"{self.metrics_url}/metrics", timeout=timeout)
+        resp.raise_for_status()
+        return resp.text
+
+    def metric_sum(self, name: str, **label_filters: str) -> float:
+        """Sum every sample of counter/gauge ``name`` whose labels are a
+        superset of ``label_filters``. Returns 0.0 when the series is absent
+        (e.g. before the first request). A minimal Prometheus-text parser —
+        adequate for e2e assertions, not a general client.
+        """
+        total = 0.0
+        for line in self.metrics_raw().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            metric, brace, rest = line.partition("{")
+            if metric != name or not brace:
+                continue
+            labels_str, _, value_str = rest.partition("}")
+            labels = {
+                key.strip(): val.strip().strip('"')
+                for key, _, val in (part.partition("=") for part in labels_str.split(","))
+                if key.strip()
+            }
+            if all(labels.get(k) == v for k, v in label_filters.items()):
+                try:
+                    total += float(value_str.strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+        return total
+
     def _worker_from_api_response(self, w: dict) -> WorkerInfo:
         """Convert API response dict to WorkerInfo."""
         status = "healthy" if w.get("is_healthy", False) else "unhealthy"
