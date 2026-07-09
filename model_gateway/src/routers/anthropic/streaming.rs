@@ -74,6 +74,10 @@ async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -
         },
         Err(_) => {
             record_streaming_timeout_metrics(model_id, start_time);
+            record_streaming_worker_outcome(
+                Some(req_ctx.worker.as_ref()),
+                StatusCode::GATEWAY_TIMEOUT,
+            );
             return router_error::gateway_timeout(
                 "streaming_timeout",
                 stream_deadline.message(StreamTimeoutKind::Total),
