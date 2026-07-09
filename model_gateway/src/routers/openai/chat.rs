@@ -371,7 +371,7 @@ pub(super) async fn route_chat(
             metrics_labels::ENDPOINT_CHAT,
             start.elapsed(),
         );
-    } else {
+    } else if !response.status().is_success() {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,
