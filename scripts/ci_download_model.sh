@@ -44,7 +44,9 @@ resolve_models_for_tier() {
 import sys
 from e2e_test.infra.model_specs import MODEL_SPECS
 for model_id, spec in MODEL_SPECS.items():
-    if spec['tp'] <= int(sys.argv[1]):
+    # skip_tier_download: engine-specific/large models (e.g. the TokenSpeed EPD
+    # model) that their own job downloads by id, so unrelated lanes don't pull them.
+    if spec['tp'] <= int(sys.argv[1]) and not spec.get('skip_tier_download'):
         print(model_id)
 " "$tier"
 }

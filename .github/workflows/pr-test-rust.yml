@@ -716,12 +716,16 @@ jobs:
           # their worker set.
           - engine: tokenspeed
             timeout: 75
+            # The inner pytest step has its own timeout (default 25m); the four EPD
+            # topologies each relaunch a worker set, so give pytest more room too.
+            test_timeout: 65
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "4"
       runner: 4-gpu-h100
       timeout: ${{ matrix.timeout }}
+      test_timeout: ${{ matrix.test_timeout || 25 }}
       test_dirs: e2e_test/chat_completions
     secrets: inherit
 

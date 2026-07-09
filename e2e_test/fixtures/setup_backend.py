@@ -57,14 +57,6 @@ _WORKER_DEFAULTS = {
     "extra_engine_args": None,
 }
 
-# EPD topology defaults (1 encode + 1 prefill + 1 decode), read from
-# ``@pytest.mark.epd(encode=..., prefill=..., decode=...)``.
-_EPD_DEFAULTS = {
-    "encode": 1,
-    "prefill": 1,
-    "decode": 1,
-}
-
 # Track worker startup failures — fail fast after repeated failures
 _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
@@ -124,13 +116,21 @@ def setup_backend(request: pytest.FixtureRequest):
       - ``@pytest.mark.workers(gpus=2, extra_engine_args=[...])``: Per-worker
         GPU count and extra engine CLI args (local workers only)
       - ``@pytest.mark.workers(prefill=1, decode=1)``: PD worker counts
-      - ``@pytest.mark.epd(encode=1, prefill=1, decode=1)``: EPD worker counts
+      - EPD topology: pass a ("epd_grpc", (encode, prefill, decode)) param
       - ``@pytest.mark.gateway(policy=..., timeout=..., extra_args=...)``: Gateway config
 
     Returns:
         Tuple of ``(backend_name, model_path, client, gateway)``
     """
-    backend_name: str = request.param
+    # EPD topologies pass a ("epd_grpc", (n_encode, n_prefill, n_decode)) tuple;
+    # every other backend passes a bare protocol string. Read the topology from
+    # request.param, NOT a marker — this fixture is class-scoped, so per-param
+    # marks on the generated test items aren't visible on request.node.
+    param = request.param
+    if isinstance(param, tuple):
+        backend_name, epd_topology = param
+    else:
+        backend_name, epd_topology = param, None
 
     if os.environ.get(ENV_SKIP_BACKEND_SETUP, "").lower() in ("1", "true", "yes"):
         pytest.skip(f"{ENV_SKIP_BACKEND_SETUP} is set")
@@ -166,13 +166,12 @@ def setup_backend(request: pytest.FixtureRequest):
     gateway = Gateway()
     try:
         if is_epd:
-            epd_config = get_marker_kwargs(request, "epd", defaults=_EPD_DEFAULTS)
             yield from _setup_epd(
                 model_id,
                 model_path,
                 engine,
                 connection_mode,
-                epd_config,
+                epd_topology or (1, 1, 1),
                 gateway_config,
                 gateway,
                 log_dir,
@@ -332,22 +331,21 @@ def _setup_epd(
     model_path,
     engine,
     connection_mode,
-    epd_config,
+    epd_topology,
     gateway_config,
     gateway,
     log_dir,
 ):
     """Launch encode + prefill + decode workers + EPD gateway, yield, tear down.
 
-    Mirrors ``_setup_pd``. The encode worker runs the vision tower at tp=1
-    (``gpus=1``); prefill/decode run the LM at the model spec's tp. GPU offsets
-    are laid out encode-first so co-located workers don't share GPUs.
+    Mirrors ``_setup_pd``. ``epd_topology`` is ``(n_encode, n_prefill, n_decode)``.
+    The encode worker runs the vision tower at tp=1 (``gpus=1``); prefill/decode
+    run the LM at the model spec's tp. GPU offsets are laid out encode-first so
+    co-located workers don't share GPUs.
     """
     spec = get_model_spec(model_id)
     tp = spec.get("tp", 1)
-    num_encode = epd_config.get("encode") or 1
-    num_prefill = epd_config.get("prefill") or 1
-    num_decode = epd_config.get("decode") or 1
+    num_encode, num_prefill, num_decode = epd_topology
     backend_name = f"epd_{connection_mode.value}"
     runtime_label = RUNTIME_LABELS.get(engine, engine)
 

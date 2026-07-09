@@ -175,6 +175,10 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "multimodal", "moe"],
         "startup_timeout": 600,
+        # ~35GB and TokenSpeed-only (EPD). Exclude from tier-wide pre-download so
+        # the sglang/vLLM/TRT lanes (which never run EPD) don't pull it; the
+        # tokenspeed EPD job downloads it explicitly by id.
+        "skip_tier_download": True,
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {

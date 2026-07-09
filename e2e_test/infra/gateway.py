@@ -117,8 +117,9 @@ class Gateway:
         )
         if modes_specified != 1:
             raise ValueError(
-                "Specify exactly one mode: worker_urls, encode/prefill/decode_workers, "
-                "prefill/decode_workers, igw_mode=True, or cloud_backend"
+                "Specify exactly one mode: worker_urls (regular), "
+                "encode/prefill/decode_workers (EPD), prefill/decode_workers (PD), "
+                "igw_mode=True, or cloud_backend"
             )
 
         if show_output is None:
