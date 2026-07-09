@@ -855,14 +855,17 @@ async fn test_qwen_xml_empty_parameter_value() {
 }
 
 // ============================================================================
-// HTML Entity and Python Literal Tests
+// Literal Value (HTML-entity parity) and Python Literal Tests
+//
+// Argument values are treated literally — entity-like substrings are NOT
+// decoded, matching vLLM's Qwen3CoderToolParser. Regression guard for #1888.
 // ============================================================================
 
 #[tokio::test]
-async fn test_qwen_xml_html_entity_decoding() {
+async fn test_qwen_xml_preserves_html_entities() {
     let parser = QwenXmlParser::new();
 
-    // Test HTML entities in parameter values
+    // Named HTML entities in parameter values must be preserved verbatim.
     let input = r"<tool_call>
 <function=process>
 <parameter=ampersand>Tom &amp; Jerry</parameter>
@@ -875,16 +878,16 @@ async fn test_qwen_xml_html_entity_decoding() {
     assert_eq!(tools.len(), 1);
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    assert_eq!(args["ampersand"], "Tom & Jerry");
-    assert_eq!(args["comparison"], "5 < 10 && 10 > 5");
-    assert_eq!(args["quotes"], "\"Hello\" & 'World'");
+    assert_eq!(args["ampersand"], "Tom &amp; Jerry");
+    assert_eq!(args["comparison"], "5 &lt; 10 &amp;&amp; 10 &gt; 5");
+    assert_eq!(args["quotes"], "&quot;Hello&quot; &amp; &apos;World&apos;");
 }
 
 #[tokio::test]
-async fn test_qwen_xml_html_numeric_entities() {
+async fn test_qwen_xml_preserves_numeric_entity_text() {
     let parser = QwenXmlParser::new();
 
-    // Test numeric HTML entities
+    // Numeric/hex entity text must be preserved verbatim (not decoded).
     let input = r"<tool_call>
 <function=process>
 <parameter=decimal>&#60;tag&#62;</parameter>
@@ -896,8 +899,8 @@ async fn test_qwen_xml_html_numeric_entities() {
     assert_eq!(tools.len(), 1);
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    assert_eq!(args["decimal"], "<tag>");
-    assert_eq!(args["hex"], "<tag>");
+    assert_eq!(args["decimal"], "&#60;tag&#62;");
+    assert_eq!(args["hex"], "&#x3C;tag&#x3E;");
 }
 
 #[tokio::test]
@@ -934,7 +937,7 @@ async fn test_qwen_xml_python_literals() {
 async fn test_qwen_xml_mixed_html_and_json() {
     let parser = QwenXmlParser::new();
 
-    // Test HTML entities within JSON structures
+    // Entity-like text alongside a JSON-valued parameter.
     let input = r#"<tool_call>
 <function=search>
 <parameter=query>price &lt; 100 &amp;&amp; rating &gt; 4</parameter>
@@ -946,8 +949,11 @@ async fn test_qwen_xml_mixed_html_and_json() {
     assert_eq!(tools.len(), 1);
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    assert_eq!(args["query"], "price < 100 && rating > 4");
-    // JSON with HTML entity inside - the entity gets decoded first, then JSON parsed
+    // Non-JSON value stays a literal string with entities intact.
+    assert_eq!(args["query"], "price &lt; 100 &amp;&amp; rating &gt; 4");
+    // JSON value parses as an object; entities inside its strings are preserved
+    // (JSON has no notion of HTML entities, so they are ordinary characters).
     assert!(args["config"].is_object());
-    assert_eq!(args["config"]["operator"], "&&");
+    assert_eq!(args["config"]["operator"], "&amp;&amp;");
+    assert_eq!(args["config"]["escape"], true);
 }

@@ -54,95 +54,26 @@ pub struct QwenXmlParser {
     xml_param_pattern: Regex,
 }
 
-/// Decode HTML entities in a string (equivalent to Python's html.unescape)
+/// Parse a raw parameter value, similar to Python's `_safe_val`.
 ///
-/// Handles common HTML entities like &amp; &lt; &gt; &quot; &#39; and numeric entities
-fn html_unescape(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '&' {
-            let mut entity = String::new();
-            let mut consumed_semicolon = false;
-            while let Some(&next) = chars.peek() {
-                if next == ';' {
-                    chars.next();
-                    consumed_semicolon = true;
-                    break;
-                }
-                if next.is_alphanumeric() || next == '#' {
-                    // Safe: peek() returned Some, so next() will too
-                    if let Some(ch) = chars.next() {
-                        entity.push(ch);
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            let decoded = match entity.as_str() {
-                "amp" => "&",
-                "lt" => "<",
-                "gt" => ">",
-                "quot" => "\"",
-                "apos" => "'",
-                "nbsp" => "\u{00A0}",
-                s if s.starts_with('#') => {
-                    let num_str = &s[1..];
-                    let code_point = if num_str.starts_with('x') || num_str.starts_with('X') {
-                        u32::from_str_radix(&num_str[1..], 16).ok()
-                    } else {
-                        num_str.parse::<u32>().ok()
-                    };
-                    if let Some(cp) = code_point {
-                        if let Some(ch) = char::from_u32(cp) {
-                            result.push(ch);
-                            continue;
-                        }
-                    }
-                    // Invalid numeric entity, reconstruct original
-                    result.push('&');
-                    result.push_str(&entity);
-                    if consumed_semicolon {
-                        result.push(';');
-                    }
-                    continue;
-                }
-                _ => {
-                    // Unknown entity, reconstruct original
-                    result.push('&');
-                    result.push_str(&entity);
-                    if consumed_semicolon {
-                        result.push(';');
-                    }
-                    continue;
-                }
-            };
-            result.push_str(decoded);
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
-/// Parse a raw parameter value, similar to Python's _safe_val
+/// Argument values are treated **literally** — no HTML-entity decoding. The
+/// Qwen3-Coder XML tool format is not HTML-escaped on render (the chat template
+/// emits values via `| tojson | safe` / `| string`), so parsing must not
+/// unescape it. This matches vLLM's `Qwen3CoderToolParser`, Qwen-Agent, and
+/// Qwen's chat template, all of which pass argument values through verbatim.
 ///
-/// 1. Decode HTML entities
-/// 2. Try to parse as JSON (numbers, booleans, null, objects, arrays)
-/// 3. Fall back to string if JSON parsing fails
+/// 1. Try to parse as JSON (numbers, booleans, null, objects, arrays)
+/// 2. Fall back to string if JSON parsing fails
 fn safe_val(raw: &str) -> Value {
-    let unescaped = html_unescape(raw.trim());
+    let trimmed = raw.trim();
 
     // Try JSON parsing first
-    if let Ok(v) = serde_json::from_str::<Value>(&unescaped) {
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
         return v;
     }
 
     // Handle Python-style literals (True, False, None)
-    match unescaped.as_str() {
+    match trimmed {
         "True" => return Value::Bool(true),
         "False" => return Value::Bool(false),
         "None" => return Value::Null,
@@ -150,14 +81,17 @@ fn safe_val(raw: &str) -> Value {
     }
 
     // Fall back to string
-    Value::String(unescaped)
+    Value::String(trimmed.to_string())
 }
 
 /// Coerce an XML parameter value by its declared schema type, falling back to
 /// [`safe_val`] inference when the type is unknown.
+///
+/// Values are treated literally; see [`safe_val`] for why the format is not
+/// HTML-unescaped.
 fn coerce_value(raw: &str, declared_type: Option<&str>) -> Value {
-    let decoded = html_unescape(raw.trim());
-    helpers::coerce_by_schema_type(&decoded, declared_type).unwrap_or_else(|| safe_val(raw))
+    let trimmed = raw.trim();
+    helpers::coerce_by_schema_type(trimmed, declared_type).unwrap_or_else(|| safe_val(raw))
 }
 
 impl QwenXmlParser {
@@ -551,40 +485,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_html_unescape_basic() {
-        assert_eq!(html_unescape("&amp;"), "&");
-        assert_eq!(html_unescape("&lt;"), "<");
-        assert_eq!(html_unescape("&gt;"), ">");
-        assert_eq!(html_unescape("&quot;"), "\"");
-        assert_eq!(html_unescape("&apos;"), "'");
-    }
-
-    #[test]
-    fn test_html_unescape_numeric() {
-        assert_eq!(html_unescape("&#60;"), "<");
-        assert_eq!(html_unescape("&#x3C;"), "<");
-        assert_eq!(html_unescape("&#x3c;"), "<");
-    }
-
-    #[test]
-    fn test_html_unescape_mixed() {
-        assert_eq!(
-            html_unescape("Hello &amp; World &lt;tag&gt;"),
-            "Hello & World <tag>"
-        );
-    }
-
-    #[test]
-    fn test_html_unescape_unknown() {
-        // Unknown entities with semicolon should be preserved as-is
-        assert_eq!(html_unescape("&unknown;"), "&unknown;");
-        // Unterminated entities should NOT have semicolon added
-        assert_eq!(html_unescape("&foo bar"), "&foo bar");
-        assert_eq!(html_unescape("&"), "&");
-        assert_eq!(html_unescape("& "), "& ");
-    }
-
-    #[test]
     fn test_safe_val_json() {
         assert_eq!(safe_val("42"), Value::Number(42.into()));
         assert_eq!(safe_val("1.5"), serde_json::json!(1.5));
@@ -614,13 +514,21 @@ mod tests {
         assert_eq!(safe_val("  spaces  "), Value::String("spaces".to_string()));
     }
 
+    // Values are treated literally: entity-like substrings must NOT be decoded
+    // (parity with vLLM's Qwen3CoderToolParser, which does no html.unescape).
     #[test]
-    fn test_safe_val_html_entities() {
-        assert_eq!(safe_val("&lt;div&gt;"), Value::String("<div>".to_string()));
+    fn test_safe_val_preserves_html_entities() {
+        assert_eq!(
+            safe_val("&lt;div&gt;"),
+            Value::String("&lt;div&gt;".to_string())
+        );
         assert_eq!(
             safe_val("Tom &amp; Jerry"),
-            Value::String("Tom & Jerry".to_string())
+            Value::String("Tom &amp; Jerry".to_string())
         );
+        // Numeric/hex entities are likewise left untouched.
+        assert_eq!(safe_val("it&#39;s"), Value::String("it&#39;s".to_string()));
+        assert_eq!(safe_val("&#x3C;"), Value::String("&#x3C;".to_string()));
     }
 
     fn tool_with_props(props: Value) -> Vec<Tool> {
@@ -689,5 +597,37 @@ mod tests {
             args.contains(r#""count": 5"#),
             "int param must coerce: {args}"
         );
+    }
+
+    // Golden conformance test (regression guard for #1888): a tool argument
+    // whose value contains HTML entities must round-trip UNCHANGED, matching
+    // vLLM's `qwen3coder` parser. Covers both the schema-typed `string` path and
+    // the schema-less inference fallback.
+    #[tokio::test]
+    async fn test_arg_values_with_entities_roundtrip_unchanged() {
+        let literal = "<a>Tom &amp; Jerry</a> &lt;x&gt; it&#39;s";
+
+        // Schema-less inference path (`safe_val`): not valid JSON -> stays a
+        // literal string with entities intact.
+        let text = format!(
+            "<tool_call>\n<function=write_file>\n\
+             <parameter=content>\n{literal}\n</parameter>\n\
+             </function>\n</tool_call>"
+        );
+        let (_, calls) = QwenXmlParser::new().parse_complete(&text).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["content"], Value::String(literal.to_string()));
+
+        // Schema-typed `string` path (`coerce_value`): same literal value.
+        let tools = tool_with_props(serde_json::json!({
+            "content": {"type": "string"},
+        }));
+        let (_, calls) = QwenXmlParser::new()
+            .parse_complete_with_tools(&text, &tools)
+            .await
+            .unwrap();
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["content"], Value::String(literal.to_string()));
     }
 }
