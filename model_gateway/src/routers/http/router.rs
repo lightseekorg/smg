@@ -853,6 +853,7 @@ impl Router {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stream_failure_status = None;
+                let mut done_decoder = sse::SseDecoder::new();
                 loop {
                     let chunk = match stream_deadline.next(&mut stream).await {
                         Ok(Some(chunk)) => chunk,
@@ -869,7 +870,12 @@ impl Router {
                     };
                     match chunk {
                         Ok(bytes) => {
+                            let stream_done = stream_is_sse
+                                && sse::observe_done_event(&mut done_decoder, bytes.as_ref());
                             if tx.send(Ok(bytes)).await.is_err() {
+                                break;
+                            }
+                            if stream_done {
                                 break;
                             }
                         }

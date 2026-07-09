@@ -683,8 +683,13 @@ impl PDRouter {
         let headers = Some(&headers_with_trace);
 
         // Build both requests
+        let prefill_client = if context.is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
         let prefill_request = self.build_post_with_headers(
-            &self.client,
+            prefill_client,
             prefill.as_ref(),
             context.route,
             &prefill_json_request,
