@@ -949,7 +949,7 @@ router config / CLI flag → `SMG_MM_*` environment variable → built-in defaul
 
 | CLI Flag | Config / WorkerSpec field | Default | Description |
 |----------|---------------------------|---------|-------------|
-| `--multimodal-tensor-transport` | `multimodal_tensor_transport` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (use `/dev/shm` whenever the router can write it — the operator asserts co-location), or `auto` (use `/dev/shm` only when the worker is *verified* to share it). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. |
+| `--multimodal-tensor-transport` | `multimodal_tensor_transport` | `inline` | Transport for large MM tensors: `inline` (gRPC bytes), `shm` (use `/dev/shm` whenever the router can write it — the operator asserts co-location), `auto` (use `/dev/shm` only when the worker is *verified* to share it), or `rdma` (pull pixels over the NIXL RDMA lane; requires the `mm-rdma` build feature + NIXL, and falls back to inline when unavailable). In `auto`, the router compares the worker's advertised `/dev/shm` namespace token (`GetServerInfo`) to its own and uses SHM only on a match; otherwise it falls back to inline. |
 | `--multimodal-shm-min-bytes` | `multimodal_shm_min_bytes` | `65536` | Minimum tensor size (bytes) before the SHM path is used; smaller tensors stay inline. |
 
 Both settings can be overridden per worker via the matching `WorkerSpec` fields

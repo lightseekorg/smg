@@ -35,14 +35,20 @@ use nixl_sys::{
 use parking_lot::Mutex;
 use tracing::{debug, error};
 
-/// `SMG_MM_PIXEL_RDMA` gate (cached in a process-wide `OnceLock`).
+use crate::routers::grpc::multimodal::mm_default_transport_is_rdma;
+
+/// Whether the RDMA pixel lane is active. Selected by the first-class
+/// `TransportMode::Rdma` (`--multimodal-tensor-transport rdma` /
+/// `SMG_MM_TENSOR_TRANSPORT=rdma`), with the legacy `SMG_MM_PIXEL_RDMA` env as a
+/// backward-compatible fallback. Cached in a process-wide `OnceLock`.
 pub(crate) fn rdma_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("SMG_MM_PIXEL_RDMA").as_deref(),
-            Ok("1") | Ok("true")
-        )
+        mm_default_transport_is_rdma()
+            || matches!(
+                std::env::var("SMG_MM_PIXEL_RDMA").as_deref(),
+                Ok("1") | Ok("true")
+            )
     })
 }
 

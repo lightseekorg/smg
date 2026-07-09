@@ -43,6 +43,8 @@ pub(crate) use process::{
     process_multimodal, process_multimodal_messages, resolve_placeholder_token,
 };
 pub(crate) use transport::init_mm_transport_defaults;
+#[cfg(feature = "mm-rdma")]
+pub(crate) use transport::mm_default_transport_is_rdma;
 
 /// Whether verbose multimodal timing logs are enabled via `SMG_LOG_MM_TIMING`.
 /// Read from the environment once and cached; the flag is not expected to change

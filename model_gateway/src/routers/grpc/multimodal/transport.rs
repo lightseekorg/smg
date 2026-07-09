@@ -139,7 +139,8 @@ pub(super) fn resolve_mm_shm_enabled(
         TransportMode::Auto => {
             worker_shares_dev_shm(workers, skip_pixel_values) && mm_shm_dev_writable()
         }
-        TransportMode::Inline => false,
+        // `rdma` routes large tensors through the NIXL pixel lane, not SHM.
+        TransportMode::Inline | TransportMode::Rdma => false,
     }
 }
 
@@ -147,6 +148,18 @@ pub(super) fn resolve_mm_shm_enabled(
 /// → router default.
 pub(super) fn resolve_mm_shm_min_bytes(workers: Option<&WorkerSelection>) -> usize {
     worker_shm_min_bytes_override(workers).unwrap_or_else(|| mm_transport_defaults().shm_min_bytes)
+}
+
+/// Whether the router-level transport mode selects the RDMA pixel lane.
+///
+/// The `mm_rdma` gate consults this so `rdma` is a first-class [`TransportMode`]
+/// alongside `inline`/`shm`/`auto` (settable via `--multimodal-tensor-transport`
+/// / `SMG_MM_TENSOR_TRANSPORT`). The legacy `SMG_MM_PIXEL_RDMA` env stays a
+/// fallback inside the gate for backward compatibility. Only compiled with the
+/// `mm-rdma` feature, since the no-op RDMA shim never consults it.
+#[cfg(feature = "mm-rdma")]
+pub(crate) fn mm_default_transport_is_rdma() -> bool {
+    mm_transport_defaults().mode == TransportMode::Rdma
 }
 
 fn worker_transport_mode_override(workers: Option<&WorkerSelection>) -> Option<TransportMode> {
@@ -251,7 +264,7 @@ fn log_unknown_transport_once(value: &str) {
     WARNED.get_or_init(|| {
         warn!(
             value,
-            "Unknown multimodal tensor transport value; expected inline|shm|auto, using inline"
+            "Unknown multimodal tensor transport value; expected inline|shm|auto|rdma, using inline"
         );
     });
 }

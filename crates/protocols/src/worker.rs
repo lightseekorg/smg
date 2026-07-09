@@ -723,6 +723,9 @@ impl WorkerSpec {
 /// - `Shm`: use same-host `/dev/shm` when SMG can write it.
 /// - `Auto`: use `/dev/shm` only when the receiving worker is verified to share
 ///   SMG's `/dev/shm`; otherwise fall back to inline.
+/// - `Rdma`: use the NIXL RDMA pixel lane for large tensors (requires the
+///   `mm-rdma` build feature + NIXL); falls back to inline when RDMA is
+///   unavailable.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -732,15 +735,17 @@ pub enum TransportMode {
     Inline,
     Shm,
     Auto,
+    Rdma,
 }
 
 impl TransportMode {
-    /// Parse from a case-insensitive string (`inline` | `shm` | `auto`).
+    /// Parse from a case-insensitive string (`inline` | `shm` | `auto` | `rdma`).
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "inline" => Some(Self::Inline),
             "shm" => Some(Self::Shm),
             "auto" => Some(Self::Auto),
+            "rdma" => Some(Self::Rdma),
             _ => None,
         }
     }
@@ -751,6 +756,7 @@ impl TransportMode {
             Self::Inline => "inline",
             Self::Shm => "shm",
             Self::Auto => "auto",
+            Self::Rdma => "rdma",
         }
     }
 }
@@ -766,7 +772,7 @@ impl std::str::FromStr for TransportMode {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)
-            .ok_or_else(|| format!("invalid transport mode '{s}'; expected inline|shm|auto"))
+            .ok_or_else(|| format!("invalid transport mode '{s}'; expected inline|shm|auto|rdma"))
     }
 }
 

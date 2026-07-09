@@ -150,7 +150,7 @@ enum Commands {
 /// Parse the `--multimodal-tensor-transport` value into a `TransportMode`.
 fn parse_transport_mode(value: &str) -> Result<TransportMode, String> {
     TransportMode::parse(value)
-        .ok_or_else(|| format!("invalid value '{value}'; expected inline, shm, or auto"))
+        .ok_or_else(|| format!("invalid value '{value}'; expected inline, shm, auto, or rdma"))
 }
 
 #[derive(Parser, Debug)]

@@ -540,7 +540,7 @@ impl Router {
                     config::ConfigError::InvalidValue {
                         field: "multimodal_tensor_transport".to_string(),
                         value: value.to_string(),
-                        reason: "expected 'inline', 'shm', or 'auto'".to_string(),
+                        reason: "expected 'inline', 'shm', 'auto', or 'rdma'".to_string(),
                     }
                 })
             })

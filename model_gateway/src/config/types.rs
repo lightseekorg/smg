@@ -44,7 +44,7 @@ pub struct RouterConfig {
     /// observability from routing.
     #[serde(default)]
     pub engine_metrics: bool,
-    /// Global multimodal tensor transport mode (`inline` | `shm` | `auto`).
+    /// Global multimodal tensor transport mode (`inline` | `shm` | `auto` | `rdma`).
     /// Per-worker `WorkerSpec.multimodal_tensor_transport` overrides this; when
     /// unset, falls back to `SMG_MM_TENSOR_TRANSPORT`, then `inline`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
