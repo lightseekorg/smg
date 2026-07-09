@@ -854,13 +854,15 @@ impl Router {
                 let mut stream = stream;
                 let mut stream_failure_status = None;
                 let mut done_decoder = sse::SseDecoder::new();
+                let mut boundary_tail = Vec::new();
+                let mut at_event_boundary = true;
                 loop {
                     let chunk = match stream_deadline.next(&mut stream).await {
                         Ok(Some(chunk)) => chunk,
                         Ok(None) => break,
                         Err(timeout) => {
                             stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
-                            if stream_is_sse {
+                            if stream_is_sse && at_event_boundary {
                                 let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
                             } else {
                                 let _ = tx.send(Err(stream_deadline.message(timeout))).await;
@@ -872,6 +874,8 @@ impl Router {
                         Ok(bytes) => {
                             let stream_done = stream_is_sse
                                 && sse::observe_done_event(&mut done_decoder, bytes.as_ref());
+                            at_event_boundary =
+                                sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                             if tx.send(Ok(bytes)).await.is_err() {
                                 break;
                             }
