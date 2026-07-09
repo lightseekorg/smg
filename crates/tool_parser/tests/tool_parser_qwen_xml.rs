@@ -858,7 +858,8 @@ async fn test_qwen_xml_empty_parameter_value() {
 // Literal Value (HTML-entity parity) and Python Literal Tests
 //
 // Argument values are treated literally — entity-like substrings are NOT
-// decoded, matching vLLM's Qwen3CoderToolParser. Regression guard for #1888.
+// decoded, matching Qwen's official API (verified on Qwen3-Coder and Qwen3.5).
+// Regression guard for #1888.
 // ============================================================================
 
 #[tokio::test]

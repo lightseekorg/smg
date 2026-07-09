@@ -56,11 +56,14 @@ pub struct QwenXmlParser {
 
 /// Parse a raw parameter value, similar to Python's `_safe_val`.
 ///
-/// Argument values are treated **literally** — no HTML-entity decoding. The
-/// Qwen3-Coder XML tool format is not HTML-escaped on render (the chat template
-/// emits values via `| tojson | safe` / `| string`), so parsing must not
-/// unescape it. This matches vLLM's `Qwen3CoderToolParser`, Qwen-Agent, and
-/// Qwen's chat template, all of which pass argument values through verbatim.
+/// Argument values are treated **literally** — no HTML-entity decoding. This
+/// matches Qwen's own official API (DashScope), verified for both Qwen3-Coder
+/// and Qwen3.5: a tool argument whose value contains `&amp;`, `&lt;`, `&#39;`
+/// is returned with those entities intact. The Qwen XML tool format is not
+/// HTML-escaped on render either (the chat template emits values via
+/// `| tojson | safe` / `| string`), so parsing must not unescape it. vLLM's
+/// `Qwen3CoderToolParser`, SGLang's `qwen3_coder_detector`, and Qwen-Agent all
+/// agree, passing argument values through verbatim.
 ///
 /// 1. Try to parse as JSON (numbers, booleans, null, objects, arrays)
 /// 2. Fall back to string if JSON parsing fails
@@ -515,7 +518,7 @@ mod tests {
     }
 
     // Values are treated literally: entity-like substrings must NOT be decoded
-    // (parity with vLLM's Qwen3CoderToolParser, which does no html.unescape).
+    // (parity with Qwen's official API, which returns them intact).
     #[test]
     fn test_safe_val_preserves_html_entities() {
         assert_eq!(
@@ -601,8 +604,8 @@ mod tests {
 
     // Golden conformance test (regression guard for #1888): a tool argument
     // whose value contains HTML entities must round-trip UNCHANGED, matching
-    // vLLM's `qwen3coder` parser. Covers both the schema-typed `string` path and
-    // the schema-less inference fallback.
+    // Qwen's official API (verified on Qwen3-Coder and Qwen3.5). Covers both the
+    // schema-typed `string` path and the schema-less inference fallback.
     #[tokio::test]
     async fn test_arg_values_with_entities_roundtrip_unchanged() {
         let literal = "<a>Tom &amp; Jerry</a> &lt;x&gt; it&#39;s";
