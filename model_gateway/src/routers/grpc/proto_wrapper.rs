@@ -93,6 +93,12 @@ pub struct VllmMultimodalData {
     pub flat_keys: HashMap<String, String>,
     /// Tensor keys that should remain on CPU (`keep_on_cpu=True` in vLLM).
     pub keep_on_cpu_keys: Vec<String>,
+    /// Resolved per-request SHM transport decision + size threshold (bytes),
+    /// computed upstream (transport mode / worker locality / config). `into_proto`
+    /// uses these to place each tensor inline or in /dev/shm without re-reading
+    /// config or the environment.
+    pub shm_enabled: bool,
+    pub shm_min_bytes: usize,
 }
 
 /// TRT-LLM multimodal data: raw image bytes only.
@@ -228,6 +234,8 @@ impl SglangMultimodalData {
 impl VllmMultimodalData {
     /// Convert to vLLM proto MultimodalInputs.
     pub fn into_proto(self) -> vllm::MultimodalInputs {
+        let shm_enabled = self.shm_enabled;
+        let shm_min_bytes = self.shm_min_bytes;
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
@@ -235,9 +243,9 @@ impl VllmMultimodalData {
                 (
                     k,
                     vllm::TensorData {
-                        data: v.data,
                         shape: v.shape,
                         dtype: v.dtype,
+                        payload: Some(vllm_tensor_payload(v.data, shm_enabled, shm_min_bytes)),
                     },
                 )
             })
@@ -251,9 +259,13 @@ impl VllmMultimodalData {
 
         vllm::MultimodalInputs {
             pixel_values: Some(vllm::TensorData {
-                data: self.pixel_values,
                 shape: self.pixel_values_shape,
                 dtype: "float32".to_string(),
+                payload: Some(vllm_tensor_payload(
+                    self.pixel_values,
+                    shm_enabled,
+                    shm_min_bytes,
+                )),
             }),
             model_specific_tensors,
             im_token_id: self.im_token_id,
@@ -369,32 +381,35 @@ fn tensor_bytes_to_tokenspeed(
     }
 }
 
-fn tokenspeed_tensor_payload(
+/// Engine-neutral inline-vs-SHM decision for a multimodal tensor payload. The
+/// raw bytes go inline unless SHM is enabled and the payload is at least
+/// `min_bytes`; an SHM-write failure falls back to inline. `engine` labels the
+/// metrics/logs. Each backend maps the result onto its own `TensorData` oneof.
+enum MmTensorPayload {
+    Inline(Vec<u8>),
+    Shm(common::ShmHandle),
+}
+
+fn resolve_mm_tensor_payload(
     data: Vec<u8>,
     shm_enabled: bool,
     min_bytes: usize,
-) -> tokenspeed::tensor_data::Payload {
+    engine: &'static str,
+) -> MmTensorPayload {
     use crate::observability::metrics::Metrics;
     let log_timing = log_tokenspeed_mm_timing_enabled();
     let nbytes = data.len();
-    if !shm_enabled {
-        if log_timing {
-            tracing::info!(nbytes, "smg_mm_timing tokenspeed_tensor_payload_inline");
-        }
-        Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
-        return tokenspeed::tensor_data::Payload::Inline(data);
-    }
-
-    if nbytes < min_bytes {
+    if !shm_enabled || nbytes < min_bytes {
         if log_timing {
             tracing::info!(
+                engine,
                 nbytes,
                 min_bytes,
-                "smg_mm_timing tokenspeed_tensor_payload_inline_below_threshold"
+                "smg_mm_timing mm_tensor_payload_inline"
             );
         }
-        Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
-        return tokenspeed::tensor_data::Payload::Inline(data);
+        Metrics::record_mm_tensor(engine, "inline", nbytes);
+        return MmTensorPayload::Inline(data);
     }
 
     let started = Instant::now();
@@ -402,31 +417,58 @@ fn tokenspeed_tensor_payload(
         Ok(handle) => {
             if log_timing {
                 tracing::info!(
+                    engine,
                     nbytes,
                     elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-                    "smg_mm_timing tokenspeed_shm_write"
+                    "smg_mm_timing mm_shm_write"
                 );
             }
-            Metrics::record_mm_tensor("tokenspeed", "shm", nbytes);
-            tokenspeed::tensor_data::Payload::Shm(handle)
+            Metrics::record_mm_tensor(engine, "shm", nbytes);
+            MmTensorPayload::Shm(handle)
         }
         Err(error) => {
             tracing::warn!(
                 ?error,
+                engine,
                 nbytes,
-                "Failed to create TokenSpeed SHM tensor payload; falling back to inline"
+                "Failed to write multimodal SHM tensor; falling back to inline"
             );
-            Metrics::record_mm_shm_write_failure("tokenspeed");
-            Metrics::record_mm_tensor("tokenspeed", "inline", nbytes);
-            tokenspeed::tensor_data::Payload::Inline(data)
+            Metrics::record_mm_shm_write_failure(engine);
+            Metrics::record_mm_tensor(engine, "inline", nbytes);
+            MmTensorPayload::Inline(data)
         }
     }
 }
 
+fn tokenspeed_tensor_payload(
+    data: Vec<u8>,
+    shm_enabled: bool,
+    min_bytes: usize,
+) -> tokenspeed::tensor_data::Payload {
+    match resolve_mm_tensor_payload(data, shm_enabled, min_bytes, "tokenspeed") {
+        MmTensorPayload::Inline(data) => tokenspeed::tensor_data::Payload::Inline(data),
+        MmTensorPayload::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
+    }
+}
+
+fn vllm_tensor_payload(
+    data: Vec<u8>,
+    shm_enabled: bool,
+    min_bytes: usize,
+) -> vllm::tensor_data::Payload {
+    match resolve_mm_tensor_payload(data, shm_enabled, min_bytes, "vllm") {
+        MmTensorPayload::Inline(data) => vllm::tensor_data::Payload::Inline(data),
+        MmTensorPayload::Shm(handle) => vllm::tensor_data::Payload::Shm(handle),
+    }
+}
+
 fn log_tokenspeed_mm_timing_enabled() -> bool {
-    std::env::var("SMG_LOG_MM_TIMING")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SMG_LOG_MM_TIMING")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -604,7 +646,7 @@ pub fn collect_tokenspeed_generate_request_shm_handles(
         .unwrap_or_default()
 }
 
-pub fn cleanup_tokenspeed_shm_handles(handles: &[common::ShmHandle]) {
+pub fn cleanup_mm_shm_handles(handles: &[common::ShmHandle]) {
     for handle in handles {
         let Some(name) = validate_tokenspeed_shm_name_for_cleanup(&handle.name) else {
             tracing::warn!(
@@ -646,7 +688,28 @@ pub(crate) fn finish_tokenspeed_request(
     match build(tokenspeed_mm) {
         Ok(req) => Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req))),
         Err(error) => {
-            cleanup_tokenspeed_shm_handles(&shm_handles);
+            cleanup_mm_shm_handles(&shm_handles);
+            Err(error)
+        }
+    }
+}
+
+/// Build a vLLM generate request, cleaning up any `/dev/shm` segments backing
+/// `vllm_mm` if the build fails. `into_proto` may write SHM files before the
+/// request is fully assembled (sampling/tool validation), so a build error must
+/// unlink them or the worker — which never receives the request — leaks them.
+pub(crate) fn finish_vllm_request(
+    vllm_mm: Option<vllm::MultimodalInputs>,
+    build: impl FnOnce(Option<vllm::MultimodalInputs>) -> Result<vllm::GenerateRequest, String>,
+) -> Result<ProtoGenerateRequest, String> {
+    let shm_handles = vllm_mm
+        .as_ref()
+        .map(collect_vllm_multimodal_inputs_shm_handles)
+        .unwrap_or_default();
+    match build(vllm_mm) {
+        Ok(req) => Ok(ProtoGenerateRequest::Vllm(Box::new(req))),
+        Err(error) => {
+            cleanup_mm_shm_handles(&shm_handles);
             Err(error)
         }
     }
@@ -677,7 +740,7 @@ pub(crate) fn cleanup_tokenspeed_items_encoder_shm(
         push(tensor);
     }
     if !handles.is_empty() {
-        cleanup_tokenspeed_shm_handles(&handles);
+        cleanup_mm_shm_handles(&handles);
     }
 }
 
@@ -696,6 +759,45 @@ fn collect_tokenspeed_tensor_shm_handles(
     handles: &mut Vec<common::ShmHandle>,
 ) {
     if let Some(tokenspeed::tensor_data::Payload::Shm(handle)) = &tensor.payload {
+        handles.push(handle.clone());
+    }
+}
+
+pub fn collect_vllm_multimodal_inputs_shm_handles(
+    inputs: &vllm::MultimodalInputs,
+) -> Vec<common::ShmHandle> {
+    let mut handles = Vec::new();
+    collect_optional_vllm_tensor_shm_handles(inputs.pixel_values.as_ref(), &mut handles);
+    for tensor in inputs.model_specific_tensors.values() {
+        collect_vllm_tensor_shm_handles(tensor, &mut handles);
+    }
+    handles
+}
+
+pub fn collect_vllm_generate_request_shm_handles(
+    request: &vllm::GenerateRequest,
+) -> Vec<common::ShmHandle> {
+    request
+        .mm_inputs
+        .as_ref()
+        .map(collect_vllm_multimodal_inputs_shm_handles)
+        .unwrap_or_default()
+}
+
+fn collect_optional_vllm_tensor_shm_handles(
+    tensor: Option<&vllm::TensorData>,
+    handles: &mut Vec<common::ShmHandle>,
+) {
+    if let Some(tensor) = tensor {
+        collect_vllm_tensor_shm_handles(tensor, handles);
+    }
+}
+
+fn collect_vllm_tensor_shm_handles(
+    tensor: &vllm::TensorData,
+    handles: &mut Vec<common::ShmHandle>,
+) {
+    if let Some(vllm::tensor_data::Payload::Shm(handle)) = &tensor.payload {
         handles.push(handle.clone());
     }
 }
@@ -1990,7 +2092,7 @@ mod tests {
         })
         .unwrap();
         let payload = std::fs::read(tokenspeed_shm_path(&handle.name));
-        cleanup_tokenspeed_shm_handles(std::slice::from_ref(&handle));
+        cleanup_mm_shm_handles(std::slice::from_ref(&handle));
 
         assert_eq!(payload.unwrap(), expected);
         assert!(!tokenspeed_shm_path(&handle.name).exists());
