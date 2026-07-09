@@ -405,6 +405,7 @@ async fn run_tool_loop(
         {
             Ok(action) => action,
             Err(timeout) => {
+                record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);
                 let _ = sse::send_error(&tx, &mut encoder, &stream_deadline.message(timeout)).await;
                 return Ok(());
             }

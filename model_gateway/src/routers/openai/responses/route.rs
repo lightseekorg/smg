@@ -25,10 +25,7 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
-        common::{
-            mcp_utils::request_uses_mcp_routing,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
+        common::worker_selection::{SelectWorkerRequest, WorkerSelector},
         error,
     },
     worker::{Endpoint, ProviderType, WorkerRegistry},
@@ -52,8 +49,6 @@ pub(in crate::routers::openai) async fn route_responses(
     let start = Instant::now();
     let model = model_id;
     let streaming = body.stream.unwrap_or(false);
-    let streaming_uses_mcp =
-        streaming && body.tools.as_deref().is_some_and(request_uses_mcp_routing);
 
     Metrics::record_router_request(
         metrics_labels::ROUTER_OPENAI,
@@ -195,7 +190,7 @@ pub(in crate::routers::openai) async fn route_responses(
         handle_non_streaming_response(ctx).await
     };
 
-    if response.status().is_success() && (!streaming || streaming_uses_mcp) {
+    if response.status().is_success() && !streaming {
         Metrics::record_router_duration(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,

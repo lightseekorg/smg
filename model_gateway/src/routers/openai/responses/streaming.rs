@@ -794,11 +794,16 @@ pub(super) async fn handle_simple_streaming_passthrough(
 }
 
 /// Handle streaming WITH MCP tool call interception and execution
+#[expect(
+    clippy::too_many_arguments,
+    reason = "MCP streaming needs client, worker, request context, orchestrator, format registry, and router timing"
+)]
 pub(super) fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
     worker: Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
+    router_start: Instant,
     orchestrator: &Arc<McpOrchestrator>,
     format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
@@ -811,6 +816,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
+    let stream_model_id = original_request.model.clone();
     let previous_response_id = req.previous_response_id;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
     let url = req.url;
@@ -828,6 +834,12 @@ pub(super) fn handle_streaming_with_tool_interception(
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
+        macro_rules! record_router_outcome {
+            ($status:expr) => {
+                record_responses_router_stream_outcome(&stream_model_id, router_start, $status);
+            };
+        }
+
         let mut state = ToolLoopState::new(
             original_request.input.clone(),
             existing_mcp_list_tools_labels,
@@ -871,6 +883,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         loop {
             if stream_deadline.is_total_elapsed() {
                 let _ = tx.send(Ok(stream_deadline.sse_error_event(StreamTimeoutKind::Total)));
+                record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
                 return;
             }
 
@@ -888,6 +901,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+                    record_router_outcome!(StatusCode::BAD_GATEWAY);
                     let _ = send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -899,6 +913,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 Err(timeout) => {
                     let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
                     record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                    record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
                     return;
                 }
             };
@@ -916,11 +931,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                     Err(StreamBodyReadError::Timeout(timeout)) => {
                         let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
                         record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
                         return;
                     }
                     Err(err) => stream_deadline.body_read_error_message(&err),
                 };
                 record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_router_outcome!(status_code);
                 let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
@@ -942,13 +959,14 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
 
-            'model_stream: loop {
+            loop {
                 let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
                     Ok(Some(chunk_result)) => chunk_result,
                     Ok(None) => break,
                     Err(timeout) => {
                         let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
                         record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
                         return;
                     }
                 };
@@ -969,7 +987,9 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 if tx.send(Ok(Bytes::from(done_block))).is_err() {
                                     return;
                                 }
-                                break 'model_stream;
+                                record_regular_worker_outcome(worker.as_ref(), status);
+                                record_router_outcome!(status);
+                                return;
                             }
 
                             // Process through handler
@@ -1101,6 +1121,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                     Err(e) => {
                         record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+                        record_router_outcome!(StatusCode::BAD_GATEWAY);
                         let _ = send_sse_event(
                             &tx,
                             &mut sse_encoder,
@@ -1120,6 +1141,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             // If no tool calls, we're done - stream is complete
             if !tool_calls_detected {
                 record_regular_worker_outcome(worker.as_ref(), status);
+                record_router_outcome!(status);
                 if !send_final_response_event(
                     &handler,
                     &tx,
@@ -1196,6 +1218,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     "Reached tool call limit during streaming: {}",
                     effective_limit
                 );
+                record_router_outcome!(StatusCode::BAD_GATEWAY);
                 send_sse_event(
                     &tx,
                     &mut sse_encoder,
@@ -1228,11 +1251,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                 Ok(should_continue) => should_continue,
                 Err(timeout) => {
                     let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
                     return;
                 }
             };
 
             if !should_continue {
+                record_router_outcome!(status);
                 return;
             }
 
@@ -1249,6 +1274,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     is_first_iteration = false;
                 }
                 Err(e) => {
+                    record_router_outcome!(StatusCode::BAD_GATEWAY);
                     send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -1337,6 +1363,7 @@ pub async fn handle_streaming_response(ctx: RequestContext, router_start: Instan
         worker.clone(),
         headers.as_ref(),
         req,
+        router_start,
         &mcp_orchestrator,
         mcp_format_registry,
         mcp_servers,
