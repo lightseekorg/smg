@@ -2,11 +2,11 @@
 """
 Shepherd Model Gateway CLI
 
-Provides convenient command-line interface for launching the router and server.
+Provides convenient command-line interface for launching the router and workers.
 
 Usage:
     smg launch [args]          # Launch router only
-    smg server [args]          # Launch router + server
+    smg serve [args]           # Launch backend worker(s) + router
     smg --help                 # Show help
 """
 
@@ -41,14 +41,6 @@ def create_parser() -> argparse.ArgumentParser:
         add_help=False,  # Let router handle --help
     )
 
-    # Launch server + router subcommand
-    subparsers.add_parser(
-        "server",
-        help="Launch router and server processes together",
-        description="Launch both Shepherd router and server processes",
-        add_help=False,  # Let server handle --help
-    )
-
     # Serve subcommand (two-pass parsing with lazy backend import)
     subparsers.add_parser(
         "serve",
@@ -74,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     # Handle empty command - show help
-    if not argv or argv[0] not in ["launch", "server", "serve", "-h", "--help"]:
+    if not argv or argv[0] not in ["launch", "serve", "-h", "--help"]:
         parser = create_parser()
         parser.print_help()
         sys.exit(1)
@@ -89,23 +81,6 @@ def main(argv: list[str] | None = None) -> None:
         # All router args are in unknown
         router_args = parse_router_args(unknown)
         launch_router(router_args)
-
-    elif args.command == "server":
-        # Import and call launch_server main with proper argv
-        # Note: launch_server.main() uses argparse internally which reads sys.argv
-        # We need to temporarily set sys.argv for compatibility
-        import smg.launch_server as launch_server_module
-
-        # Preserve original sys.argv
-        original_argv = sys.argv
-        try:
-            # All server args are in unknown
-            prog_name = os.path.basename(sys.argv[0]) if sys.argv else "smg"
-            sys.argv = [f"{prog_name} server"] + unknown
-            launch_server_module.main()
-        finally:
-            # Restore original sys.argv
-            sys.argv = original_argv
 
     elif args.command == "serve":
         from smg.serve import serve_main

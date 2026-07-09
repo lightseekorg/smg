@@ -58,7 +58,6 @@ bindings/python/
 │       ├── __init__.py
 │       ├── cli.py          # CLI entry point
 │       ├── serve.py        # smg serve implementation
-│       ├── launch_server.py
 │       ├── launch_router.py
 │       ├── router.py
 │       └── router_args.py
