@@ -99,15 +99,6 @@ async fn build_streaming_response(
 
     debug!(model = %model_id, status = %status, "Starting streaming response");
 
-    Metrics::record_router_duration(
-        metrics_labels::ROUTER_HTTP,
-        metrics_labels::BACKEND_EXTERNAL,
-        metrics_labels::CONNECTION_HTTP,
-        model_id,
-        "messages",
-        start_time.elapsed(),
-    );
-
     let headers = response.headers().clone();
     let upstream_stream = response.bytes_stream();
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
@@ -122,6 +113,7 @@ async fn build_streaming_response(
         stream_deadline,
         model_id.to_string(),
         start_time,
+        true,
     ));
 
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -129,23 +121,43 @@ async fn build_streaming_response(
     sse::build_sse_response(status, headers, body)
 }
 
-fn record_streaming_timeout_metrics(model_id: &str, start_time: Instant) {
-    Metrics::record_router_duration(
-        metrics_labels::ROUTER_HTTP,
-        metrics_labels::BACKEND_EXTERNAL,
-        metrics_labels::CONNECTION_HTTP,
-        model_id,
-        "messages",
-        start_time.elapsed(),
-    );
+fn record_streaming_error_metric(model_id: &str, error_type: &'static str) {
     Metrics::record_router_error(
         metrics_labels::ROUTER_HTTP,
         metrics_labels::BACKEND_EXTERNAL,
         metrics_labels::CONNECTION_HTTP,
         model_id,
         "messages",
-        "streaming_timeout",
+        error_type,
     );
+}
+
+fn record_streaming_timeout_metrics(model_id: &str, _start_time: Instant) {
+    record_streaming_error_metric(model_id, "streaming_timeout");
+}
+
+fn record_streaming_router_outcome(model_id: &str, start_time: Instant, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            "messages",
+            start_time.elapsed(),
+        );
+    } else {
+        let error_type = if status == StatusCode::GATEWAY_TIMEOUT {
+            "streaming_timeout"
+        } else {
+            metrics_labels::ERROR_BACKEND
+        };
+        record_streaming_error_metric(model_id, error_type);
+    }
+}
+
+fn is_streaming_timeout_message(message: &str) -> bool {
+    message.starts_with("Streaming request exceeded configured ")
 }
 
 async fn relay_stream_with_deadline<S>(
@@ -154,6 +166,7 @@ async fn relay_stream_with_deadline<S>(
     stream_deadline: StreamDeadline,
     model_id: String,
     start_time: Instant,
+    record_router_outcome: bool,
 ) where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
 {
@@ -161,13 +174,14 @@ async fn relay_stream_with_deadline<S>(
     let mut boundary_tail = Vec::new();
     let mut at_event_boundary = true;
     let mut terminal_decoder = SseDecoder::new();
+    let mut stream_failure_status = None;
     loop {
         let chunk = match stream_deadline.next(&mut upstream_stream).await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(timeout) => {
                 let message = stream_deadline.message(timeout);
-                record_streaming_timeout_metrics(&model_id, start_time);
+                stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                 if at_event_boundary {
                     let _ = sse::send_error(&tx, &mut encoder, &message).await;
                 } else {
@@ -189,10 +203,18 @@ async fn relay_stream_with_deadline<S>(
                 }
             }
             Err(e) => {
+                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                 let _ = tx.send(Err(io::Error::other(e))).await;
                 break;
             }
         }
+    }
+    if record_router_outcome {
+        record_streaming_router_outcome(
+            &model_id,
+            start_time,
+            stream_failure_status.unwrap_or(StatusCode::OK),
+        );
     }
 }
 
@@ -248,6 +270,7 @@ async fn build_streaming_error_response(
             stream_deadline,
             model_id.to_string(),
             start_time,
+            false,
         ));
 
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -353,7 +376,15 @@ async fn run_tool_loop(
         )
         .await;
 
-        let consumed = result?;
+        let consumed = match result {
+            Ok(consumed) => consumed,
+            Err(err) => {
+                if is_streaming_timeout_message(&err) {
+                    record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);
+                }
+                return Err(err);
+            }
+        };
         is_first_iteration = false;
 
         // Accumulate usage
