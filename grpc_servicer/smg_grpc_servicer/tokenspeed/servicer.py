@@ -432,8 +432,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             self.server_args, "tokenizer_path", ""
         )
         supports_vision = bool(getattr(model_config, "is_multimodal", False))
-        image_modality = getattr(tokenspeed_scheduler_pb2, "IMAGE", 1)
-        video_modality = getattr(tokenspeed_scheduler_pb2, "VIDEO", 3)
+        image_modality = common_pb2.IMAGE
+        video_modality = common_pb2.VIDEO
         supported_modalities = []
         if supports_vision:
             supported_modalities.append(image_modality)
@@ -1147,11 +1147,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     @staticmethod
     def _modality_from_proto(modality: int) -> Modality:
-        if modality == getattr(tokenspeed_scheduler_pb2, "IMAGE", 1):
+        if modality == common_pb2.IMAGE:
             return Modality.IMAGE
-        if modality == getattr(tokenspeed_scheduler_pb2, "VIDEO", 3):
+        if modality == common_pb2.VIDEO:
             return Modality.VIDEO
-        if modality == getattr(tokenspeed_scheduler_pb2, "AUDIO", 2):
+        if modality == common_pb2.AUDIO:
             raise ValueError("TokenSpeed audio multimodal inputs are not supported yet")
         raise ValueError(f"Unsupported multimodal item modality: {modality}")
 

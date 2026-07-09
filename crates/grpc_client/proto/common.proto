@@ -115,3 +115,12 @@ message RemoteTensorHandle {
   bytes descriptor = 2;
   uint64 nbytes = 3;
 }
+
+// Multimodal input modality, shared across engine protos so the servicers can
+// route each request to the matching encoder (image vs video vs audio).
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  IMAGE = 1;
+  AUDIO = 2;
+  VIDEO = 3;
+}

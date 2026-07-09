@@ -191,15 +191,8 @@ message PlaceholderRange {
   uint32 length = 2;
 }
 
-enum Modality {
-  MODALITY_UNSPECIFIED = 0;
-  IMAGE = 1;
-  AUDIO = 2;
-  VIDEO = 3;
-}
-
 message MultimodalItem {
-  Modality modality = 1;
+  smg.grpc.common.Modality modality = 1;
   bytes content_hash = 2;
   // Primary input to the multimodal encoder for this item. For vision models
   // this is the preprocessed image/video tensor; for audio models this can be
@@ -325,7 +318,7 @@ message GetModelInfoResponse {
   // non-vision workers before tokenization).
   bool supports_vision = 14;
   bool supports_multimodal = 15;
-  repeated Modality supported_modalities = 16;
+  repeated smg.grpc.common.Modality supported_modalities = 16;
   string model_dtype = 17;
   string multimodal_encoder_dtype = 18;
 }

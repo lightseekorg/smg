@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 import grpc
 from smg_grpc_proto.generated import (
+    common_pb2,
     tokenspeed_encoder_pb2,
     tokenspeed_encoder_pb2_grpc,
-    tokenspeed_scheduler_pb2,
 )
 
 from smg_grpc_servicer.tokenspeed.rdma_pixel import RdmaPixelPuller
@@ -145,12 +145,12 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             }
 
             if item_proto.modality in (
-                tokenspeed_scheduler_pb2.IMAGE,
-                tokenspeed_scheduler_pb2.MODALITY_UNSPECIFIED,
+                common_pb2.IMAGE,
+                common_pb2.MODALITY_UNSPECIFIED,
             ):
                 item_modality = Modality.IMAGE
                 grid_key = "image_grid_thw"
-            elif item_proto.modality == tokenspeed_scheduler_pb2.VIDEO:
+            elif item_proto.modality == common_pb2.VIDEO:
                 item_modality = Modality.VIDEO
                 grid_key = "video_grid_thw"
             else:

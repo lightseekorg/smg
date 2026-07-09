@@ -614,14 +614,26 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         ``batched_keys`` and ``flat_keys`` proto fields.
         """
         prompt_token_ids = list(tokenized.input_ids)
-        num_images = len(mm_proto.mm_placeholders)
+        num_items = len(mm_proto.mm_placeholders)
+
+        # Image vs video: vLLM routes each modality to a different encoder and
+        # expects the pixel tensor under a modality-specific key. The router sends
+        # the generic ``pixel_values`` field; rename it to ``pixel_values_videos``
+        # for the video path (grid/size tensors already carry video-specific keys).
+        is_video = mm_proto.modality == common_pb2.VIDEO
+        mm_modality = "video" if is_video else "image"
+
+        def mm_key(key: str) -> str:
+            if is_video and key == "pixel_values":
+                return "pixel_values_videos"
+            return key
 
         # Deserialize all tensors from proto
         hf_dict: dict[str, torch.Tensor] = {
-            "pixel_values": _tensor_from_proto(mm_proto.pixel_values),
+            mm_key("pixel_values"): _tensor_from_proto(mm_proto.pixel_values),
         }
         for key, td in mm_proto.model_specific_tensors.items():
-            hf_dict[key] = _tensor_from_proto(td)
+            hf_dict[mm_key(key)] = _tensor_from_proto(td)
 
         # Cast floating-point tensors to model dtype (e.g. bfloat16).
         # This mirrors _postprocess_output in multimodal/processing/context.py
@@ -631,26 +643,26 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if hf_dict[key].is_floating_point():
                 hf_dict[key] = hf_dict[key].to(dtype=model_dtype)
 
-        cpu_keys = set(mm_proto.keep_on_cpu_keys)
+        cpu_keys = {mm_key(k) for k in mm_proto.keep_on_cpu_keys}
 
         # Field configs are fully determined by the Rust router.
-        batched = set(mm_proto.batched_keys)
-        flat = dict(mm_proto.flat_keys)
+        batched = {mm_key(k) for k in mm_proto.batched_keys}
+        flat = {mm_key(k): mm_key(v) for k, v in mm_proto.flat_keys.items()}
         fields_config: dict[str, MultiModalFieldConfig] = {}
         flat_sizes_cache: dict[str, torch.Tensor] = {}
         for key in hf_dict:
             on_cpu = key in cpu_keys
             if key in batched:
-                fields_config[key] = MultiModalFieldConfig.batched("image", keep_on_cpu=on_cpu)
+                fields_config[key] = MultiModalFieldConfig.batched(mm_modality, keep_on_cpu=on_cpu)
             elif key in flat:
                 sizes_key = flat[key]
                 if sizes_key not in flat_sizes_cache:
                     flat_sizes_cache[sizes_key] = hf_dict[sizes_key].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
-                    "image", flat_sizes_cache[sizes_key], keep_on_cpu=on_cpu
+                    mm_modality, flat_sizes_cache[sizes_key], keep_on_cpu=on_cpu
                 )
             else:
-                fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
+                fields_config[key] = MultiModalFieldConfig.shared(mm_modality, num_items)
 
         batch_feature = BatchFeature(hf_dict, tensor_type="pt")
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(batch_feature, fields_config)
@@ -658,7 +670,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Build mm_hashes: dict[str, list[str]]
         mm_hashes: dict[str, list[str]] = {}
         if mm_proto.mm_hashes:
-            mm_hashes["image"] = list(mm_proto.mm_hashes)
+            mm_hashes[mm_modality] = list(mm_proto.mm_hashes)
 
         # Build mm_placeholders: dict[str, list[PlaceholderRange]]
         # When structural tokens (e.g. <|image_start|>, separators) are present
@@ -686,7 +698,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 placeholders.append(
                     PlaceholderRange(offset=p.offset, length=p.length, is_embed=is_embed)
                 )
-            mm_placeholders["image"] = placeholders
+            mm_placeholders[mm_modality] = placeholders
 
         return mm_input(
             prompt_token_ids=prompt_token_ids,

@@ -11,6 +11,7 @@ use llm_multimodal::{
     FieldLayout, Modality, ModelSpecificValue, PlaceholderRange, PreprocessedEncoderInputs,
 };
 use ndarray::ArrayViewD;
+use smg_grpc_client::common_proto as common;
 use tracing::{info, warn};
 
 use super::{
@@ -71,7 +72,7 @@ async fn assemble_multimodal_data_impl(
                 Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
             }
             GrpcClient::Vllm(_) => {
-                ensure_image_only(&precomputed, "vLLM")?;
+                ensure_image_or_video(&precomputed, "vLLM")?;
                 Ok(MultimodalData::Vllm(assemble_vllm(precomputed, workers)))
             }
             GrpcClient::Trtllm(_) => {
@@ -138,6 +139,24 @@ fn ensure_image_only(
     Ok(())
 }
 
+/// Backends that accept both image and video (single-modality per request;
+/// mixed image+video is already rejected upstream in `process`). Audio is not
+/// supported on these paths.
+fn ensure_image_or_video(
+    intermediate: &PrecomputedMultimodalIntermediate,
+    backend: &str,
+) -> Result<()> {
+    match intermediate.modality {
+        // Adds video to the previous image-only gate; ImageEmbeds/Audio stay
+        // rejected (unchanged from ensure_image_only).
+        Modality::Image | Modality::Video => Ok(()),
+        Modality::ImageEmbeds | Modality::Audio => Err(anyhow::anyhow!(
+            "{backend} multimodal path supports image and video inputs; got {}",
+            intermediate.modality
+        )),
+    }
+}
+
 fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
@@ -174,7 +193,27 @@ fn assemble_vllm(
 ) -> VllmMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
-    let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
+    let modality = match intermediate.modality {
+        Modality::Video => common::Modality::Video,
+        Modality::Audio => common::Modality::Audio,
+        Modality::Image | Modality::ImageEmbeds => common::Modality::Image,
+    };
+    let is_video = modality == common::Modality::Video;
+    // Hashes track the per-item media for encoder-output caching: videos for the
+    // video path, images otherwise.
+    let mm_hashes = if is_video {
+        intermediate
+            .videos
+            .iter()
+            .map(|video| video.hash.clone())
+            .collect()
+    } else {
+        intermediate
+            .images
+            .iter()
+            .map(|frame| frame.hash.clone())
+            .collect()
+    };
     let mm_placeholders = intermediate
         .placeholders
         .iter()
@@ -193,6 +232,7 @@ fn assemble_vllm(
         batched_keys,
         flat_keys,
         keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
+        modality,
         shm_enabled: resolve_mm_shm_enabled(workers, false),
         shm_min_bytes: resolve_mm_shm_min_bytes(workers),
     }

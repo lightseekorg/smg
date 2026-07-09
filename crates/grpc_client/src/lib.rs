@@ -5,7 +5,12 @@
 //! and SGLang scheduler backends.
 
 pub mod common_proto {
-    #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
+    #![allow(
+        clippy::all,
+        clippy::absolute_paths,
+        clippy::trivially_copy_pass_by_ref,
+        unused_qualifications
+    )]
     tonic::include_proto!("smg.grpc.common");
 }
 pub mod abort_on_drop;

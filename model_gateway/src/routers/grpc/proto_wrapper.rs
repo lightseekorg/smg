@@ -96,6 +96,9 @@ pub struct VllmMultimodalData {
     pub flat_keys: HashMap<String, String>,
     /// Tensor keys that should remain on CPU (`keep_on_cpu=True` in vLLM).
     pub keep_on_cpu_keys: Vec<String>,
+    /// Input modality (image/video). Selects the video modality
+    /// (`pixel_values_videos` / `video_grid_thw`) on the servicer side.
+    pub modality: common::Modality,
     /// Resolved per-request SHM transport decision + size threshold (bytes),
     /// computed upstream (transport mode / worker locality / config). `into_proto`
     /// uses these to place each tensor inline or in /dev/shm without re-reading
@@ -326,6 +329,7 @@ impl VllmMultimodalData {
             batched_keys: self.batched_keys,
             flat_keys: self.flat_keys,
             keep_on_cpu_keys: self.keep_on_cpu_keys,
+            modality: self.modality as i32,
         }
     }
 }
@@ -393,9 +397,9 @@ impl TokenSpeedMultimodalItem {
 
         tokenspeed::MultimodalItem {
             modality: match self.modality {
-                TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
-                TokenSpeedModality::Audio => tokenspeed::Modality::Audio as i32,
-                TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
+                TokenSpeedModality::Image => common::Modality::Image as i32,
+                TokenSpeedModality::Audio => common::Modality::Audio as i32,
+                TokenSpeedModality::Video => common::Modality::Video as i32,
             },
             content_hash: self.content_hash,
             encoder_input,
@@ -2042,7 +2046,7 @@ mod tests {
 
         assert_eq!(proto.items.len(), 1);
         let item = &proto.items[0];
-        assert_eq!(item.modality, tokenspeed::Modality::Image as i32);
+        assert_eq!(item.modality, common::Modality::Image as i32);
         assert_eq!(item.placeholder_token_id, Some(151655));
         assert_eq!(item.placeholders[0].offset, 4);
         assert_eq!(item.placeholders[0].length, 2);
@@ -2085,7 +2089,7 @@ mod tests {
 
         assert_eq!(proto.items.len(), 1);
         let item = &proto.items[0];
-        assert_eq!(item.modality, tokenspeed::Modality::Video as i32);
+        assert_eq!(item.modality, common::Modality::Video as i32);
         assert_eq!(item.placeholder_token_id, Some(151656));
         assert_eq!(item.placeholders[0].offset, 4);
         assert_eq!(item.placeholders[0].length, 2);
@@ -2234,5 +2238,35 @@ mod tests {
         // Engines without the proto field ignore the pin
         let mut mlx_req = ProtoGenerateRequest::Mlx(Box::default());
         mlx_req.set_data_parallel_rank(1);
+    }
+
+    fn vllm_mm_data(modality: common::Modality) -> VllmMultimodalData {
+        let is_video = modality == common::Modality::Video;
+        VllmMultimodalData {
+            pixel_values: vec![0u8; 16],
+            pixel_values_shape: vec![1, 4],
+            model_specific_tensors: HashMap::new(),
+            im_token_id: Some(if is_video { 151656 } else { 151655 }),
+            mm_placeholders: vec![(3, 4)],
+            mm_hashes: vec!["h0".to_string()],
+            batched_keys: vec![],
+            flat_keys: HashMap::new(),
+            keep_on_cpu_keys: vec![],
+            modality,
+            shm_enabled: false,
+            shm_min_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn vllm_modality_round_trips_into_proto() {
+        // The video path must set the proto `modality` so the servicer routes to
+        // vLLM's video modality; the image path must set image.
+        let video = vllm_mm_data(common::Modality::Video).into_proto();
+        assert_eq!(video.modality, common::Modality::Video as i32);
+        assert_eq!(video.im_token_id, Some(151656));
+
+        let image = vllm_mm_data(common::Modality::Image).into_proto();
+        assert_eq!(image.modality, common::Modality::Image as i32);
     }
 }

@@ -151,6 +151,11 @@ message MultimodalInputs {
   // Tensor keys that should remain on CPU (not transferred to GPU).
   // Maps to vLLM's MultiModalFieldConfig keep_on_cpu flag.
   repeated string keep_on_cpu_keys = 9;
+
+  // Input modality (image/video). The servicer routes video to vLLM's video
+  // modality (`pixel_values_videos` / `video_grid_thw`) and expands the video
+  // placeholder token instead of the image one. Unset (0) is treated as image.
+  smg.grpc.common.Modality modality = 10;
 }
 
 // =====================
