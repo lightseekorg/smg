@@ -102,7 +102,9 @@ class Gateway:
             raise RuntimeError("Gateway already started")
 
         is_pd_mode = prefill_workers is not None or decode_workers is not None
-        is_regular_mode = worker_urls is not None
+        # `--worker-urls` may be combined with `--enable-igw` (mixed self-hosted +
+        # external registered at startup), so IGW takes precedence over regular.
+        is_regular_mode = worker_urls is not None and not igw_mode
         is_igw_mode = igw_mode
         is_cloud_mode = cloud_backend is not None
 
@@ -125,12 +127,20 @@ class Gateway:
         if is_igw_mode:
             self.pd_mode = False
             self.igw_mode = True
+            mode_args = ["--enable-igw"]
+            num_workers = None
+            if worker_urls:
+                # IGW started with `--worker-urls` (self-hosted + external
+                # providers registered at startup, same as the CLI path).
+                mode_args += ["--worker-urls", *worker_urls]
+                num_workers = len(worker_urls)
             self._launch(
-                mode_args=["--enable-igw"],
+                mode_args=mode_args,
                 timeout=timeout,
                 show_output=show_output,
                 extra_args=extra_args,
-                log_msg="IGW gateway (no workers)",
+                num_workers=num_workers,
+                log_msg=f"IGW gateway ({num_workers or 0} worker(s))",
             )
         elif is_pd_mode:
             self.pd_mode = True

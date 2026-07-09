@@ -323,7 +323,25 @@ impl RouterManager {
         }
 
         let workers = if let Some(model) = model_id {
-            self.worker_registry.get_by_model(model).to_vec()
+            let indexed = self.worker_registry.get_by_model(model).to_vec();
+            if indexed.is_empty() {
+                // Wildcard external workers (e.g. `--worker-urls https://api.openai.com`
+                // with no key) accept any model but aren't in the per-model index, so
+                // `get_by_model` misses them. Fall back to external workers that support
+                // the model, so the request dispatches to the provider proxy router
+                // instead of the default local router. Indexed (explicit) workers win,
+                // so a local model never falls through to a wildcard. (#1871)
+                self.worker_registry
+                    .get_all()
+                    .into_iter()
+                    .filter(|w| {
+                        matches!(w.metadata().spec.runtime_type, RuntimeType::External)
+                            && w.supports_model(model)
+                    })
+                    .collect()
+            } else {
+                indexed
+            }
         } else {
             self.worker_registry.get_all()
         };
@@ -962,6 +980,59 @@ mod tests {
         fn router_type(&self) -> &'static str {
             "epd"
         }
+    }
+
+    // #1871: in IGW mode, an unlisted model served only by a keyless wildcard
+    // external worker (e.g. `--worker-urls https://api.openai.com`) must dispatch
+    // to the OpenAI proxy router, while a locally-served model stays on the local
+    // router (never leaking to the wildcard).
+    #[test]
+    fn igw_dispatches_wildcard_external_model_to_provider_router() {
+        let registry = Arc::new(WorkerRegistry::new());
+        // Local worker serving one explicit model (indexed under that model).
+        registry.register_or_replace(Arc::new(
+            BasicWorkerBuilder::new("http://local:8080")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Http)
+                .models(vec![ModelCard::new("local-model")])
+                .build(),
+        ));
+        // Keyless wildcard external worker (accepts any model, not indexed).
+        registry.register_or_replace(Arc::new(
+            BasicWorkerBuilder::new("https://api.openai.com")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Http)
+                .runtime_type(RuntimeType::External)
+                .build(),
+        ));
+
+        let mut manager = RouterManager::new(Arc::clone(&registry), reqwest::Client::new());
+        manager.enable_igw = true;
+        let manager = Arc::new(manager);
+
+        // Distinct instances so we can assert which one was selected by identity.
+        let regular: Arc<dyn RouterTrait> = Arc::new(StubRouter);
+        let openai: Arc<dyn RouterTrait> = Arc::new(StubRouter);
+        manager.register_router(router_ids::HTTP_REGULAR, regular.clone());
+        manager.register_router(router_ids::HTTP_OPENAI, openai.clone());
+
+        // Unlisted model (only the wildcard external serves it) → OpenAI router.
+        let picked = manager
+            .select_router_for_request(Some("gpt-4o-mini"))
+            .expect("a router should be selected for gpt-4o-mini");
+        assert!(
+            Arc::ptr_eq(&picked, &openai),
+            "gpt-4o-mini should dispatch to the OpenAI router"
+        );
+
+        // Locally-served model → local (regular) router; never the wildcard.
+        let picked = manager
+            .select_router_for_request(Some("local-model"))
+            .expect("a router should be selected for the local model");
+        assert!(
+            Arc::ptr_eq(&picked, &regular),
+            "local model should stay on the regular router"
+        );
     }
 
     fn test_manager(enable_igw: bool) -> Arc<RouterManager> {
