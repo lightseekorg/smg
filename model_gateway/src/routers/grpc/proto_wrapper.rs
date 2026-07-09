@@ -38,6 +38,8 @@ use smg_grpc_client::{
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
 
+use crate::routers::grpc::mm_rdma;
+
 /// Backend-neutral encode->prefill bootstrap info for one multimodal item.
 ///
 /// Backend wrappers translate this into their own proto shape when supported.
@@ -190,7 +192,7 @@ impl TokenSpeedTensor {
     }
 
     pub fn try_export_nixl_remote(self, room: i64) -> Self {
-        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+        if !mm_rdma::rdma_enabled() {
             return self;
         }
 
@@ -214,7 +216,7 @@ impl TokenSpeedTensor {
         }
 
         let nbytes = data.len() as u64;
-        match crate::routers::grpc::mm_rdma::export_pixel_buffer(room, data) {
+        match mm_rdma::export_pixel_buffer(room, data) {
             Ok(descriptor) => Self::remote(
                 common::RemoteTensorHandle {
                     transport: "nixl".to_string(),
@@ -343,7 +345,7 @@ impl TokenSpeedMultimodalData {
     /// its own room-matched export path because the room must also be injected
     /// into the encode->prefill handshake.
     pub fn try_export_encoder_inputs_nixl_remote(mut self) -> Self {
-        if !crate::routers::grpc::mm_rdma::rdma_enabled() {
+        if !mm_rdma::rdma_enabled() {
             return self;
         }
         for item in &mut self.items {

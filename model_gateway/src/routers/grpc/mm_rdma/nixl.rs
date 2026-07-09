@@ -135,7 +135,10 @@ struct ArenaRegion {
 impl MemoryRegion for ArenaRegion {
     // The NIXL trait declares this `unsafe`; the body just reinterprets a usize the
     // crate denies unsafe_code globally, so allow it for this trait impl.
-    #[allow(unsafe_code)]
+    #[expect(
+        unsafe_code,
+        reason = "NIXL MemoryRegion trait method is unsafe; body only reinterprets the stored base address as a pointer"
+    )]
     unsafe fn as_ptr(&self) -> *const u8 {
         self.base as *const u8
     }
@@ -217,7 +220,10 @@ impl SlotPool {
         // leaked memory (no aliasing typed reference). So there is no data race and no
         // overlap. Write the header gen FIRST and the trailer gen LAST so a racing
         // reuse is visible at one stamp or the other (seqlock framing).
-        #[allow(unsafe_code)]
+        #[expect(
+            unsafe_code,
+            reason = "seqlock gen-stamp write into the pre-registered NIXL slot arena"
+        )]
         unsafe {
             let p = addr as *mut u8;
             std::ptr::copy_nonoverlapping(gen_le.as_ptr(), p, GEN_BYTES);
@@ -512,7 +518,10 @@ mod tests {
     /// Read back what physically sits at a slot address (what a one-sided READ to that
     /// address would return).
     fn bytes_at(addr: u64, len: usize) -> Vec<u8> {
-        #[allow(unsafe_code)]
+        #[expect(
+            unsafe_code,
+            reason = "read bytes back from a NIXL slot address for gen verification"
+        )]
         unsafe {
             std::slice::from_raw_parts(addr as *const u8, len).to_vec()
         }

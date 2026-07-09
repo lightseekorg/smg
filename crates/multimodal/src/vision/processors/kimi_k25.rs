@@ -18,6 +18,7 @@ use ndarray::Array3;
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
     processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
+    scratch,
     transforms::{self, TransformError},
 };
 
@@ -158,7 +159,7 @@ impl KimiK25Processor {
 
         // Pooled: this per-image CHW buffer (tens of MB) is recycled by the
         // caller after patch extraction, keeping its pages mapped and hot.
-        let mut data = crate::vision::scratch::take_f32(3 * canvas_pixels);
+        let mut data = scratch::take_f32(3 * canvas_pixels);
         let (r_plane, rest) = data.split_at_mut(canvas_pixels);
         let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
 
@@ -264,7 +265,7 @@ impl VisionPreProcessor for KimiK25Processor {
             let grid_w = (cfg.new_width + cfg.pad_width) / self.patch_size;
             estimated_total += grid_h * grid_w * patch_features;
         }
-        let mut all_patches: Vec<f32> = crate::vision::scratch::take_f32_cap(estimated_total);
+        let mut all_patches: Vec<f32> = scratch::take_f32_cap(estimated_total);
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
         let mut feature_token_counts = Vec::with_capacity(images.len());
@@ -293,7 +294,7 @@ impl VisionPreProcessor for KimiK25Processor {
             // CHW tensor's storage (standard layout, offset 0) for the next image.
             Self::extract_patches_into(&tensor, self.patch_size, &mut all_patches);
             let (storage, _offset) = tensor.into_raw_vec_and_offset();
-            crate::vision::scratch::give_f32(storage);
+            scratch::give_f32(storage);
             patches_per_image.push(num_patches as i64);
         }
 

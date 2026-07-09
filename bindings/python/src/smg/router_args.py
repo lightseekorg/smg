@@ -573,7 +573,7 @@ class RouterArgs:
             type=str,
             choices=["inline", "shm", "auto", "rdma"],
             default=RouterArgs.multimodal_tensor_transport,
-            help="Multimodal tensor transport mode: inline (default), shm, auto, or rdma (NIXL pixel lane; requires the mm-rdma build)",
+            help="Multimodal tensor transport: inline (default), shm, auto, or rdma (NIXL lane; needs mm-rdma build)",
         )
         parser.add_argument(
             f"--{prefix}multimodal-shm-min-bytes",
