@@ -86,6 +86,35 @@ pub struct Router {
     webrtc_stun_server: Option<String>,
 }
 
+#[derive(Clone)]
+struct RouterStreamMetrics {
+    model_id: String,
+    endpoint: &'static str,
+    start_time: Instant,
+}
+
+fn record_regular_router_stream_outcome(metrics: &RouterStreamMetrics, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            metrics.start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            error_type_from_status(status),
+        );
+    }
+}
+
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Router")
@@ -289,7 +318,9 @@ impl Router {
             // operation per attempt
             |_: u32| async {
                 let res = self
-                    .route_typed_request_once(headers, typed_req, route, model_id, is_stream, &text)
+                    .route_typed_request_once(
+                        headers, typed_req, route, model_id, is_stream, &text, start,
+                    )
                     .await;
 
                 // Need to be outside `route_typed_request_once` because that function has multiple return paths
@@ -316,7 +347,7 @@ impl Router {
         )
         .await;
 
-        if response.status().is_success() {
+        if !is_stream && response.status().is_success() {
             let duration = start.elapsed();
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
@@ -326,7 +357,7 @@ impl Router {
                 endpoint,
                 duration,
             );
-        } else if !is_retryable_status(response.status()) {
+        } else if !response.status().is_success() && !is_retryable_status(response.status()) {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_REGULAR,
@@ -340,6 +371,10 @@ impl Router {
         response
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "typed retry attempts pass route metadata and stream metric context explicitly"
+    )]
     async fn route_typed_request_once<T: GenerationRequest + serde::Serialize + Clone>(
         &self,
         headers: Option<&HeaderMap>,
@@ -348,6 +383,7 @@ impl Router {
         model_id: &str,
         is_stream: bool,
         text: &str,
+        start_time: Instant,
     ) -> Response {
         let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
             Some(w) => w,
@@ -396,6 +432,11 @@ impl Router {
                 worker.clone(),
                 is_stream,
                 load_guard,
+                RouterStreamMetrics {
+                    model_id: model_id.to_string(),
+                    endpoint: route_to_endpoint(route),
+                    start_time,
+                },
             )
             .await;
 
@@ -925,6 +966,10 @@ impl Router {
     }
 
     // Send typed request directly without conversion
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request forwarding needs worker, load guard, stream mode, and metric context"
+    )]
     async fn send_typed_request<T: serde::Serialize>(
         &self,
         headers: Option<&HeaderMap>,
@@ -933,6 +978,7 @@ impl Router {
         worker: Arc<dyn Worker>,
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
+        router_metrics: RouterStreamMetrics,
     ) -> Response {
         let api_key = worker.api_key().cloned();
         let endpoint_url = worker.endpoint_url(route);
@@ -1033,6 +1079,7 @@ impl Router {
             const STREAM_RELAY_BUFFER: usize = 32;
             let (tx, rx) = mpsc::channel(STREAM_RELAY_BUFFER);
             let worker_for_stream = worker.clone();
+            let stream_router_metrics = router_metrics.clone();
 
             // Spawn task to forward stream
             #[expect(
@@ -1082,6 +1129,7 @@ impl Router {
                 let effective_status = stream_failure_status.unwrap_or(status);
                 if status.is_success() {
                     record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+                    record_regular_router_stream_outcome(&stream_router_metrics, effective_status);
                 }
             });
 

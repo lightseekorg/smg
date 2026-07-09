@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
@@ -78,6 +78,28 @@ fn record_regular_worker_outcome(worker: &dyn Worker, status: StatusCode) {
         Metrics::record_worker_error(
             metrics_labels::WORKER_REGULAR,
             metrics_labels::CONNECTION_HTTP,
+            error_type_from_status(status),
+        );
+    }
+}
+
+fn record_responses_router_stream_outcome(model_id: &str, start_time: Instant, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_RESPONSES,
+            start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_RESPONSES,
             error_type_from_status(status),
         );
     }
@@ -552,9 +574,11 @@ pub(super) async fn handle_simple_streaming_passthrough(
     worker: &Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
+    router_start: Instant,
 ) -> Response {
     let stream_timeout = req.stream_timeout;
     let stream_idle_timeout = req.stream_idle_timeout;
+    let stream_model_id = req.original_body.model.clone();
     let mut request_builder = client.post(&req.url).json(&req.payload);
     let provider = ApiProvider::from_url(&req.url);
     let auth_header = provider.extract_auth_header(headers, worker.api_key());
@@ -567,6 +591,11 @@ pub(super) async fn handle_simple_streaming_passthrough(
         Ok(Ok(resp)) => resp,
         Ok(Err(err)) => {
             record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+            record_responses_router_stream_outcome(
+                &stream_model_id,
+                router_start,
+                StatusCode::BAD_GATEWAY,
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
@@ -575,6 +604,11 @@ pub(super) async fn handle_simple_streaming_passthrough(
         }
         Err(_) => {
             record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+            record_responses_router_stream_outcome(
+                &stream_model_id,
+                router_start,
+                StatusCode::GATEWAY_TIMEOUT,
+            );
             return (
                 StatusCode::GATEWAY_TIMEOUT,
                 stream_deadline.message(StreamTimeoutKind::Total),
@@ -595,10 +629,16 @@ pub(super) async fn handle_simple_streaming_passthrough(
         {
             Ok(body) => {
                 record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_responses_router_stream_outcome(&stream_model_id, router_start, status_code);
                 body
             }
             Err(StreamBodyReadError::Timeout(timeout)) => {
                 record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                record_responses_router_stream_outcome(
+                    &stream_model_id,
+                    router_start,
+                    StatusCode::GATEWAY_TIMEOUT,
+                );
                 return (
                     StatusCode::GATEWAY_TIMEOUT,
                     stream_deadline.message(timeout),
@@ -607,6 +647,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
             Err(err) => {
                 record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_responses_router_stream_outcome(&stream_model_id, router_start, status_code);
                 stream_deadline.body_read_error_message(&err)
             }
         };
@@ -625,6 +666,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
     let worker_for_stream = worker.clone();
+    let stream_model_id_for_relay = stream_model_id.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -696,6 +738,11 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
         let effective_status = stream_failure_status.unwrap_or(status_code);
         record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+        record_responses_router_stream_outcome(
+            &stream_model_id_for_relay,
+            router_start,
+            effective_status,
+        );
 
         if should_store && stream_failure_status.is_none() {
             if chunk_processor.has_remaining() {
@@ -1225,7 +1272,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 }
 
 /// Main entry point for streaming responses
-pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
+pub async fn handle_streaming_response(ctx: RequestContext, router_start: Instant) -> Response {
     use crate::routers::common::mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing};
 
     let worker = match ctx.worker() {
@@ -1275,7 +1322,14 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing else {
-        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
+        return handle_simple_streaming_passthrough(
+            &client,
+            &worker,
+            headers.as_ref(),
+            req,
+            router_start,
+        )
+        .await;
     };
 
     handle_streaming_with_tool_interception(

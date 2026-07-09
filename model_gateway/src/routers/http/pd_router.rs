@@ -76,6 +76,35 @@ struct PDRequestContext<'a> {
     headers: Option<HeaderMap>,
 }
 
+#[derive(Clone)]
+struct PDRouterStreamMetrics {
+    model_id: String,
+    endpoint: &'static str,
+    start_time: Instant,
+}
+
+fn record_pd_router_stream_outcome(metrics: &PDRouterStreamMetrics, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_PD,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            metrics.start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_PD,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            error_type_from_status(status),
+        );
+    }
+}
+
 enum PDDispatchError {
     Transport(String),
     StreamingTimeout(StreamTimeoutKind),
@@ -316,6 +345,7 @@ impl PDRouter {
         let route = context.route;
         let model = context.model_id;
         let endpoint = route_to_endpoint(route);
+        let route_is_stream = context.is_stream;
 
         // Record request start (Layer 2)
         Metrics::record_router_request(
@@ -449,6 +479,7 @@ impl PDRouter {
                                 context,
                                 Arc::clone(&prefill),
                                 Arc::clone(&decode),
+                                start_time,
                             )
                             .await;
 
@@ -477,7 +508,7 @@ impl PDRouter {
 
         // Record Layer 2 metrics
         let duration = start_time.elapsed();
-        if response.status().is_success() {
+        if !route_is_stream && response.status().is_success() {
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_PD,
@@ -486,7 +517,7 @@ impl PDRouter {
                 endpoint,
                 duration,
             );
-        } else if !is_retryable_status(response.status()) {
+        } else if !response.status().is_success() && !is_retryable_status(response.status()) {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_PD,
@@ -553,6 +584,7 @@ impl PDRouter {
                 None,
                 load_guards,
                 stream_deadline,
+                None,
             )
         } else {
             // Handle non-streaming error response
@@ -627,6 +659,10 @@ impl PDRouter {
     }
 
     // Internal method that performs the actual dual dispatch (without retry logic)
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PD dispatch must carry both leg payloads, selected workers, and router timing"
+    )]
     async fn execute_dual_dispatch_internal(
         &self,
         headers: Option<&HeaderMap>,
@@ -635,6 +671,7 @@ impl PDRouter {
         context: PDRequestContext<'_>,
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
+        router_start: Instant,
     ) -> Response {
         let load_guards = vec![
             WorkerLoadGuard::new(prefill.clone(), headers),
@@ -819,6 +856,11 @@ impl PDRouter {
                 Some((prefill.clone(), decode.clone())),
                 load_guards,
                 stream_deadline,
+                Some(PDRouterStreamMetrics {
+                    model_id: context.model_id.to_string(),
+                    endpoint: route_to_endpoint(context.route),
+                    start_time: router_start,
+                }),
             )
         } else {
             // Non-streaming response
@@ -1014,6 +1056,7 @@ impl PDRouter {
         outcome_workers: Option<(Arc<dyn Worker>, Arc<dyn Worker>)>,
         load_guards: Vec<WorkerLoadGuard>,
         stream_deadline: StreamDeadline,
+        router_metrics: Option<PDRouterStreamMetrics>,
     ) -> Response {
         use crate::worker::AttachedBody;
 
@@ -1084,6 +1127,11 @@ impl PDRouter {
             if let Some((prefill, decode)) = outcome_workers {
                 let effective_status = stream_failure_status.unwrap_or(status);
                 record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), effective_status);
+                if status.is_success() {
+                    if let Some(metrics) = router_metrics.as_ref() {
+                        record_pd_router_stream_outcome(metrics, effective_status);
+                    }
+                }
             }
         });
 
@@ -1900,6 +1948,7 @@ mod tests {
                 None,
                 guards,
                 StreamDeadline::new(router.stream_timeout, router.stream_idle_timeout),
+                None,
             );
 
             // Guards are now attached to response body, so load should be 1

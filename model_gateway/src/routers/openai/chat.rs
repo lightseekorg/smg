@@ -57,6 +57,28 @@ fn record_regular_worker_outcome(worker: &dyn Worker, status: StatusCode) {
     }
 }
 
+fn record_chat_router_stream_outcome(model_id: &str, start_time: Instant, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_CHAT,
+            start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_CHAT,
+            error_type_from_status(status),
+        );
+    }
+}
+
 /// Route a chat completion request to the appropriate upstream worker.
 pub(super) async fn route_chat(
     deps: &ChatRouterContext<'_>,
@@ -242,6 +264,8 @@ pub(super) async fn route_chat(
                     let stream = resp.bytes_stream();
                     let (tx, rx) = mpsc::unbounded_channel();
                     let worker_for_stream = worker.clone();
+                    let stream_model_id = model.to_string();
+                    let stream_start = start;
                     #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
                     tokio::spawn(async move {
                         let mut s = stream;
@@ -286,6 +310,11 @@ pub(super) async fn route_chat(
                         let effective_status = stream_failure_status.unwrap_or(status);
                         if status.is_success() {
                             record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+                            record_chat_router_stream_outcome(
+                                &stream_model_id,
+                                stream_start,
+                                effective_status,
+                            );
                         }
                     });
                     let mut response =
@@ -333,7 +362,7 @@ pub(super) async fn route_chat(
     )
     .await;
 
-    if response.status().is_success() {
+    if !streaming && response.status().is_success() {
         Metrics::record_router_duration(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,
