@@ -476,6 +476,75 @@ class TestIGWMixedWorkerClassification:
 @pytest.mark.engine("sglang")
 @pytest.mark.gpu(1)
 @pytest.mark.e2e
+class TestWorkerUrlsMixedExternal:
+    """Regression for discussion #1871: mixed local + OpenAI via ``--worker-urls``.
+
+    Starting the gateway with ``--worker-urls <local-sglang> https://api.openai.com``
+    registers the OpenAI URL as an external worker; a ``gpt-*`` request routes to it
+    and the caller's ``Authorization`` (BYOK) is forwarded upstream. External workers
+    stay open-ended/wildcard for routing, so models newer than a provider's
+    ``/v1/models`` still forward. Exercises the CLI startup path (not ``POST /workers``).
+
+    Requires OPENAI_API_KEY (used as the caller's bearer token).
+    """
+
+    def test_worker_urls_openai_routes_with_byok(self):
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_key:
+            pytest.skip("OPENAI_API_KEY not set")
+
+        engine = os.environ.get("E2E_ENGINE", "sglang")
+        model = "meta-llama/Llama-3.1-8B-Instruct"
+        http_workers = start_workers(model, engine, mode=ConnectionMode.HTTP, count=1)
+
+        try:
+            # Regular mode == the reported `--worker-urls` path (CLI startup, no
+            # POST /workers).
+            gateway = Gateway()
+            try:
+                gateway.start(
+                    worker_urls=[http_workers[0].base_url, "https://api.openai.com"],
+                    model_path=model,
+                    policy="cache_aware",
+                )
+
+                # The OpenAI URL is classified as an external worker.
+                raw = httpx.get(f"{gateway.base_url}/workers", timeout=10).json()
+                openai_worker = next(
+                    (w for w in raw.get("workers", []) if "api.openai.com" in w.get("url", "")),
+                    None,
+                )
+                assert openai_worker is not None, f"OpenAI worker not registered: {raw}"
+                assert openai_worker.get("runtime_type") == "external", (
+                    f"OpenAI worker should be external, got {openai_worker.get('runtime_type')}"
+                )
+
+                # A gpt-* request routes to the OpenAI worker; the caller's bearer
+                # (BYOK) is forwarded upstream. Only the OpenAI worker matches gpt-*,
+                # so routing is unambiguous alongside the local worker.
+                resp = httpx.post(
+                    f"{gateway.base_url}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {openai_key}"},
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                    timeout=30,
+                )
+                assert resp.status_code == 200, (
+                    "gpt request should route to the external OpenAI worker and "
+                    f"forward the caller's key, got {resp.status_code}: {resp.text}"
+                )
+            finally:
+                gateway.shutdown()
+        finally:
+            stop_workers(http_workers)
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
 class TestWorkerAPIRestSemantics:
     """Tests for proper REST semantics on worker management endpoints.
 

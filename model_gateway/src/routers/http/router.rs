@@ -169,13 +169,33 @@ impl Router {
         } else {
             Some(model_id)
         };
-        let workers = self.worker_registry.get_workers_filtered(
+        let mut workers = self.worker_registry.get_workers_filtered(
             model_filter,
             Some(WorkerType::Regular),
             Some(ConnectionMode::Http),
             None,  // any runtime type
             false, // get all workers, we'll filter by is_available() next
         );
+
+        // Wildcard workers (external providers registered via `--worker-urls`)
+        // accept any model but aren't in the per-model index, so the lookup
+        // above misses them. When no worker explicitly serves this model, fall
+        // back to workers that support it (wildcards), so e.g. `gpt-*` routes to
+        // an external OpenAI worker alongside local models. Explicit matches
+        // win — a local model never falls through to a wildcard. (#1871)
+        if workers.is_empty() {
+            if let Some(model) = model_filter {
+                let mut fallback = self.worker_registry.get_workers_filtered(
+                    None,
+                    Some(WorkerType::Regular),
+                    Some(ConnectionMode::Http),
+                    None,
+                    false,
+                );
+                fallback.retain(|w| w.supports_model(model));
+                workers = fallback;
+            }
+        }
 
         let available: Vec<Arc<dyn Worker>> = workers
             .iter()
@@ -1423,7 +1443,7 @@ impl RouterTrait for Router {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::{model_card::ModelCard, worker::HealthCheckConfig};
 
     use super::*;
     use crate::{config::types::PolicyConfig, worker::BasicWorkerBuilder};
@@ -1502,5 +1522,53 @@ mod tests {
 
         let worker = router.worker_registry.get_by_url(&url).unwrap();
         assert!(worker.is_healthy());
+    }
+
+    /// #1871: with a local worker plus a wildcard external worker (an external
+    /// provider registered via `--worker-urls`), an unlisted model (e.g. `gpt-*`)
+    /// must fall back to the wildcard worker — it isn't in the per-model index —
+    /// while a locally-served model still routes to the local worker.
+    #[test]
+    fn select_worker_for_model_falls_back_to_wildcard() {
+        let worker_registry = Arc::new(WorkerRegistry::new());
+        // Local worker serving one explicit model (indexed under that model).
+        worker_registry.register_or_replace(Arc::new(
+            BasicWorkerBuilder::new("http://local:8080")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Http)
+                .health_config(no_health_check())
+                .models(vec![ModelCard::new("meta-llama/Llama-3.1-8B-Instruct")])
+                .build(),
+        ));
+        // Wildcard external worker (no models → accepts any model).
+        worker_registry.register_or_replace(Arc::new(
+            BasicWorkerBuilder::new("http://api.openai.com")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Http)
+                .runtime_type(crate::worker::RuntimeType::External)
+                .health_config(no_health_check())
+                .build(),
+        ));
+        let router = Router {
+            worker_registry,
+            policy_registry: Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin)),
+            client: Client::new(),
+            retry_config: RetryConfig::default(),
+            realtime_registry: Arc::new(RealtimeRegistry::new()),
+            webrtc_bind_addr: None,
+            webrtc_stun_server: None,
+        };
+
+        // Unlisted model → wildcard external worker.
+        let picked = router
+            .select_worker_for_model("gpt-4o-mini", None, None)
+            .expect("gpt-4o-mini should fall back to the wildcard worker");
+        assert_eq!(picked.url(), "http://api.openai.com");
+
+        // Locally-served model → local worker (explicit match wins).
+        let picked = router
+            .select_worker_for_model("meta-llama/Llama-3.1-8B-Instruct", None, None)
+            .expect("local model should route to the local worker");
+        assert_eq!(picked.url(), "http://local:8080");
     }
 }
