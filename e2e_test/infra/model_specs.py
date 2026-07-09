@@ -162,6 +162,20 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "multimodal"],
     },
+    # TokenSpeed EPD multimodal model: Qwen3.6-35B-A3B (arch
+    # Qwen3_5MoeForConditionalGeneration — in TokenSpeed's multimodal registry —
+    # with a SigLIP vision tower). FP8 (not NVFP4): FP8 is Hopper-native so it runs
+    # on the h100 runner, whereas NVFP4 needs Blackwell. Only 3B params are active,
+    # so the FP8 weights (~35GB) fit one H100 at tp=1; that lets every EPD topology
+    # (1e1p1d/1e2p1d/2e1p1d/1e1p2d) run on the 4-GPU h100 runner, one worker per
+    # card. EPD (Encode-Prefill-Decode) disaggregation is TokenSpeed-only: the
+    # encode worker runs the vision tower, prefill/decode run the LM.
+    "Qwen/Qwen3.6-35B-A3B-FP8": {
+        "model": _resolve_model_path("Qwen/Qwen3.6-35B-A3B-FP8"),
+        "tp": 1,
+        "features": ["chat", "streaming", "multimodal", "moe"],
+        "startup_timeout": 600,
+    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),

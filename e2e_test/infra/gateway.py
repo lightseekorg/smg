@@ -42,9 +42,10 @@ class WorkerInfo:
 class Gateway:
     """Manages a Shepherd Model Gateway router instance.
 
-    Four startup modes:
+    Five startup modes:
     - Regular: start(worker_urls=[...], model_path="...")
     - PD: start(prefill_workers=[...], decode_workers=[...])
+    - EPD: start(encode_workers=[...], prefill_workers=[...], decode_workers=[...])
     - IGW: start(igw_mode=True), then add_worker(url) dynamically
     - Cloud: start(cloud_backend="openai"|"xai"|"anthropic")
     """
@@ -69,6 +70,7 @@ class Gateway:
         self.log_level: str = "warn"
         self.log_dir: str | None = None
         self.pd_mode: bool = False
+        self.epd_mode: bool = False
         self.igw_mode: bool = False
         self.cloud_mode: bool = False
         self.cloud_backend: str | None = None
@@ -85,8 +87,10 @@ class Gateway:
         *,
         worker_urls: list[str] | None = None,
         model_path: str | None = None,
+        encode_workers: list[Worker] | None = None,
         prefill_workers: list[Worker] | None = None,
         decode_workers: list[Worker] | None = None,
+        encode_policy: str | None = None,
         igw_mode: bool = False,
         cloud_backend: str | None = None,
         history_backend: str = "memory",
@@ -97,20 +101,24 @@ class Gateway:
         log_level: str | None = None,
         log_dir: str | None = None,
     ) -> None:
-        """Start the gateway in exactly one mode (regular, PD, IGW, or cloud)."""
+        """Start the gateway in exactly one mode (regular, PD, EPD, IGW, or cloud)."""
         if self._started:
             raise RuntimeError("Gateway already started")
 
-        is_pd_mode = prefill_workers is not None or decode_workers is not None
+        is_epd_mode = encode_workers is not None
+        # EPD also passes prefill/decode workers, so gate PD on the absence of encode.
+        is_pd_mode = not is_epd_mode and (prefill_workers is not None or decode_workers is not None)
         is_regular_mode = worker_urls is not None
         is_igw_mode = igw_mode
         is_cloud_mode = cloud_backend is not None
 
-        modes_specified = sum([is_pd_mode, is_regular_mode, is_igw_mode, is_cloud_mode])
+        modes_specified = sum(
+            [is_epd_mode, is_pd_mode, is_regular_mode, is_igw_mode, is_cloud_mode]
+        )
         if modes_specified != 1:
             raise ValueError(
-                "Specify exactly one mode: worker_urls, prefill/decode_workers, "
-                "igw_mode=True, or cloud_backend"
+                "Specify exactly one mode: worker_urls, encode/prefill/decode_workers, "
+                "prefill/decode_workers, igw_mode=True, or cloud_backend"
             )
 
         if show_output is None:
@@ -153,6 +161,40 @@ class Gateway:
                 show_output=show_output,
                 extra_args=extra_args,
                 log_msg=f"PD gateway ({len(prefills)} prefill, {len(decodes)} decode)",
+            )
+        elif is_epd_mode:
+            self.pd_mode = False
+            self.epd_mode = True
+            self.igw_mode = False
+            encodes = encode_workers or []
+            prefills = prefill_workers or []
+            decodes = decode_workers or []
+
+            mode_args = ["--epd-disaggregation"]
+            for en in encodes:
+                if en.bootstrap_port is not None:
+                    mode_args += ["--encode", en.base_url, str(en.bootstrap_port)]
+                else:
+                    mode_args += ["--encode", en.worker_url]
+            for pf in prefills:
+                if pf.bootstrap_port is not None:
+                    mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
+                else:
+                    mode_args += ["--prefill", pf.worker_url]
+            for dc in decodes:
+                mode_args += ["--decode", dc.worker_url]
+            if encode_policy:
+                mode_args += ["--encode-policy", encode_policy]
+
+            self._launch(
+                mode_args=mode_args,
+                timeout=timeout,
+                show_output=show_output,
+                extra_args=extra_args,
+                log_msg=(
+                    f"EPD gateway ({len(encodes)} encode, "
+                    f"{len(prefills)} prefill, {len(decodes)} decode)"
+                ),
             )
         elif is_cloud_mode:
             assert cloud_backend is not None

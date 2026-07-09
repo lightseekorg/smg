@@ -41,6 +41,7 @@ class Worker:
     gpu_ids: list[int]
     mode: ConnectionMode = ConnectionMode.HTTP
     worker_type: WorkerType = WorkerType.REGULAR
+    tp_override: int | None = None  # per-worker tp (else model spec's tp)
     bootstrap_port: int | None = None
     nixl_port: int | None = None
     ib_device: str | None = None
@@ -173,7 +174,10 @@ class Worker:
         """Build engine-specific launch command using model specs."""
         spec = get_model_spec(self.model_id)
         model_path = spec["model"]
-        tp_size = spec.get("tp", 1)
+        # tp defaults to the spec's tp. A per-worker ``tp_override`` (e.g. the EPD
+        # encode worker's vision tower at tp=1) wins — it decouples tp from the
+        # spec tp without disturbing the ``gpus``-only DP path (gpus=dp*tp, tp=1).
+        tp_size = self.tp_override if self.tp_override is not None else spec.get("tp", 1)
         features = spec.get("features", [])
 
         if self.engine == "sglang":
@@ -341,6 +345,15 @@ class Worker:
             # ``logprobs=True`` requests get real per-token data back.
             "--enable-output-logprobs",
         ]
+
+        # EPD disaggregation: encode/prefill/decode are the SAME module, split by
+        # ``--disaggregation-mode``. Encode + prefill get a bootstrap port for the
+        # mooncake rendezvous; decode has none (mirrors the SGLang PD branch).
+        if self.worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE):
+            cmd.extend(["--disaggregation-mode", self.worker_type.value])
+            if self.bootstrap_port:
+                cmd.extend(["--disaggregation-bootstrap-port", str(self.bootstrap_port)])
+
         extra = spec.get("tokenspeed_args", [])
         if extra:
             cmd.extend(extra)
@@ -537,9 +550,14 @@ def start_workers(
     gpus_per_worker = gpus or spec.get("tp", 1)
     timeout = spec.get("startup_timeout", timeout)
 
-    # Detect IB device for PD workers
-    has_pd = worker_type in (WorkerType.PREFILL, WorkerType.DECODE)
+    # Detect IB device for disaggregated (PD / EPD) workers
+    has_pd = worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE)
     ib_device = detect_ib_device() if has_pd else None
+
+    # The EPD encode worker runs the vision tower at tp == its GPU count (not DP),
+    # so its tp must track ``gpus`` rather than the LM's spec tp. Other worker
+    # types keep spec tp (``gpus``-only DP callers pass gpus=dp*tp with tp=1).
+    tp_override = gpus_per_worker if worker_type == WorkerType.ENCODE else None
 
     workers: list[Worker] = []
 
@@ -548,7 +566,10 @@ def start_workers(
             gpu_ids = list(range(gpu_offset, gpu_offset + gpus_per_worker))
             gpu_offset += gpus_per_worker
             port = get_open_port()
-            bootstrap_port = get_open_port() if worker_type == WorkerType.PREFILL else None
+            # Encode + prefill advertise a bootstrap port for the mooncake
+            # rendezvous; decode connects out and needs none.
+            needs_bootstrap = worker_type in (WorkerType.ENCODE, WorkerType.PREFILL)
+            bootstrap_port = get_open_port() if needs_bootstrap else None
 
             worker = Worker(
                 model_id=model_id,
@@ -557,6 +578,7 @@ def start_workers(
                 gpu_ids=gpu_ids,
                 mode=mode,
                 worker_type=worker_type,
+                tp_override=tp_override,
                 bootstrap_port=bootstrap_port,
                 ib_device=ib_device if has_pd else None,
                 log_dir=log_dir,

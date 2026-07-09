@@ -57,6 +57,10 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "epd(encode=1, prefill=1, decode=1): EPD disaggregation worker topology",
+    )
+    config.addinivalue_line(
+        "markers",
         "storage(backend): storage backend for cloud tests (memory, oracle-custom)",
     )
     config.addinivalue_line(
