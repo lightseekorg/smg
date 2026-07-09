@@ -103,8 +103,6 @@ class RouterArgs:
     storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
-    # Maximum time a streaming response may go without yielding a chunk
-    stream_idle_timeout_secs: int = 300
     # Grace period in seconds to wait for in-flight requests during shutdown
     shutdown_grace_period_secs: int = 180
     # Max concurrent requests for rate limiting (-1 to disable)
@@ -202,6 +200,9 @@ class RouterArgs:
     mesh_advertise_host: str | None = None
     mesh_port: int = 39527
     mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
+    # Maximum time a streaming response may go without yielding a chunk.
+    # Appended to preserve positional RouterArgs constructor compatibility.
+    stream_idle_timeout_secs: int = 300
 
     @staticmethod
     def add_cli_args(
