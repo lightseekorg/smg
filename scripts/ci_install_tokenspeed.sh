@@ -22,7 +22,10 @@ fi
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
 # caught up.
-TOKENSPEED_REF="${TOKENSPEED_REF:-5e145afae8e5651cd66234e68c988c31aac6639f}"
+# Bumped to include the EPD encode pipeline (tokenspeed #548, b5c762d): the SMG
+# encode servicer already expects `--disaggregation-mode encode`, which the old
+# pin (5e145af) predated — the EPD e2e's encode worker died on "invalid choice".
+TOKENSPEED_REF="${TOKENSPEED_REF:-69091e10c90c0e0f6e97c2bfdd332d61362ddd55}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 
