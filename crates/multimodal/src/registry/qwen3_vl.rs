@@ -55,14 +55,6 @@ impl Qwen3VLVisionSpec {
             })
     }
 
-    fn is_qwen3_5(metadata: &ModelMetadata) -> bool {
-        let id = metadata.model_id.to_ascii_lowercase();
-        let model_type = metadata.config_model_type();
-        id.contains("qwen3.5")
-            || id.contains("qwen3.6")
-            || model_type.is_some_and(|mt| mt == "qwen3_5" || mt == "qwen3_5_moe")
-    }
-
     fn video_grid_t(preprocessed: &PreprocessedEncoderInputs) -> Option<usize> {
         match preprocessed.model_specific.get("video_grid_thw") {
             Some(ModelSpecificValue::IntTensor { data, shape })
@@ -92,7 +84,16 @@ impl Qwen3VLVisionSpec {
             .unwrap_or_default()
     }
 
-    fn qwen3_5_video_replacement_tokens(
+    /// Build the per-frame video placeholder body for the Qwen3-VL family.
+    ///
+    /// Qwen3-VL lays out video as one `<|vision_start|> .. <|vision_end|>` block
+    /// per temporal frame with a `<seconds>` timestamp between frames. The chat
+    /// template already supplies the outer `<|vision_start|>`/`<|vision_end|>`, so
+    /// this emits only the inner per-frame structure (hence the `grid_idx > 0`
+    /// guards that reuse the template's opener/closer for the first/last frame).
+    /// Returns `None` when the layout can't apply (single-frame or ragged token
+    /// counts), leaving the caller to fall back to a flat pad block.
+    fn per_frame_video_tokens(
         metadata: &ModelMetadata,
         pad_token_id: TokenId,
         num_tokens: usize,
@@ -246,21 +247,29 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
                     .feature_token_counts
                     .iter()
                     .map(|&num_tokens| {
-                        let tokens = if Self::is_qwen3_5(metadata) {
-                            video_grid_t
-                                .and_then(|grid_t| {
-                                    Self::qwen3_5_video_replacement_tokens(
-                                        metadata,
-                                        pad_token_id,
-                                        num_tokens,
-                                        grid_t,
-                                    )
-                                })
-                                .unwrap_or_else(|| vec![pad_token_id; num_tokens])
-                        } else {
-                            vec![pad_token_id; num_tokens]
-                        };
+                        // Every Qwen3-VL model routed to this spec (base VL and the
+                        // 3.5/3.6 family) needs the per-frame video layout: vLLM's
+                        // mrope pass scans for one <|vision_start|> per temporal
+                        // frame, so a single flat block crashes any multi-frame
+                        // video. Fall back to a flat block only when the per-frame
+                        // layout can't be built (single-frame or unknown grid_t).
+                        let tokens = video_grid_t
+                            .and_then(|grid_t| {
+                                Self::per_frame_video_tokens(
+                                    metadata,
+                                    pad_token_id,
+                                    num_tokens,
+                                    grid_t,
+                                )
+                            })
+                            .unwrap_or_else(|| vec![pad_token_id; num_tokens]);
+                        // The chat template wraps the placeholder as
+                        // <|vision_start|><|video_pad|><|vision_end|>; the leading
+                        // <|vision_start|> belongs to the placeholder range so vLLM's
+                        // per-frame video mrope finds one marker per frame starting at
+                        // the range offset (it scans even for a single frame).
                         PromptReplacement::sequence(Modality::Video, &placeholder_token, tokens)
+                            .with_structural_prefix(1)
                     })
                     .collect())
             }
@@ -391,6 +400,51 @@ mod tests {
             .prompt_replacements_for(&metadata, &preprocessed, crate::types::Modality::Video)
             .unwrap();
 
+        let tokens = &replacements[0].tokens;
+        assert_eq!(tokens.len(), 162);
+        assert!(tokens[..80].iter().all(|&token| token == 151656));
+        assert_eq!(tokens[80], 151653);
+        assert_eq!(tokens[81], 151652);
+        assert!(tokens[82..].iter().all(|&token| token == 151656));
+    }
+
+    #[test]
+    fn qwen3_vl_video_splits_temporal_grid() {
+        // Base Qwen3-VL (not the 3.5/3.6 family) must ALSO emit one vision block
+        // per temporal frame. vLLM's mrope pass scans for a <|vision_start|> per
+        // frame, so a flat single block crashes any multi-frame video. Regression
+        // guard for the is_qwen3_5-only gate that previously left base VL flat.
+        let tokenizer = TestTokenizer::new(&[
+            ("<|video_pad|>", 151656),
+            ("<|vision_start|>", 151652),
+            ("<|vision_end|>", 151653),
+        ]);
+        let config = json!({
+            "model_type": "qwen3_vl",
+            "image_token_id": 151655,
+            "video_token_id": 151656,
+            "vision_start_token_id": 151652,
+            "vision_end_token_id": 151653,
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen/Qwen3-VL-8B-Instruct",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3_vl spec");
+        assert_eq!(spec.name(), "qwen3_vl");
+        let preprocessed = test_preprocessed_with_tokens(&[ImageSize::new(320, 256)], &[160])
+            .with_extra(
+                "video_grid_thw",
+                ModelSpecificValue::int_2d(vec![2, 16, 20], 1, 3),
+            );
+        let replacements = spec
+            .prompt_replacements_for(&metadata, &preprocessed, crate::types::Modality::Video)
+            .unwrap();
+
+        // Two temporal frames -> a vision_end/vision_start seam splits the 160
+        // pads into two 80-token halves (mirrors the 3.5 case above).
         let tokens = &replacements[0].tokens;
         assert_eq!(tokens.len(), 162);
         assert!(tokens[..80].iter().all(|&token| token == 151656));

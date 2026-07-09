@@ -545,9 +545,15 @@ fn expand_tokens(
 
             // PromptReplacement uses TokenId = i32, convert to u32
             expanded.extend(repl.tokens.iter().map(|&t| t as u32));
+            // Fold any template-emitted structural prefix (already in `expanded`,
+            // e.g. Qwen's leading <|vision_start|>) into the reported range so a
+            // backend that scans the range for structural markers — vLLM's video
+            // mrope walks each frame from <|vision_start|> — starts on the marker.
+            // `offset` (used by the sglang patch_offsets pass above) is untouched.
+            let prefix = repl.structural_prefix.min(offset);
             placeholders.push(PlaceholderRange {
-                offset,
-                length: repl.tokens.len(),
+                offset: offset - prefix,
+                length: repl.tokens.len() + prefix,
             });
             replacement_idx += 1;
         } else {
@@ -593,6 +599,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, 50, 50, 50], // Expand to 4 tokens
+            structural_prefix: 0,
         }];
 
         let result = expand_tokens(&token_ids, Some(100), None, &replacements);
@@ -602,6 +609,30 @@ mod tests {
         assert_eq!(result.placeholders[0].offset, 2);
         assert_eq!(result.placeholders[0].length, 4);
         assert!(result.patch_offsets.is_none());
+    }
+
+    #[test]
+    fn test_expand_tokens_structural_prefix_folds_leading_marker() {
+        // Qwen video: the chat template emits <VS><video_pad><VE> (777, 100, 778).
+        // The replacement declares structural_prefix=1, so the reported range must
+        // start on the leading <VS> (offset 2, not 3) and grow by one, letting a
+        // backend that scans the range for <VS> (vLLM's per-frame video mrope) find
+        // it. The token stream is unchanged — the marker is not re-emitted.
+        let token_ids = vec![1, 2, 777, 100, 778, 3]; // 100 is the placeholder
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Video,
+            placeholder_token: "<|video_pad|>".to_string(),
+            tokens: vec![50, 50, 50], // expands to 3 video tokens
+            structural_prefix: 1,
+        }];
+
+        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+
+        assert_eq!(result.token_ids, vec![1, 2, 777, 50, 50, 50, 778, 3]);
+        assert_eq!(result.placeholders.len(), 1);
+        // Range starts on <VS> (index 2) and covers it + the 3 video tokens.
+        assert_eq!(result.placeholders[0].offset, 2);
+        assert_eq!(result.placeholders[0].length, 4);
     }
 
     #[test]
@@ -622,11 +653,13 @@ mod tests {
                 modality: Modality::Image,
                 placeholder_token: "<image>".to_string(),
                 tokens: vec![50, 50], // 2 tokens for first image
+                structural_prefix: 0,
             },
             PromptReplacement {
                 modality: Modality::Image,
                 placeholder_token: "<image>".to_string(),
                 tokens: vec![60, 60, 60], // 3 tokens for second image
+                structural_prefix: 0,
             },
         ];
 
@@ -649,6 +682,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![88, 92, 92, 92, 93, 92, 92, 92, 89], // start + patches + sep + patches + end
+            structural_prefix: 0,
         }];
 
         let result = expand_tokens(&token_ids, Some(100), Some(92), &replacements);
@@ -674,6 +708,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, 50],
+            structural_prefix: 0,
         }];
 
         let result = expand_tokens(&token_ids, Some(100), None, &replacements);

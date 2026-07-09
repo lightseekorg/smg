@@ -345,6 +345,15 @@ pub struct PromptReplacement {
     pub modality: Modality,
     pub placeholder_token: String,
     pub tokens: Vec<TokenId>,
+    /// Number of structural tokens the chat template emits *immediately before*
+    /// this placeholder (e.g. Qwen's leading `<|vision_start|>`) that belong to
+    /// the placeholder's range. `expand_tokens` folds them into the reported
+    /// [`PlaceholderRange`] without re-emitting them, so backends that scan the
+    /// range for structural markers see the leading marker. vLLM's video mrope
+    /// walks each frame from `<|vision_start|>` starting at the range offset, so
+    /// the offset must sit on (or before) the first marker. 0 for the common
+    /// case where the range is exactly the replacement.
+    pub structural_prefix: usize,
 }
 
 impl PromptReplacement {
@@ -358,6 +367,7 @@ impl PromptReplacement {
             modality,
             placeholder_token: placeholder_token.to_string(),
             tokens: vec![token_id; count],
+            structural_prefix: 0,
         }
     }
 
@@ -366,7 +376,17 @@ impl PromptReplacement {
             modality,
             placeholder_token: placeholder_token.to_string(),
             tokens: sequence,
+            structural_prefix: 0,
         }
+    }
+
+    /// Declare that `n` template-emitted structural tokens precede this
+    /// placeholder and should be included in its reported range. See
+    /// [`Self::structural_prefix`].
+    #[must_use]
+    pub fn with_structural_prefix(mut self, n: usize) -> Self {
+        self.structural_prefix = n;
+        self
     }
 }
 
