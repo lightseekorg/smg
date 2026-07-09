@@ -3,7 +3,7 @@
 //! Handles both passthrough (no MCP) and MCP tool loop streaming paths,
 //! composing worker, sse, and mcp primitives.
 
-use std::{io, time::Instant};
+use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
@@ -31,6 +31,7 @@ use crate::{
         },
         error::{self as router_error, extract_error_code_from_response},
     },
+    worker::Worker as WorkerTrait,
 };
 
 /// Channel buffer size for SSE events sent to the client.
@@ -80,12 +81,20 @@ async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -
         }
     };
 
-    build_streaming_response(response, model_id, start_time, stream_deadline).await
+    build_streaming_response(
+        response,
+        req_ctx.worker.clone(),
+        model_id,
+        start_time,
+        stream_deadline,
+    )
+    .await
 }
 
 /// Build a streaming SSE response.
 async fn build_streaming_response(
     response: reqwest::Response,
+    worker: Arc<dyn WorkerTrait>,
     model_id: &str,
     start_time: Instant,
     stream_deadline: StreamDeadline,
@@ -113,6 +122,7 @@ async fn build_streaming_response(
         stream_deadline,
         model_id.to_string(),
         start_time,
+        Some(worker),
         true,
     ));
 
@@ -156,6 +166,24 @@ fn record_streaming_router_outcome(model_id: &str, start_time: Instant, status: 
     }
 }
 
+fn record_streaming_worker_outcome(worker: Option<&dyn WorkerTrait>, status: StatusCode) {
+    let Some(worker) = worker else {
+        return;
+    };
+    worker.record_outcome(status.as_u16());
+    if status.is_server_error() {
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            if status == StatusCode::GATEWAY_TIMEOUT {
+                metrics_labels::ERROR_TIMEOUT
+            } else {
+                metrics_labels::ERROR_BACKEND
+            },
+        );
+    }
+}
+
 fn is_streaming_timeout_message(message: &str) -> bool {
     message.starts_with("Streaming request exceeded configured ")
 }
@@ -166,6 +194,7 @@ async fn relay_stream_with_deadline<S>(
     stream_deadline: StreamDeadline,
     model_id: String,
     start_time: Instant,
+    worker: Option<Arc<dyn WorkerTrait>>,
     record_router_outcome: bool,
 ) where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
@@ -209,12 +238,10 @@ async fn relay_stream_with_deadline<S>(
             }
         }
     }
+    let effective_status = stream_failure_status.unwrap_or(StatusCode::OK);
+    record_streaming_worker_outcome(worker.as_deref(), effective_status);
     if record_router_outcome {
-        record_streaming_router_outcome(
-            &model_id,
-            start_time,
-            stream_failure_status.unwrap_or(StatusCode::OK),
-        );
+        record_streaming_router_outcome(&model_id, start_time, effective_status);
     }
 }
 
@@ -270,6 +297,7 @@ async fn build_streaming_error_response(
             stream_deadline,
             model_id.to_string(),
             start_time,
+            None,
             false,
         ));
 
