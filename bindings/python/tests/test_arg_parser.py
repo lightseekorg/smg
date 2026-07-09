@@ -44,6 +44,7 @@ class TestRouterArgs:
         assert args.disable_retries is False
         assert args.disable_circuit_breaker is False
         assert args.mesh_advertise_host is None
+        assert args.stream_idle_timeout_secs == 300
 
     def test_parse_selector_valid(self):
         """Test parsing valid selector arguments."""
@@ -181,6 +182,7 @@ class TestRouterArgs:
             router_request_id_headers=["x-request-id", "x-trace-id"],
             router_storage_context_headers=["x-tenant-id=tenant_id", "x-user-id=user_id"],
             router_request_timeout_secs=1200,
+            router_stream_idle_timeout_secs=45,
             router_max_concurrent_requests=512,
             router_queue_size=200,
             router_queue_timeout_secs=120,
@@ -238,6 +240,7 @@ class TestRouterArgs:
             "x-user-id": "user_id",
         }
         assert router_args.request_timeout_secs == 1200
+        assert router_args.stream_idle_timeout_secs == 45
         assert router_args.max_concurrent_requests == 512
         assert router_args.queue_size == 200
         assert router_args.queue_timeout_secs == 120
@@ -313,6 +316,7 @@ class TestRouterArgs:
             router_request_id_headers=None,
             router_storage_context_headers=None,
             router_request_timeout_secs=1800,
+            router_stream_idle_timeout_secs=300,
             router_max_concurrent_requests=256,
             router_queue_size=100,
             router_queue_timeout_secs=60,

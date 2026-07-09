@@ -103,6 +103,8 @@ class RouterArgs:
     storage_context_headers: dict[str, str] = dataclasses.field(default_factory=dict)
     # Request timeout in seconds
     request_timeout_secs: int = 1800
+    # Maximum time a streaming response may go without yielding a chunk
+    stream_idle_timeout_secs: int = 300
     # Grace period in seconds to wait for in-flight requests during shutdown
     shutdown_grace_period_secs: int = 180
     # Max concurrent requests for rate limiting (-1 to disable)
@@ -728,6 +730,12 @@ class RouterArgs:
             type=int,
             default=RouterArgs.request_timeout_secs,
             help="Request timeout in seconds",
+        )
+        request_group.add_argument(
+            f"--{prefix}stream-idle-timeout-secs",
+            type=int,
+            default=RouterArgs.stream_idle_timeout_secs,
+            help="Maximum time a streaming response may go without yielding a chunk",
         )
         request_group.add_argument(
             f"--{prefix}shutdown-grace-period-secs",
