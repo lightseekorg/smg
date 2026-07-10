@@ -359,6 +359,19 @@ class Worker:
             # segment, and the worker hangs before it can become healthy.
             if self.ib_device:
                 cmd.extend(["--disaggregation-ib-device", self.ib_device])
+            # Match tokenspeed's EPD serve script (tokenspeed#549): explicit
+            # mooncake transfer backend + layerwise transfer, and skip the engine
+            # server warmup (the disaggregated warmup path hangs; the gRPC-side
+            # warmup is skipped via TOKENSPEED_SKIP_GRPC_WARMUP in _build_env).
+            cmd.extend(
+                [
+                    "--disaggregation-transfer-backend",
+                    "mooncake",
+                    "--disaggregation-layerwise-interval",
+                    "1",
+                    "--skip-server-warmup",
+                ]
+            )
 
         extra = spec.get("tokenspeed_args", [])
         if extra:
@@ -449,6 +462,22 @@ class Worker:
             # [temp diag] enable faulthandler so a SIGABRT on health timeout dumps
             # every thread's Python stack to the worker log (see _dump_worker_stack).
             env.setdefault("PYTHONFAULTHANDLER", "1")
+            # EPD runtime config mirrored from tokenspeed's own EPD serve script
+            # (serve_qwen35_122b_nvfp4_epd_1e2p1d.sh, tokenspeed#549). THE hang fix:
+            # the smg servicer's gRPC warmup drives stub.Generate, which on a
+            # disaggregated prefill/decode worker can't complete and hangs until the
+            # health timeout (server.py:_wait_and_warmup; the encode role self-skips,
+            # which is why only encode came up). Skip it so prefill/decode reach
+            # SERVING. The rest make the actual same-node encode<->prefill<->decode
+            # transfer work: NVLink-IPC intranode transport (RoCE loopback fails on
+            # one host), proxy bypass for the local mooncake bootstrap, and a large
+            # gRPC limit for the inline pixel payload to the encode worker.
+            env.setdefault("TOKENSPEED_SKIP_GRPC_WARMUP", "1")
+            env.setdefault("MC_INTRANODE_NVLINK", "1")
+            env.setdefault("MC_INTRA_NVLINK", "1")
+            env.setdefault("NO_PROXY", "*")
+            env.setdefault("no_proxy", "*")
+            env.setdefault("TOKENSPEED_GRPC_MAX_MESSAGE_BYTES", "2000000000")
 
         return env
 
