@@ -250,10 +250,10 @@ echo "=== RDMA probe: kernel modules / GPUDirect ==="
 lsmod 2>/dev/null | grep -iE "peermem|mlx5_ib|ib_uverbs|nvidia_fs" || echo "  (no matching modules)"
 if [ -d /sys/module/nvidia_peermem ]; then echo "  nvidia_peermem: LOADED"; else echo "  nvidia_peermem: NOT loaded"; fi
 command -v rdma >/dev/null 2>&1 && rdma link 2>/dev/null | head -3 || true
-echo "=== RDMA probe: mooncake init + GPU register_memory (60s timeout) ==="
+echo "=== RDMA probe: mooncake GPU register_memory — peermem (default) vs dmabuf ==="
 set +e
-timeout 60 python3 - <<'PY'
-import socket, sys
+cat > /tmp/mc_probe.py <<'PY'
+import subprocess, sys, os
 try:
     import torch
     from mooncake.engine import TransferEngine
@@ -261,21 +261,20 @@ except Exception as e:
     print("PROBE import failed:", e); sys.exit(3)
 if not torch.cuda.is_available():
     print("PROBE: no CUDA device visible"); sys.exit(4)
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80))
-ip = s.getsockname()[0]; s.close()
+ips = [x for x in subprocess.check_output(["hostname", "-I"]).decode().split() if not x.startswith("127.")]
+ip = ips[0] if ips else "127.0.0.1"
 eng = TransferEngine()
-rc = eng.initialize(ip, "P2PHANDSHAKE", "rdma", "mlx5_0")
-print("PROBE initialize rc =", rc, "(0=ok)", flush=True)
-if rc != 0:
-    sys.exit(5)
-buf = torch.zeros(1 << 20, device="cuda")
-print("PROBE registering 1MiB GPU buffer with RDMA ...", flush=True)
+if eng.initialize(ip, "P2PHANDSHAKE", "rdma", "mlx5_0") != 0:
+    print("PROBE initialize failed"); sys.exit(5)
+buf = torch.zeros(4 << 20, device="cuda")
 rc = eng.register_memory(buf.data_ptr(), buf.numel() * buf.element_size())
-print("PROBE register_memory rc =", rc, "-> GPU RDMA registration WORKS" if rc == 0 else "-> register FAILED")
+mode = os.environ.get("WITH_NVIDIA_PEERMEM", "<default:true>")
+print(f"PROBE[WITH_NVIDIA_PEERMEM={mode}] GPU register rc={rc}", "-> WORKS" if rc == 0 else "-> FAIL", flush=True)
+sys.exit(0 if rc == 0 else 6)
 PY
-rc=$?
-[ "$rc" = 124 ] && echo "PROBE: mooncake init+register HUNG (60s timeout) -> GPU RDMA registration is the EPD blocker"
-[ "$rc" != 0 ] && [ "$rc" != 124 ] && echo "PROBE: exited rc=$rc (see above)"
+echo "-- peermem (default) --";                 timeout 60 python3 /tmp/mc_probe.py; echo "  (rc=$?)"
+echo "-- dmabuf (WITH_NVIDIA_PEERMEM=false) --"; WITH_NVIDIA_PEERMEM=false timeout 60 python3 /tmp/mc_probe.py; echo "  (rc=$?)"
+rm -f /tmp/mc_probe.py
 set -e
 
 echo "TokenSpeed installation complete"
