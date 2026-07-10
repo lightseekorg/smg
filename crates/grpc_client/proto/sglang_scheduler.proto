@@ -45,6 +45,19 @@ service SglangScheduler {
   // Subscribe to KV cache events (server-streaming)
   rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)
       returns (stream smg.grpc.common.KvEventBatch);
+
+  // Load a LoRA adapter into the engine (weights from local disk to CPU DRAM)
+  rpc LoadLoRAAdapter(LoadLoRAAdapterRequest) returns (LoadLoRAAdapterResponse);
+
+  // Unload a LoRA adapter from the engine
+  rpc UnloadLoRAAdapter(UnloadLoRAAdapterRequest) returns (UnloadLoRAAdapterResponse);
+
+  // List the LoRA adapter ids currently loaded in the engine (the ids
+  // supplied by the caller on LoadLoRAAdapter). Read-only: lets a client
+  // reconcile its view of loaded adapters (e.g. after a restart) without
+  // issuing a mutating load/unload call.
+  rpc ListLoadedLoRAAdapters(ListLoadedLoRAAdaptersRequest)
+      returns (ListLoadedLoRAAdaptersResponse);
 }
 
 // =====================
@@ -364,31 +377,64 @@ message AbortResponse {
 
 
 // =====================
-// Additional Operations (Future)
+// LoRA Adapter
 // =====================
 
-// Load LoRA adapter
-message LoadLoRARequest {
-  string adapter_id = 1;
-  string adapter_path = 2;
-  int32 rank = 3;
+// Load a LoRA adapter into the engine (weights read from a local
+// directory into CPU DRAM; GPU residency is managed by the engine).
+message LoadLoRAAdapterRequest {
+  // Engine-side adapter name (human-readable identifier).
+  string lora_name = 1;
+  // Local directory containing the adapter weights. Must be readable
+  // by the engine process (shared volume).
+  string lora_path = 2;
+  // Pin the adapter in the engine's GPU buffer pool (never evicted).
+  bool pinned = 3;
+  // Unique adapter id minted by the caller. Required: the scheduler-direct
+  // path has no TokenizerManager to auto-generate one, and inference
+  // requests reference the adapter by this id (GenerateRequest.lora_id).
+  string lora_id = 4;
 }
 
-message LoadLoRAResponse {
+message LoadLoRAAdapterResponse {
   bool success = 1;
-  string adapter_id = 2;
-  string message = 3;
+  // Named error_message (not this file's usual `message`) to mirror
+  // sglang's LoRAUpdateOutput, which these responses relay verbatim.
+  string error_message = 2;
+  // Full set of caller-minted adapter ids loaded in the engine after
+  // this operation (engine-truth snapshot; see ListLoadedLoRAAdapters).
+  repeated string loaded_lora_ids = 3;
 }
 
-// Unload LoRA adapter
-message UnloadLoRARequest {
-  string adapter_id = 1;
+// Unload a LoRA adapter from the engine (frees CPU DRAM; the engine
+// reclaims any GPU slot on its own).
+message UnloadLoRAAdapterRequest {
+  // Human-readable adapter name given at load time.
+  string lora_name = 1;
+  // The id the adapter was loaded under.
+  string lora_id = 2;
 }
 
-message UnloadLoRAResponse {
+message UnloadLoRAAdapterResponse {
   bool success = 1;
-  string message = 2;
+  string error_message = 2;
+  // Full set of caller-minted adapter ids still loaded after this
+  // operation (engine-truth snapshot; see ListLoadedLoRAAdapters).
+  repeated string loaded_lora_ids = 3;
 }
+
+// List the caller-minted adapter ids currently loaded in the engine.
+// Adapters loaded outside this API (e.g. startup --lora-paths) carry
+// engine-generated uuids and are excluded.
+message ListLoadedLoRAAdaptersRequest {}
+
+message ListLoadedLoRAAdaptersResponse {
+  repeated string loaded_lora_ids = 1;
+}
+
+// =====================
+// Additional Operations (Future)
+// =====================
 
 // Update weights
 message UpdateWeightsRequest {
