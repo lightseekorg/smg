@@ -353,6 +353,12 @@ class Worker:
             cmd.extend(["--disaggregation-mode", self.worker_type.value])
             if self.bootstrap_port:
                 cmd.extend(["--disaggregation-bootstrap-port", str(self.bootstrap_port)])
+            # Pin mooncake to one IB device, exactly as the PD branch does.
+            # Without it the transfer engine enumerates every RoCE NIC on the
+            # node (18 on the 4-GPU H100 runner), fails to register a local
+            # segment, and the worker hangs before it can become healthy.
+            if self.ib_device:
+                cmd.extend(["--disaggregation-ib-device", self.ib_device])
 
         extra = spec.get("tokenspeed_args", [])
         if extra:
