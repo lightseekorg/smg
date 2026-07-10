@@ -610,19 +610,22 @@ mod tests {
     async fn test_arg_values_with_entities_roundtrip_unchanged() {
         let literal = "<a>Tom &amp; Jerry</a> &lt;x&gt; it&#39;s";
 
-        // Schema-less inference path (`safe_val`): not valid JSON -> stays a
-        // literal string with entities intact.
+        // Function name matches `tool_with_props` (`f`) so the schema-typed
+        // branch below actually resolves the `content` param's type.
         let text = format!(
-            "<tool_call>\n<function=write_file>\n\
+            "<tool_call>\n<function=f>\n\
              <parameter=content>\n{literal}\n</parameter>\n\
              </function>\n</tool_call>"
         );
+
+        // Schema-less inference path (`safe_val`): not valid JSON -> stays a
+        // literal string with entities intact.
         let (_, calls) = QwenXmlParser::new().parse_complete(&text).await.unwrap();
         assert_eq!(calls.len(), 1);
         let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["content"], Value::String(literal.to_string()));
 
-        // Schema-typed `string` path (`coerce_value`): same literal value.
+        // Schema-typed `string` path (`coerce_value` -> `coerce_by_schema_type`).
         let tools = tool_with_props(serde_json::json!({
             "content": {"type": "string"},
         }));
