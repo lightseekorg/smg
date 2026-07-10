@@ -44,14 +44,12 @@ spec:
           readinessProbe:
             exec:
               command: ["healthcheck.sh"]
-            initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 10
           livenessProbe:
             exec:
               command: ["healthcheck.sh"]
-            initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
