@@ -52,10 +52,10 @@ service SglangScheduler {
   // Unload a LoRA adapter from the engine
   rpc UnloadLoRAAdapter(UnloadLoRAAdapterRequest) returns (UnloadLoRAAdapterResponse);
 
-  // List the LoRA adapter ids currently loaded in the engine (the ids
-  // supplied by the caller on LoadLoRAAdapter). Read-only: lets a client
-  // reconcile its view of loaded adapters (e.g. after a restart) without
-  // issuing a mutating load/unload call.
+  // List the LoRA adapters currently loaded in the engine, with the
+  // metadata supplied at load time. Read-only: lets a client reconcile
+  // its view of loaded adapters (e.g. after a restart) without issuing
+  // a mutating load/unload call.
   rpc ListLoadedLoRAAdapters(ListLoadedLoRAAdaptersRequest)
       returns (ListLoadedLoRAAdaptersResponse);
 }
@@ -398,9 +398,8 @@ message LoadLoRAAdapterRequest {
 
 message LoadLoRAAdapterResponse {
   bool success = 1;
-  // Named error_message (not this file's usual `message`) to mirror
-  // sglang's LoRAUpdateOutput, which these responses relay verbatim.
-  string error_message = 2;
+  // Status or error description; empty on success.
+  string message = 2;
   // Full set of caller-minted adapter ids loaded in the engine after
   // this operation (engine-truth snapshot; see ListLoadedLoRAAdapters).
   repeated string loaded_lora_ids = 3;
@@ -409,27 +408,41 @@ message LoadLoRAAdapterResponse {
 // Unload a LoRA adapter from the engine (frees CPU DRAM; the engine
 // reclaims any GPU slot on its own).
 message UnloadLoRAAdapterRequest {
-  // Human-readable adapter name given at load time.
+  // Human-readable adapter name given at load time. Required — the
+  // primary selector, mirroring the HTTP unload payload.
   string lora_name = 1;
-  // The id the adapter was loaded under.
+  // The caller-minted id the adapter was loaded under (see
+  // LoadLoRAAdapterRequest.lora_id). Complements lora_name rather than
+  // replacing it: both refer to the same adapter and are supplied
+  // together.
   string lora_id = 2;
 }
 
 message UnloadLoRAAdapterResponse {
   bool success = 1;
-  string error_message = 2;
+  // Status or error description; empty on success.
+  string message = 2;
   // Full set of caller-minted adapter ids still loaded after this
   // operation (engine-truth snapshot; see ListLoadedLoRAAdapters).
   repeated string loaded_lora_ids = 3;
 }
 
-// List the caller-minted adapter ids currently loaded in the engine.
-// Adapters loaded outside this API (e.g. startup --lora-paths) carry
+// List the LoRA adapters currently loaded in the engine. Adapters
+// loaded outside this API (e.g. startup --lora-paths) carry
 // engine-generated uuids and are excluded.
 message ListLoadedLoRAAdaptersRequest {}
 
+// One loaded adapter, echoing the metadata supplied at load time —
+// the same per-adapter fields the HTTP surface exposes via /v1/models.
+message LoadedLoRAAdapter {
+  string lora_id = 1;
+  string lora_name = 2;
+  string lora_path = 3;
+  bool pinned = 4;
+}
+
 message ListLoadedLoRAAdaptersResponse {
-  repeated string loaded_lora_ids = 1;
+  repeated LoadedLoRAAdapter loaded_adapters = 1;
 }
 
 // =====================
