@@ -148,6 +148,31 @@ uv pip install setuptools wheel pybind11
 # torch requirement; bump alongside TOKENSPEED_REF.
 uv pip install "torch==2.11.0+cu130"
 
+# The kernel's host-stub compile binds crt/host_runtime.h from torch's bundled
+# cu13 headers (site-packages/nvidia/cu*/include/crt) no matter the -I order,
+# and those are a newer patch (nvidia-cuda-runtime 13.0.96) than the apt system
+# nvcc (13.0.88): the 88 nvcc emits a 2-arg __cudaLaunch stub the 96 header's
+# 1-arg macro can't satisfy -> "'__cudaLaunch' was not declared". Those crt dirs
+# are pulled by the kernel build's own dependency resolution, so materialize
+# them with a first build pass (tolerate its compile failure), realign every
+# bundled crt to the system toolkit, then build for real -- deps are satisfied
+# now, so nothing re-pulls the crt.
+uv pip install -e tokenspeed-kernel/python/ --no-build-isolation || \
+    echo "first kernel build pass failed (expected: crt skew); realigning crt headers"
+
+_sys_crt="${CUDA_HOME}/include/crt"
+_purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+if [ -d "$_sys_crt" ] && [ -d "$_purelib" ]; then
+    _aligned=0
+    while IFS= read -r -d '' _pip_crt; do
+        echo "Aligning bundled CUDA crt to system: ${_pip_crt} -> ${_sys_crt}"
+        rm -rf "$_pip_crt"
+        ln -sfnT "$_sys_crt" "$_pip_crt"
+        _aligned=1
+    done < <(find "$_purelib" -type d -path '*/nvidia/cu*/include/crt' -print0 2>/dev/null)
+    [ "$_aligned" = 1 ] || echo "WARNING: no bundled nvidia crt dirs found under ${_purelib}" >&2
+fi
+
 uv pip install -e tokenspeed-kernel/python/ --no-build-isolation
 uv pip install -e tokenspeed-scheduler/
 uv pip install -e "./python" --no-build-isolation
