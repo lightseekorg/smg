@@ -446,6 +446,9 @@ class Worker:
             WorkerType.DECODE,
         ):
             env.setdefault("WITH_NVIDIA_PEERMEM", "false")
+            # [temp diag] enable faulthandler so a SIGABRT on health timeout dumps
+            # every thread's Python stack to the worker log (see _dump_worker_stack).
+            env.setdefault("PYTHONFAULTHANDLER", "1")
 
         return env
 
@@ -522,10 +525,27 @@ class Worker:
         finally:
             channel.close()
 
+        # [temp diag] turn a silent health timeout into a precise stack: SIGABRT +
+        # PYTHONFAULTHANDLER makes the worker print every thread's traceback to its
+        # log before dying, so we can see exactly where EPD prefill is stuck.
+        self._dump_worker_stack()
         raise TimeoutError(
             f"gRPC worker {self.model_id} on port {self.port} "
             f"did not become healthy within {timeout}s"
         )
+
+    def _dump_worker_stack(self) -> None:
+        """[temp diag] SIGABRT the worker so faulthandler dumps stacks to its log."""
+        if not self.process or self.process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(self.process.pid), signal.SIGABRT)
+        except Exception:
+            try:
+                self.process.send_signal(signal.SIGABRT)
+            except Exception:
+                return
+        time.sleep(3)  # let faulthandler flush the traceback to the log
 
 
 def start_workers(
