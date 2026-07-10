@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: oracle-db
-          image: gvenzl/oracle-free:23-slim-faststart
+          image: docker.io/gvenzl/oracle-free:23-slim-faststart
           ports:
             - containerPort: 1521
           env:
@@ -34,6 +34,13 @@ spec:
             limits:
               cpu: "2"
               memory: 4Gi
+          startupProbe:
+            exec:
+              command: ["healthcheck.sh"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
           readinessProbe:
             exec:
               command: ["healthcheck.sh"]
@@ -82,7 +89,7 @@ spec:
     spec:
       containers:
         - name: brave-search-mcp
-          image: mcp/brave-search:latest
+          image: docker.io/mcp/brave-search:latest
           ports:
             - containerPort: 8080
           env:
