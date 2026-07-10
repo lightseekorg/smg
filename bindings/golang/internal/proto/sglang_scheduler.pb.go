@@ -2129,9 +2129,9 @@ func (x *UnloadLoRAAdapterResponse) GetLoadedLoraIds() []string {
 	return nil
 }
 
-// List the LoRA adapters currently loaded in the engine. Adapters
-// loaded outside this API (e.g. startup --lora-paths) carry
-// engine-generated uuids and are excluded.
+// List every LoRA adapter currently loaded in the engine, regardless
+// of how it was loaded — via LoadLoRAAdapter or preloaded at startup
+// (e.g. --lora-paths).
 type ListLoadedLoRAAdaptersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -2171,11 +2171,15 @@ func (*ListLoadedLoRAAdaptersRequest) Descriptor() ([]byte, []int) {
 // One loaded adapter, echoing the metadata supplied at load time —
 // the same per-adapter fields the HTTP surface exposes via /v1/models.
 type LoadedLoRAAdapter struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LoraId        string                 `protobuf:"bytes,1,opt,name=lora_id,json=loraId,proto3" json:"lora_id,omitempty"`
-	LoraName      string                 `protobuf:"bytes,2,opt,name=lora_name,json=loraName,proto3" json:"lora_name,omitempty"`
-	LoraPath      string                 `protobuf:"bytes,3,opt,name=lora_path,json=loraPath,proto3" json:"lora_path,omitempty"`
-	Pinned        bool                   `protobuf:"varint,4,opt,name=pinned,proto3" json:"pinned,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Caller-minted for adapters loaded via LoadLoRAAdapter;
+	// engine-assigned for adapters loaded outside this API. Either way,
+	// this is the id inference requests reference
+	// (GenerateRequest.lora_id) and UnloadLoRAAdapter accepts.
+	LoraId        string `protobuf:"bytes,1,opt,name=lora_id,json=loraId,proto3" json:"lora_id,omitempty"`
+	LoraName      string `protobuf:"bytes,2,opt,name=lora_name,json=loraName,proto3" json:"lora_name,omitempty"`
+	LoraPath      string `protobuf:"bytes,3,opt,name=lora_path,json=loraPath,proto3" json:"lora_path,omitempty"`
+	Pinned        bool   `protobuf:"varint,4,opt,name=pinned,proto3" json:"pinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

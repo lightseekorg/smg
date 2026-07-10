@@ -427,14 +427,18 @@ message UnloadLoRAAdapterResponse {
   repeated string loaded_lora_ids = 3;
 }
 
-// List the LoRA adapters currently loaded in the engine. Adapters
-// loaded outside this API (e.g. startup --lora-paths) carry
-// engine-generated uuids and are excluded.
+// List every LoRA adapter currently loaded in the engine, regardless
+// of how it was loaded — via LoadLoRAAdapter or preloaded at startup
+// (e.g. --lora-paths).
 message ListLoadedLoRAAdaptersRequest {}
 
 // One loaded adapter, echoing the metadata supplied at load time —
 // the same per-adapter fields the HTTP surface exposes via /v1/models.
 message LoadedLoRAAdapter {
+  // Caller-minted for adapters loaded via LoadLoRAAdapter;
+  // engine-assigned for adapters loaded outside this API. Either way,
+  // this is the id inference requests reference
+  // (GenerateRequest.lora_id) and UnloadLoRAAdapter accepts.
   string lora_id = 1;
   string lora_name = 2;
   string lora_path = 3;
