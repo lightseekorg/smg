@@ -415,28 +415,29 @@ impl HarmonyBuilder {
         self.build_system_message(reasoning_effort, has_tools)
     }
 
-    /// Build system message from ResponsesRequest
+    /// Convert Responses reasoning effort to Harmony's supported values.
     ///
     /// # Arguments
     /// * `request` - The ResponsesRequest
-    /// * `with_custom_tools` - Whether custom tools (beyond built-ins) are present
-    fn build_system_message_from_responses(
-        &self,
+    ///
+    /// Returns an error for `none`, which Harmony cannot represent.
+    fn reasoning_effort_from_responses(
         request: &ResponsesRequest,
-        with_custom_tools: bool,
-    ) -> HarmonyMessage {
-        let reasoning_effort = request
+    ) -> Result<Option<ReasoningEffort>, String> {
+        request
             .reasoning
             .as_ref()
             .and_then(|r| r.effort.as_ref())
             .map(|effort| match effort {
-                ResponsesReasoningEffort::High => ReasoningEffort::High,
-                ResponsesReasoningEffort::Medium => ReasoningEffort::Medium,
-                ResponsesReasoningEffort::Low => ReasoningEffort::Low,
-                ResponsesReasoningEffort::Minimal => ReasoningEffort::Low,
-            });
-
-        self.build_system_message(reasoning_effort, with_custom_tools)
+                ResponsesReasoningEffort::None => {
+                    Err("reasoning.effort 'none' is not supported by Harmony models".to_string())
+                }
+                ResponsesReasoningEffort::High => Ok(ReasoningEffort::High),
+                ResponsesReasoningEffort::Medium => Ok(ReasoningEffort::Medium),
+                ResponsesReasoningEffort::Low => Ok(ReasoningEffort::Low),
+                ResponsesReasoningEffort::Minimal => Ok(ReasoningEffort::Low),
+            })
+            .transpose()
     }
 
     /// Build developer message with common logic
@@ -535,6 +536,7 @@ impl HarmonyBuilder {
         request: &ResponsesRequest,
     ) -> Result<Vec<HarmonyMessage>, String> {
         let mut all_messages = Vec::new();
+        let reasoning_effort = Self::reasoning_effort_from_responses(request)?;
 
         // Handle new vs continuing conversation
         if request.previous_response_id.is_none() {
@@ -549,7 +551,7 @@ impl HarmonyBuilder {
             let with_custom_tools = has_custom_tools(&tool_types);
 
             // Add system message
-            let sys_msg = self.build_system_message_from_responses(request, with_custom_tools);
+            let sys_msg = self.build_system_message(reasoning_effort, with_custom_tools);
             all_messages.push(sys_msg);
 
             // Add developer message if we have custom tools or instructions
@@ -1168,6 +1170,27 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn responses_reasoning_effort_none_is_rejected_for_all_harmony_requests() {
+        for previous_response_id in [None, Some("resp_previous".to_string())] {
+            let request = ResponsesRequest {
+                input: ResponseInput::Text("Answer briefly".to_string()),
+                previous_response_id,
+                reasoning: Some(openai_protocol::responses::ResponseReasoningParam {
+                    effort: Some(openai_protocol::responses::ReasoningEffort::None),
+                    summary: None,
+                }),
+                ..Default::default()
+            };
+
+            let result = HarmonyBuilder::new().construct_input_messages_with_harmony(&request);
+            assert_eq!(
+                result.err().as_deref(),
+                Some("reasoning.effort 'none' is not supported by Harmony models")
+            );
+        }
+    }
 
     /// Invariant: `image_generation` must never be advertised as a
     /// gpt-oss native builtin tool. If a future change re-adds it,

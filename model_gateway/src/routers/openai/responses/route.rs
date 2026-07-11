@@ -215,8 +215,8 @@ mod tests {
     use openai_protocol::{
         common::Detail,
         responses::{
-            Annotation, FileDetail, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponsesRequest,
+            Annotation, FileDetail, ReasoningEffort, ResponseContentPart, ResponseInput,
+            ResponseInputOutputItem, ResponseReasoningParam, ResponsesRequest,
         },
     };
     use serde_json::{json, to_value};
@@ -303,6 +303,22 @@ mod tests {
             content[3]["refusal"],
             json!("I cannot process that request.")
         );
+    }
+
+    #[test]
+    fn router_serialization_preserves_reasoning_effort_none() {
+        let req = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("Answer briefly".to_string()),
+            reasoning: Some(ResponseReasoningParam {
+                effort: Some(ReasoningEffort::None),
+                summary: None,
+            }),
+            ..Default::default()
+        };
+
+        let payload = serialize_like_router(&req);
+        assert_eq!(payload["reasoning"]["effort"], json!("none"));
     }
 
     #[test]

@@ -687,6 +687,37 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
+    async fn test_v1_responses_accepts_reasoning_effort_none() {
+        let ctx = AppTestContext::new(vec![MockWorkerConfig {
+            port: 18959,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        }])
+        .await;
+
+        let app = ctx.create_app();
+        let payload = json!({
+            "input": "Answer briefly",
+            "model": "mock-model",
+            "reasoning": {"effort": "none"},
+            "stream": false
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_v1_responses_streaming() {
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18951,
