@@ -27,6 +27,7 @@ use crate::{
         common::{openai_bridge, persistence_utils::split_stored_message_content},
         error,
         grpc::common::responses::ResponsesContext,
+        ws_responses::CachedWsResponse,
     },
 };
 
@@ -162,75 +163,153 @@ pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> V
 // Conversation History Loading
 // ============================================================================
 
-/// Load conversation history and response chains, returning modified request
+/// Normalize a request's input into a flat list of conversation items.
+///
+/// `ResponseInput::Text` becomes a single user message; `ResponseInput::Items`
+/// is normalized element-by-element (e.g. `SimpleInputMessage` → `Message`).
+/// The WebSocket connection cache stores these so a follow-up turn that
+/// references the previous response can be reconstructed without durable
+/// storage.
+pub(crate) fn normalize_request_input_items(
+    request: &ResponsesRequest,
+) -> Vec<ResponseInputOutputItem> {
+    match &request.input {
+        ResponseInput::Text(text) => vec![ResponseInputOutputItem::Message {
+            id: format!(
+                "msg_u_{}",
+                request.previous_response_id.as_deref().unwrap_or("new")
+            ),
+            role: "user".to_string(),
+            content: vec![ResponseContentPart::InputText { text: text.clone() }],
+            status: Some("completed".to_string()),
+            phase: None,
+        }],
+        ResponseInput::Items(items) => items.iter().map(responses::normalize_input_item).collect(),
+    }
+}
+
+/// Load conversation history and response chains, returning modified request.
+///
+/// HTTP callers use this directly (warn-and-continue on conversation load
+/// errors, `bad_request` on a missing `previous_response_id`). The WebSocket
+/// path calls [`load_conversation_history_with_cache`] instead, which checks a
+/// connection-local cache before durable storage and fails strictly.
 pub(super) async fn load_conversation_history(
     ctx: &ResponsesContext,
     request: &ResponsesRequest,
+) -> Result<ResponsesRequest, Response> {
+    load_conversation_history_with_cache(ctx, request, None, false).await
+}
+
+/// Cache-first variant of [`load_conversation_history`].
+///
+/// `cached` is the WebSocket session's most recent response (with its input
+/// items); when a `previous_response_id` matches the cached response's id, the
+/// chain is reconstructed from the cache and durable storage is skipped.
+///
+/// `strict` controls the missing-`previous_response_id` behavior:
+/// - `false` (HTTP): return `bad_request("previous_response_not_found")` (the
+///   pre-existing behavior), preserved for byte-identical HTTP responses.
+/// - `true` (WebSocket): return `not_found("previous_response_not_found")` with
+///   `param = "previous_response_id"` so the WS executor surfaces a 404.
+pub(crate) async fn load_conversation_history_with_cache(
+    ctx: &ResponsesContext,
+    request: &ResponsesRequest,
+    cached: Option<&CachedWsResponse>,
+    strict: bool,
 ) -> Result<ResponsesRequest, Response> {
     let mut modified_request = request.clone();
     let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
 
     // Handle previous_response_id by loading response chain
     if let Some(ref prev_id_str) = modified_request.previous_response_id {
-        let prev_id = ResponseId::from(prev_id_str.as_str());
-        match ctx
-            .response_storage
-            .get_response_chain(&prev_id, None)
-            .await
-        {
-            Ok(chain) if !chain.responses.is_empty() => {
-                let mut items = Vec::new();
-                for stored in &chain.responses {
-                    // Convert input items from stored input (which is now a JSON array)
-                    if let Some(input_arr) = stored.input.as_array() {
-                        for item in input_arr {
-                            match serde_json::from_value::<ResponseInputOutputItem>(item.clone()) {
-                                Ok(input_item) => {
-                                    items.push(input_item);
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to deserialize stored input item: {}. Item: {}",
-                                        e, item
-                                    );
+        // Connection-local cache hit: reconstruct the chain from the WS session
+        // cache and skip durable storage entirely.
+        if let Some(cached_response) = cached.filter(|cached| &cached.response.id == prev_id_str) {
+            conversation_items = Some(cached_response.to_conversation_items());
+            modified_request.previous_response_id = None;
+        } else {
+            let prev_id = ResponseId::from(prev_id_str.as_str());
+            // Re-establish the storage request-context scope for the read so
+            // tenant/user-scoped storage hooks see it. The WS executor runs
+            // outside the middleware's task-local scope, so wrap explicitly when
+            // a context was rebuilt from the upgrade request's headers.
+            let chain_fut = ctx.response_storage.get_response_chain(&prev_id, None);
+            let chain_result = match &ctx.request_context {
+                Some(rc) => data_connector::with_request_context(rc.clone(), chain_fut).await,
+                None => chain_fut.await,
+            };
+            match chain_result {
+                Ok(chain) if !chain.responses.is_empty() => {
+                    let mut items = Vec::new();
+                    for stored in &chain.responses {
+                        // Convert input items from stored input (which is now a JSON array)
+                        if let Some(input_arr) = stored.input.as_array() {
+                            for item in input_arr {
+                                match serde_json::from_value::<ResponseInputOutputItem>(
+                                    item.clone(),
+                                ) {
+                                    Ok(input_item) => {
+                                        items.push(input_item);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to deserialize stored input item: {}. Item: {}",
+                                            e, item
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Convert output items from stored raw_response["output"] (which is a JSON array)
-                    if let Some(output_arr) =
-                        stored.raw_response.get("output").and_then(|v| v.as_array())
-                    {
-                        for item in output_arr {
-                            match serde_json::from_value::<ResponseInputOutputItem>(item.clone()) {
-                                Ok(output_item) => {
-                                    items.push(output_item);
-                                }
-                                Err(e) => {
-                                    warn!(
+                        // Convert output items from stored raw_response["output"] (which is a JSON array)
+                        if let Some(output_arr) =
+                            stored.raw_response.get("output").and_then(|v| v.as_array())
+                        {
+                            for item in output_arr {
+                                match serde_json::from_value::<ResponseInputOutputItem>(
+                                    item.clone(),
+                                ) {
+                                    Ok(output_item) => {
+                                        items.push(output_item);
+                                    }
+                                    Err(e) => {
+                                        warn!(
                                         "Failed to deserialize stored output item: {}. Item: {}",
                                         e, item
                                     );
+                                    }
                                 }
                             }
                         }
                     }
+                    conversation_items = Some(items);
+                    modified_request.previous_response_id = None;
                 }
-                conversation_items = Some(items);
-                modified_request.previous_response_id = None;
-            }
-            Ok(_) | Err(ResponseStorageError::ResponseNotFound(_)) => {
-                return Err(error::bad_request(
-                    "previous_response_not_found",
-                    format!("Previous response with id '{prev_id_str}' not found."),
-                ));
-            }
-            Err(e) => {
-                return Err(error::internal_error(
-                    "load_previous_response_chain_failed",
-                    format!("Failed to load previous response chain for {prev_id_str}: {e}"),
-                ));
+                Ok(_) | Err(ResponseStorageError::ResponseNotFound(_)) => {
+                    // WebSocket (strict) callers get a 404 with a `param` so the
+                    // executor can surface OpenAI's `previous_response_not_found`
+                    // shape; HTTP keeps the pre-existing 400 for compatibility.
+                    return Err(if strict {
+                        error::not_found(
+                        "previous_response_not_found",
+                        format!(
+                            "Previous response '{prev_id_str}' was not found in the current session or durable storage."
+                        ),
+                    )
+                    } else {
+                        error::bad_request(
+                            "previous_response_not_found",
+                            format!("Previous response with id '{prev_id_str}' not found."),
+                        )
+                    });
+                }
+                Err(e) => {
+                    return Err(error::internal_error(
+                        "load_previous_response_chain_failed",
+                        format!("Failed to load previous response chain for {prev_id_str}: {e}"),
+                    ));
+                }
             }
         }
     }
@@ -240,17 +319,20 @@ pub(super) async fn load_conversation_history(
         let conv_id_str = conv_ref.as_id();
         let conv_id = ConversationId::from(conv_id_str);
 
-        // Check if conversation exists - return error if not found
-        let conversation = ctx
-            .conversation_storage
-            .get_conversation(&conv_id)
-            .await
-            .map_err(|e| {
-                error::internal_error(
-                    "check_conversation_failed",
-                    format!("Failed to check conversation: {e}"),
-                )
-            })?;
+        // Check if conversation exists - return error if not found. Scope the
+        // read to the request storage-context (same as the response-chain read
+        // above) so tenant/user storage hooks see it outside the middleware scope.
+        let get_conv_fut = ctx.conversation_storage.get_conversation(&conv_id);
+        let conversation = match &ctx.request_context {
+            Some(rc) => data_connector::with_request_context(rc.clone(), get_conv_fut).await,
+            None => get_conv_fut.await,
+        }
+        .map_err(|e| {
+            error::internal_error(
+                "check_conversation_failed",
+                format!("Failed to check conversation: {e}"),
+            )
+        })?;
 
         if conversation.is_none() {
             return Err(error::not_found(
@@ -269,11 +351,12 @@ pub(super) async fn load_conversation_history(
             after: None,
         };
 
-        match ctx
-            .conversation_item_storage
-            .list_items(&conv_id, params)
-            .await
-        {
+        let list_fut = ctx.conversation_item_storage.list_items(&conv_id, params);
+        let list_result = match &ctx.request_context {
+            Some(rc) => data_connector::with_request_context(rc.clone(), list_fut).await,
+            None => list_fut.await,
+        };
+        match list_result {
             Ok(stored_items) => {
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {

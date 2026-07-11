@@ -15,6 +15,8 @@ mod conversions;
 mod handlers;
 mod non_streaming;
 mod streaming;
+mod websocket;
 
 // Public exports
 pub(crate) use handlers::route_responses;
+pub(crate) use websocket::GrpcWsResponsesExecutor;

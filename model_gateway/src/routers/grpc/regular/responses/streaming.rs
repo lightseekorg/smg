@@ -12,7 +12,7 @@ use std::{
 };
 
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     http::{header, StatusCode},
     response::Response,
 };
@@ -57,7 +57,10 @@ use crate::{
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
-                streaming::{attach_mcp_server_label, OutputItemKind, ResponseStreamEventEmitter},
+                streaming::{
+                    attach_mcp_server_label, OutputItemKind, ResponseEventSink,
+                    ResponseStreamEventEmitter, WsResponseEventSink,
+                },
                 ResponsesContext,
             },
             utils,
@@ -148,8 +151,47 @@ async fn process_and_transform_sse_stream(
     request_context: Option<StorageRequestContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
+    // Drive the transport-neutral core over the SSE sender. `process_chunk`
+    // emits `completed` (draining state) on this path for byte-identical SSE
+    // output; the finalized response is then persisted.
+    let final_response = drive_non_mcp_stream(
+        body,
+        &original_request,
+        &tx,
+        /* drain_completed */ true,
+    )
+    .await?;
+
+    // Finalize and persist accumulated response
+    persist_response_if_needed(
+        conversation_storage,
+        conversation_item_storage,
+        response_storage,
+        &final_response,
+        &original_request,
+        request_context,
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Sink-generic core for the non-MCP streaming path.
+///
+/// Emits `response.created` / `response.in_progress`, then transforms each chat
+/// SSE chunk into Responses events on `sink`, accumulates the response, and
+/// (when `drain_completed`) emits the terminal `response.completed`. Returns the
+/// finalized [`ResponsesResponse`] so the WS path can populate its connection
+/// cache (it sets `drain_completed = false` and emits `completed`/`failed`
+/// itself with an explicit status).
+async fn drive_non_mcp_stream(
+    body: Body,
+    original_request: &ResponsesRequest,
+    sink: &impl ResponseEventSink,
+    drain_completed: bool,
+) -> Result<ResponsesResponse, String> {
     // Create accumulator for final response
-    let mut accumulator = StreamingResponseAccumulator::new(&original_request);
+    let mut accumulator = StreamingResponseAccumulator::new(original_request);
 
     // Create event emitter for OpenAI-compatible streaming
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -161,12 +203,12 @@ async fn process_and_transform_sse_stream(
     // Emit initial response.created and response.in_progress events
     let event = event_emitter.emit_created();
     event_emitter
-        .send_event(&event, &tx)
+        .send_event(&event, sink)
         .map_err(|_| "Failed to send response.created event".to_string())?;
 
     let event = event_emitter.emit_in_progress();
     event_emitter
-        .send_event(&event, &tx)
+        .send_event(&event, sink)
         .map_err(|_| "Failed to send response.in_progress event".to_string())?;
 
     // Convert body to data stream
@@ -196,14 +238,37 @@ async fn process_and_transform_sse_stream(
                     accumulator.process_chunk(&chat_chunk);
 
                     // Process chunk through event emitter (emits proper OpenAI events)
-                    event_emitter.process_chunk(&chat_chunk, &tx)?;
+                    event_emitter.process_chunk(&chat_chunk, sink)?;
                 }
                 Err(_) => {
-                    // Not a valid chat chunk - might be error event, pass through
-                    debug!("Non-chunk SSE event, passing through: {}", event);
-                    if tx.send(Ok(Bytes::from(format!("{event}\n\n")))).is_err() {
-                        return Err("Client disconnected".to_string());
+                    // A non-chat frame carrying an `error` object is an upstream
+                    // worker error. Fail the turn instead of forwarding it: a
+                    // pass-through here would ship the client an error-shaped frame
+                    // AND then a terminal response.completed for the same turn (and
+                    // cache/persist a bogus success). Mirrors the MCP path
+                    // (convert_and_accumulate_stream).
+                    if let Some(message) = serde_json::from_str::<Value>(json_str)
+                        .ok()
+                        .as_ref()
+                        .and_then(|value| value.get("error"))
+                        .map(|error| {
+                            error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("upstream worker stream error")
+                                .to_string()
+                        })
+                    {
+                        return Err(message);
                     }
+                    // Other non-chat frames (informational) stay pass-through.
+                    // Forward the data:-stripped payload (`json_str`), NOT `event`:
+                    // `send_raw_json` re-frames as `data: {payload}` for SSE and
+                    // sends bare JSON text on WS, so passing the prefixed line would
+                    // double-frame to `data: data: ...`.
+                    debug!("Non-chunk SSE event, passing through: {}", json_str);
+                    sink.send_raw_json(json_str)
+                        .map_err(|_| "Client disconnected".to_string())?;
                 }
             }
         }
@@ -228,22 +293,86 @@ async fn process_and_transform_sse_stream(
         usage_obj
     });
 
-    let completed_event = event_emitter.emit_completed(usage_json.as_ref());
-    event_emitter.send_event(&completed_event, &tx)?;
+    if drain_completed {
+        let completed_event = event_emitter.emit_completed(usage_json.as_ref());
+        event_emitter.send_event(&completed_event, sink)?;
+    } else {
+        // WS path: emit the terminal event with an explicit status (CLONE — does
+        // not drain — so the finalized cache response below sees the items).
+        let status = accumulator.status();
+        let completed_event = event_emitter.emit_completed_with_status(status, usage_json.as_ref());
+        event_emitter.send_event(&completed_event, sink)?;
+    }
 
-    // Finalize and persist accumulated response
-    let final_response = accumulator.finalize();
-    persist_response_if_needed(
-        conversation_storage,
-        conversation_item_storage,
-        response_storage,
-        &final_response,
+    // Finalize accumulated response (used for persistence and/or WS cache).
+    //
+    // The accumulator adopts the worker's chat-completion id (`chatcmpl-…`) from
+    // the first chunk, but the client received the emitter's `resp_…` id in the
+    // streamed events. Stamp the finalized response with the emitter id so the
+    // persisted/cached response is keyed by the id the client holds — required
+    // for `previous_response_id` continuation (durable + WS connection cache).
+    let mut final_response = accumulator.finalize();
+    final_response.id.clone_from(&event_emitter.response_id);
+    Ok(final_response)
+}
+
+/// Execute the non-MCP streaming pipeline over an arbitrary sink and return the
+/// finalized response. Used by the WebSocket Responses executor; the chat
+/// pipeline is driven inline (no fire-and-forget spawn / SSE body) so the caller
+/// can await the materialized [`ResponsesResponse`] for its connection cache.
+pub(crate) async fn execute_non_mcp_stream_with_sink(
+    ctx: &ResponsesContext,
+    chat_request: Arc<ChatCompletionRequest>,
+    original_request: ResponsesRequest,
+    headers: Option<header::HeaderMap>,
+    model_id: Option<String>,
+    sink: &WsResponseEventSink,
+) -> Result<ResponsesResponse, String> {
+    let chat_response = ctx
+        .pipeline
+        .execute_chat(
+            chat_request,
+            headers,
+            model_id.unwrap_or_else(|| original_request.model.clone()),
+            ctx.components.clone(),
+            None,
+        )
+        .await;
+
+    // A non-2xx from the chat pipeline (worker-selection / stage error before any
+    // SSE is produced) carries its error in the body, not as a `data:` frame.
+    // Streaming it would emit response.created/in_progress and then a bogus
+    // response.completed (drive_non_mcp_stream ignores non-`data:` error bodies),
+    // so the client sees success and an empty response is cached/persisted.
+    // Surface it as a failed turn instead.
+    let status = chat_response.status();
+    if !status.is_success() {
+        let body_bytes = to_bytes(chat_response.into_body(), 1_048_576).await.ok();
+        let message = body_bytes
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+            .as_ref()
+            .and_then(|value| value.get("error"))
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("chat pipeline returned status {status}"));
+        return Err(message);
+    }
+
+    let (_parts, body) = chat_response.into_parts();
+
+    let final_response = drive_non_mcp_stream(
+        body,
         &original_request,
-        request_context,
+        sink,
+        /* drain_completed */ false,
     )
-    .await;
+    .await?;
 
-    Ok(())
+    // Persistence is handled once by the caller (`execute_response_create`)
+    // after the MCP/non-MCP branch, so both WS paths persist identically.
+    Ok(final_response)
 }
 
 /// Response accumulator for streaming responses (non-MCP path)
@@ -356,7 +485,23 @@ impl StreamingResponseAccumulator {
         }
     }
 
+    /// Terminal status derived from the accumulated `finish_reason`.
+    ///
+    /// Borrows `&self` so the WS path can read the status before `finalize`
+    /// consumes the accumulator. Mirrors the mapping in `finalize`.
+    fn status(&self) -> ResponseStatus {
+        match self.finish_reason.as_deref() {
+            Some("stop") | Some("length") => ResponseStatus::Completed,
+            Some("tool_calls") => ResponseStatus::InProgress,
+            Some("failed") | Some("error") => ResponseStatus::Failed,
+            _ => ResponseStatus::Completed,
+        }
+    }
+
     fn finalize(self) -> ResponsesResponse {
+        // Determine final status before consuming fields out of `self`.
+        let status = self.status();
+
         let mut output: Vec<ResponseOutputItem> = Vec::new();
 
         // Add message content if present
@@ -388,14 +533,6 @@ impl StreamingResponseAccumulator {
 
         // Add tool calls
         output.extend(self.tool_calls);
-
-        // Determine final status
-        let status = match self.finish_reason.as_deref() {
-            Some("stop") | Some("length") => ResponseStatus::Completed,
-            Some("tool_calls") => ResponseStatus::InProgress,
-            Some("failed") | Some("error") => ResponseStatus::Failed,
-            _ => ResponseStatus::Completed,
-        };
 
         // Convert usage
         let usage = self.usage.as_ref().map(|u| {
@@ -457,13 +594,34 @@ pub(super) fn execute_tool_loop_streaming(
             &original_request_clone,
             params,
             mcp_servers,
-            tx.clone(),
+            &tx,
+            /* drain_completed */ true,
         )
         .await;
 
-        if let Err(e) = result {
-            warn!("Streaming tool loop error: {}", e);
-            utils::send_error_sse(&tx, &e, "tool_loop_error");
+        match result {
+            // Persist (when store=true) the finalized tool-using response so
+            // GET /v1/responses/{id} retrieval and durable previous_response_id
+            // resolution work on the SSE MCP path too — mirroring the non-MCP
+            // SSE path (`process_and_transform_sse_stream`) and the WS executor
+            // (`websocket.rs`). The sink-generic refactor previously dropped this,
+            // silently breaking store=true durability for streaming tool-call
+            // responses (default store=true → GET 404 + broken chaining).
+            Ok(final_response) => {
+                persist_response_if_needed(
+                    ctx_clone.conversation_storage.clone(),
+                    ctx_clone.conversation_item_storage.clone(),
+                    ctx_clone.response_storage.clone(),
+                    &final_response,
+                    &original_request_clone,
+                    ctx_clone.request_context.clone(),
+                )
+                .await;
+            }
+            Err(e) => {
+                warn!("Streaming tool loop error: {}", e);
+                utils::send_error_sse(&tx, &e, "tool_loop_error");
+            }
         }
 
         // Send [DONE]
@@ -499,15 +657,64 @@ pub(super) fn execute_tool_loop_streaming(
     response
 }
 
+/// Execute the MCP streaming tool loop over a WebSocket sink and return the
+/// finalized response for the connection cache.
+///
+/// Mirrors [`execute_tool_loop_streaming`] but drives the loop inline (no
+/// fire-and-forget spawn / SSE body) so the caller can await the materialized
+/// [`ResponsesResponse`]. The WebSocket transport is inherently event-streamed,
+/// so the terminal `response.completed`/`failed` is emitted with an explicit
+/// status (no draining) and the response is materialized non-destructively.
+pub(crate) async fn execute_tool_loop_streaming_with_sink(
+    ctx: &ResponsesContext,
+    current_request: ResponsesRequest,
+    original_request: &ResponsesRequest,
+    headers: Option<header::HeaderMap>,
+    model_id: Option<String>,
+    mcp_servers: Vec<McpServerBinding>,
+    sink: &WsResponseEventSink,
+) -> Result<ResponsesResponse, String> {
+    // WS sessions resolve tenant via the route_request_meta middleware on the
+    // realtime-style route group, but the meta is not threaded down to the
+    // executor; use an anonymous charge identity for the inline pipeline call.
+    let tenant_request_meta = crate::middleware::TenantRequestMeta::new(
+        crate::tenant::TenantIdentity::Anonymous.into_key(),
+    );
+    let params = ResponsesCallContext {
+        headers,
+        model_id: model_id.unwrap_or_else(|| current_request.model.clone()),
+        response_id: None,
+        tenant_request_meta,
+    };
+
+    execute_tool_loop_streaming_internal(
+        ctx,
+        current_request,
+        original_request,
+        params,
+        mcp_servers,
+        sink,
+        /* drain_completed */ false,
+    )
+    .await
+}
+
 /// Internal streaming tool loop implementation
+///
+/// Sink-generic so both the SSE and WebSocket Responses paths reuse the same
+/// MCP tool-loop, event-emission and accumulation logic. When `drain_completed`
+/// is true (SSE) the terminal `response.completed` event is emitted by draining
+/// emitter state; when false (WS) it is emitted with an explicit status via a
+/// clone so the returned [`ResponsesResponse`] still carries the full output.
 async fn execute_tool_loop_streaming_internal(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
-    tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
-) -> Result<(), String> {
+    sink: &impl ResponseEventSink,
+    drain_completed: bool,
+) -> Result<ResponsesResponse, String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
@@ -528,9 +735,9 @@ async fn execute_tool_loop_streaming_internal(
 
     // Emit initial response.created and response.in_progress events
     let event = emitter.emit_created();
-    emitter.send_event(&event, &tx)?;
+    emitter.send_event(&event, sink)?;
     let event = emitter.emit_in_progress();
-    emitter.send_event(&event, &tx)?;
+    emitter.send_event(&event, sink)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
@@ -542,7 +749,11 @@ async fn execute_tool_loop_streaming_internal(
     // Flag to track if mcp_list_tools has been emitted
     let mut mcp_list_tools_emitted = false;
 
-    loop {
+    // Terminal (usage, status) captured at whichever `break` the loop exits
+    // through, used to materialize the finalized response for the WS cache /
+    // persistence. The function-tool-call and tool-limit exits leave the turn
+    // pending (`InProgress`); only natural completion reports `Completed`.
+    let (terminal_usage, terminal_status) = loop {
         state.iteration += 1;
 
         // Record tool loop iteration metric
@@ -561,7 +772,7 @@ async fn execute_tool_loop_streaming_internal(
             for binding in session.mcp_servers() {
                 let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
-                emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, &tx)?;
+                emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, sink)?;
             }
             mcp_list_tools_emitted = true;
         }
@@ -585,10 +796,31 @@ async fn execute_tool_loop_streaming_internal(
             )
             .await;
 
+        // A non-2xx from the chat pipeline (worker-selection / stage error before
+        // any SSE) carries its error in the body, not a `data:` frame.
+        // convert_and_accumulate_stream only consumes `data:` frames, so the error
+        // body would materialize as an empty success and the loop would
+        // emit/cache/persist a completed turn. Surface it as a failed turn instead
+        // (same guard as the non-MCP path).
+        let status = response.status();
+        if !status.is_success() {
+            let body_bytes = to_bytes(response.into_body(), 1_048_576).await.ok();
+            let message = body_bytes
+                .as_ref()
+                .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("chat pipeline returned status {status}"));
+            return Err(message);
+        }
+
         // Convert chat stream to Responses API events while accumulating for tool call detection
         // Stream text naturally - it only appears on final iteration (tool iterations have empty content)
         let accumulated_response =
-            convert_and_accumulate_stream(response.into_body(), &mut emitter, &tx).await?;
+            convert_and_accumulate_stream(response.into_body(), &mut emitter, sink).await?;
 
         // Check for tool calls (extract all of them for parallel execution)
         let tool_calls = extract_all_tool_calls_from_chat(&accumulated_response);
@@ -627,7 +859,11 @@ async fn execute_tool_loop_streaming_internal(
                     max_tool_calls,
                     DEFAULT_MAX_ITERATIONS
                 );
-                break;
+                // TODO(phase2): max_tool_calls should surface status=failed + an
+                // error payload per main's contract (NOT incomplete_details).
+                // For now keep main's current behavior: stop the loop and return
+                // the accumulated turn unchanged (pending → InProgress).
+                break (accumulated_response.usage, ResponseStatus::InProgress);
             }
 
             // Process each MCP tool call
@@ -674,12 +910,12 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Emit output_item.added
                 let event = emitter.emit_output_item_added(output_index, &item);
-                emitter.send_event(&event, &tx)?;
+                emitter.send_event(&event, sink)?;
 
                 // Emit tool_call.in_progress
                 let event =
                     emitter.emit_tool_call_in_progress(output_index, &item_id, response_format);
-                emitter.send_event(&event, &tx)?;
+                emitter.send_event(&event, sink)?;
 
                 // Emit arguments events for mcp_call only (skip for builtin tools)
                 if matches!(response_format, ResponseFormat::Passthrough) {
@@ -689,7 +925,7 @@ async fn execute_tool_loop_streaming_internal(
                         &item_id,
                         &tool_call.arguments,
                     );
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
 
                     // Emit mcp_call_arguments.done
                     let event = emitter.emit_mcp_call_arguments_done(
@@ -697,14 +933,14 @@ async fn execute_tool_loop_streaming_internal(
                         &item_id,
                         &tool_call.arguments,
                     );
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
                 }
 
                 // Emit searching/interpreting event for builtin tools
                 if let Some(event) =
                     emitter.emit_tool_call_searching(output_index, &item_id, response_format)
                 {
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
                 }
 
                 // Execute the MCP tool
@@ -769,7 +1005,7 @@ async fn execute_tool_loop_streaming_internal(
                 if success {
                     let event =
                         emitter.emit_tool_call_completed(output_index, &item_id, response_format);
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
                 } else {
                     let err_text = tool_output
                         .error_message
@@ -784,19 +1020,19 @@ async fn execute_tool_loop_streaming_internal(
                     // content.
                     if matches!(response_format, ResponseFormat::Passthrough) {
                         let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
-                        emitter.send_event(&event, &tx)?;
+                        emitter.send_event(&event, sink)?;
                     } else {
                         let event = emitter.emit_tool_call_completed(
                             output_index,
                             &item_id,
                             response_format,
                         );
-                        emitter.send_event(&event, &tx)?;
+                        emitter.send_event(&event, sink)?;
                     }
                 }
 
                 let event = emitter.emit_output_item_done(output_index, &item_done);
-                emitter.send_event(&event, &tx)?;
+                emitter.send_event(&event, sink)?;
                 emitter.complete_output_item(output_index);
 
                 Metrics::record_mcp_tool_duration(
@@ -849,7 +1085,7 @@ async fn execute_tool_loop_streaming_internal(
 
                     // Emit output_item.added
                     let event = emitter.emit_output_item_added(output_index, &item);
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
 
                     // Emit function_call_arguments.delta
                     let event = emitter.emit_function_call_arguments_delta(
@@ -857,7 +1093,7 @@ async fn execute_tool_loop_streaming_internal(
                         &item_id,
                         &tool_call.arguments,
                     );
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
 
                     // Emit function_call_arguments.done
                     let event = emitter.emit_function_call_arguments_done(
@@ -865,7 +1101,7 @@ async fn execute_tool_loop_streaming_internal(
                         &item_id,
                         &tool_call.arguments,
                     );
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
 
                     // Build complete item
                     let item_complete = json!({
@@ -879,13 +1115,14 @@ async fn execute_tool_loop_streaming_internal(
 
                     // Emit output_item.done
                     let event = emitter.emit_output_item_done(output_index, &item_complete);
-                    emitter.send_event(&event, &tx)?;
+                    emitter.send_event(&event, sink)?;
 
                     emitter.complete_output_item(output_index);
                 }
 
-                // Break loop to return response to caller
-                break;
+                // Break loop to return response to caller. Function tool calls
+                // leave the turn pending on the client; status stays InProgress.
+                break (accumulated_response.usage, ResponseStatus::InProgress);
             }
 
             // Build next request with conversation history
@@ -906,35 +1143,61 @@ async fn execute_tool_loop_streaming_internal(
         // Emit reasoning item if present
         if let Some(reasoning) = reasoning_content {
             if !reasoning.is_empty() {
-                emitter.emit_reasoning_item(&tx, Some(reasoning))?;
+                emitter.emit_reasoning_item(sink, Some(reasoning))?;
             }
         }
 
         // Text message events already emitted naturally by process_chunk during stream processing
         // (OpenAI router approach - text only appears on final iteration when no tool calls)
 
-        // Emit final response.completed event
-        let usage_json = accumulated_response.usage.as_ref().map(|u| {
-            json!({
-                "input_tokens": u.prompt_tokens,
-                "output_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens
-            })
-        });
-        let event = emitter.emit_completed(usage_json.as_ref());
-        emitter.send_event(&event, &tx)?;
+        // No tool calls → final turn. The terminal `response.completed` event is
+        // emitted once after the loop so every exit path emits it (see below).
+        break (accumulated_response.usage, ResponseStatus::Completed);
+    };
 
-        break;
-    }
+    // Emit the terminal response event for EVERY loop exit. Previously only the
+    // normal-completion path emitted it inline; the max-tool-calls and
+    // function-tool-call early exits broke out WITHOUT emitting, hanging
+    // streaming clients that block on `response.completed`/`error` until timeout.
+    // Emit once here for all exits.
+    let terminal_usage_json = terminal_usage.as_ref().map(|u| {
+        json!({
+            "input_tokens": u.prompt_tokens,
+            "output_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens
+        })
+    });
+    // SSE drains emitter state (terminal, byte-identical to prior output) for a
+    // normal `Completed` turn, but on the early exits (`InProgress`:
+    // function-tool-call / max-tool-calls) it must preserve the explicit status so
+    // clients see the turn is still pending rather than a hardcoded `completed`.
+    // WS always emits with the explicit status (clone) so `finalize_with_status`
+    // below still materializes the full output.
+    // Materialize the finalized response BEFORE the terminal emit. On the SSE
+    // `Completed` path `emit_completed` DRAINS emitter state via `take()`, while
+    // `finalize_with_status` reads non-destructively — so finalize MUST run first
+    // or the persisted response (SSE store=true) and the WS connection cache lose
+    // every output item (e.g. an MCP turn's mcp_list_tools / mcp_call / message).
+    // The terminal event is emitted afterwards and still drains for byte-identical
+    // SSE output. Both transports consume this value: the WS caller caches and
+    // persists it, the SSE caller persists it (store=true) in the spawned task.
+    let final_response = emitter.finalize_with_status(terminal_usage, terminal_status.clone());
 
-    Ok(())
+    let event = if drain_completed && matches!(terminal_status, ResponseStatus::Completed) {
+        emitter.emit_completed(terminal_usage_json.as_ref())
+    } else {
+        emitter.emit_completed_with_status(terminal_status, terminal_usage_json.as_ref())
+    };
+    emitter.send_event(&event, sink)?;
+
+    Ok(final_response)
 }
 
 /// Convert chat stream to Responses API events while accumulating for tool call detection
 async fn convert_and_accumulate_stream(
     body: Body,
     emitter: &mut ResponseStreamEventEmitter,
-    tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    sink: &impl ResponseEventSink,
 ) -> Result<ChatCompletionResponse, String> {
     let mut accumulator = ChatResponseAccumulator::new();
     let mut stream = body.into_data_stream();
@@ -952,12 +1215,37 @@ async fn convert_and_accumulate_stream(
 
         if let Some(json_str) = event.strip_prefix("data: ") {
             let json_str = json_str.trim();
-            if let Ok(chat_chunk) = serde_json::from_str::<ChatCompletionStreamResponse>(json_str) {
-                // Convert chat chunk to Responses API events and emit
-                emitter.process_chunk(&chat_chunk, tx)?;
+            match serde_json::from_str::<ChatCompletionStreamResponse>(json_str) {
+                Ok(chat_chunk) => {
+                    // Convert chat chunk to Responses API events and emit
+                    emitter.process_chunk(&chat_chunk, sink)?;
 
-                // Accumulate for tool call detection
-                accumulator.process_chunk(&chat_chunk);
+                    // Accumulate for tool call detection
+                    accumulator.process_chunk(&chat_chunk);
+                }
+                Err(_) => {
+                    // A frame that isn't a chat-completion delta but carries an
+                    // `error` object is a mid-stream worker error. The MCP tool
+                    // loop must surface it rather than silently drop the frame and
+                    // finalize a bogus `response.completed` (the non-MCP path
+                    // forwards such frames to the client; here we fail the turn so
+                    // the caller emits `response.failed` / an error event). Other
+                    // unrecognized informational frames stay lenient (ignored).
+                    if let Some(message) = serde_json::from_str::<Value>(json_str)
+                        .ok()
+                        .as_ref()
+                        .and_then(|value| value.get("error"))
+                        .map(|error| {
+                            error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("upstream worker stream error")
+                                .to_string()
+                        })
+                    {
+                        return Err(message);
+                    }
+                }
             }
         }
     }
@@ -1108,5 +1396,286 @@ mod tests {
             }
             other => panic!("expected function tool call, got {other:?}"),
         }
+    }
+
+    /// Collecting [`ResponseEventSink`] that records every emitted event so a
+    /// test can inspect the wire frames the client would have received.
+    #[derive(Default)]
+    struct CollectingSink {
+        events: std::sync::Mutex<Vec<Value>>,
+        raw_jsons: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CollectingSink {
+        /// The `id` carried by the most recent `response.completed` frame — the
+        /// id the client actually observed on the wire.
+        fn streamed_completed_id(&self) -> Option<String> {
+            self.events
+                .lock()
+                .expect("sink mutex poisoned")
+                .iter()
+                .rev()
+                .find(|event| event["type"] == "response.completed")
+                .and_then(|event| event["response"]["id"].as_str().map(str::to_owned))
+        }
+
+        /// Raw pass-through payloads handed to `send_raw_json` (the exact bytes a
+        /// client would receive after the sink's own framing).
+        fn raw_jsons(&self) -> Vec<String> {
+            self.raw_jsons.lock().expect("sink mutex poisoned").clone()
+        }
+    }
+
+    impl ResponseEventSink for CollectingSink {
+        fn send_event(&self, event: &Value) -> Result<(), String> {
+            self.events
+                .lock()
+                .expect("sink mutex poisoned")
+                .push(event.clone());
+            Ok(())
+        }
+
+        fn send_raw_json(&self, payload: &str) -> Result<(), String> {
+            self.raw_jsons
+                .lock()
+                .expect("sink mutex poisoned")
+                .push(payload.to_string());
+            Ok(())
+        }
+    }
+
+    /// Frame an SSE body out of chat chunks whose ids begin with `chatcmpl-`,
+    /// the same shape the worker emits.
+    fn sse_body_from_chunks(chunks: &[ChatCompletionStreamResponse]) -> Body {
+        let mut payload = String::new();
+        for chunk in chunks {
+            let json = serde_json::to_string(chunk).expect("chunk serializes");
+            payload.push_str("data: ");
+            payload.push_str(&json);
+            payload.push_str("\n\n");
+        }
+        payload.push_str("data: [DONE]\n\n");
+        Body::from(payload)
+    }
+
+    /// Regression: the worker stamps each chat chunk with its own
+    /// `chatcmpl-…` id, but the client receives (and continuation relies on)
+    /// the emitter's `resp_…` id. `drive_non_mcp_stream` must return a response
+    /// keyed by the emitter id — never the chunk id — and that returned id must
+    /// match the id streamed in `response.completed`. Caught only by live
+    /// inference before this test existed (resp_/chatcmpl- mismatch broke
+    /// `previous_response_id` continuation).
+    #[tokio::test]
+    async fn drive_non_mcp_stream_stamps_emitter_resp_id_not_chunk_id() {
+        let chunk = ChatCompletionStreamResponse::builder("chatcmpl-fake-worker-123", "test-model")
+            .add_choice_content(0, "assistant", "hello world")
+            .build();
+        // A second chunk carrying the terminal finish_reason and usage.
+        let mut finish_chunk =
+            ChatCompletionStreamResponse::builder("chatcmpl-fake-worker-123", "test-model").build();
+        finish_chunk
+            .choices
+            .push(openai_protocol::chat::ChatStreamChoice {
+                index: 0,
+                delta: openai_protocol::chat::ChatMessageDelta {
+                    role: None,
+                    content: None,
+                    tool_calls: None,
+                    reasoning_content: None,
+                },
+                logprobs: None,
+                finish_reason: Some("stop".to_string()),
+                matched_stop: None,
+            });
+
+        let body = sse_body_from_chunks(&[chunk, finish_chunk]);
+        let request = ResponsesRequest {
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+        let sink = CollectingSink::default();
+
+        // `drain_completed = false` exercises the WS path, which is the one that
+        // populates the connection cache from the returned response.
+        let final_response = drive_non_mcp_stream(body, &request, &sink, false)
+            .await
+            .expect("stream drives to completion");
+
+        assert!(
+            final_response.id.starts_with("resp_"),
+            "finalized id must be the emitter resp_ id, got {:?}",
+            final_response.id
+        );
+        assert!(
+            !final_response.id.contains("chatcmpl-"),
+            "finalized id must not adopt the worker chunk id, got {:?}",
+            final_response.id
+        );
+
+        // The id the client received on the wire must equal the id we cache /
+        // persist, so a follow-up `previous_response_id` resolves.
+        let streamed_id = sink
+            .streamed_completed_id()
+            .expect("a response.completed frame was streamed");
+        assert_eq!(
+            streamed_id, final_response.id,
+            "streamed completed id must match the finalized/cached id"
+        );
+    }
+
+    /// Regression for the double-`data:` framing bug: a non-chat, non-error SSE
+    /// event (an informational/keepalive frame) fails
+    /// `ChatCompletionStreamResponse` parsing and is forwarded via
+    /// `send_raw_json`. It must be forwarded as the data:-STRIPPED JSON, NOT the
+    /// prefixed line, otherwise `send_raw_json` re-frames it to `data: data: …`
+    /// on SSE (and ships non-JSON text to WS clients). (Error frames are handled
+    /// separately now: they fail the turn, see the next test.)
+    #[tokio::test]
+    async fn drive_non_mcp_stream_forwards_non_chat_events_single_framed() {
+        let chunk = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "hi")
+            .build();
+        let info_json = r#"{"note":"keepalive","seq":1}"#;
+        // Each HTTP body frame is treated as one complete SSE event, so emit the
+        // valid chunk, the non-chat informational event, and [DONE] as SEPARATE frames.
+        let frames: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&chunk).expect("chunk serializes")
+            ))),
+            Ok(bytes::Bytes::from(format!("data: {info_json}\n\n"))),
+            Ok(bytes::Bytes::from("data: [DONE]\n\n")),
+        ];
+        let body = Body::from_stream(futures_util::stream::iter(frames));
+
+        let request = ResponsesRequest {
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+        let sink = CollectingSink::default();
+        drive_non_mcp_stream(body, &request, &sink, false)
+            .await
+            .expect("stream drives to completion");
+
+        let raw = sink.raw_jsons();
+        assert_eq!(
+            raw.len(),
+            1,
+            "exactly one non-chat event should be forwarded, got {raw:?}"
+        );
+        assert_eq!(
+            raw[0], info_json,
+            "non-chat event must be forwarded as stripped JSON (no `data: ` prefix)"
+        );
+        assert!(
+            !raw[0].starts_with("data: "),
+            "forwarded payload must not retain the SSE `data: ` prefix (would double-frame), got {:?}",
+            raw[0]
+        );
+    }
+
+    /// Regression: a non-MCP turn that hits an upstream `data: {"error":…}` frame
+    /// must FAIL (return Err), not forward the error and then emit
+    /// `response.completed` for the same turn (which would also cache/persist a
+    /// bogus success). Mirrors the MCP path. Benign non-error frames stay
+    /// pass-through (the test above).
+    #[tokio::test]
+    async fn drive_non_mcp_stream_fails_turn_on_error_frame() {
+        let chunk = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "partial")
+            .build();
+        let error_json = r#"{"error":{"message":"worker exploded","type":"server_error","code":"internal_error"}}"#;
+        let frames: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&chunk).expect("chunk serializes")
+            ))),
+            Ok(bytes::Bytes::from(format!("data: {error_json}\n\n"))),
+            Ok(bytes::Bytes::from("data: [DONE]\n\n")),
+        ];
+        let body = Body::from_stream(futures_util::stream::iter(frames));
+        let request = ResponsesRequest {
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+        let sink = CollectingSink::default();
+        let err = drive_non_mcp_stream(body, &request, &sink, false)
+            .await
+            .expect_err("an upstream error frame must fail the non-MCP turn");
+        assert!(
+            err.contains("worker exploded"),
+            "surfaced error must carry the upstream worker message, got {err:?}"
+        );
+    }
+
+    /// Frame chat chunks + extra raw `data:` lines into a multi-frame SSE body
+    /// (each `Bytes` is one SSE event), so a non-chat frame can be interleaved.
+    fn sse_body_from_lines(lines: &[String]) -> Body {
+        let frames: Vec<Result<Bytes, std::io::Error>> = lines
+            .iter()
+            .map(|line| Ok(Bytes::from(format!("data: {line}\n\n"))))
+            .chain(std::iter::once(Ok(Bytes::from("data: [DONE]\n\n"))))
+            .collect();
+        Body::from_stream(futures_util::stream::iter(frames))
+    }
+
+    /// Regression: on the MCP tool-loop path a mid-stream worker error frame
+    /// (`data: {"error":…}`) must FAIL the turn rather than be silently dropped
+    /// and finalized as a bogus successful response. The non-MCP path forwards
+    /// such frames to the client; the MCP accumulator (which feeds tool-call
+    /// detection) had no `else` branch, so the error chunk failed
+    /// `ChatCompletionStreamResponse` parsing and was ignored, and the loop
+    /// returned `Ok(empty completed)` — the caller then emitted a spurious
+    /// `response.completed`. The error must now surface as `Err` so the caller
+    /// emits `response.failed` / an error event.
+    #[tokio::test]
+    async fn convert_and_accumulate_stream_surfaces_worker_error_frame() {
+        let valid = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "partial")
+            .build();
+        let error_json = r#"{"error":{"message":"worker exploded","type":"server_error","code":"internal_error"}}"#;
+        let body = sse_body_from_lines(&[
+            serde_json::to_string(&valid).expect("chunk serializes"),
+            error_json.to_string(),
+        ]);
+
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 0);
+        let sink = CollectingSink::default();
+
+        let err = convert_and_accumulate_stream(body, &mut emitter, &sink)
+            .await
+            .expect_err("a mid-stream worker error frame must fail the turn");
+        assert!(
+            err.contains("worker exploded"),
+            "surfaced error must carry the upstream worker message, got {err:?}"
+        );
+        assert!(
+            sink.streamed_completed_id().is_none(),
+            "no terminal response.completed may be emitted for a failed turn"
+        );
+    }
+
+    /// Companion to the worker-error test: a non-chat frame WITHOUT an `error`
+    /// object (e.g. an unrecognized informational/keepalive event) must stay
+    /// lenient — ignored, not turned into a turn failure — so the fix does not
+    /// regress benign streams.
+    #[tokio::test]
+    async fn convert_and_accumulate_stream_ignores_benign_unknown_frame() {
+        let valid = ChatCompletionStreamResponse::builder("chatcmpl-x", "test-model")
+            .add_choice_content(0, "assistant", "hello")
+            .build();
+        let body = sse_body_from_lines(&[
+            serde_json::to_string(&valid).expect("chunk serializes"),
+            r#"{"note":"keepalive","seq":7}"#.to_string(),
+        ]);
+
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 0);
+        let sink = CollectingSink::default();
+
+        convert_and_accumulate_stream(body, &mut emitter, &sink)
+            .await
+            .expect("a benign non-error frame must not fail the turn");
     }
 }

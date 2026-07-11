@@ -324,6 +324,117 @@ data: {"type": "response.output_item.done", "output_index": 1, "item": {"type": 
 
 ---
 
+## WebSocket Mode
+
+For multi-turn agentic workflows, the Responses API supports a **WebSocket transport** that keeps one persistent connection open across turns. This removes the per-turn client↔gateway connection setup and the per-turn conversation re-hydration that stateless `POST` continuations incur, mirroring [OpenAI's Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode).
+
+WebSocket mode is **scoped to the gRPC regular worker backend**. On an HTTP-worker or Harmony backend, the upgrade returns `501 Not Implemented`.
+
+### Establishing the connection
+
+Upgrade `GET /v1/responses` to a WebSocket; the model is supplied as a query parameter:
+
+```
+ws://localhost:30000/v1/responses?model=meta-llama/Llama-3.1-8B-Instruct
+```
+
+### Creating a response
+
+Send a `response.create` event. The `response` payload mirrors the `POST /v1/responses` body (including `model`); transport-only fields (`stream`, `background`) are not used.
+
+```json
+{
+  "type": "response.create",
+  "event_id": "e1",
+  "response": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "input": "What is the capital of France?",
+    "max_output_tokens": 128,
+    "store": true
+  }
+}
+```
+
+The server streams back the **same event sequence as SSE** (`response.created` → `response.in_progress` → `response.output_text.delta` … → `response.completed`), without the SSE `event:`/`data:` framing — each event is one JSON message.
+
+### Multi-turn continuation
+
+Continue on the same socket by sending another `response.create` with `previous_response_id`:
+
+```json
+{
+  "type": "response.create",
+  "event_id": "e2",
+  "response": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "input": "And its population?",
+    "previous_response_id": "resp_abc123",
+    "store": true
+  }
+}
+```
+
+A **connection-local cache** resolves `previous_response_id` for same-socket continuations without reading durable storage. With `store: true` the response is still persisted — retrievable via `GET /v1/responses/{id}` and chainable after a reconnect (which falls back to durable storage). With `store: false`, the response is not persisted and is chainable only within the same live connection.
+
+### Constraints
+
+| Constraint | Behavior |
+|---|---|
+| Backend | gRPC regular worker only; HTTP-worker / Harmony → `501` |
+| In-flight requests | One `response.create` per connection at a time |
+| Connection lifetime | Capped at 60 minutes |
+| `conversation` parameter | Rejected (use `previous_response_id`) |
+| Unknown event type | Rejected with an `error` event |
+| Malformed JSON | Rejected with an `error` event (`invalid_json`) |
+| Invalid `response.create` payload | Rejected with an `error` event (`invalid_request`) |
+
+### Errors
+
+Errors arrive as an `error` event on the socket:
+
+```json
+{
+  "type": "error",
+  "status": 400,
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_request",
+    "message": "Failed to parse `response.create` payload: missing field `model`"
+  }
+}
+```
+
+### Example
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    url = "ws://localhost:30000/v1/responses?model=meta-llama/Llama-3.1-8B-Instruct"
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({
+            "type": "response.create",
+            "event_id": "e1",
+            "response": {
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "input": "Hello!",
+                "store": True,
+            },
+        }))
+        async for message in ws:
+            event = json.loads(message)
+            if event["type"] == "response.output_text.delta":
+                print(event["delta"], end="", flush=True)
+            elif event["type"] == "response.completed":
+                break
+            elif event["type"] == "error":
+                raise RuntimeError(event["error"]["message"])
+
+asyncio.run(main())
+```
+
+---
+
 ## Get Response
 
 Retrieve a previously stored response by ID.
