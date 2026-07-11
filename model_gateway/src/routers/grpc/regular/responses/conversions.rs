@@ -240,6 +240,11 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
             None
         },
         parallel_tool_calls: req.parallel_tool_calls,
+        reasoning_effort: req
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.effort.as_ref())
+            .map(|effort| effort.as_str().to_string()),
         top_logprobs: req.top_logprobs,
         top_p: req.top_p,
         skip_special_tokens: true,
@@ -444,6 +449,21 @@ mod tests {
         assert_eq!(chat_req.messages.len(), 2); // system + user
         assert_eq!(chat_req.model, "gpt-4");
         assert_eq!(chat_req.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_reasoning_effort_none_conversion() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("Answer briefly".to_string()),
+            reasoning: Some(openai_protocol::responses::ResponseReasoningParam {
+                effort: Some(openai_protocol::responses::ReasoningEffort::None),
+                summary: None,
+            }),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("none"));
     }
 
     #[test]

@@ -11,6 +11,16 @@ use serde_json::json;
 use validator::Validate;
 
 #[test]
+fn reasoning_effort_none_round_trips() {
+    let payload = json!({"effort": "none"});
+    let reasoning: ResponseReasoningParam =
+        serde_json::from_value(payload.clone()).expect("reasoning effort none should deserialize");
+
+    assert!(matches!(reasoning.effort, Some(ReasoningEffort::None)));
+    assert_eq!(serde_json::to_value(reasoning).expect("serialize"), payload);
+}
+
+#[test]
 fn summary_text_content_round_trips_spec_shape() {
     // Spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
     let item: ResponseOutputItem = serde_json::from_value(json!({
