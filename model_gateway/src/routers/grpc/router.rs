@@ -75,7 +75,7 @@ const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
     ("vi", "Vietnamese"),
 ];
 
-fn normalize_qwen3_asr_language(language: Option<&str>) -> Result<Option<String>, Response> {
+fn normalize_qwen3_asr_language(language: Option<&str>) -> Result<Option<String>, Box<Response>> {
     let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -86,10 +86,10 @@ fn normalize_qwen3_asr_language(language: Option<&str>) -> Result<Option<String>
         })
         .map(|(_, name)| Some((*name).to_string()))
         .ok_or_else(|| {
-            error::bad_request(
+            Box::new(error::bad_request(
                 "unsupported_transcription_language",
                 format!("Qwen3-ASR does not support language '{language}'"),
-            )
+            ))
         })
 }
 
@@ -207,16 +207,16 @@ enum TranscriptionResponseFormat {
 
 fn parse_transcription_response_format(
     format: Option<&str>,
-) -> Result<TranscriptionResponseFormat, Response> {
+) -> Result<TranscriptionResponseFormat, Box<Response>> {
     match format.unwrap_or("json").to_ascii_lowercase().as_str() {
         "json" => Ok(TranscriptionResponseFormat::Json),
         "text" => Ok(TranscriptionResponseFormat::Text),
-        unsupported => Err(error::bad_request(
+        unsupported => Err(Box::new(error::bad_request(
             "unsupported_transcription_response_format",
             format!(
                 "Qwen3-ASR does not provide timestamps required for response format '{unsupported}'"
             ),
-        )),
+        ))),
     }
 }
 
@@ -377,7 +377,7 @@ impl GrpcRouter {
         model_id: &str,
     ) -> Response {
         if let Err(response) = super::validate_text_only_output(body) {
-            return response;
+            return *response;
         }
 
         // Choose Harmony pipeline if workers indicate Harmony (checks architectures, hf_model_type)
@@ -815,7 +815,7 @@ impl RouterTrait for GrpcRouter {
         let response_format =
             match parse_transcription_response_format(body.response_format.as_deref()) {
                 Ok(format) => format,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
         if body.stream.unwrap_or(false) {
             return error::bad_request(
@@ -836,7 +836,7 @@ impl RouterTrait for GrpcRouter {
 
         let requested_language = match normalize_qwen3_asr_language(body.language.as_deref()) {
             Ok(language) => language,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         let chat_request =
             build_qwen3_asr_chat_request(body, &audio, requested_language.as_deref());

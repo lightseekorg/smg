@@ -393,7 +393,7 @@ impl GrpcPDRouter {
         model_id: &str,
     ) -> Response {
         if let Err(response) = super::validate_text_only_output(body) {
-            return response;
+            return *response;
         }
 
         debug!(

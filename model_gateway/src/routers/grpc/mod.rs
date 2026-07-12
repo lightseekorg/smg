@@ -22,12 +22,12 @@ pub mod utils; // Used by routers/http and bindings/golang
 // Re-export for convenience
 pub use proto_wrapper::{MultimodalData, TensorBytes};
 
-fn validate_text_only_output(request: &ChatCompletionRequest) -> Result<(), Response> {
+fn validate_text_only_output(request: &ChatCompletionRequest) -> Result<(), Box<Response>> {
     if request.return_audio == Some(true) {
-        return Err(error::bad_request(
+        return Err(Box::new(error::bad_request(
             "audio_output_not_supported",
             "'return_audio' must be false because the gRPC backend only supports text output",
-        ));
+        )));
     }
 
     if let Some(modality) = request.modalities.as_ref().and_then(|modalities| {
@@ -35,12 +35,12 @@ fn validate_text_only_output(request: &ChatCompletionRequest) -> Result<(), Resp
             .iter()
             .find(|modality| modality.as_str() != "text")
     }) {
-        return Err(error::bad_request(
+        return Err(Box::new(error::bad_request(
             "unsupported_output_modality",
             format!(
                 "unsupported output modality '{modality}'; the gRPC backend only supports text output"
             ),
-        ));
+        )));
     }
 
     Ok(())
