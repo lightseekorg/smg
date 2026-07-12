@@ -8,9 +8,8 @@ use std::collections::HashMap;
 use image::DynamicImage;
 
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
-use crate::types::RgbFrameRef;
-
 pub use crate::encoder_inputs::{ModelSpecificValue, PreprocessedEncoderInputs};
+use crate::types::RgbFrameRef;
 
 /// Helper to extract a dimension from encoder_input given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.

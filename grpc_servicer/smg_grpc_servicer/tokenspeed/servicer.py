@@ -433,8 +433,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         )
         supported_modalities = self._static_supported_modalities(model_config, hf_config)
         supports_vision = any(
-            modality in (common_pb2.IMAGE, common_pb2.VIDEO)
-            for modality in supported_modalities
+            modality in (common_pb2.IMAGE, common_pb2.VIDEO) for modality in supported_modalities
         )
         supports_multimodal = bool(supported_modalities)
 

@@ -16,7 +16,6 @@ use super::{
     execution::{scope as parallel_scope, task_count},
     scratch,
 };
-
 pub use crate::error::TransformError;
 
 pub type Result<T> = std::result::Result<T, TransformError>;

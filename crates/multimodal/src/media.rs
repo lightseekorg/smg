@@ -2110,7 +2110,7 @@ mod tests {
     #[cfg(feature = "opencv-video")]
     #[test]
     fn opencv_sampling_preserves_min_frames_for_short_clips() {
-        let cfg = super::VideoFetchConfig {
+        let cfg = VideoFetchConfig {
             min_frames: 4,
             max_frames: 8,
             sample_fps: 2.0,

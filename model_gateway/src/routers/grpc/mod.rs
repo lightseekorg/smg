@@ -59,9 +59,8 @@ pub struct ProcessedMessages {
 
 #[cfg(test)]
 mod tests {
-    use crate::routers::error::extract_error_code_from_response;
-
     use super::*;
+    use crate::routers::error::extract_error_code_from_response;
 
     #[test]
     fn validates_grpc_text_only_output() {
