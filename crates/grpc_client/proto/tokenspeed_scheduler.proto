@@ -9,9 +9,9 @@ import "common.proto";
 // TokenSpeed scheduler gRPC service. Self-contained wire definition apart
 // from the cross-engine admin messages in smg.grpc.common (flush/profile).
 // Trimmed to text+multimodal generation (no embed, no LoRA, no hidden-state
-// forwarding). Multimodal carries preprocessed tensors only — image fetch +
+// forwarding). Multimodal carries preprocessed tensors only — media fetch +
 // per-model preprocess happen in the gateway (see crates/multimodal). EPD: a
-// prefill request may carry `EncodeBootstrapInfo` so its image embeddings
+// prefill request may carry `EncodeBootstrapInfo` so its multimodal embeddings
 // arrive from an encode worker over Mooncake (see tokenspeed_encoder.proto).
 service TokenSpeedScheduler {
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
@@ -108,9 +108,9 @@ message GenerateRequest {
   // Preprocessed multimodal payload. Absent for text-only requests.
   MultimodalInputs mm_inputs = 9;
 
-  // EPD: present when this request's image embeddings arrive from an encode
+  // EPD: present when this request's multimodal embeddings arrive from an encode
   // worker over Mooncake instead of being computed here. The worker waits for
-  // the embedding keyed by `bootstrap_room` rather than running the vision
+  // the embedding keyed by `bootstrap_room` rather than running the matching
   // tower. Absent for non-disaggregated (aggregated) requests.
   optional EncodeBootstrapInfo encode_bootstrap_info = 10;
 
@@ -142,11 +142,11 @@ message EncodeItemBootstrapInfo {
   // The encode worker's bootstrap server (data-source side), not the prefill's.
   string bootstrap_host = 2;
   int32 bootstrap_port = 3;
-  // 63-bit rendezvous id: minted random per image by the gateway with no
+  // 63-bit rendezvous id: minted random per item by the gateway with no
   // in-flight dedup, so the space must be wide enough that the birthday
   // collision rate is negligible even with many independent gateways and
   // thousands of concurrent rooms (int32's 2^31 collides every few days under
-  // load, silently cross-wiring one image's embedding onto another's room).
+  // load, silently cross-wiring one item's embedding onto another's room).
   int64 bootstrap_room = 4;
 }
 

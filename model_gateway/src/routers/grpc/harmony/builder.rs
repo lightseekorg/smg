@@ -30,6 +30,38 @@ use crate::routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils};
 /// Global Harmony encoding (lazy-initialized)
 static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();
 
+fn reject_chat_audio(messages: &[ChatMessage]) -> Result<(), String> {
+    let has_audio = messages.iter().any(|message| match message {
+        ChatMessage::System { content, .. }
+        | ChatMessage::User { content, .. }
+        | ChatMessage::Tool { content, .. }
+        | ChatMessage::Developer { content, .. } => content_contains_audio(content),
+        ChatMessage::Assistant { content, .. } => {
+            content.as_ref().is_some_and(content_contains_audio)
+        }
+        ChatMessage::Function { .. } => false,
+    });
+
+    if has_audio {
+        Err(
+            "Harmony does not support audio content parts; use the regular multimodal path"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn content_contains_audio(content: &MessageContent) -> bool {
+    matches!(
+        content,
+        MessageContent::Parts(parts)
+            if parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::AudioUrl { .. } | ContentPart::InputAudio { .. }))
+    )
+}
+
 /// Get or initialize the Harmony encoding
 ///
 /// Uses HarmonyGptOss encoding which supports the gpt-oss model family.
@@ -262,6 +294,8 @@ impl HarmonyBuilder {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<HarmonyBuildOutput, String> {
+        reject_chat_audio(&request.messages)?;
+
         let mut all_messages = Vec::new();
 
         let sys_msg = self.build_system_message_from_chat(request);
@@ -1163,11 +1197,39 @@ mod tests {
     //!      signature (`type image_generation = (_: …) => any;`) that
     //!      gpt-oss is trained to emit calls against.
 
-    use openai_protocol::responses::{
-        ImageGenerationTool, ResponseInput, ResponseTool, ResponsesRequest,
+    use openai_protocol::{
+        common::{AudioUrl, InputAudio},
+        responses::{ImageGenerationTool, ResponseInput, ResponseTool, ResponsesRequest},
     };
 
     use super::*;
+
+    #[test]
+    fn chat_audio_is_explicitly_rejected() {
+        let audio_parts = [
+            ContentPart::AudioUrl {
+                audio_url: AudioUrl {
+                    url: "https://example.com/audio.wav".to_string(),
+                },
+            },
+            ContentPart::InputAudio {
+                input_audio: InputAudio {
+                    data: "UklGRg==".to_string(),
+                    format: "wav".to_string(),
+                },
+            },
+        ];
+
+        for part in audio_parts {
+            let messages = vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![part]),
+                name: None,
+            }];
+            let error = reject_chat_audio(&messages).expect_err("Harmony must reject chat audio");
+            assert!(error.contains("audio content parts"));
+            assert!(error.contains("regular multimodal path"));
+        }
+    }
 
     /// Invariant: `image_generation` must never be advertised as a
     /// gpt-oss native builtin tool. If a future change re-adds it,

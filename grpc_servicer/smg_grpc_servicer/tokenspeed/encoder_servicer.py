@@ -1,9 +1,9 @@
 """TokenSpeed EPD encode servicer.
 
-Receives ``Encode`` RPCs from the gateway and forwards them to a vision-only
+Receives ``Encode`` RPCs from the gateway and forwards them to an encoder-only
 encode worker (the engine's ``run_encode_loop``) over the same AsyncLLM
-scheduler-input channel the LM uses. The encode worker runs the vision tower and
-ships the resulting image embeddings to prefill workers over Mooncake; this
+scheduler-input channel the LM uses. The encode worker runs the requested
+multimodal tower and ships the resulting embeddings to prefill workers; this
 servicer only acks (the embeddings never flow back through the gateway).
 """
 
@@ -55,9 +55,9 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         health_servicer=None,
     ):
         self.async_llm = async_llm
-        # EPD_PIXEL_SHM: ship pixels to the scheduler process as POSIX-SHM
+        # EPD_PIXEL_SHM: ship encoder inputs to the scheduler process as POSIX-SHM
         # handles instead of pickling the raw tensor over ZMQ (the dominant
-        # per-image ingest cost). On by default (this servicer only runs in the
+        # per-item ingest cost). On by default (this servicer only runs in the
         # encode role, where SHM is always the right path); set EPD_PIXEL_SHM=0 to
         # fall back to the inline ZMQ pickle (e.g. a container with a tiny
         # /dev/shm). The decision is made once per item in _items_from_proto; the
@@ -77,9 +77,6 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         self._bootstrap_host = get_local_ip_by_remote()
         self._bootstrap_port = server_args.disaggregation_bootstrap_port
 
-        # Spatial merge factor for post-merge token counts (Qwen vision default 2).
-        self._merge_size = self._resolve_merge_size()
-
         self._rdma_pixel_puller = RdmaPixelPuller(
             agent_name=f"smg-encode-{self._bootstrap_host}-{self._bootstrap_port}",
             log_prefix="EPD RDMA",
@@ -88,40 +85,50 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         self.async_llm.auto_create_handle_loop()
         logger.info("TokenSpeedEncoderServicer initialized")
 
-    def _resolve_merge_size(self) -> int:
-        hf_config = getattr(self.async_llm.model_config, "hf_config", None)
-        vision_config = getattr(hf_config, "vision_config", None)
-        return int(getattr(vision_config, "spatial_merge_size", 2) or 2)
-
     def _items_from_proto(self, mm_inputs, bootstrap_room: int = 0):
         """Reconstruct the engine MultimodalDataItem(s) for the encode worker.
 
         Unlike the prefill leg, the encode worker NEEDS each item's encoder_input
-        (it runs the tower). It also needs each item's post-merge token count so the executor
-        can split the tower output; the gateway ships grid_thw but not
-        placeholders to encode, so derive the count from grid_thw and set it as
-        the item's single offset span (the offset positions are irrelevant to the
-        encode side, only the count matters).
+        (it runs the tower). Proto placeholders carry the output token spans the
+        executor uses to split the packed tower output back into items.
         """
         Modality, MultimodalDataItem = _lazy_mm_item()
         model_dtype = getattr(self.async_llm.model_config, "dtype", None)
 
-        # mm_inputs is itemized (one MultimodalItem per image, each owning its
+        # mm_inputs is itemized (one MultimodalItem per media item, each owning its
         # encoder_input + model_specific_tensors). The gateway sends one item per
         # Encode RPC keyed by bootstrap_room, but iterate generally.
         items = []
         for item_proto in mm_inputs.items:
+            if item_proto.modality == common_pb2.MODALITY_UNSPECIFIED:
+                item_modality = Modality.IMAGE
+            else:
+                item_modality = TokenSpeedSchedulerServicer._modality_from_proto(
+                    item_proto.modality
+                )
+
+            if not item_proto.placeholders:
+                raise ValueError("encode MultimodalItem carried no placeholders")
+            if any(p.length <= 0 for p in item_proto.placeholders):
+                raise ValueError("encode MultimodalItem.placeholders.length must be > 0")
+            offsets = [(p.offset, p.offset + p.length - 1) for p in item_proto.placeholders]
+
+            model_specific = {
+                name: TokenSpeedSchedulerServicer._tensor_from_proto(t)
+                for name, t in item_proto.model_specific_tensors.items()
+            }
+
             # The feature's CROSS-PROCESS representation is decided here, once, for
             # both payload arms: a plain CPU tensor by default, or (EPD_PIXEL_SHM) a
             # POSIX-SHM handle so the ZMQ hop to the scheduler pickles ~KB instead of
-            # the 19-77MB pixels. The content hash is computed on the real bytes
+            # the full encoder tensor. The content hash is computed on the real bytes
             # before the swap and pre-set on the item.
             td = item_proto.encoder_input
             if td.WhichOneof("payload") == "remote":
-                # EPD RDMA: pull pixels from the gateway's exported NIXL memory.
+                # EPD RDMA: pull the encoder input from exported NIXL memory.
                 # With EPD_PIXEL_SHM, the received slot is published directly to
                 # scheduler SHM so the scheduler ingest path still avoids pickle
-                # copies of the full pixel tensor.
+                # copies of the full encoder tensor.
                 feature, feat_hash = self._rdma_pixel_puller.feature_from_remote(
                     td,
                     explicit_room=bootstrap_room,
@@ -139,42 +146,6 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
 
                     feat_hash = hash_feature(feature)
                     feature = ShmTensorHandle.publish(feature)
-            model_specific = {
-                name: TokenSpeedSchedulerServicer._tensor_from_proto(t, cast_to=model_dtype)
-                for name, t in item_proto.model_specific_tensors.items()
-            }
-
-            if item_proto.modality in (
-                common_pb2.IMAGE,
-                common_pb2.MODALITY_UNSPECIFIED,
-            ):
-                item_modality = Modality.IMAGE
-                grid_key = "image_grid_thw"
-            elif item_proto.modality == common_pb2.VIDEO:
-                item_modality = Modality.VIDEO
-                grid_key = "video_grid_thw"
-            else:
-                raise ValueError(f"encode request modality={item_proto.modality} is not supported")
-
-            grid = model_specific.get(grid_key)
-            if grid is None:
-                # Tolerate the legacy "grid_thws" key (older gateway builds emit it on
-                # the encode RPC); mirrors the engine kimi_k25 _grid() helper's tolerance.
-                grid = model_specific.get("grid_thws")
-            if grid is None:
-                raise ValueError(
-                    f"encode request is missing {grid_key}/grid_thws; "
-                    f"have keys={sorted(model_specific.keys())}"
-                )
-            # grid is [num_media, 3] = (t, h, w) in patch units, per item.
-            merge = self._merge_size
-            offsets = []
-            cursor = 0
-            for row in grid.tolist():
-                t, h, w = int(row[0]), int(row[1]), int(row[2])
-                span = t * (h // merge) * (w // merge)
-                offsets.append((cursor, cursor + span - 1))
-                cursor += span
 
             item = MultimodalDataItem(
                 modality=item_modality,
@@ -206,11 +177,11 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         bootstrap_room = request.items[0].bootstrap_room
 
         if os.environ.get("EPD_INGEST_OFFLOOP", "1").lower() not in ("0", "false", "no"):
-            # Per-image ingest (proto->tensor + pickle) BLOCKS the lone asyncio
+            # Per-item ingest (proto->tensor + pickle) BLOCKS the lone asyncio
             # event loop, so grpc.aio cannot deliver the next Encode message until
-            # the previous one is fully ingested -- a per-worker serial pixel lane.
+            # the previous one is fully ingested -- a per-worker serial encoder-input lane.
             # Split it: parse + pickle on a worker thread (overlapping across
-            # images; the GIL is released in the tensor copy/cast), then the
+            # items; the GIL is released in the tensor copy/cast), then the
             # cheap zmq send back ON the loop -- send_to_scheduler is a
             # zmq.asyncio socket whose send() needs the running loop (and this
             # keeps it single-writer).
@@ -233,7 +204,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
 
     def _build_encode_request(self, request, bootstrap_room):
-        """Proto -> engine EncodeRequest (the expensive per-image parse)."""
+        """Proto -> engine EncodeRequest (the expensive per-item parse)."""
         items = self._items_from_proto(request.mm_inputs, bootstrap_room)
 
         EncodeRequest = _lazy_encode_request()

@@ -198,26 +198,32 @@ pub(super) fn mm_encoder_input_dtype(
     modality: Modality,
     workers: Option<&WorkerSelection>,
 ) -> String {
-    if let Some(dtype) = mm_encoder_input_dtype_from_env(modality) {
-        return dtype;
-    }
-    if let Some(dtype) = mm_encoder_input_dtype_from_worker(workers) {
-        return dtype;
-    }
-    // Default to bf16 on the wire: the engine casts encoder_input to the model
-    // dtype (bf16) at the ViT regardless, so this is numerically identical to f32
-    // while halving the gateway->encode payload (the EPD throughput limiter).
-    // Override per-modality via SMG_TOKENSPEED_*_ENCODER_INPUT_DTYPE.
-    "bfloat16".to_string()
+    resolve_mm_encoder_input_dtype(
+        mm_modality_encoder_input_dtype_from_env(modality),
+        mm_default_encoder_input_dtype_from_env(),
+        mm_encoder_input_dtype_from_worker(workers),
+    )
 }
 
-fn mm_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
+fn resolve_mm_encoder_input_dtype(
+    modality_override: Option<String>,
+    default_override: Option<String>,
+    worker_dtype: Option<String>,
+) -> String {
+    // Use one configurable wire policy across modalities, with an optional
+    // per-modality override for encoder contracts that require another dtype.
+    modality_override
+        .or(default_override)
+        .or(worker_dtype)
+        .unwrap_or_else(|| "bfloat16".to_string())
+}
+
+fn mm_modality_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
     static IMAGE_DTYPE: OnceLock<Option<String>> = OnceLock::new();
     static VIDEO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
     static AUDIO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
-    static DEFAULT_DTYPE: OnceLock<Option<String>> = OnceLock::new();
 
-    let modality_dtype = match modality {
+    match modality {
         Modality::Image | Modality::ImageEmbeds => {
             cached_env_dtype(&IMAGE_DTYPE, "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE")
         }
@@ -227,9 +233,12 @@ fn mm_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
         Modality::Audio => {
             cached_env_dtype(&AUDIO_DTYPE, "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE")
         }
-    };
-    modality_dtype
-        .or_else(|| cached_env_dtype(&DEFAULT_DTYPE, "SMG_TOKENSPEED_ENCODER_INPUT_DTYPE"))
+    }
+}
+
+fn mm_default_encoder_input_dtype_from_env() -> Option<String> {
+    static DEFAULT_DTYPE: OnceLock<Option<String>> = OnceLock::new();
+    cached_env_dtype(&DEFAULT_DTYPE, "SMG_TOKENSPEED_ENCODER_INPUT_DTYPE")
 }
 
 fn cached_env_dtype(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<String> {
@@ -359,6 +368,31 @@ fn compute_shm_namespace_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modality_dtype_precedes_global_then_worker_with_bfloat16_fallback() {
+        assert_eq!(
+            resolve_mm_encoder_input_dtype(
+                Some("float16".to_string()),
+                Some("float32".to_string()),
+                Some("bfloat16".to_string()),
+            ),
+            "float16"
+        );
+        assert_eq!(
+            resolve_mm_encoder_input_dtype(
+                None,
+                Some("float32".to_string()),
+                Some("bfloat16".to_string()),
+            ),
+            "float32"
+        );
+        assert_eq!(
+            resolve_mm_encoder_input_dtype(None, None, Some("bfloat16".to_string()),),
+            "bfloat16"
+        );
+        assert_eq!(resolve_mm_encoder_input_dtype(None, None, None), "bfloat16");
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

@@ -17,7 +17,7 @@ use crate::{
         error,
         grpc::{
             context::{EncodeWorkerAssignment, PreparationOutput, RequestContext, WorkerSelection},
-            multimodal::{self, MultimodalIntermediate},
+            multimodal,
         },
     },
     worker::{
@@ -442,9 +442,13 @@ impl WorkerSelectionStage {
             .iter()
             .map(|w| w.metadata().spec.runtime_type)
             .find(|runtime| {
-                all_decode
-                    .iter()
-                    .any(|w| w.metadata().spec.runtime_type == *runtime)
+                // The current EPD multimodal encoder adapter is TokenSpeed-
+                // specific. Do not select a shared SGLang/vLLM runtime only to
+                // reject it later during request building.
+                (!needs_encode || *runtime == RuntimeType::TokenSpeed)
+                    && all_decode
+                        .iter()
+                        .any(|w| w.metadata().spec.runtime_type == *runtime)
                     && (!needs_encode
                         || all_encode
                             .iter()
@@ -563,10 +567,10 @@ fn encode_item_hashes(prep: &PreparationOutput) -> anyhow::Result<Vec<Vec<u8>>> 
         } => processed_messages.multimodal_intermediate.as_ref(),
         _ => None,
     };
-    let Some(MultimodalIntermediate::Precomputed(precomputed)) = intermediate else {
+    let Some(intermediate) = intermediate else {
         return Ok(Vec::new());
     };
-    multimodal::precomputed_encode_routing_hashes(precomputed)
+    multimodal::encode_routing_hashes(intermediate)
 }
 
 fn assign_encode_workers(

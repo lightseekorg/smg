@@ -6,8 +6,8 @@ use std::{path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    MediaConnector, MediaConnectorConfig, ModelRegistry, PreProcessorConfig,
-    VisionProcessorRegistry,
+    AudioProcessorRegistry, MediaConnector, MediaConnectorConfig, ModelRegistry,
+    PreProcessorConfig, VisionProcessorRegistry,
 };
 use tracing::{debug, warn};
 
@@ -201,6 +201,7 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
 pub(crate) struct MultimodalComponents {
     pub media_connector: Arc<MediaConnector>,
     pub vision_processor_registry: Arc<VisionProcessorRegistry>,
+    pub audio_processor_registry: Arc<AudioProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
@@ -222,6 +223,7 @@ impl MultimodalComponents {
         Ok(Self {
             media_connector: Arc::new(media_connector),
             vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
+            audio_processor_registry: Arc::new(AudioProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
             pixel_cache: pixel_cache_from_env(),

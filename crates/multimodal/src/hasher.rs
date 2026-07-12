@@ -12,6 +12,11 @@ pub fn hash_video(raw_bytes: &[u8]) -> String {
     blake3::hash(raw_bytes).to_hex().to_string()
 }
 
+/// Compute a blake3 hex-digest hash for a single audio payload's raw bytes.
+pub fn hash_audio(raw_bytes: &[u8]) -> String {
+    blake3::hash(raw_bytes).to_hex().to_string()
+}
+
 /// Compute per-image hashes keyed by modality.
 ///
 /// Returns a `BTreeMap` of per-modality hash lists,

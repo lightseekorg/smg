@@ -392,6 +392,10 @@ impl GrpcPDRouter {
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Err(response) = super::validate_text_only_output(body) {
+            return response;
+        }
+
         debug!(
             "Processing chat completion request for model: {} (PD mode)",
             model_id

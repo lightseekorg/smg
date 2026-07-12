@@ -2,6 +2,8 @@ mod kimi_k25;
 mod llama4;
 mod llava;
 mod phi3_v;
+mod qwen3_asr;
+mod qwen3_omni;
 mod qwen3_vl;
 mod qwen_vl;
 mod traits;
@@ -11,6 +13,8 @@ use llama4::Llama4Spec;
 use llava::{LlavaNextSpec, LlavaSpec};
 use once_cell::sync::Lazy;
 use phi3_v::Phi3VisionSpec;
+use qwen3_asr::Qwen3AsrSpec;
+use qwen3_omni::Qwen3OmniSpec;
 use qwen3_vl::Qwen3VLVisionSpec;
 use qwen_vl::QwenVLVisionSpec;
 // Re-export public API from traits.
@@ -29,6 +33,8 @@ impl ModelRegistry {
                 // LlavaNext must be registered before Llava so "llava_next" model_type matches first.
                 LazySpec::new(|| Box::new(LlavaNextSpec)),
                 LazySpec::new(|| Box::new(LlavaSpec)),
+                LazySpec::new(|| Box::new(Qwen3AsrSpec)),
+                LazySpec::new(|| Box::new(Qwen3OmniSpec)),
                 // Qwen3-VL must be registered before QwenVL so "qwen3" matches first.
                 LazySpec::new(|| Box::new(Qwen3VLVisionSpec)),
                 LazySpec::new(|| Box::new(QwenVLVisionSpec)),
@@ -78,8 +84,8 @@ pub(super) mod test_helpers {
     use once_cell::sync::Lazy;
 
     use crate::{
+        encoder_inputs::{ModelSpecificValue, PreprocessedEncoderInputs},
         types::ImageSize,
-        vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
     };
 
     pub struct TestTokenizer {

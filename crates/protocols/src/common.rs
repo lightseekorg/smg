@@ -191,6 +191,10 @@ pub enum ContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrl },
+    #[serde(rename = "audio_url")]
+    AudioUrl { audio_url: AudioUrl },
+    #[serde(rename = "input_audio")]
+    InputAudio { input_audio: InputAudio },
     #[serde(rename = "video_url")]
     VideoUrl { video_url: VideoUrl },
 }
@@ -200,6 +204,19 @@ pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>, // "auto", "low", or "high"
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+pub struct AudioUrl {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+pub struct InputAudio {
+    /// Base64-encoded audio bytes.
+    pub data: String,
+    /// Encoded audio format. The OpenAI Chat API supports `wav` and `mp3`.
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
@@ -813,6 +830,48 @@ mod tests {
     fn test_deserialize_null_as_false_rejects_non_bool() {
         let result = serde_json::from_value::<NullableBoolTest>(json!({"field": "yes"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn content_part_deserializes_audio_url() {
+        let value = json!({
+            "type": "audio_url",
+            "audio_url": {
+                "url": "https://example.com/audio.wav"
+            }
+        });
+        let part: ContentPart = serde_json::from_value(value).expect("audio_url content part");
+        assert_eq!(
+            part,
+            ContentPart::AudioUrl {
+                audio_url: AudioUrl {
+                    url: "https://example.com/audio.wav".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn content_part_round_trips_input_audio() {
+        let value = json!({
+            "type": "input_audio",
+            "input_audio": {
+                "data": "UklGRg==",
+                "format": "wav"
+            }
+        });
+        let part: ContentPart =
+            serde_json::from_value(value.clone()).expect("input_audio content part");
+        assert_eq!(
+            part,
+            ContentPart::InputAudio {
+                input_audio: InputAudio {
+                    data: "UklGRg==".to_string(),
+                    format: "wav".to_string(),
+                },
+            }
+        );
+        assert_eq!(serde_json::to_value(part).unwrap(), value);
     }
 
     #[test]

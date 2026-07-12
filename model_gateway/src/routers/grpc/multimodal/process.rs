@@ -1,116 +1,43 @@
 //! Multimodal processing core: fetch media → preprocess pixels → expand
 //! placeholder tokens → build the lightweight [`MultimodalIntermediate`].
 //!
-//! The chat and Messages API pipelines share `process_multimodal_parts`; only
-//! the content extraction differs (see [`super::detect`]).
+//! Protocol adapters first normalize media into a [`MediaPlan`], so this module
+//! has one request-independent processing entry point.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use anyhow::Result;
+use futures::future::try_join_all;
 use llm_multimodal::{
-    AsyncMultiModalTracker, ImageFrame, Modality, ModelMetadata, PlaceholderRange,
-    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TrackedMedia, TrackerOutput,
-    VideoClip, VisionProcessorRegistry,
+    AsyncMultiModalTracker, AudioClip, EncoderFieldLayouts, ImageFrame, Modality, ModelMetadata,
+    PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement,
+    TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
-use openai_protocol::{chat::ChatMessage, messages::InputMessage};
 use tracing::{debug, info, warn};
 
 use super::{
-    config::MultimodalComponents,
-    detect::{extract_content_parts, extract_content_parts_messages},
+    config::{MultimodalComponents, MultimodalModelConfig},
     log_mm_timing_enabled,
     pixel_cache::{config_fingerprint, CachedPreprocessedItem, PixelCache, PixelCacheKey},
-    MultimodalIntermediate, MultimodalOutput, PrecomputedMultimodalIntermediate,
+    plan::MediaPlan,
+    MediaBatch, MultimodalIntermediate, MultimodalOutput, PrecomputedMultimodalIntermediate,
+    PromptBinding,
 };
 
-/// Resolve the placeholder token string for a multimodal model.
-///
-/// Loads the model config (via the shared registry, keyed by `tokenizer_id`)
-/// and looks up the model spec to get the placeholder token (e.g.
-/// `"<|image|>"` for Phi-3-vision). Returns `None` if the model is not
-/// recognized as multimodal.
-pub(crate) async fn resolve_placeholder_token(
-    model_id: &str,
-    tokenizer: &dyn TokenizerTrait,
-    components: &MultimodalComponents,
-    tokenizer_id: &str,
-    tokenizer_source: &str,
-    modality: Modality,
-) -> Result<Option<String>> {
-    let model_config = components
-        .config_registry
-        .get_or_load(tokenizer_id, tokenizer_source)
-        .await?;
-    let metadata = ModelMetadata {
-        model_id,
-        tokenizer,
-        config: &model_config.config,
-    };
-    let spec = match components.model_registry.lookup(&metadata) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    Ok(Some(
-        spec.placeholder_token_for(&metadata, modality)
-            .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?,
-    ))
+struct PreparedMultimodalPart {
+    preprocessed: PreprocessedEncoderInputs,
+    media: MediaBatch,
+    prompt_replacements: Vec<PromptReplacement>,
+    search_token_id: Option<u32>,
+    placeholder_token_id: Option<u32>,
+    field_layouts: EncoderFieldLayouts,
+    keep_on_cpu_keys: Vec<String>,
 }
 
-/// Process multimodal content from Messages API input messages.
-pub(crate) async fn process_multimodal_messages(
-    messages: &[InputMessage],
-    model_id: &str,
-    tokenizer: &dyn TokenizerTrait,
-    token_ids: Vec<u32>,
-    components: &MultimodalComponents,
-    tokenizer_id: &str,
-    tokenizer_source: &str,
-) -> Result<MultimodalOutput> {
-    let content_parts = extract_content_parts_messages(messages);
-    process_multimodal_parts(
-        content_parts,
-        model_id,
-        tokenizer,
-        token_ids,
-        components,
-        tokenizer_id,
-        tokenizer_source,
-    )
-    .await
-}
-
-/// Process multimodal content: fetch images, preprocess pixels, expand tokens, collect hashes.
-///
-/// Single entry point called from preparation.rs. Handles the full pipeline:
-pub(crate) async fn process_multimodal(
-    messages: &[ChatMessage],
-    model_id: &str,
-    tokenizer: &dyn TokenizerTrait,
-    token_ids: Vec<u32>,
-    components: &MultimodalComponents,
-    tokenizer_id: &str,
-    tokenizer_source: &str,
-) -> Result<MultimodalOutput> {
-    let content_parts = extract_content_parts(messages);
-    process_multimodal_parts(
-        content_parts,
-        model_id,
-        tokenizer,
-        token_ids,
-        components,
-        tokenizer_id,
-        tokenizer_source,
-    )
-    .await
-}
-
-/// Shared multimodal processing core.
-///
-/// Takes pre-extracted `MediaContentPart`s (from either chat or messages pipeline)
-/// and runs the full processing chain: fetch → preprocess → expand → build intermediate.
-async fn process_multimodal_parts(
-    content_parts: Vec<llm_multimodal::MediaContentPart>,
+/// Process a protocol-independent, ordered media plan.
+pub(crate) async fn process_multimodal_plan(
+    plan: MediaPlan,
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
@@ -123,7 +50,7 @@ async fn process_multimodal_parts(
     let media_started = Instant::now();
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
 
-    for part in content_parts {
+    for part in plan.into_parts() {
         tracker
             .push_part(part)
             .map_err(|e| anyhow::anyhow!("Failed to push content part: {e}"))?;
@@ -162,44 +89,76 @@ async fn process_multimodal_parts(
         })
         .unwrap_or_default();
 
-    let media_elapsed_ms = media_started.elapsed().as_secs_f64() * 1000.0;
-    let modality = match (images.is_empty(), videos.is_empty()) {
-        (false, true) => Modality::Image,
-        (true, false) => Modality::Video,
-        (false, false) => {
-            return Err(anyhow::anyhow!(
-                "Mixed image and video multimodal requests are not supported yet"
-            ));
-        }
-        (true, true) => {
-            return Err(anyhow::anyhow!(
-                "No media was successfully fetched for multimodal request"
-            ));
-        }
-    };
+    let audios: Vec<Arc<AudioClip>> = tracker_output
+        .data
+        .get(&Modality::Audio)
+        .map(|media_vec| {
+            media_vec
+                .iter()
+                .filter_map(|m| match m {
+                    TrackedMedia::Audio(clip) => Some(clip.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    if modality == Modality::Video && videos.len() != 1 {
+    let media_elapsed_ms = media_started.elapsed().as_secs_f64() * 1000.0;
+    let image_count = images.len();
+    let audio_count = audios.len();
+    let video_count = videos.len();
+    let video_frame_count = videos.first().map_or(0, |video| {
+        if video.frames().is_empty() {
+            video
+                .rgb_video()
+                .map_or(0, |rgb_video| rgb_video.frames.len())
+        } else {
+            video.frames().len()
+        }
+    });
+    let mut media_batches = Vec::with_capacity(3);
+    if !images.is_empty() {
+        media_batches.push(MediaBatch::Images(images));
+    }
+    if !videos.is_empty() {
+        media_batches.push(MediaBatch::Videos(videos));
+    }
+    if !audios.is_empty() {
+        media_batches.push(MediaBatch::Audios(audios));
+    }
+    if media_batches.is_empty() {
         return Err(anyhow::anyhow!(
-            "Exactly one video is supported per request for the initial video path"
+            "No media was successfully fetched for multimodal request"
         ));
     }
+    let present_modalities = media_batches
+        .iter()
+        .map(MediaBatch::modality)
+        .collect::<Vec<_>>();
 
-    match modality {
-        Modality::Image => {
-            debug!(
-                image_count = images.len(),
-                item_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
-                "Fetched images for multimodal processing"
-            );
+    for batch in &media_batches {
+        match batch {
+            MediaBatch::Images(images) => {
+                debug!(
+                    image_count = images.len(),
+                    item_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
+                    "Fetched images for multimodal processing"
+                );
+            }
+            MediaBatch::Videos(videos) => {
+                debug!(
+                    video_count = videos.len(),
+                    frame_count = video_frame_count,
+                    "Fetched video for multimodal processing"
+                );
+            }
+            MediaBatch::Audios(audios) => {
+                debug!(
+                    audio_count = audios.len(),
+                    "Fetched audios for multimodal processing"
+                );
+            }
         }
-        Modality::Video => {
-            debug!(
-                video_count = videos.len(),
-                frame_count = videos.first().map_or(0, |v| v.frames.len()),
-                "Fetched video for multimodal processing"
-            );
-        }
-        _ => {}
     }
 
     // Step 2: Resolve model spec and preprocess media.
@@ -223,187 +182,134 @@ async fn process_multimodal_parts(
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
     let config_elapsed_ms = config_started.elapsed().as_secs_f64() * 1000.0;
 
-    // Run CPU-intensive vision preprocessing on a blocking thread pool so it
-    // doesn't block the tokio async runtime under concurrent load.
-    // TODO: consider making the thread pool size configurable.
-    let pp_config = match modality {
-        Modality::Video => model_config
-            .video_preprocessor_config
-            .clone()
-            .unwrap_or_else(|| model_config.preprocessor_config.clone()),
-        _ => model_config.preprocessor_config.clone(),
-    };
     let preprocess_started = Instant::now();
-
-    let preprocessed: PreprocessedEncoderInputs = if let (Some(cache), Modality::Image, 1) =
-        (components.pixel_cache.clone(), modality, images.len())
-    {
-        preprocess_image_cached(
-            cache,
-            &images[0],
-            components.vision_processor_registry.clone(),
-            model_id.to_string(),
-            model_type.map(String::from),
-            pp_config,
-            config_fingerprint(tokenizer_id, &model_config.config),
+    let mut prepared_parts = Vec::with_capacity(media_batches.len());
+    // Every modality batch is independent until prompt expansion. Poll all
+    // preprocessors concurrently and preserve the batch order in the returned
+    // vector so the media/preprocessed zip below remains exact for any model-
+    // validated modality combination.
+    let preprocessed_parts = try_join_all(media_batches.iter().map(|media| {
+        preprocess_modality(
+            media,
+            components,
+            model_id,
+            model_type,
+            spec.name(),
+            tokenizer_id,
+            &model_config,
         )
-        .await?
-    } else {
-        let registry = components.vision_processor_registry.clone();
-        let model_id_owned = model_id.to_string();
-        let model_type_owned = model_type.map(String::from);
-        let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
-        let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
-        let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
-            let processor = registry
-                .find(&model_id_owned, model_type_owned.as_deref())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
-                })?;
+    }))
+    .await?;
 
-            match modality {
-                Modality::Image => {
-                    // Extract DynamicImages inside the blocking closure so the expensive
-                    // clone happens off the tokio async runtime.
-                    let raw_images: Vec<image::DynamicImage> = images_for_preprocess
-                        .iter()
-                        .map(|f| f.image.clone())
-                        .collect();
-                    processor
-                        .preprocess(&raw_images, &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
-                }
-                Modality::Video => {
-                    let video = videos_for_preprocess
-                        .first()
-                        .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+    for (media, preprocessed) in media_batches.into_iter().zip(preprocessed_parts) {
+        let modality = media.modality();
+        debug!(
+            ?modality,
+            item_count = preprocessed.feature_token_counts.len(),
+            total_tokens = preprocessed.feature_token_counts.iter().sum::<usize>(),
+            "Multimodal preprocessing complete"
+        );
 
-                    if !video.frames().is_empty() {
-                        return processor
-                            .preprocess_video(video.frames(), &pp_config)
-                            .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
-                    }
+        let prompt_replacements = spec
+            .prompt_replacements_for(&metadata, &preprocessed, modality)
+            .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {e}"))?;
 
-                    if let Some(rgb_video) = video.rgb_video() {
-                        match rgb_video.frame_refs() {
-                            Ok(frame_refs) => {
-                                match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
-                                    Ok(preprocessed) => return Ok(preprocessed),
-                                    Err(error) => {
-                                        warn!(
-                                            error = %error,
-                                            "RGB video preprocessing fast path failed; falling back to materialized frames"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    "RGB video frame refs are invalid; falling back to materialized frames"
-                                );
-                            }
-                        }
-                    }
+        let media_count = media.len();
+        anyhow::ensure!(
+            preprocessed.feature_token_counts.len() == media_count,
+            "Preprocessing item count mismatch for {modality}: {} media items, {} feature-token counts",
+            media_count,
+            preprocessed.feature_token_counts.len()
+        );
+        anyhow::ensure!(
+            prompt_replacements.len() == media_count,
+            "Prompt replacement count mismatch for {modality}: {} media items, {} replacements",
+            media_count,
+            prompt_replacements.len()
+        );
 
-                    let frames = video
-                        .materialized_frames()
-                        .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
-                    processor
-                        .preprocess_video(&frames, &pp_config)
-                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
-                }
-                _ => Err(anyhow::anyhow!(
-                    "Unsupported modality for preprocessing: {modality}"
-                )),
+        // Two token IDs may differ for the same placeholder:
+        // - search_token_id: what the tokenizer actually emits (e.g. 200090 for "<|image|>")
+        // - placeholder_token_id: what the model config declares (e.g. image_token_id/video_token_id)
+        let placeholder_token = spec
+            .placeholder_token_for(&metadata, modality)
+            .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
+        let search_token_id = tokenizer.token_to_id(&placeholder_token);
+        let placeholder_token_id: Option<u32> = match spec
+            .placeholder_token_id_for(&metadata, modality)
+        {
+            Ok(id) => Some(u32::try_from(id).map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid negative placeholder token ID {id} for modality {modality}"
+                )
+            })?),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    ?search_token_id,
+                    "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
+                );
+                search_token_id
             }
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
-        preprocessed
-    };
-    let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
+        };
 
-    debug!(
-        ?modality,
-        item_count = preprocessed.feature_token_counts.len(),
-        total_tokens = preprocessed.feature_token_counts.iter().sum::<usize>(),
-        "Multimodal preprocessing complete"
-    );
+        prepared_parts.push(PreparedMultimodalPart {
+            preprocessed,
+            media,
+            prompt_replacements,
+            search_token_id,
+            placeholder_token_id,
+            field_layouts: spec.encoder_field_layouts_for(modality),
+            keep_on_cpu_keys: spec.keep_on_cpu_keys_for(modality),
+        });
+    }
+    let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
 
     // Step 3: Compute prompt replacements and expand tokens.
     let expansion_started = Instant::now();
-    let prompt_replacements = spec
-        .prompt_replacements_for(&metadata, &preprocessed, modality)
-        .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {e}"))?;
-
-    // Two token IDs may differ for the same placeholder:
-    // - search_token_id: what the tokenizer actually emits (e.g. 200090 for "<|image|>")
-    // - placeholder_token_id: what the model config declares (e.g. image_token_id/video_token_id)
-    let placeholder_token = spec
-        .placeholder_token_for(&metadata, modality)
-        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
-    let search_token_id = tokenizer.token_to_id(&placeholder_token);
-    let placeholder_token_id: Option<u32> = match spec.placeholder_token_id_for(&metadata, modality)
-    {
-        Ok(id) => Some(id as u32),
-        Err(e) => {
-            warn!(
-                error = %e,
-                ?search_token_id,
-                "Failed to resolve placeholder_token_id from config, falling back to tokenizer lookup"
-            );
-            search_token_id
-        }
-    };
-
-    let expanded = expand_tokens(
-        &token_ids,
-        search_token_id,
-        placeholder_token_id,
-        &prompt_replacements,
-    );
+    let expansions = prepared_parts
+        .iter()
+        .map(|part| ModalityExpansion {
+            modality: part.media.modality(),
+            search_token_id: part.search_token_id,
+            placeholder_token_id: part.placeholder_token_id,
+            replacements: &part.prompt_replacements,
+        })
+        .collect::<Vec<_>>();
+    let expanded = expand_tokens_for_modalities(&token_ids, &expansions)?;
+    let placeholder_count = expanded.bindings.iter().map(Vec::len).sum::<usize>();
 
     debug!(
         original_len = token_ids.len(),
         expanded_len = expanded.token_ids.len(),
-        placeholder_count = expanded.placeholders.len(),
-        ?search_token_id,
-        ?placeholder_token_id,
+        placeholder_count,
+        modality_count = prepared_parts.len(),
         "Token expansion complete"
     );
     let expansion_elapsed_ms = expansion_started.elapsed().as_secs_f64() * 1000.0;
-    let image_count = images.len();
-    let video_count = videos.len();
-    let video_frame_count = videos.first().map_or(0, |video| {
-        if video.frames().is_empty() {
-            video
-                .rgb_video()
-                .map_or(0, |rgb_video| rgb_video.frames.len())
-        } else {
-            video.frames().len()
-        }
-    });
     let original_tokens = token_ids.len();
     let expanded_tokens = expanded.token_ids.len();
 
     // Step 4: Build lightweight intermediate (defers tensor serialization to assembly)
-    let intermediate = MultimodalIntermediate::Precomputed(PrecomputedMultimodalIntermediate {
-        modality,
-        preprocessed,
-        images,
-        videos,
-        placeholders: expanded.placeholders,
-        patch_offsets: expanded.patch_offsets,
-        placeholder_token_id,
-        field_layouts: spec.field_layouts(),
-        keep_on_cpu_keys: spec.keep_on_cpu_keys(),
-    });
+    let batches = prepared_parts
+        .into_iter()
+        .zip(expanded.bindings)
+        .map(|(part, bindings)| PrecomputedMultimodalIntermediate {
+            preprocessed: part.preprocessed,
+            media: part.media,
+            bindings,
+            placeholder_token_id: part.placeholder_token_id,
+            field_layouts: part.field_layouts,
+            keep_on_cpu_keys: part.keep_on_cpu_keys,
+        })
+        .collect::<Vec<_>>();
+    let intermediate = MultimodalIntermediate::try_new(batches)?;
 
     if log_timing {
         info!(
-            modality = ?modality,
+            modalities = ?present_modalities,
             image_count,
+            audio_count,
             video_count,
             video_frame_count,
             media_fetch_decode_ms = media_elapsed_ms,
@@ -413,7 +319,7 @@ async fn process_multimodal_parts(
             total_ms = total_started.elapsed().as_secs_f64() * 1000.0,
             original_tokens,
             expanded_tokens,
-            "smg_mm_timing process_multimodal_parts"
+            "smg_mm_timing process_multimodal_plan"
         );
     }
 
@@ -421,6 +327,151 @@ async fn process_multimodal_parts(
         expanded_token_ids: expanded.token_ids,
         intermediate,
     })
+}
+
+async fn preprocess_modality(
+    media: &MediaBatch,
+    components: &MultimodalComponents,
+    model_id: &str,
+    model_type: Option<&str>,
+    model_spec: &str,
+    tokenizer_id: &str,
+    model_config: &MultimodalModelConfig,
+) -> Result<PreprocessedEncoderInputs> {
+    // Run CPU-intensive preprocessing on a blocking thread pool so it doesn't
+    // block the tokio async runtime under concurrent load.
+    // TODO: consider making the thread pool size configurable.
+    let modality = media.modality();
+    let pp_config = match modality {
+        Modality::Video => model_config
+            .video_preprocessor_config
+            .clone()
+            .unwrap_or_else(|| model_config.preprocessor_config.clone()),
+        _ => model_config.preprocessor_config.clone(),
+    };
+
+    if let MediaBatch::Images(images) = media {
+        if let (Some(cache), [image]) = (components.pixel_cache.clone(), images.as_slice()) {
+            return preprocess_image_cached(
+                cache,
+                image,
+                components.vision_processor_registry.clone(),
+                model_id.to_string(),
+                model_type.map(String::from),
+                pp_config,
+                config_fingerprint(tokenizer_id, &model_config.config),
+            )
+            .await;
+        }
+    }
+
+    let registry = components.vision_processor_registry.clone();
+    let model_id_owned = model_id.to_string();
+    let model_type_owned = model_type.map(String::from);
+    let media_for_preprocess = media.clone(); // cheap Arc refcount bumps
+    let audio_processor = if modality == Modality::Audio {
+        Some(
+            components
+                .audio_processor_registry
+                .create(
+                    model_spec,
+                    &model_config.config,
+                    &model_config.preprocessor_config,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No audio processor registered for model spec: {model_spec}")
+                })?,
+        )
+    } else {
+        None
+    };
+
+    tokio::task::spawn_blocking(move || match media_for_preprocess {
+        MediaBatch::Images(images) => {
+            let processor = registry
+                .find(&model_id_owned, model_type_owned.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
+                })?;
+            // Extract DynamicImages inside the blocking closure so the expensive
+            // clone happens off the tokio async runtime.
+            let raw_images: Vec<image::DynamicImage> =
+                images.iter().map(|frame| frame.image.clone()).collect();
+            processor
+                .preprocess(&raw_images, &pp_config)
+                .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+        }
+        MediaBatch::Videos(videos) => {
+            // VisionPreProcessor currently models one decoded clip per call.
+            // Video-capable model specs therefore declare a per-request limit
+            // of one; a future batched-video processor can lift this without
+            // adding any modality-combination policy here.
+            let [video] = videos.as_slice() else {
+                anyhow::bail!(
+                    "Video preprocessing currently requires exactly one clip per modality batch; got {}",
+                    videos.len()
+                );
+            };
+            let processor = registry
+                .find(&model_id_owned, model_type_owned.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
+                })?;
+            let video_pp_config = with_video_sample_fps(pp_config.clone(), video);
+
+            if !video.frames().is_empty() {
+                return processor
+                    .preprocess_video(video.frames(), &video_pp_config)
+                    .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
+            }
+
+            if let Some(rgb_video) = video.rgb_video() {
+                match rgb_video.frame_refs() {
+                    Ok(frame_refs) => match processor
+                        .preprocess_video_rgb(&frame_refs, &video_pp_config)
+                    {
+                        Ok(preprocessed) => return Ok(preprocessed),
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "RGB video preprocessing fast path failed; falling back to materialized frames"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "RGB video frame refs are invalid; falling back to materialized frames"
+                        );
+                    }
+                }
+            }
+
+            let frames = video
+                .materialized_frames()
+                .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
+            processor
+                .preprocess_video(&frames, &video_pp_config)
+                .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
+        }
+        MediaBatch::Audios(audios) => {
+            let processor = audio_processor.ok_or_else(|| {
+                anyhow::anyhow!("Model did not provide an audio processor")
+            })?;
+            processor
+                .preprocess(&audios)
+                .map_err(|e| anyhow::anyhow!("Audio preprocessing failed: {e}"))
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))?
+}
+
+fn with_video_sample_fps(mut config: PreProcessorConfig, video: &VideoClip) -> PreProcessorConfig {
+    config
+        .extra
+        .insert("fps".to_string(), serde_json::json!(video.sample_fps()));
+    config
 }
 
 /// Pixel-cache image preprocessing for single-image requests.
@@ -478,119 +529,179 @@ async fn preprocess_image_batch(
     .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))?
 }
 
-/// Output of token expansion, containing both full structural and patch-only ranges.
-struct ExpandedTokens {
-    /// The expanded token ID sequence.
-    token_ids: Vec<u32>,
-    /// Full structural placeholder ranges (offset, length) covering the entire
-    /// replacement including structural tokens. Used by vLLM (which filters via is_embed).
-    placeholders: Vec<PlaceholderRange>,
-    /// Patch-only placeholder ranges: contiguous runs of `im_token_id` within each
-    /// expansion. Used by sglang (which expects offsets aligned 1:1 with vision
-    /// encoder output). `None` when `im_token_id` is not set.
-    patch_offsets: Option<Vec<(u32, u32)>>,
+struct ModalityExpansion<'a> {
+    modality: Modality,
+    search_token_id: Option<u32>,
+    placeholder_token_id: Option<u32>,
+    replacements: &'a [PromptReplacement],
 }
 
-/// Expand placeholder tokens in the token ID sequence.
-///
-/// For each placeholder token found, replace it with the expanded token sequence
-/// from the corresponding `PromptReplacement`. Also track both the full structural
-/// placeholder ranges and patch-only offsets (contiguous runs of `im_token_id`)
-/// in a single pass — no extra iteration needed.
-fn expand_tokens(
+#[derive(Debug)]
+struct ExpandedMultimodalTokens {
+    token_ids: Vec<u32>,
+    bindings: Vec<Vec<PromptBinding>>,
+}
+
+fn expand_tokens_for_modalities(
     token_ids: &[u32],
-    placeholder_token_id: Option<u32>,
-    im_token_id: Option<u32>,
-    replacements: &[PromptReplacement],
-) -> ExpandedTokens {
-    let Some(placeholder_id) = placeholder_token_id else {
-        // If we can't resolve the placeholder token, return unchanged
-        warn!("Could not resolve placeholder token ID; skipping token expansion");
-        return ExpandedTokens {
-            token_ids: token_ids.to_vec(),
-            placeholders: vec![],
-            patch_offsets: None,
+    expansions: &[ModalityExpansion<'_>],
+) -> Result<ExpandedMultimodalTokens> {
+    let mut anchor_to_expansion = HashMap::with_capacity(expansions.len());
+    for (idx, expansion) in expansions.iter().enumerate() {
+        let Some(anchor_id) = expansion.search_token_id else {
+            anyhow::ensure!(
+                expansion.replacements.is_empty(),
+                "Could not resolve prompt anchor token ID for {} ({} replacements)",
+                expansion.modality,
+                expansion.replacements.len()
+            );
+            continue;
         };
-    };
+        if let Some(previous_idx) = anchor_to_expansion.insert(anchor_id, idx) {
+            return Err(anyhow::anyhow!(
+                "Prompt anchor token ID {anchor_id} is shared by {} and {}; anchors must be unique",
+                expansions[previous_idx].modality,
+                expansion.modality
+            ));
+        }
+        for (item_index, replacement) in expansion.replacements.iter().enumerate() {
+            anyhow::ensure!(
+                replacement.modality == expansion.modality,
+                "Prompt replacement {item_index} has modality {}, expected {}",
+                replacement.modality,
+                expansion.modality
+            );
+            anyhow::ensure!(
+                !replacement.tokens.is_empty(),
+                "Prompt replacement {item_index} for {} is empty",
+                expansion.modality
+            );
+        }
+    }
 
     let mut expanded = Vec::with_capacity(token_ids.len());
-    let mut placeholders = Vec::new();
-    let mut patch_offsets: Option<Vec<(u32, u32)>> = im_token_id.map(|_| Vec::new());
-    let mut replacement_idx = 0;
-    let mut extra_placeholders = 0usize;
+    let mut bindings = vec![Vec::new(); expansions.len()];
+    let mut replacement_indices = vec![0usize; expansions.len()];
+    let mut prompt_ordinal = 0usize;
 
-    for &token in token_ids {
-        if token == placeholder_id && replacement_idx < replacements.len() {
-            let repl = &replacements[replacement_idx];
+    for (prompt_offset, &token) in token_ids.iter().enumerate() {
+        if let Some(&idx) = anchor_to_expansion.get(&token) {
+            let expansion = &expansions[idx];
+            let item_index = replacement_indices[idx];
+            let replacement = expansion.replacements.get(item_index).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Extra prompt anchor for {} at input token offset {prompt_offset}: expected {} anchors",
+                    expansion.modality,
+                    expansion.replacements.len()
+                )
+            })?;
+            let replacement_tokens = replacement
+                .tokens
+                .iter()
+                .enumerate()
+                .map(|(replacement_offset, &token)| {
+                    u32::try_from(token).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Invalid negative token ID {token} in {} replacement {item_index} at offset {replacement_offset}",
+                            expansion.modality
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             let offset = expanded.len();
-
-            // Track patch-only runs while extending
-            if let (Some(im_id), Some(ref mut offsets)) = (im_token_id, &mut patch_offsets) {
-                let mut run_start: Option<u32> = None;
-                for (i, &t) in repl.tokens.iter().enumerate() {
-                    let pos = (offset + i) as u32;
-                    if t as u32 == im_id {
-                        if run_start.is_none() {
-                            run_start = Some(pos);
-                        }
-                    } else if let Some(s) = run_start {
-                        offsets.push((s, pos - s));
-                        run_start = None;
-                    }
-                }
-                if let Some(s) = run_start {
-                    offsets.push((s, (offset + repl.tokens.len()) as u32 - s));
-                }
-            }
-
-            // PromptReplacement uses TokenId = i32, convert to u32
-            expanded.extend(repl.tokens.iter().map(|&t| t as u32));
-            // Fold any template-emitted structural prefix (already in `expanded`,
-            // e.g. Qwen's leading <|vision_start|>) into the reported range so a
-            // backend that scans the range for structural markers — vLLM's video
-            // mrope walks each frame from <|vision_start|> — starts on the marker.
-            // `offset` (used by the sglang patch_offsets pass above) is untouched.
-            let prefix = repl.structural_prefix.min(offset);
-            placeholders.push(PlaceholderRange {
-                offset: offset - prefix,
-                length: repl.tokens.len() + prefix,
+            let length = replacement_tokens.len();
+            let patches = patch_ranges(offset, &replacement_tokens, expansion.placeholder_token_id);
+            expanded.extend(replacement_tokens);
+            let prefix = replacement.structural_prefix.min(offset);
+            bindings[idx].push(PromptBinding {
+                item_index,
+                prompt_ordinal,
+                structural: PlaceholderRange {
+                    offset: offset - prefix,
+                    length: length + prefix,
+                },
+                patches,
             });
-            replacement_idx += 1;
+            prompt_ordinal = prompt_ordinal
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Prompt binding ordinal overflow"))?;
+            replacement_indices[idx] += 1;
         } else {
-            // A placeholder token seen after all replacements are consumed is
-            // left in place (unchanged behavior) but counted so we can warn.
-            if token == placeholder_id {
-                extra_placeholders += 1;
-            }
             expanded.push(token);
         }
     }
 
-    if replacement_idx < replacements.len() {
-        warn!(
-            expected = replacements.len(),
-            found = replacement_idx,
-            "Fewer placeholder tokens found in sequence than expected"
-        );
-    }
-    if extra_placeholders > 0 {
-        warn!(
-            extra_placeholders,
-            replacements = replacements.len(),
-            "More placeholder tokens than replacements; extra placeholders left unexpanded"
+    for (idx, expansion) in expansions.iter().enumerate() {
+        anyhow::ensure!(
+            replacement_indices[idx] == expansion.replacements.len(),
+            "Missing prompt anchors for {}: expected {}, found {}",
+            expansion.modality,
+            expansion.replacements.len(),
+            replacement_indices[idx]
         );
     }
 
-    ExpandedTokens {
+    Ok(ExpandedMultimodalTokens {
         token_ids: expanded,
-        placeholders,
-        patch_offsets,
+        bindings,
+    })
+}
+
+fn patch_ranges(
+    offset: usize,
+    replacement_tokens: &[u32],
+    placeholder_token_id: Option<u32>,
+) -> Vec<PlaceholderRange> {
+    let Some(placeholder_id) = placeholder_token_id else {
+        return Vec::new();
+    };
+
+    let mut ranges = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (i, &token) in replacement_tokens.iter().enumerate() {
+        let pos = offset + i;
+        if token == placeholder_id {
+            if run_start.is_none() {
+                run_start = Some(pos);
+            }
+        } else if let Some(start) = run_start.take() {
+            ranges.push(PlaceholderRange {
+                offset: start,
+                length: pos - start,
+            });
+        }
     }
+    if let Some(start) = run_start {
+        let end = offset + replacement_tokens.len();
+        ranges.push(PlaceholderRange {
+            offset: start,
+            length: end - start,
+        });
+    }
+    ranges
 }
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use llm_multimodal::VideoSource;
+
     use super::*;
+
+    #[test]
+    fn decoded_video_sample_fps_overrides_processor_default() {
+        let video = VideoClip::new_with_sample_fps(
+            Vec::new(),
+            Bytes::new(),
+            VideoSource::InlineBytes,
+            "video-hash".to_string(),
+            0.8,
+        );
+
+        let config = with_video_sample_fps(PreProcessorConfig::default(), &video);
+
+        assert!((config.get_extra::<f32>("fps").unwrap() - 0.8).abs() < 1e-6);
+    }
 
     #[test]
     fn test_expand_tokens_basic() {
@@ -602,13 +713,19 @@ mod tests {
             structural_prefix: 0,
         }];
 
-        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
 
         assert_eq!(result.token_ids, vec![1, 2, 50, 50, 50, 50, 3, 4]);
-        assert_eq!(result.placeholders.len(), 1);
-        assert_eq!(result.placeholders[0].offset, 2);
-        assert_eq!(result.placeholders[0].length, 4);
-        assert!(result.patch_offsets.is_none());
+        assert_eq!(result.bindings[0].len(), 1);
+        assert_eq!(result.bindings[0][0].structural.offset, 2);
+        assert_eq!(result.bindings[0][0].structural.length, 4);
+        assert!(result.bindings[0][0].patches.is_empty());
     }
 
     #[test]
@@ -626,23 +743,35 @@ mod tests {
             structural_prefix: 1,
         }];
 
-        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+        let expansion = ModalityExpansion {
+            modality: Modality::Video,
+            search_token_id: Some(100),
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
 
         assert_eq!(result.token_ids, vec![1, 2, 777, 50, 50, 50, 778, 3]);
-        assert_eq!(result.placeholders.len(), 1);
+        assert_eq!(result.bindings[0].len(), 1);
         // Range starts on <VS> (index 2) and covers it + the 3 video tokens.
-        assert_eq!(result.placeholders[0].offset, 2);
-        assert_eq!(result.placeholders[0].length, 4);
+        assert_eq!(result.bindings[0][0].structural.offset, 2);
+        assert_eq!(result.bindings[0][0].structural.length, 4);
     }
 
     #[test]
     fn test_expand_tokens_no_placeholder() {
         let token_ids = vec![1, 2, 3];
-        let result = expand_tokens(&token_ids, None, None, &[]);
+        let replacements = Vec::new();
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: None,
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
 
         assert_eq!(result.token_ids, vec![1, 2, 3]);
-        assert!(result.placeholders.is_empty());
-        assert!(result.patch_offsets.is_none());
+        assert!(result.bindings[0].is_empty());
     }
 
     #[test]
@@ -663,14 +792,20 @@ mod tests {
             },
         ];
 
-        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
 
         assert_eq!(result.token_ids, vec![1, 50, 50, 2, 60, 60, 60, 3]);
-        assert_eq!(result.placeholders.len(), 2);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 2);
-        assert_eq!(result.placeholders[1].offset, 4);
-        assert_eq!(result.placeholders[1].length, 3);
+        assert_eq!(result.bindings[0].len(), 2);
+        assert_eq!(result.bindings[0][0].structural.offset, 1);
+        assert_eq!(result.bindings[0][0].structural.length, 2);
+        assert_eq!(result.bindings[0][1].structural.offset, 4);
+        assert_eq!(result.bindings[0][1].structural.length, 3);
     }
 
     #[test]
@@ -685,24 +820,224 @@ mod tests {
             structural_prefix: 0,
         }];
 
-        let result = expand_tokens(&token_ids, Some(100), Some(92), &replacements);
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: Some(92),
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
 
         // Full structural range
-        assert_eq!(result.placeholders.len(), 1);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 9);
+        assert_eq!(result.bindings[0].len(), 1);
+        assert_eq!(result.bindings[0][0].structural.offset, 1);
+        assert_eq!(result.bindings[0][0].structural.length, 9);
 
         // Patch-only offsets: two runs of token 92
-        let patch = result.patch_offsets.unwrap();
+        let patch = &result.bindings[0][0].patches;
         assert_eq!(patch.len(), 2);
-        assert_eq!(patch[0], (2, 3)); // offset=2, length=3
-        assert_eq!(patch[1], (6, 3)); // offset=6, length=3
+        assert_eq!((patch[0].offset, patch[0].length), (2, 3));
+        assert_eq!((patch[1].offset, patch[1].length), (6, 3));
+    }
+
+    #[test]
+    fn test_expand_tokens_preserves_template_owned_audio_end() {
+        // The template owns the audio end marker. Expansion preserves the
+        // anchor, adds feature tokens, and must not inject another end marker.
+        let audio_anchor: u32 = 100;
+        let audio_placeholder: u32 = 101;
+        let audio_end: u32 = 102;
+        let message_end: u32 = 103;
+        let token_ids = vec![1, audio_anchor, audio_end, message_end];
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Audio,
+            placeholder_token: "<audio>".to_string(),
+            tokens: vec![
+                audio_anchor as i32,
+                audio_placeholder as i32,
+                audio_placeholder as i32,
+            ],
+            structural_prefix: 0,
+        }];
+
+        let expansion = ModalityExpansion {
+            modality: Modality::Audio,
+            search_token_id: Some(audio_anchor),
+            placeholder_token_id: Some(audio_placeholder),
+            replacements: &replacements,
+        };
+        let result = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap();
+
+        assert_eq!(
+            result.token_ids,
+            vec![
+                1,
+                audio_anchor,
+                audio_placeholder,
+                audio_placeholder,
+                audio_end,
+                message_end
+            ]
+        );
+        assert_eq!(
+            result
+                .token_ids
+                .iter()
+                .filter(|&&token| token == audio_end)
+                .count(),
+            1
+        );
+        assert_eq!(result.bindings[0][0].patches.len(), 1);
+        assert_eq!(result.bindings[0][0].patches[0].offset, 2);
+        assert_eq!(result.bindings[0][0].patches[0].length, 2);
+    }
+
+    #[test]
+    fn test_expand_tokens_mixed_image_audio_offsets_follow_final_prompt() {
+        let audio_anchor: u32 = 100;
+        let audio_placeholder: u32 = 101;
+        let audio_end: u32 = 102;
+        let image_anchor: u32 = 200;
+        let image_placeholder: u32 = 201;
+        let message_end: u32 = 103;
+        let token_ids = vec![
+            1,
+            audio_anchor,
+            audio_end,
+            message_end,
+            2,
+            image_anchor,
+            message_end,
+        ];
+        let audio_replacements = vec![PromptReplacement {
+            modality: Modality::Audio,
+            placeholder_token: "<audio>".to_string(),
+            tokens: vec![
+                audio_anchor as i32,
+                audio_placeholder as i32,
+                audio_placeholder as i32,
+            ],
+            structural_prefix: 0,
+        }];
+        let image_replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![
+                image_anchor as i32,
+                image_placeholder as i32,
+                image_placeholder as i32,
+                image_placeholder as i32,
+            ],
+            structural_prefix: 0,
+        }];
+        let expansions = vec![
+            ModalityExpansion {
+                modality: Modality::Image,
+                search_token_id: Some(image_anchor),
+                placeholder_token_id: Some(image_placeholder),
+                replacements: &image_replacements,
+            },
+            ModalityExpansion {
+                modality: Modality::Audio,
+                search_token_id: Some(audio_anchor),
+                placeholder_token_id: Some(audio_placeholder),
+                replacements: &audio_replacements,
+            },
+        ];
+
+        let result = expand_tokens_for_modalities(&token_ids, &expansions).unwrap();
+
+        assert_eq!(
+            result.token_ids,
+            vec![
+                1,
+                audio_anchor,
+                audio_placeholder,
+                audio_placeholder,
+                audio_end,
+                message_end,
+                2,
+                image_anchor,
+                image_placeholder,
+                image_placeholder,
+                image_placeholder,
+                message_end,
+            ]
+        );
+        assert_eq!(result.bindings[0][0].structural.offset, 7);
+        assert_eq!(result.bindings[0][0].structural.length, 4);
+        assert_eq!(result.bindings[0][0].patches[0].offset, 8);
+        assert_eq!(result.bindings[0][0].patches[0].length, 3);
+        assert_eq!(result.bindings[0][0].prompt_ordinal, 1);
+        assert_eq!(result.bindings[1][0].structural.offset, 1);
+        assert_eq!(result.bindings[1][0].structural.length, 3);
+        assert_eq!(result.bindings[1][0].patches[0].offset, 2);
+        assert_eq!(result.bindings[1][0].patches[0].length, 2);
+        assert_eq!(result.bindings[1][0].prompt_ordinal, 0);
+    }
+
+    #[test]
+    fn test_expand_tokens_three_modalities_follow_final_prompt() {
+        let image_replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![110, 101, 111],
+            structural_prefix: 0,
+        }];
+        let video_replacements = vec![PromptReplacement {
+            modality: Modality::Video,
+            placeholder_token: "<video>".to_string(),
+            tokens: vec![210, 201, 201, 211],
+            structural_prefix: 0,
+        }];
+        let audio_replacements = vec![PromptReplacement {
+            modality: Modality::Audio,
+            placeholder_token: "<audio>".to_string(),
+            tokens: vec![310, 301, 301],
+            structural_prefix: 0,
+        }];
+        let expansions = vec![
+            ModalityExpansion {
+                modality: Modality::Image,
+                search_token_id: Some(100),
+                placeholder_token_id: Some(101),
+                replacements: &image_replacements,
+            },
+            ModalityExpansion {
+                modality: Modality::Video,
+                search_token_id: Some(200),
+                placeholder_token_id: Some(201),
+                replacements: &video_replacements,
+            },
+            ModalityExpansion {
+                modality: Modality::Audio,
+                search_token_id: Some(300),
+                placeholder_token_id: Some(301),
+                replacements: &audio_replacements,
+            },
+        ];
+
+        let result = expand_tokens_for_modalities(&[300, 9, 100, 8, 200], &expansions).unwrap();
+
+        assert_eq!(
+            result.token_ids,
+            vec![310, 301, 301, 9, 110, 101, 111, 8, 210, 201, 201, 211]
+        );
+        let image = &result.bindings[0][0];
+        let video = &result.bindings[1][0];
+        let audio = &result.bindings[2][0];
+        assert_eq!(image.prompt_ordinal, 1);
+        assert_eq!((image.structural.offset, image.patches[0].offset), (4, 5));
+        assert_eq!(video.prompt_ordinal, 2);
+        assert_eq!((video.structural.offset, video.patches[0].offset), (8, 9));
+        assert_eq!(audio.prompt_ordinal, 0);
+        assert_eq!((audio.structural.offset, audio.patches[0].offset), (0, 1));
     }
 
     #[test]
     fn test_expand_tokens_more_placeholders_than_replacements() {
-        // Two placeholder tokens but only one replacement: the first is
-        // expanded, the second is left in place unchanged (and warned about).
+        // Two prompt anchors for one replacement must fail instead of silently
+        // binding user/template text to the wrong media item.
         let token_ids = vec![1, 100, 2, 100, 3];
         let replacements = vec![PromptReplacement {
             modality: Modality::Image,
@@ -711,12 +1046,84 @@ mod tests {
             structural_prefix: 0,
         }];
 
-        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let error = expand_tokens_for_modalities(&token_ids, &[expansion]).unwrap_err();
+        assert!(error.to_string().contains("Extra prompt anchor"));
+    }
 
-        // Output is unchanged behavior: excess placeholder (100) stays as-is.
-        assert_eq!(result.token_ids, vec![1, 50, 50, 2, 100, 3]);
-        assert_eq!(result.placeholders.len(), 1);
-        assert_eq!(result.placeholders[0].offset, 1);
-        assert_eq!(result.placeholders[0].length, 2);
+    #[test]
+    fn test_expand_tokens_rejects_missing_anchor() {
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![50, 50],
+            structural_prefix: 0,
+        }];
+
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: None,
+            replacements: &replacements,
+        };
+        let error = expand_tokens_for_modalities(&[1, 2, 3], &[expansion]).unwrap_err();
+        assert!(error.to_string().contains("Missing prompt anchors"));
+    }
+
+    #[test]
+    fn test_expand_tokens_rejects_shared_anchor_id() {
+        let image_replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![50],
+            structural_prefix: 0,
+        }];
+        let audio_replacements = vec![PromptReplacement {
+            modality: Modality::Audio,
+            placeholder_token: "<audio>".to_string(),
+            tokens: vec![60],
+            structural_prefix: 0,
+        }];
+        let expansions = [
+            ModalityExpansion {
+                modality: Modality::Image,
+                search_token_id: Some(100),
+                placeholder_token_id: Some(50),
+                replacements: &image_replacements,
+            },
+            ModalityExpansion {
+                modality: Modality::Audio,
+                search_token_id: Some(100),
+                placeholder_token_id: Some(60),
+                replacements: &audio_replacements,
+            },
+        ];
+
+        let error = expand_tokens_for_modalities(&[100, 100], &expansions).unwrap_err();
+        assert!(error.to_string().contains("anchors must be unique"));
+    }
+
+    #[test]
+    fn test_expand_tokens_rejects_negative_replacement_token() {
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![50, -1],
+            structural_prefix: 0,
+        }];
+
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: Some(50),
+            replacements: &replacements,
+        };
+        let error = expand_tokens_for_modalities(&[100], &[expansion]).unwrap_err();
+        assert!(error.to_string().contains("Invalid negative token ID"));
     }
 }

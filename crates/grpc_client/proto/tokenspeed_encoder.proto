@@ -5,8 +5,8 @@ package tokenspeed.grpc.encoder;
 import "tokenspeed_scheduler.proto";
 
 // TokenSpeed EPD encode-stage gRPC service. The gateway ships preprocessed
-// multimodal tensors to a vision-tower-only encode worker; the worker runs the
-// tower and pushes the resulting image embeddings to a prefill worker over
+// multimodal tensors to an encoder-only worker; the worker runs the matching
+// tower and pushes the resulting embeddings to a prefill worker over
 // Mooncake, keyed per item by bootstrap_room. The gateway never sees the
 // embeddings — it only triggers the encode and assigns each item its room.
 //
@@ -24,7 +24,7 @@ message EncodeRequest {
   string request_id = 1;
 
   // This worker's assigned multimodal item — the same tensor shape the scheduler
-  // Generate path carries. The encode worker runs the vision tower on it; it
+  // Generate path carries. The encode worker runs the matching tower on it; it
   // does not fetch or preprocess (that already happened in the gateway).
   tokenspeed.grpc.scheduler.MultimodalInputs mm_inputs = 2;
 

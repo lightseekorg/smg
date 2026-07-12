@@ -1,16 +1,16 @@
-//! Vision processor trait and encoder-output types.
+//! Vision processor trait and registry.
 //!
-//! This module defines the interface for model-specific vision processors
-//! and the common output format for preprocessed encoder inputs.
+//! Shared encoder output types live in [`crate::encoder_inputs`] and are re-exported
+//! here for compatibility.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::collections::HashMap;
 
-use anyhow::{Context, Result as AnyhowResult};
 use image::DynamicImage;
-use ndarray::{Array4, ArrayD};
 
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
-use crate::types::{FieldLayout, RgbFrameRef};
+use crate::types::RgbFrameRef;
+
+pub use crate::encoder_inputs::{ModelSpecificValue, PreprocessedEncoderInputs};
 
 /// Helper to extract a dimension from encoder_input given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.
@@ -30,249 +30,7 @@ fn dim_for_ndim(
     }
 }
 
-/// Model-specific output values that vary by architecture.
-///
-/// Different vision models require different auxiliary outputs beyond encoder_input.
-/// This enum captures the common types of such outputs.
-#[derive(Debug, Clone)]
-pub enum ModelSpecificValue {
-    /// A tensor with shape information (data as flat vec, shape as dims)
-    Tensor { data: Vec<f32>, shape: Vec<usize> },
-
-    /// A tensor of integers (e.g., aspect_ratio_ids)
-    IntTensor { data: Vec<i64>, shape: Vec<usize> },
-
-    /// A tensor of unsigned integers (e.g., image_grid_thw)
-    UintTensor { data: Vec<u32>, shape: Vec<usize> },
-
-    /// Simple integer value
-    Int(i64),
-
-    /// Simple float value
-    Float(f64),
-
-    /// List of integers
-    IntVec(Vec<i64>),
-
-    /// List of unsigned integers
-    UintVec(Vec<u32>),
-
-    /// List of floats
-    FloatVec(Vec<f32>),
-
-    /// List of tuples (e.g., image sizes)
-    TupleVec(Vec<(u32, u32)>),
-
-    /// Boolean flag
-    Bool(bool),
-}
-
-impl ModelSpecificValue {
-    /// Create a 1D uint tensor from a vector.
-    pub fn uint_1d(data: Vec<u32>) -> Self {
-        let len = data.len();
-        Self::UintTensor {
-            data,
-            shape: vec![len],
-        }
-    }
-
-    /// Create a 2D uint tensor.
-    pub fn uint_2d(data: Vec<u32>, rows: usize, cols: usize) -> Self {
-        Self::UintTensor {
-            data,
-            shape: vec![rows, cols],
-        }
-    }
-
-    /// Create a 1D int tensor from a vector.
-    pub fn int_1d(data: Vec<i64>) -> Self {
-        let len = data.len();
-        Self::IntTensor {
-            data,
-            shape: vec![len],
-        }
-    }
-
-    /// Create a 2D int tensor.
-    pub fn int_2d(data: Vec<i64>, rows: usize, cols: usize) -> Self {
-        Self::IntTensor {
-            data,
-            shape: vec![rows, cols],
-        }
-    }
-
-    /// Interpret this value as per-item flat sizes.
-    pub fn as_flat_sizes(&self) -> AnyhowResult<Vec<usize>> {
-        match self {
-            Self::IntTensor { data, .. } => data
-                .iter()
-                .map(|&v| usize::try_from(v).context("negative flat size"))
-                .collect(),
-            Self::UintTensor { data, .. } => Ok(data.iter().map(|&v| v as usize).collect()),
-            Self::IntVec(values) => values
-                .iter()
-                .map(|&v| usize::try_from(v).context("negative flat size"))
-                .collect(),
-            Self::UintVec(values) => Ok(values.iter().map(|&v| v as usize).collect()),
-            _ => Err(anyhow::anyhow!("unsupported flat sizes value type")),
-        }
-    }
-
-    /// Slice item-batched metadata along the first dimension.
-    pub fn slice_first_dim(&self, start: usize, len: usize) -> AnyhowResult<Self> {
-        match self {
-            Self::Tensor { data, shape } => {
-                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
-                Ok(Self::Tensor { data, shape })
-            }
-            Self::IntTensor { data, shape } => {
-                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
-                Ok(Self::IntTensor { data, shape })
-            }
-            Self::UintTensor { data, shape } => {
-                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
-                Ok(Self::UintTensor { data, shape })
-            }
-            Self::IntVec(values) => Ok(Self::IntVec(slice_1d(values, start, len)?.to_vec())),
-            Self::UintVec(values) => Ok(Self::UintVec(slice_1d(values, start, len)?.to_vec())),
-            Self::FloatVec(values) => Ok(Self::FloatVec(slice_1d(values, start, len)?.to_vec())),
-            Self::TupleVec(values) => Ok(Self::TupleVec(slice_1d(values, start, len)?.to_vec())),
-            _ => Ok(self.clone()),
-        }
-    }
-}
-
-fn slice_tensor_first_dim<T: Clone>(
-    data: &[T],
-    shape: &[usize],
-    start: usize,
-    len: usize,
-) -> AnyhowResult<(Vec<T>, Vec<usize>)> {
-    let first_dim = *shape
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("cannot slice scalar tensor"))?;
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| anyhow::anyhow!("tensor slice range overflow"))?;
-    anyhow::ensure!(
-        end <= first_dim,
-        "tensor first-dimension slice {start}..{end} exceeds {first_dim}"
-    );
-    let row_width = shape[1..]
-        .iter()
-        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| anyhow::anyhow!("tensor row width overflow"))?;
-    let data_start = start
-        .checked_mul(row_width)
-        .ok_or_else(|| anyhow::anyhow!("tensor data start overflow"))?;
-    let data_len = len
-        .checked_mul(row_width)
-        .ok_or_else(|| anyhow::anyhow!("tensor data length overflow"))?;
-    let data_end = data_start
-        .checked_add(data_len)
-        .ok_or_else(|| anyhow::anyhow!("tensor data end overflow"))?;
-    anyhow::ensure!(
-        data_end <= data.len(),
-        "tensor slice data range {data_start}..{data_end} exceeds {}",
-        data.len()
-    );
-    let mut new_shape = shape.to_vec();
-    new_shape[0] = len;
-    Ok((data[data_start..data_end].to_vec(), new_shape))
-}
-
-fn slice_1d<T>(values: &[T], start: usize, len: usize) -> AnyhowResult<&[T]> {
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| anyhow::anyhow!("slice range overflow"))?;
-    values
-        .get(start..end)
-        .ok_or_else(|| anyhow::anyhow!("slice range {start}..{end} exceeds {}", values.len()))
-}
-
-/// Preprocessed encoder inputs ready for model consumption.
-///
-/// This struct contains the processor outputs needed by serving backends to
-/// construct `MultimodalInputs` for the model. Vision processors currently
-/// produce this from images or sampled video frames; future modality processors
-/// can reuse the same output contract for audio features or other encoder inputs.
-#[derive(Debug, Clone)]
-pub struct PreprocessedEncoderInputs {
-    /// Primary encoder input as a dynamic-dimensional float32 tensor.
-    ///
-    /// For vision models this is typically the preprocessed image/video tensor.
-    /// Shape varies by model and modality:
-    /// - Standard: [B, C, H, W] (4D)
-    /// - Phi3-Vision: [B, num_crops+1, C, H, W] (5D)
-    pub encoder_input: ArrayD<f32>,
-
-    /// Number of encoder feature tokens per media item in the batch.
-    ///
-    /// Used to expand placeholder tokens in the text input. For vision this is
-    /// usually an image patch or video patch count; for audio this could be an
-    /// audio feature-frame count.
-    /// For example, LLaVA with 336x336 and patch_size=14 produces 576 tokens.
-    pub feature_token_counts: Vec<usize>,
-
-    /// Modality-specific item size metadata before preprocessing.
-    ///
-    /// Vision processors use this for image/frame dimensions, but the exact
-    /// tuple order follows each processor/model contract. Model-specific shape
-    /// tensors that need a fixed order should also be emitted in `model_specific`.
-    pub item_sizes: Vec<(u32, u32)>,
-
-    /// Model-specific auxiliary outputs.
-    ///
-    /// Examples:
-    /// - Qwen-VL: `image_grid_thw` for rotary position encoding
-    /// - LLaMA-Vision: `aspect_ratio_ids`, `aspect_ratio_mask`
-    /// - Phi3-Vision: `num_img_tokens` auxiliary metadata
-    pub model_specific: HashMap<String, ModelSpecificValue>,
-}
-
 impl PreprocessedEncoderInputs {
-    /// Create a new PreprocessedEncoderInputs with required fields (4D encoder input).
-    pub fn new(
-        encoder_input: Array4<f32>,
-        feature_token_counts: Vec<usize>,
-        item_sizes: Vec<(u32, u32)>,
-    ) -> Self {
-        Self {
-            encoder_input: encoder_input.into_dyn(),
-            feature_token_counts,
-            item_sizes,
-            model_specific: HashMap::new(),
-        }
-    }
-
-    /// Create a new PreprocessedEncoderInputs with dynamic-dimensional encoder input.
-    ///
-    /// Use this for models like Phi3-Vision that have 5D tensors.
-    pub fn new_dynamic(
-        encoder_input: ArrayD<f32>,
-        feature_token_counts: Vec<usize>,
-        item_sizes: Vec<(u32, u32)>,
-    ) -> Self {
-        Self {
-            encoder_input,
-            feature_token_counts,
-            item_sizes,
-            model_specific: HashMap::new(),
-        }
-    }
-
-    /// Add a model-specific value.
-    pub fn with_extra(mut self, key: impl Into<String>, value: ModelSpecificValue) -> Self {
-        self.model_specific.insert(key.into(), value);
-        self
-    }
-
-    /// Get the number of media items represented by this preprocessed batch.
-    pub fn batch_size(&self) -> usize {
-        self.item_sizes.len()
-    }
-
     /// Get the number of channels.
     ///
     /// For 4D tensors [B, C, H, W], returns shape[1].
@@ -304,56 +62,6 @@ impl PreprocessedEncoderInputs {
     /// Returns `TransformError::InvalidShape` if encoder_input is not 4D or 5D.
     pub fn width(&self) -> Result<usize, TransformError> {
         dim_for_ndim(self.encoder_input.ndim(), 3, 4, self.encoder_input.shape())
-    }
-
-    /// Get the number of dimensions of encoder_input.
-    pub fn ndim(&self) -> usize {
-        self.encoder_input.ndim()
-    }
-
-    /// Get total number of encoder feature tokens across all media items.
-    pub fn total_feature_tokens(&self) -> usize {
-        self.feature_token_counts.iter().sum()
-    }
-
-    /// Get the primary encoder input as a flat f32 slice without copying if possible.
-    pub fn encoder_input_flat(&self) -> Cow<'_, [f32]> {
-        match self.encoder_input.as_slice() {
-            Some(slice) => Cow::Borrowed(slice),
-            None => Cow::Owned(self.encoder_input.iter().copied().collect()),
-        }
-    }
-
-    /// Get the shape of the primary encoder input as a vector.
-    pub fn encoder_input_shape(&self) -> Vec<usize> {
-        self.encoder_input.shape().to_vec()
-    }
-
-    /// Number of media items in this batch.
-    pub fn num_media_items(&self) -> usize {
-        self.item_sizes.len()
-    }
-
-    /// Extract batched tensor keys from explicit field layout declarations.
-    pub fn batched_keys(layouts: &HashMap<String, FieldLayout>) -> Vec<String> {
-        layouts
-            .iter()
-            .filter(|(_, l)| matches!(l, FieldLayout::Batched))
-            .map(|(k, _)| k.clone())
-            .collect()
-    }
-
-    /// Extract flat-slicing tensor keys from explicit field layout declarations.
-    ///
-    /// Returns a map of tensor name → sizes tensor name.
-    pub fn flat_keys(layouts: &HashMap<String, FieldLayout>) -> HashMap<String, String> {
-        layouts
-            .iter()
-            .filter_map(|(k, l)| match l {
-                FieldLayout::Flat { sizes_key } => Some((k.clone(), sizes_key.clone())),
-                FieldLayout::Batched => None,
-            })
-            .collect()
     }
 }
 
@@ -536,6 +244,17 @@ impl VisionProcessorRegistry {
             Box::new(super::processors::Qwen3VLProcessor::new()),
         );
 
+        // Qwen3-Omni uses the same patchification and normalization contract
+        // as Qwen3-VL for its image and video towers.
+        registry.register(
+            "qwen3-omni",
+            Box::new(super::processors::Qwen3OmniVisionProcessor::new()),
+        );
+        registry.register(
+            "qwen3_omni",
+            Box::new(super::processors::Qwen3OmniVisionProcessor::new()),
+        );
+
         // Qwen3.5 family (and Qwen3.6: same arch) reuses Qwen3-VL preprocessing.
         registry.register(
             "qwen3.5",
@@ -624,7 +343,7 @@ mod tests {
     use crate::vision::processors::LlavaProcessor;
 
     #[test]
-    fn test_preprocessed_encoder_inputs_accessors() {
+    fn test_preprocessed_encoder_inputs_geometry_accessors() {
         let encoder_input = Array4::<f32>::zeros((2, 3, 336, 336));
         let inputs = PreprocessedEncoderInputs::new(
             encoder_input,
@@ -632,78 +351,9 @@ mod tests {
             vec![(640, 480), (800, 600)],
         );
 
-        assert_eq!(inputs.batch_size(), 2);
         assert_eq!(inputs.channels().unwrap(), 3);
         assert_eq!(inputs.height().unwrap(), 336);
         assert_eq!(inputs.width().unwrap(), 336);
-        assert_eq!(inputs.total_feature_tokens(), 1152);
-    }
-
-    #[test]
-    fn test_preprocessed_encoder_inputs_with_extra() {
-        let encoder_input = Array4::<f32>::zeros((1, 3, 224, 224));
-        let inputs = PreprocessedEncoderInputs::new(encoder_input, vec![196], vec![(224, 224)])
-            .with_extra(
-                "image_grid_thw",
-                ModelSpecificValue::uint_1d(vec![1, 16, 16]),
-            )
-            .with_extra("aspect_ratio_id", ModelSpecificValue::Int(0));
-
-        assert!(inputs.model_specific.contains_key("image_grid_thw"));
-        assert!(inputs.model_specific.contains_key("aspect_ratio_id"));
-    }
-
-    #[test]
-    fn test_model_specific_value_constructors() {
-        let uint_1d = ModelSpecificValue::uint_1d(vec![1, 2, 3]);
-        match uint_1d {
-            ModelSpecificValue::UintTensor { data, shape } => {
-                assert_eq!(data, vec![1, 2, 3]);
-                assert_eq!(shape, vec![3]);
-            }
-            _ => panic!("Expected UintTensor"),
-        }
-
-        let uint_2d = ModelSpecificValue::uint_2d(vec![1, 2, 3, 4], 2, 2);
-        match uint_2d {
-            ModelSpecificValue::UintTensor { data, shape } => {
-                assert_eq!(data, vec![1, 2, 3, 4]);
-                assert_eq!(shape, vec![2, 2]);
-            }
-            _ => panic!("Expected UintTensor"),
-        }
-
-        let int_1d = ModelSpecificValue::int_1d(vec![1, 2, 3]);
-        match int_1d {
-            ModelSpecificValue::IntTensor { data, shape } => {
-                assert_eq!(data, vec![1, 2, 3]);
-                assert_eq!(shape, vec![3]);
-            }
-            _ => panic!("Expected IntTensor"),
-        }
-
-        let int_2d = ModelSpecificValue::int_2d(vec![1, 2, 3, 4], 2, 2);
-        match int_2d {
-            ModelSpecificValue::IntTensor { data, shape } => {
-                assert_eq!(data, vec![1, 2, 3, 4]);
-                assert_eq!(shape, vec![2, 2]);
-            }
-            _ => panic!("Expected IntTensor"),
-        }
-    }
-
-    #[test]
-    fn test_encoder_input_flat() {
-        let mut encoder_input = Array4::<f32>::zeros((1, 1, 2, 2));
-        encoder_input[[0, 0, 0, 0]] = 1.0;
-        encoder_input[[0, 0, 0, 1]] = 2.0;
-        encoder_input[[0, 0, 1, 0]] = 3.0;
-        encoder_input[[0, 0, 1, 1]] = 4.0;
-
-        let inputs = PreprocessedEncoderInputs::new(encoder_input, vec![4], vec![(2, 2)]);
-        let flat = inputs.encoder_input_flat();
-
-        assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

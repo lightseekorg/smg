@@ -182,6 +182,9 @@ pub struct ChatCompletionRequest {
     /// Output types that you would like the model to generate for this request
     pub modalities: Option<Vec<String>>,
 
+    /// Whether to return audio output.
+    pub return_audio: Option<bool>,
+
     /// How many chat completion choices to generate for each input message
     #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
@@ -772,7 +775,21 @@ pub struct ChatStreamChoice {
 
 #[cfg(test)]
 mod tests {
-    use super::thinking_from_reasoning_effort;
+    use serde_json::{json, Value};
+
+    use super::{thinking_from_reasoning_effort, ChatCompletionRequest};
+
+    fn request_with_output_fields(fields: &[(&str, Value)]) -> ChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let object = value.as_object_mut().expect("request must be an object");
+        for (name, field_value) in fields {
+            object.insert((*name).to_string(), field_value.clone());
+        }
+        serde_json::from_value(value).expect("request must deserialize")
+    }
 
     #[test]
     fn thinking_from_reasoning_effort_maps_disable_values() {
@@ -786,5 +803,24 @@ mod tests {
         // Unspecified / unknown -> defer.
         assert_eq!(thinking_from_reasoning_effort(None), None);
         assert_eq!(thinking_from_reasoning_effort(Some("bogus")), None);
+    }
+
+    #[test]
+    fn return_audio_preserves_explicit_values() {
+        for fields in [vec![], vec![("return_audio", Value::Null)]] {
+            let request = request_with_output_fields(&fields);
+            assert_eq!(request.return_audio, None);
+            assert!(!request.other.contains_key("return_audio"));
+            let serialized = serde_json::to_value(request).expect("request must serialize");
+            assert!(serialized.get("return_audio").is_none());
+        }
+
+        for value in [false, true] {
+            let request = request_with_output_fields(&[("return_audio", json!(value))]);
+            assert_eq!(request.return_audio, Some(value));
+            assert!(!request.other.contains_key("return_audio"));
+            let serialized = serde_json::to_value(request).expect("request must serialize");
+            assert_eq!(serialized.get("return_audio"), Some(&Value::Bool(value)));
+        }
     }
 }

@@ -68,6 +68,12 @@ pub struct QwenVLConfig {
     pub min_pixels: usize,
     /// Maximum total pixels allowed
     pub max_pixels: usize,
+    /// Minimum video pixels, interpreted according to `video_resize_mode`.
+    pub video_min_pixels: usize,
+    /// Maximum video pixels, interpreted according to `video_resize_mode`.
+    pub video_max_pixels: usize,
+    /// Whether the video budget applies per frame or to the sampled volume.
+    pub video_resize_mode: QwenVideoResizeMode,
     /// Temporal patch size for video
     pub temporal_patch_size: usize,
     /// Normalization mean values
@@ -76,6 +82,12 @@ pub struct QwenVLConfig {
     pub std: [f64; 3],
     /// Model name for identification
     pub model_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QwenVideoResizeMode {
+    TotalVolume,
+    PerFrame,
 }
 
 #[derive(Clone)]
@@ -108,14 +120,29 @@ struct QwenVideoPlan {
     num_patches: usize,
     output_values: usize,
     tokens: usize,
+    second_per_grid: f32,
     filter: FilterType,
     do_resize: bool,
     lut: [[f32; 256]; 3],
 }
 
-fn normalization_lut(config: &PreProcessorConfig) -> [[f32; 256]; 3] {
-    let mean = config.get_image_mean();
-    let std = config.get_image_std();
+fn normalization_lut(
+    config: &PreProcessorConfig,
+    default_mean: [f64; 3],
+    default_std: [f64; 3],
+) -> [[f32; 256]; 3] {
+    let mean = config
+        .image_mean
+        .as_ref()
+        .filter(|values| values.len() >= 3)
+        .map(|values| [values[0], values[1], values[2]])
+        .unwrap_or(default_mean);
+    let std = config
+        .image_std
+        .as_ref()
+        .filter(|values| values.len() >= 3)
+        .map(|values| [values[0], values[1], values[2]])
+        .unwrap_or(default_std);
     let do_normalize = config.do_normalize.unwrap_or(true);
     let scale: [f32; 3] = if do_normalize {
         std::array::from_fn(|channel| 1.0 / (255.0 * std[channel] as f32))
@@ -319,6 +346,18 @@ impl QwenVLProcessorBase {
         self.config.max_pixels
     }
 
+    pub fn video_min_pixels(&self) -> usize {
+        self.config.video_min_pixels
+    }
+
+    pub fn video_max_pixels(&self) -> usize {
+        self.config.video_max_pixels
+    }
+
+    pub fn video_resize_mode(&self) -> QwenVideoResizeMode {
+        self.config.video_resize_mode
+    }
+
     /// Get the temporal patch size.
     pub fn temporal_patch_size(&self) -> usize {
         self.config.temporal_patch_size
@@ -352,6 +391,14 @@ impl QwenVLProcessorBase {
                 "Qwen video patch buffer size overflow: patches={num_patches}, features={patch_features}"
             ))
         })?;
+        // MediaConnector samples video at 2 fps by default. A checkpoint may
+        // override that value in video_preprocessor_config.json.
+        let sample_fps = config.get_extra::<f32>("fps").unwrap_or(2.0);
+        if !sample_fps.is_finite() || sample_fps <= 0.0 {
+            return Err(TransformError::ShapeError(format!(
+                "Qwen video fps must be finite and positive, got {sample_fps}"
+            )));
+        }
 
         Ok(QwenVideoPlan {
             original_size: (width, height),
@@ -364,9 +411,10 @@ impl QwenVLProcessorBase {
             num_patches,
             output_values,
             tokens: self.calculate_tokens_from_grid(grid_t, grid_h, grid_w),
+            second_per_grid: temporal_patch_size as f32 / sample_fps,
             filter: pil_to_filter(config.resampling.or(Some(3))),
             do_resize: config.do_resize.unwrap_or(true),
-            lut: normalization_lut(config),
+            lut: normalization_lut(config, self.config.mean, self.config.std),
         })
     }
 
@@ -384,8 +432,8 @@ impl QwenVLProcessorBase {
                 },
             )?;
 
-        Ok(PreprocessedEncoderInputs::new_dynamic(
-            encoder_input.into_dyn(),
+        Ok(PreprocessedEncoderInputs::new(
+            encoder_input,
             vec![plan.tokens],
             vec![plan.original_size],
         )
@@ -404,6 +452,13 @@ impl QwenVLProcessorBase {
         .with_extra(
             "patches_per_image",
             ModelSpecificValue::int_1d(vec![plan.num_patches as i64]),
+        )
+        .with_extra(
+            "video_second_per_grid",
+            ModelSpecificValue::Tensor {
+                data: vec![plan.second_per_grid],
+                shape: vec![1],
+            },
         ))
     }
 
@@ -528,21 +583,26 @@ impl QwenVLProcessorBase {
         h_bar = h_bar.max(factor);
         w_bar = w_bar.max(factor);
 
-        let t_bar =
-            num_frames.div_ceil(self.config.temporal_patch_size) * self.config.temporal_patch_size;
-        let resized_pixels = t_bar as f64 * h_bar as f64 * w_bar as f64;
-        if resized_pixels > self.config.max_pixels as f64 {
-            // HF uses padded frames for the threshold but actual frames for beta.
-            let beta = (num_frames as f64 * height as f64 * width as f64
-                / self.config.max_pixels as f64)
-                .sqrt();
+        let (budget_scale, resized_pixels) = match self.config.video_resize_mode {
+            QwenVideoResizeMode::TotalVolume => {
+                let padded_frames = num_frames.div_ceil(self.config.temporal_patch_size)
+                    * self.config.temporal_patch_size;
+                (
+                    num_frames as f64,
+                    padded_frames as f64 * h_bar as f64 * w_bar as f64,
+                )
+            }
+            QwenVideoResizeMode::PerFrame => (1.0, h_bar as f64 * w_bar as f64),
+        };
+        let source_pixels = budget_scale * height as f64 * width as f64;
+        if resized_pixels > self.config.video_max_pixels as f64 {
+            let beta = (source_pixels / self.config.video_max_pixels as f64).sqrt();
             h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
             w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
             h_bar = h_bar.max(factor);
             w_bar = w_bar.max(factor);
-        } else if resized_pixels < self.config.min_pixels as f64 {
-            let beta =
-                (self.config.min_pixels as f64 / (num_frames * height * width) as f64).sqrt();
+        } else if resized_pixels < self.config.video_min_pixels as f64 {
+            let beta = (self.config.video_min_pixels as f64 / source_pixels).sqrt();
             h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
             w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
         }
@@ -1034,7 +1094,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         let temporal_patch_size = self.config.temporal_patch_size;
         let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
         let do_resize = config.do_resize.unwrap_or(true);
-        let lut = normalization_lut(config);
+        let lut = normalization_lut(config, self.config.mean, self.config.std);
 
         let mut image_plans = Vec::with_capacity(images.len());
         let mut item_sizes = Vec::with_capacity(images.len());
@@ -1134,19 +1194,16 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                 ))
             })?;
 
-        let result = PreprocessedEncoderInputs::new_dynamic(
-            encoder_input.into_dyn(),
-            feature_token_counts,
-            item_sizes,
-        )
-        .with_extra(
-            "image_grid_thw",
-            ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
-        )
-        .with_extra(
-            "patches_per_image",
-            ModelSpecificValue::int_1d(patches_per_image),
-        );
+        let result =
+            PreprocessedEncoderInputs::new(encoder_input, feature_token_counts, item_sizes)
+                .with_extra(
+                    "image_grid_thw",
+                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
+                )
+                .with_extra(
+                    "patches_per_image",
+                    ModelSpecificValue::int_1d(patches_per_image),
+                );
 
         Ok(result)
     }
@@ -1335,6 +1392,9 @@ mod tests {
             merge_size: 2,
             min_pixels: 256 * 28 * 28,
             max_pixels: 1280 * 28 * 28,
+            video_min_pixels: 256 * 28 * 28,
+            video_max_pixels: 1280 * 28 * 28,
+            video_resize_mode: QwenVideoResizeMode::TotalVolume,
             temporal_patch_size: 2,
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
@@ -1348,6 +1408,9 @@ mod tests {
             merge_size: 1,
             min_pixels: 1,
             max_pixels: 1024 * 1024,
+            video_min_pixels: 1,
+            video_max_pixels: 1024 * 1024,
+            video_resize_mode: QwenVideoResizeMode::TotalVolume,
             temporal_patch_size: 2,
             mean: [0.5, 0.25, 0.75],
             std: [0.5, 0.25, 0.5],
@@ -1671,6 +1734,9 @@ mod tests {
             merge_size: 2,
             min_pixels: 1,
             max_pixels: 16_777_216,
+            video_min_pixels: 1,
+            video_max_pixels: 16_777_216,
+            video_resize_mode: QwenVideoResizeMode::TotalVolume,
             temporal_patch_size: 2,
             mean: [0.5; 3],
             std: [0.5; 3],

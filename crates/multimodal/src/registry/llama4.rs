@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::{
+    encoder_inputs::{ModelSpecificValue, PreprocessedEncoderInputs},
     registry::{ModelMetadata, ModelProcessorSpec, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
 };
 
 pub(super) struct Llama4Spec;

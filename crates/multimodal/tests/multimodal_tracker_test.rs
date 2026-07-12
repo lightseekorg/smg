@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use llm_multimodal::{
-    AsyncMultiModalTracker, ImageFetchConfig, ImageSource, MediaConnector, MediaConnectorConfig,
-    MediaContentPart, MediaSource, Modality,
+    AsyncMultiModalTracker, AudioSource, ImageFetchConfig, ImageSource, MediaConnector,
+    MediaConnectorConfig, MediaContentPart, MediaSource, Modality,
 };
 use reqwest::Client;
 use tempfile::tempdir;
@@ -19,6 +19,27 @@ fn tiny_png_bytes() -> Vec<u8> {
     BASE64_STANDARD
         .decode(TINY_PNG_BASE64)
         .expect("decode tiny png fixture")
+}
+
+fn wav_i16_mono(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
+    let data_bytes = samples.len() as u32 * 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
 }
 
 #[expect(
@@ -96,6 +117,24 @@ async fn fetch_image_from_file() {
         ImageSource::File { path } => assert_eq!(path, &expected),
         other => panic!("expected file source, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn fetch_audio_from_inline_bytes_decodes_samples() {
+    let connector = test_connector(None);
+    let bytes = wav_i16_mono(16_000, &[0, 16_384, -16_384]);
+    let clip = connector
+        .fetch_audio(MediaSource::InlineBytes(bytes.clone()))
+        .await
+        .expect("inline audio");
+
+    assert_eq!(clip.raw_bytes(), bytes.as_slice());
+    assert_eq!(clip.decoded().sample_rate, 16_000);
+    assert_eq!(clip.decoded().samples.len(), 3);
+    assert!(clip.decoded().samples[0].abs() < 1e-6);
+    assert!((clip.decoded().samples[1] - 0.5).abs() < 1e-4);
+    assert!((clip.decoded().samples[2] + 0.5).abs() < 1e-4);
+    assert!(matches!(clip.source(), AudioSource::InlineBytes));
 }
 
 #[tokio::test]

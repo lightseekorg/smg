@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::{
+    encoder_inputs::PreprocessedEncoderInputs,
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::processor::PreprocessedEncoderInputs,
 };
 
 pub(super) struct KimiK25VisionSpec;

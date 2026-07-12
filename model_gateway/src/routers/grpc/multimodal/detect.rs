@@ -4,54 +4,18 @@
 //! pipeline (`InputMessage`) funnel into the shared processing core; only the
 //! detection and extraction differ, because the input message types differ.
 
-use llm_multimodal::{ImageDetail, MediaContentPart, Modality};
+use llm_multimodal::{ImageDetail, MediaContentPart};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
     messages::{ImageSource, InputContent, InputContentBlock, InputMessage, Role},
 };
 
-/// Return the multimodal modalities present in OpenAI chat messages.
-pub(crate) fn chat_modalities(messages: &[ChatMessage]) -> Vec<Modality> {
-    let mut modalities = Vec::new();
-    let mut push_unique = |modality| {
-        if !modalities.contains(&modality) {
-            modalities.push(modality);
-        }
-    };
+use super::plan::MediaPlan;
 
-    for msg in messages {
-        let content = match msg {
-            ChatMessage::User { content, .. } => Some(content),
-            ChatMessage::System { content, .. } => Some(content),
-            ChatMessage::Developer { content, .. } => Some(content),
-            ChatMessage::Tool { content, .. } => Some(content),
-            _ => None,
-        };
-
-        if let Some(MessageContent::Parts(parts)) = content {
-            for part in parts {
-                match part {
-                    ContentPart::ImageUrl { .. } => push_unique(Modality::Image),
-                    ContentPart::VideoUrl { .. } => push_unique(Modality::Video),
-                    ContentPart::Text { .. } => {}
-                }
-            }
-        }
-    }
-
-    modalities
-}
-
-/// Check if any messages in the request contain multimodal content.
-#[cfg(test)]
-pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
-    !chat_modalities(messages).is_empty()
-}
-
-/// Extract multimodal content parts from OpenAI chat messages,
+/// Extract media parts from OpenAI chat messages,
 /// converting protocol `ContentPart` to multimodal crate `MediaContentPart`.
-pub(super) fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
+fn extract_media_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
     let mut parts = Vec::new();
 
     for msg in messages {
@@ -74,8 +38,21 @@ pub(super) fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaConten
                             uuid: None,
                         });
                     }
-                    ContentPart::Text { text } => {
-                        parts.push(MediaContentPart::Text { text: text.clone() });
+                    ContentPart::Text { .. } => {}
+                    ContentPart::AudioUrl { audio_url } => {
+                        parts.push(MediaContentPart::AudioUrl {
+                            url: audio_url.url.clone(),
+                            uuid: None,
+                        });
+                    }
+                    ContentPart::InputAudio { input_audio } => {
+                        parts.push(MediaContentPart::AudioUrl {
+                            url: format!(
+                                "data:audio/{};base64,{}",
+                                input_audio.format, input_audio.data
+                            ),
+                            uuid: None,
+                        });
                     }
                     ContentPart::VideoUrl { video_url } => {
                         parts.push(MediaContentPart::VideoUrl {
@@ -89,6 +66,11 @@ pub(super) fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaConten
     }
 
     parts
+}
+
+/// Build the canonical ordered media plan for Chat Completions input.
+pub(crate) fn media_plan_chat(messages: &[ChatMessage]) -> MediaPlan {
+    MediaPlan::new(extract_media_parts(messages))
 }
 
 /// Parse OpenAI detail string to multimodal ImageDetail enum.
@@ -105,24 +87,9 @@ fn parse_detail(detail: &str) -> Option<ImageDetail> {
 // Messages API multimodal detection and extraction
 // ---------------------------------------------------------------------------
 
-/// Check if any messages in a Messages API request contain multimodal content.
-pub(crate) fn has_multimodal_content_messages(messages: &[InputMessage]) -> bool {
-    messages.iter().any(|msg| {
-        if msg.role != Role::User {
-            return false;
-        }
-        match &msg.content {
-            InputContent::Blocks(blocks) => blocks
-                .iter()
-                .any(|block| matches!(block, InputContentBlock::Image(_))),
-            InputContent::String(_) => false,
-        }
-    })
-}
-
-/// Extract multimodal content parts from Messages API input messages,
+/// Extract media parts from Messages API input messages,
 /// converting `InputContentBlock::Image` to multimodal crate `MediaContentPart`.
-pub(super) fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<MediaContentPart> {
+fn extract_media_parts_messages(messages: &[InputMessage]) -> Vec<MediaContentPart> {
     let mut parts = Vec::new();
 
     for msg in messages {
@@ -154,11 +121,7 @@ pub(super) fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<M
                         });
                     }
                 },
-                InputContentBlock::Text(text_block) => {
-                    parts.push(MediaContentPart::Text {
-                        text: text_block.text.clone(),
-                    });
-                }
+                InputContentBlock::Text(_) => {}
                 _ => {}
             }
         }
@@ -167,14 +130,20 @@ pub(super) fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<M
     parts
 }
 
+/// Build the canonical ordered media plan for Messages API input.
+pub(crate) fn media_plan_messages(messages: &[InputMessage]) -> MediaPlan {
+    MediaPlan::new(extract_media_parts_messages(messages))
+}
+
 #[cfg(test)]
 mod tests {
-    use openai_protocol::common::{ImageUrl, VideoUrl};
+    use llm_multimodal::Modality;
+    use openai_protocol::common::{AudioUrl, ImageUrl, InputAudio, VideoUrl};
 
     use super::*;
 
     #[test]
-    fn test_has_multimodal_content_with_images() {
+    fn media_plan_detects_image() {
         let messages = vec![ChatMessage::User {
             content: MessageContent::Parts(vec![
                 ContentPart::Text {
@@ -190,11 +159,11 @@ mod tests {
             name: None,
         }];
 
-        assert!(has_multimodal_content(&messages));
+        assert_eq!(media_plan_chat(&messages).modalities(), &[Modality::Image]);
     }
 
     #[test]
-    fn test_has_multimodal_content_with_video() {
+    fn media_plan_detects_video() {
         let messages = vec![ChatMessage::User {
             content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                 video_url: VideoUrl {
@@ -204,22 +173,35 @@ mod tests {
             name: None,
         }];
 
-        assert!(has_multimodal_content(&messages));
-        assert_eq!(chat_modalities(&messages), vec![Modality::Video]);
+        assert_eq!(media_plan_chat(&messages).modalities(), &[Modality::Video]);
     }
 
     #[test]
-    fn test_has_multimodal_content_text_only() {
+    fn media_plan_detects_audio() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::AudioUrl {
+                audio_url: AudioUrl {
+                    url: "https://example.com/clip.wav".to_string(),
+                },
+            }]),
+            name: None,
+        }];
+
+        assert_eq!(media_plan_chat(&messages).modalities(), &[Modality::Audio]);
+    }
+
+    #[test]
+    fn media_plan_is_empty_for_string_text() {
         let messages = vec![ChatMessage::User {
             content: MessageContent::Text("Hello".to_string()),
             name: None,
         }];
 
-        assert!(!has_multimodal_content(&messages));
+        assert!(media_plan_chat(&messages).is_empty());
     }
 
     #[test]
-    fn test_has_multimodal_content_parts_text_only() {
+    fn media_plan_is_empty_for_text_parts() {
         let messages = vec![ChatMessage::User {
             content: MessageContent::Parts(vec![ContentPart::Text {
                 text: "Just text".to_string(),
@@ -227,11 +209,11 @@ mod tests {
             name: None,
         }];
 
-        assert!(!has_multimodal_content(&messages));
+        assert!(media_plan_chat(&messages).is_empty());
     }
 
     #[test]
-    fn test_extract_content_parts() {
+    fn extracts_image_media_part() {
         let messages = vec![
             ChatMessage::System {
                 content: MessageContent::Text("You are helpful".to_string()),
@@ -253,15 +235,10 @@ mod tests {
             },
         ];
 
-        let parts = extract_content_parts(&messages);
-        assert_eq!(parts.len(), 2);
+        let parts = extract_media_parts(&messages);
+        assert_eq!(parts.len(), 1);
 
         match &parts[0] {
-            MediaContentPart::Text { text } => assert_eq!(text, "Describe this:"),
-            _ => panic!("Expected Text part"),
-        }
-
-        match &parts[1] {
             MediaContentPart::ImageUrl { url, detail, .. } => {
                 assert_eq!(url, "https://example.com/image.jpg");
                 assert_eq!(*detail, Some(ImageDetail::High));
@@ -271,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_video_content_parts() {
+    fn extracts_video_media_part() {
         let messages = vec![ChatMessage::User {
             content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                 video_url: VideoUrl {
@@ -281,13 +258,58 @@ mod tests {
             name: None,
         }];
 
-        let parts = extract_content_parts(&messages);
+        let parts = extract_media_parts(&messages);
         assert_eq!(parts.len(), 1);
         match &parts[0] {
             MediaContentPart::VideoUrl { url, .. } => {
                 assert_eq!(url, "https://example.com/video.mp4");
             }
             _ => panic!("Expected VideoUrl part"),
+        }
+    }
+
+    #[test]
+    fn extracts_audio_url_media_part() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::AudioUrl {
+                audio_url: AudioUrl {
+                    url: "https://example.com/audio.wav".to_string(),
+                },
+            }]),
+            name: None,
+        }];
+
+        let parts = extract_media_parts(&messages);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MediaContentPart::AudioUrl { url, .. } => {
+                assert_eq!(url, "https://example.com/audio.wav");
+            }
+            _ => panic!("Expected AudioUrl part"),
+        }
+    }
+
+    #[test]
+    fn extracts_inline_audio_as_data_url() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::InputAudio {
+                input_audio: InputAudio {
+                    data: "UklGRg==".to_string(),
+                    format: "wav".to_string(),
+                },
+            }]),
+            name: None,
+        }];
+
+        assert_eq!(media_plan_chat(&messages).modalities(), &[Modality::Audio]);
+
+        let parts = extract_media_parts(&messages);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MediaContentPart::AudioUrl { url, .. } => {
+                assert_eq!(url, "data:audio/wav;base64,UklGRg==");
+            }
+            _ => panic!("Expected AudioUrl part"),
         }
     }
 

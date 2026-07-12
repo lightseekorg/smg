@@ -1188,7 +1188,7 @@ impl ProtoGenerateRequest {
 
     /// Drop raw multimodal encoder tensors while keeping item metadata.
     ///
-    /// Used by the EPD prefill leg: image embeddings arrive from encode workers,
+    /// Used by the EPD prefill leg: multimodal embeddings arrive from encode workers,
     /// but prefill still needs placeholders/model-specific metadata to slot them.
     pub fn clear_mm_pixel_values(&mut self) {
         match self {
@@ -1265,7 +1265,7 @@ impl ProtoGenerateRequest {
         }
     }
 
-    /// Set encode->prefill bootstrap info for backends that receive image embeddings
+    /// Set encode->prefill bootstrap info for backends that receive multimodal embeddings
     /// out-of-band from encode workers.
     pub(crate) fn set_encode_bootstrap_info(&mut self, items: Vec<EncodeItemBootstrapInfo>) {
         match self {

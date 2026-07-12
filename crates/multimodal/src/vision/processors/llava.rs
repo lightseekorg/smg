@@ -594,11 +594,8 @@ impl VisionPreProcessor for LlavaNextProcessor {
             .flat_map(|&(w, h)| [h as i64, w as i64])
             .collect();
 
-        let mut result = PreprocessedEncoderInputs::new_dynamic(
-            encoder_input.into_dyn(),
-            feature_token_counts,
-            item_sizes,
-        );
+        let mut result =
+            PreprocessedEncoderInputs::new(encoder_input, feature_token_counts, item_sizes);
         result.model_specific.insert(
             "image_sizes".to_string(),
             ModelSpecificValue::int_2d(image_sizes_flat, num_images, 2),

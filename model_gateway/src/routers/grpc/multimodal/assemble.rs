@@ -4,11 +4,15 @@
 //! For TokenSpeed this also splits the batched preprocessing output into
 //! per-item encoder inputs and per-item content hashes used for encode routing.
 
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use llm_multimodal::{
-    FieldLayout, Modality, ModelSpecificValue, PlaceholderRange, PreprocessedEncoderInputs,
+    EncoderFieldLayouts, FieldLayout, Modality, ModelSpecificValue, PlaceholderRange,
+    PreprocessedEncoderInputs,
 };
 use ndarray::ArrayViewD;
 use smg_grpc_client::common_proto as common;
@@ -21,7 +25,7 @@ use super::{
         serialize_encoder_input, serialize_model_specific, slice_array_axis0,
     },
     transport::{mm_encoder_input_dtype, resolve_mm_shm_enabled, resolve_mm_shm_min_bytes},
-    MultimodalIntermediate, PrecomputedMultimodalIntermediate,
+    MediaBatch, MultimodalIntermediate, PrecomputedMultimodalIntermediate, PromptBinding,
 };
 use crate::routers::grpc::{
     client::GrpcClient,
@@ -55,45 +59,47 @@ pub(crate) async fn assemble_multimodal_data_after_encode(
     assemble_multimodal_data_impl(intermediate, client, workers, true).await
 }
 
-#[expect(
-    clippy::unreachable,
-    reason = "MLX multimodal rejected by caller before reaching here"
-)]
 async fn assemble_multimodal_data_impl(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
     omit_prefill_pixels: bool,
 ) -> Result<MultimodalData> {
-    match intermediate {
-        MultimodalIntermediate::Precomputed(precomputed) => match client {
-            GrpcClient::Sglang(_) => {
-                ensure_image_only(&precomputed, "SGLang")?;
-                Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
-            }
-            GrpcClient::Vllm(_) => {
-                ensure_image_or_video(&precomputed, "vLLM")?;
-                Ok(MultimodalData::Vllm(assemble_vllm(precomputed, workers)))
-            }
-            GrpcClient::Trtllm(_) => {
-                ensure_image_only(&precomputed, "TRT-LLM")?;
-                Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
-            }
-            GrpcClient::TokenSpeed(_) => {
-                let options =
-                    tokenspeed_assembly_options(precomputed.modality, workers, omit_prefill_pixels);
-                let pending = tokio::task::spawn_blocking(move || {
-                    assemble_tokenspeed_with_options(&precomputed, options)
-                        .map(PendingTokenSpeedAssembly::new)
+    validate_intermediate(&intermediate)?;
+    match client {
+        GrpcClient::Sglang(_) => {
+            let batch = into_single_image_batch(intermediate, "SGLang")?;
+            Ok(MultimodalData::Sglang(assemble_sglang(batch)?))
+        }
+        GrpcClient::Vllm(_) => {
+            let batch = into_single_vision_batch(intermediate, "vLLM")?;
+            Ok(MultimodalData::Vllm(assemble_vllm(batch, workers)?))
+        }
+        GrpcClient::Trtllm(_) => {
+            let batch = into_single_image_batch(intermediate, "TRT-LLM")?;
+            Ok(MultimodalData::Trtllm(assemble_trtllm(batch)?))
+        }
+        GrpcClient::TokenSpeed(_) => {
+            let options = intermediate
+                .batches()
+                .iter()
+                .map(|batch| {
+                    tokenspeed_assembly_options(
+                        batch.media.modality(),
+                        workers,
+                        omit_prefill_pixels,
+                    )
                 })
-                .await
-                .context("TokenSpeed multimodal assembly task failed")??;
-                Ok(MultimodalData::TokenSpeed(pending.into_inner()?))
-            }
-            GrpcClient::Mlx(_) => unreachable!(
-                "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
-            ),
-        },
+                .collect::<Vec<_>>();
+            let batches = intermediate.into_batches();
+            let pending = tokio::task::spawn_blocking(move || {
+                assemble_tokenspeed_batches(&batches, options).map(PendingTokenSpeedAssembly::new)
+            })
+            .await
+            .context("TokenSpeed multimodal assembly task failed")??;
+            Ok(MultimodalData::TokenSpeed(pending.into_inner()?))
+        }
+        GrpcClient::Mlx(_) => anyhow::bail!("MLX does not support multimodal inputs"),
     }
 }
 
@@ -126,103 +132,92 @@ impl Drop for PendingTokenSpeedAssembly {
     }
 }
 
-fn ensure_image_only(
-    intermediate: &PrecomputedMultimodalIntermediate,
+fn into_single_image_batch(
+    intermediate: MultimodalIntermediate,
     backend: &str,
-) -> Result<()> {
-    if intermediate.modality != Modality::Image {
-        return Err(anyhow::anyhow!(
-            "{backend} multimodal path currently supports image inputs only; got {}",
-            intermediate.modality
-        ));
-    }
-    Ok(())
+) -> Result<PrecomputedMultimodalIntermediate> {
+    anyhow::ensure!(
+        intermediate.batches().len() == 1,
+        "{backend} multimodal path requires exactly one image batch; got {} batches",
+        intermediate.batches().len()
+    );
+    let mut batches = intermediate.into_batches();
+    let batch = batches
+        .pop()
+        .context("multimodal intermediate is missing its sole batch")?;
+    anyhow::ensure!(
+        matches!(&batch.media, MediaBatch::Images(_)),
+        "{backend} multimodal path currently supports image inputs only; got {}",
+        batch.media.modality()
+    );
+    Ok(batch)
 }
 
-/// Backends that accept both image and video (single-modality per request;
-/// mixed image+video is already rejected upstream in `process`). Audio is not
-/// supported on these paths.
-fn ensure_image_or_video(
-    intermediate: &PrecomputedMultimodalIntermediate,
+fn into_single_vision_batch(
+    intermediate: MultimodalIntermediate,
     backend: &str,
-) -> Result<()> {
-    match intermediate.modality {
-        // Adds video to the previous image-only gate; ImageEmbeds/Audio stay
-        // rejected (unchanged from ensure_image_only).
-        Modality::Image | Modality::Video => Ok(()),
-        Modality::ImageEmbeds | Modality::Audio => Err(anyhow::anyhow!(
-            "{backend} multimodal path supports image and video inputs; got {}",
-            intermediate.modality
-        )),
-    }
+) -> Result<PrecomputedMultimodalIntermediate> {
+    anyhow::ensure!(
+        intermediate.batches().len() == 1,
+        "{backend} multimodal path requires exactly one vision batch; got {} batches",
+        intermediate.batches().len()
+    );
+    let mut batches = intermediate.into_batches();
+    let batch = batches
+        .pop()
+        .context("multimodal intermediate is missing its sole batch")?;
+    anyhow::ensure!(
+        matches!(&batch.media, MediaBatch::Images(_) | MediaBatch::Videos(_)),
+        "{backend} multimodal path currently supports image and video inputs only; got {}",
+        batch.media.modality()
+    );
+    Ok(batch)
 }
 
-fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
+fn assemble_sglang(
+    intermediate: PrecomputedMultimodalIntermediate,
+) -> Result<SglangMultimodalData> {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
-    let image_data = intermediate
-        .images
-        .iter()
-        .map(|f| f.raw_bytes.to_vec())
-        .collect();
-    // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
-    let mm_placeholders = intermediate
-        .patch_offsets
-        .filter(|offsets| !offsets.is_empty())
-        .unwrap_or_else(|| {
-            intermediate
-                .placeholders
-                .iter()
-                .map(|p| (p.offset as u32, p.length as u32))
-                .collect()
-        });
+    let MediaBatch::Images(images) = &intermediate.media else {
+        anyhow::bail!("SGLang assembly requires an image batch");
+    };
+    let image_data = images.iter().map(|f| f.raw_bytes.to_vec()).collect();
+    let mm_placeholders = placeholders_for_bindings(&intermediate.bindings, true)?;
 
-    SglangMultimodalData {
+    Ok(SglangMultimodalData {
         image_data,
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
         im_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
-    }
+    })
 }
 
 fn assemble_vllm(
     intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
-) -> VllmMultimodalData {
+) -> Result<VllmMultimodalData> {
     let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
-    let modality = match intermediate.modality {
-        Modality::Video => common::Modality::Video,
-        Modality::Audio => common::Modality::Audio,
-        Modality::Image | Modality::ImageEmbeds => common::Modality::Image,
+    let (modality, mm_hashes) = match &intermediate.media {
+        MediaBatch::Images(images) => (
+            common::Modality::Image,
+            images.iter().map(|frame| frame.hash.clone()).collect(),
+        ),
+        MediaBatch::Videos(videos) => (
+            common::Modality::Video,
+            videos.iter().map(|video| video.hash.clone()).collect(),
+        ),
+        MediaBatch::Audios(_) => {
+            anyhow::bail!("vLLM assembly requires an image or video batch")
+        }
     };
-    let is_video = modality == common::Modality::Video;
-    // Hashes track the per-item media for encoder-output caching: videos for the
-    // video path, images otherwise.
-    let mm_hashes = if is_video {
-        intermediate
-            .videos
-            .iter()
-            .map(|video| video.hash.clone())
-            .collect()
-    } else {
-        intermediate
-            .images
-            .iter()
-            .map(|frame| frame.hash.clone())
-            .collect()
-    };
-    let mm_placeholders = intermediate
-        .placeholders
-        .iter()
-        .map(|p| (p.offset as u32, p.length as u32))
-        .collect();
-    let batched_keys = PreprocessedEncoderInputs::batched_keys(&intermediate.field_layouts);
-    let flat_keys = PreprocessedEncoderInputs::flat_keys(&intermediate.field_layouts);
+    let mm_placeholders = placeholders_for_bindings(&intermediate.bindings, false)?;
+    let (batched_keys, flat_keys) = vllm_field_layout_keys(&intermediate.field_layouts);
 
-    VllmMultimodalData {
+    Ok(VllmMultimodalData {
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
@@ -235,25 +230,55 @@ fn assemble_vllm(
         modality,
         shm_enabled: resolve_mm_shm_enabled(workers, false),
         shm_min_bytes: resolve_mm_shm_min_bytes(workers),
+    })
+}
+
+/// Translate the neutral layout contract to vLLM's legacy HF field names.
+fn vllm_field_layout_keys(layouts: &EncoderFieldLayouts) -> (Vec<String>, HashMap<String, String>) {
+    let mut batched_keys = PreprocessedEncoderInputs::batched_keys(&layouts.model_specific);
+    let mut flat_keys = PreprocessedEncoderInputs::flat_keys(&layouts.model_specific);
+    match &layouts.encoder_input {
+        FieldLayout::Batched => batched_keys.push("pixel_values".to_string()),
+        FieldLayout::Flat { sizes_key } => {
+            flat_keys.insert("pixel_values".to_string(), sizes_key.clone());
+        }
     }
+    (batched_keys, flat_keys)
 }
 
-fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMultimodalData {
-    let image_data = intermediate
-        .images
-        .iter()
-        .map(|f| f.raw_bytes.to_vec())
-        .collect();
-    TrtllmMultimodalData { image_data }
+fn assemble_trtllm(
+    intermediate: PrecomputedMultimodalIntermediate,
+) -> Result<TrtllmMultimodalData> {
+    let MediaBatch::Images(images) = &intermediate.media else {
+        anyhow::bail!("TRT-LLM assembly requires an image batch");
+    };
+    let image_data = images.iter().map(|f| f.raw_bytes.to_vec()).collect();
+    Ok(TrtllmMultimodalData { image_data })
 }
 
-pub(crate) fn assemble_tokenspeed(
+#[cfg(test)]
+fn assemble_tokenspeed(
     intermediate: &PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
     skip_pixel_values: bool,
 ) -> Result<TokenSpeedMultimodalData> {
-    let options = tokenspeed_assembly_options(intermediate.modality, workers, skip_pixel_values);
+    validate_precomputed_batch(intermediate)?;
+    let options =
+        tokenspeed_assembly_options(intermediate.media.modality(), workers, skip_pixel_values);
     assemble_tokenspeed_with_options(intermediate, options)
+}
+
+pub(crate) fn assemble_tokenspeed_for_encode(
+    intermediate: &MultimodalIntermediate,
+    workers: Option<&WorkerSelection>,
+) -> Result<TokenSpeedMultimodalData> {
+    validate_intermediate(intermediate)?;
+    let options = intermediate
+        .batches()
+        .iter()
+        .map(|batch| tokenspeed_assembly_options(batch.media.modality(), workers, false))
+        .collect();
+    assemble_tokenspeed_batches(intermediate.batches(), options)
 }
 
 struct TokenSpeedAssemblyOptions {
@@ -288,28 +313,38 @@ fn assemble_tokenspeed_with_options(
         encoder_input_dtype,
         skip_pixel_values,
     } = options;
-    // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
-    let patch_offsets = intermediate
-        .patch_offsets
-        .clone()
-        .filter(|offsets| !offsets.is_empty())
-        .unwrap_or_default();
-
-    let modality = match intermediate.modality {
+    let modality = match intermediate.media.modality() {
         Modality::Image => TokenSpeedModality::Image,
         Modality::Video => TokenSpeedModality::Video,
         Modality::Audio => TokenSpeedModality::Audio,
         Modality::ImageEmbeds => TokenSpeedModality::Image,
     };
 
-    let item_count = precomputed_multimodal_item_count(intermediate)?;
+    let item_count = intermediate.media.len();
     // Build items imperatively so that if any step fails partway we can unlink
     // the /dev/shm segments already created for prior items' encoder inputs
     // (and this item's, once created). `?`/`collect` would drop those
     // `TokenSpeedTensor::Shm` handles without ever reaching the send-path
     // cleanup, leaking files until the next sweep.
+    let mut ordered_bindings = intermediate.bindings.iter().collect::<Vec<_>>();
+    ordered_bindings.sort_by_key(|binding| binding.prompt_ordinal);
     let mut items: Vec<TokenSpeedMultimodalItem> = Vec::with_capacity(item_count);
-    for item_index in 0..item_count {
+    for binding in ordered_bindings {
+        let item_index = binding.item_index;
+        let mm_placeholders = match placeholders_for_binding(binding, true) {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup_tokenspeed_items_encoder_shm(&items, None);
+                return Err(error);
+            }
+        };
+        let content_hash = match content_hash_for_item(intermediate, item_index) {
+            Ok(value) => value,
+            Err(error) => {
+                cleanup_tokenspeed_items_encoder_shm(&items, None);
+                return Err(error);
+            }
+        };
         let encoder_input_started = Instant::now();
         // EPD prefill: the embedding arrives over Mooncake and this item's
         // encoder_input is stripped downstream (clear_mm_pixel_values), so skip
@@ -319,7 +354,7 @@ fn assemble_tokenspeed_with_options(
         } else {
             let item_encoder_input = match encoder_input_for_item(
                 &intermediate.preprocessed,
-                &intermediate.field_layouts,
+                &intermediate.field_layouts.encoder_input,
                 item_index,
             ) {
                 Ok(value) => value,
@@ -339,7 +374,7 @@ fn assemble_tokenspeed_with_options(
         let model_specific_started = Instant::now();
         let model_specific_tensors = match serialize_model_specific_for_item(
             &intermediate.preprocessed.model_specific,
-            &intermediate.field_layouts,
+            &intermediate.field_layouts.model_specific,
             item_index,
         ) {
             Ok(value) => value,
@@ -351,10 +386,6 @@ fn assemble_tokenspeed_with_options(
             }
         };
         let model_specific_serialize_ms = model_specific_started.elapsed().as_secs_f64() * 1000.0;
-        let mm_placeholders =
-            placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
-        let content_hash = content_hash_for_item(intermediate.modality, intermediate, item_index);
-
         if log_timing {
             info!(
                 modality = ?modality,
@@ -395,61 +426,175 @@ fn assemble_tokenspeed_with_options(
     })
 }
 
-fn precomputed_multimodal_item_count(
-    intermediate: &PrecomputedMultimodalIntermediate,
-) -> Result<usize> {
-    let media_count = match intermediate.modality {
-        Modality::Image | Modality::ImageEmbeds => intermediate.images.len(),
-        Modality::Video => intermediate.videos.len(),
-        Modality::Audio => 0,
-    };
-    let token_count = intermediate.preprocessed.feature_token_counts.len();
-    let placeholder_count = intermediate.placeholders.len();
-    let item_count = token_count.max(media_count).max(placeholder_count);
+fn assemble_tokenspeed_batches(
+    batches: &[PrecomputedMultimodalIntermediate],
+    options: Vec<TokenSpeedAssemblyOptions>,
+) -> Result<TokenSpeedMultimodalData> {
     anyhow::ensure!(
-        item_count > 0,
-        "precomputed multimodal assembly requires at least one item"
+        batches.len() == options.len(),
+        "multimodal batch/assembly option count mismatch"
     );
-    if media_count > 0 {
-        anyhow::ensure!(
-            media_count == item_count,
-            "precomputed multimodal assembly media count mismatch: modality={}, media_count={media_count}, item_count={item_count}",
-            intermediate.modality
-        );
+
+    let shm_enabled = options
+        .first()
+        .map(|opts| opts.shm_enabled)
+        .unwrap_or(false);
+    let shm_min_bytes = options.first().map(|opts| opts.shm_min_bytes).unwrap_or(0);
+    let mut ordered_items: Vec<(usize, TokenSpeedMultimodalItem)> = Vec::new();
+
+    for (batch, options) in batches.iter().zip(options) {
+        match assemble_tokenspeed_with_options(batch, options) {
+            Ok(data) => {
+                let mut ordinals = batch
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.prompt_ordinal)
+                    .collect::<Vec<_>>();
+                ordinals.sort_unstable();
+                if ordinals.len() != data.items.len() {
+                    cleanup_tokenspeed_items_encoder_shm(&data.items, None);
+                    cleanup_ordered_tokenspeed_items(&ordered_items);
+                    return Err(anyhow::anyhow!(
+                        "TokenSpeed binding/item count mismatch for {}",
+                        batch.media.modality()
+                    ));
+                }
+                ordered_items.extend(ordinals.into_iter().zip(data.items));
+            }
+            Err(error) => {
+                cleanup_ordered_tokenspeed_items(&ordered_items);
+                return Err(error);
+            }
+        }
     }
-    anyhow::ensure!(
-        token_count == item_count,
-        "precomputed multimodal assembly token count mismatch: modality={}, token_count={token_count}, item_count={item_count}",
-        intermediate.modality
-    );
-    anyhow::ensure!(
-        placeholder_count == item_count,
-        "precomputed multimodal assembly placeholder count mismatch: modality={}, placeholder_count={placeholder_count}, item_count={item_count}",
-        intermediate.modality
-    );
-    Ok(item_count)
+    let items = into_prompt_order(ordered_items);
+
+    Ok(TokenSpeedMultimodalData {
+        items,
+        shm_enabled,
+        shm_min_bytes,
+    })
 }
 
-pub(crate) fn precomputed_encode_routing_hashes(
-    intermediate: &PrecomputedMultimodalIntermediate,
-) -> Result<Vec<Vec<u8>>> {
-    let item_count = precomputed_multimodal_item_count(intermediate)?;
-    Ok((0..item_count)
-        .map(|item_index| content_hash_for_item(intermediate.modality, intermediate, item_index))
-        .collect())
+fn cleanup_ordered_tokenspeed_items(items: &[(usize, TokenSpeedMultimodalItem)]) {
+    for (_, item) in items {
+        cleanup_tokenspeed_items_encoder_shm(std::slice::from_ref(item), None);
+    }
+}
+
+fn into_prompt_order<T>(mut entries: Vec<(usize, T)>) -> Vec<T> {
+    entries.sort_unstable_by_key(|(prompt_ordinal, _)| *prompt_ordinal);
+    entries.into_iter().map(|(_, value)| value).collect()
+}
+
+fn validate_intermediate(intermediate: &MultimodalIntermediate) -> Result<()> {
+    anyhow::ensure!(
+        !intermediate.batches().is_empty(),
+        "multimodal intermediate requires at least one batch"
+    );
+    let total_bindings = intermediate
+        .batches()
+        .iter()
+        .map(|batch| batch.bindings.len())
+        .sum::<usize>();
+    let mut prompt_ordinals = HashSet::with_capacity(total_bindings);
+    for batch in intermediate.batches() {
+        validate_precomputed_batch(batch)?;
+        for binding in &batch.bindings {
+            anyhow::ensure!(
+                binding.prompt_ordinal < total_bindings,
+                "multimodal prompt ordinal {} is outside 0..{total_bindings}",
+                binding.prompt_ordinal
+            );
+            anyhow::ensure!(
+                prompt_ordinals.insert(binding.prompt_ordinal),
+                "duplicate multimodal prompt ordinal {}",
+                binding.prompt_ordinal
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_precomputed_batch(intermediate: &PrecomputedMultimodalIntermediate) -> Result<()> {
+    let modality = intermediate.media.modality();
+    let media_count = intermediate.media.len();
+    let token_count = intermediate.preprocessed.feature_token_counts.len();
+    let binding_count = intermediate.bindings.len();
+    anyhow::ensure!(
+        media_count > 0,
+        "precomputed {modality} batch requires at least one media item"
+    );
+    anyhow::ensure!(
+        token_count == media_count,
+        "precomputed multimodal token count mismatch: modality={modality}, token_count={token_count}, media_count={media_count}"
+    );
+    anyhow::ensure!(
+        binding_count == media_count,
+        "precomputed multimodal binding count mismatch: modality={modality}, binding_count={binding_count}, media_count={media_count}"
+    );
+
+    let mut item_indices = HashSet::with_capacity(binding_count);
+    for binding in &intermediate.bindings {
+        anyhow::ensure!(
+            binding.item_index < media_count,
+            "precomputed {modality} binding item index {} is outside 0..{media_count}",
+            binding.item_index
+        );
+        anyhow::ensure!(
+            item_indices.insert(binding.item_index),
+            "duplicate precomputed {modality} binding for item {}",
+            binding.item_index
+        );
+        anyhow::ensure!(
+            binding.structural.length > 0,
+            "precomputed {modality} binding for item {} has an empty structural range",
+            binding.item_index
+        );
+        let structural_end = binding
+            .structural
+            .offset
+            .checked_add(binding.structural.length)
+            .context("structural prompt range overflow")?;
+        for patch in &binding.patches {
+            let patch_end = patch
+                .offset
+                .checked_add(patch.length)
+                .context("patch prompt range overflow")?;
+            anyhow::ensure!(
+                patch.length > 0
+                    && patch.offset >= binding.structural.offset
+                    && patch_end <= structural_end,
+                "precomputed {modality} patch range ({}, {}) lies outside structural range ({}, {})",
+                patch.offset,
+                patch.length,
+                binding.structural.offset,
+                binding.structural.length
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_routing_hashes(intermediate: &MultimodalIntermediate) -> Result<Vec<Vec<u8>>> {
+    validate_intermediate(intermediate)?;
+    let mut hashes = Vec::new();
+    for batch in intermediate.batches() {
+        for binding in &batch.bindings {
+            hashes.push((
+                binding.prompt_ordinal,
+                content_hash_for_item(batch, binding.item_index)?,
+            ));
+        }
+    }
+    Ok(into_prompt_order(hashes))
 }
 
 fn encoder_input_for_item<'a>(
     preprocessed: &'a PreprocessedEncoderInputs,
-    field_layouts: &HashMap<String, FieldLayout>,
+    layout: &FieldLayout,
     item_index: usize,
 ) -> Result<ArrayViewD<'a, f32>> {
-    // The field layout key remains "pixel_values" because it mirrors the
-    // HuggingFace/vLLM vision kwargs contract. Internally this tensor is the
-    // modality encoder input we pass to TokenSpeed.
-    let layout = field_layouts
-        .get("pixel_values")
-        .unwrap_or(&FieldLayout::Batched);
     match layout {
         FieldLayout::Batched => slice_array_axis0(&preprocessed.encoder_input, item_index, 1),
         FieldLayout::Flat { sizes_key } => {
@@ -489,46 +634,61 @@ fn serialize_model_specific_for_item(
     Ok(serialized)
 }
 
-fn placeholders_for_item(
-    item_index: usize,
-    placeholders: &[PlaceholderRange],
-    patch_offsets: &[(u32, u32)],
-) -> Vec<(u32, u32)> {
-    let Some(placeholder) = placeholders.get(item_index) else {
-        return Vec::new();
-    };
-    let start = placeholder.offset as u32;
-    let end = start + placeholder.length as u32;
-    let item_patch_offsets = patch_offsets
-        .iter()
-        .copied()
-        .filter(|(offset, length)| *offset >= start && offset.saturating_add(*length) <= end)
-        .collect::<Vec<_>>();
-    if item_patch_offsets.is_empty() {
-        vec![(start, end - start)]
+fn placeholders_for_bindings(
+    bindings: &[PromptBinding],
+    prefer_patches: bool,
+) -> Result<Vec<(u32, u32)>> {
+    let mut ordered = bindings.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|binding| binding.prompt_ordinal);
+    ordered
+        .into_iter()
+        .flat_map(|binding| {
+            let ranges = if prefer_patches && !binding.patches.is_empty() {
+                binding.patches.as_slice()
+            } else {
+                std::slice::from_ref(&binding.structural)
+            };
+            ranges.iter()
+        })
+        .map(placeholder_range_to_u32)
+        .collect()
+}
+
+fn placeholders_for_binding(
+    binding: &PromptBinding,
+    prefer_patches: bool,
+) -> Result<Vec<(u32, u32)>> {
+    let ranges = if prefer_patches && !binding.patches.is_empty() {
+        binding.patches.as_slice()
     } else {
-        item_patch_offsets
-    }
+        std::slice::from_ref(&binding.structural)
+    };
+    ranges.iter().map(placeholder_range_to_u32).collect()
+}
+
+fn placeholder_range_to_u32(range: &PlaceholderRange) -> Result<(u32, u32)> {
+    Ok((
+        u32::try_from(range.offset).context("multimodal placeholder offset exceeds u32")?,
+        u32::try_from(range.length).context("multimodal placeholder length exceeds u32")?,
+    ))
 }
 
 fn content_hash_for_item(
-    modality: Modality,
     intermediate: &PrecomputedMultimodalIntermediate,
     item_index: usize,
-) -> Vec<u8> {
-    match modality {
-        Modality::Image | Modality::ImageEmbeds => intermediate
-            .images
-            .get(item_index)
-            .map(|image| hash_hex_strings(std::iter::once(image.hash.as_str())))
-            .unwrap_or_default(),
-        Modality::Video => intermediate
-            .videos
-            .get(item_index)
-            .map(|video| hash_hex_strings(std::iter::once(video.hash.as_str())))
-            .unwrap_or_default(),
-        Modality::Audio => Vec::new(),
+) -> Result<Vec<u8>> {
+    let hash = match &intermediate.media {
+        MediaBatch::Images(items) => items.get(item_index).map(|item| item.hash.as_str()),
+        MediaBatch::Videos(items) => items.get(item_index).map(|item| item.hash.as_str()),
+        MediaBatch::Audios(items) => items.get(item_index).map(|item| item.hash.as_str()),
     }
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing {} media item {item_index} for content hash",
+            intermediate.media.modality()
+        )
+    })?;
+    Ok(hash_hex_strings(std::iter::once(hash)))
 }
 
 fn tensor_sizes_from_model_specific(
@@ -566,7 +726,9 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
 mod tests {
     use std::{mem::size_of, path::Path, sync::Arc};
 
-    use llm_multimodal::{ImageDetail, ImageFrame, VideoClip};
+    use llm_multimodal::{
+        audio::DecodedAudio, AudioClip, AudioSource, ImageDetail, ImageFrame, VideoClip,
+    };
     use ndarray::{ArrayD, IxDyn};
 
     use super::*;
@@ -665,30 +827,42 @@ mod tests {
         ];
 
         let intermediate = PrecomputedMultimodalIntermediate {
-            modality: Modality::Image,
             preprocessed,
-            images,
-            videos: vec![],
-            placeholders: vec![
-                PlaceholderRange {
-                    offset: 10,
-                    length: 2,
+            media: MediaBatch::Images(images),
+            bindings: vec![
+                PromptBinding {
+                    item_index: 0,
+                    prompt_ordinal: 0,
+                    structural: PlaceholderRange {
+                        offset: 10,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 10,
+                        length: 2,
+                    }],
                 },
-                PlaceholderRange {
-                    offset: 20,
-                    length: 2,
+                PromptBinding {
+                    item_index: 1,
+                    prompt_ordinal: 1,
+                    structural: PlaceholderRange {
+                        offset: 20,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 20,
+                        length: 2,
+                    }],
                 },
             ],
-            patch_offsets: Some(vec![(10, 2), (20, 2)]),
             placeholder_token_id: Some(151655),
-            field_layouts: HashMap::from([
-                (
-                    "pixel_values".to_string(),
-                    FieldLayout::flat("patches_per_image"),
-                ),
-                ("patches_per_image".to_string(), FieldLayout::Batched),
-                ("image_grid_thw".to_string(), FieldLayout::Batched),
-            ]),
+            field_layouts: EncoderFieldLayouts::new(
+                FieldLayout::flat("patches_per_image"),
+                HashMap::from([
+                    ("patches_per_image".to_string(), FieldLayout::Batched),
+                    ("image_grid_thw".to_string(), FieldLayout::Batched),
+                ]),
+            ),
             keep_on_cpu_keys: vec![],
         };
 
@@ -772,30 +946,42 @@ mod tests {
         ];
 
         let intermediate = PrecomputedMultimodalIntermediate {
-            modality: Modality::Video,
             preprocessed,
-            images: vec![],
-            videos,
-            placeholders: vec![
-                PlaceholderRange {
-                    offset: 30,
-                    length: 2,
+            media: MediaBatch::Videos(videos),
+            bindings: vec![
+                PromptBinding {
+                    item_index: 0,
+                    prompt_ordinal: 0,
+                    structural: PlaceholderRange {
+                        offset: 30,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 30,
+                        length: 2,
+                    }],
                 },
-                PlaceholderRange {
-                    offset: 40,
-                    length: 2,
+                PromptBinding {
+                    item_index: 1,
+                    prompt_ordinal: 1,
+                    structural: PlaceholderRange {
+                        offset: 40,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 40,
+                        length: 2,
+                    }],
                 },
             ],
-            patch_offsets: Some(vec![(30, 2), (40, 2)]),
             placeholder_token_id: Some(151656),
-            field_layouts: HashMap::from([
-                (
-                    "pixel_values".to_string(),
-                    FieldLayout::flat("patches_per_video"),
-                ),
-                ("patches_per_video".to_string(), FieldLayout::Batched),
-                ("video_grid_thw".to_string(), FieldLayout::Batched),
-            ]),
+            field_layouts: EncoderFieldLayouts::new(
+                FieldLayout::flat("patches_per_video"),
+                HashMap::from([
+                    ("patches_per_video".to_string(), FieldLayout::Batched),
+                    ("video_grid_thw".to_string(), FieldLayout::Batched),
+                ]),
+            ),
             keep_on_cpu_keys: vec![],
         };
 
@@ -832,5 +1018,273 @@ mod tests {
             second.model_specific_tensors["video_grid_thw"].shape,
             vec![1, 3]
         );
+    }
+
+    #[test]
+    fn assemble_tokenspeed_splits_audio_items_as_bfloat16_by_default() {
+        let mut model_specific = HashMap::new();
+        model_specific.insert(
+            "row_lengths".to_string(),
+            ModelSpecificValue::IntTensor {
+                data: vec![2, 2],
+                shape: vec![2],
+            },
+        );
+
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(
+                IxDyn(&[4, 2]),
+                vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            )
+            .unwrap(),
+            feature_token_counts: vec![2, 2],
+            item_sizes: vec![(2, 2), (2, 2)],
+            model_specific,
+        };
+
+        let audios = vec![
+            Arc::new(AudioClip::new(
+                bytes::Bytes::from_static(b"a"),
+                DecodedAudio {
+                    samples: Vec::new(),
+                    sample_rate: 16_000,
+                },
+                AudioSource::InlineBytes,
+                "audio-hash-a".to_string(),
+            )),
+            Arc::new(AudioClip::new(
+                bytes::Bytes::from_static(b"b"),
+                DecodedAudio {
+                    samples: Vec::new(),
+                    sample_rate: 16_000,
+                },
+                AudioSource::InlineBytes,
+                "audio-hash-b".to_string(),
+            )),
+        ];
+
+        let intermediate = PrecomputedMultimodalIntermediate {
+            preprocessed,
+            media: MediaBatch::Audios(audios),
+            bindings: vec![
+                PromptBinding {
+                    item_index: 0,
+                    prompt_ordinal: 0,
+                    structural: PlaceholderRange {
+                        offset: 30,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 30,
+                        length: 2,
+                    }],
+                },
+                PromptBinding {
+                    item_index: 1,
+                    prompt_ordinal: 1,
+                    structural: PlaceholderRange {
+                        offset: 40,
+                        length: 2,
+                    },
+                    patches: vec![PlaceholderRange {
+                        offset: 40,
+                        length: 2,
+                    }],
+                },
+            ],
+            placeholder_token_id: Some(42),
+            field_layouts: EncoderFieldLayouts::new(
+                FieldLayout::flat("row_lengths"),
+                HashMap::from([("row_lengths".to_string(), FieldLayout::Batched)]),
+            ),
+            keep_on_cpu_keys: vec![],
+        };
+
+        let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
+        assert_eq!(assembled.items.len(), 2);
+
+        let first = &assembled.items[0];
+        assert_eq!(first.modality, TokenSpeedModality::Audio);
+        assert_eq!(first.encoder_input.dtype, "bfloat16");
+        assert_eq!(first.encoder_input.shape, vec![2, 2]);
+        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<u16>());
+        assert_eq!(first.mm_placeholders, vec![(30, 2)]);
+        assert_eq!(
+            first.content_hash,
+            hash_hex_strings(std::iter::once("audio-hash-a"))
+        );
+        assert_eq!(first.model_specific_tensors["row_lengths"].shape, vec![1]);
+
+        let second = &assembled.items[1];
+        assert_eq!(second.encoder_input.dtype, "bfloat16");
+        assert_eq!(second.encoder_input.shape, vec![2, 2]);
+        assert_eq!(second.mm_placeholders, vec![(40, 2)]);
+        assert_eq!(
+            second.content_hash,
+            hash_hex_strings(std::iter::once("audio-hash-b"))
+        );
+    }
+
+    #[test]
+    fn tokenspeed_epd_items_and_hashes_follow_prompt_binding_order() {
+        let one_item_inputs = || PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(IxDyn(&[1, 1]), vec![1.0]).unwrap(),
+            feature_token_counts: vec![1],
+            item_sizes: vec![(1, 1)],
+            model_specific: HashMap::new(),
+        };
+        let image_batch = PrecomputedMultimodalIntermediate {
+            preprocessed: one_item_inputs(),
+            media: MediaBatch::Images(vec![Arc::new(ImageFrame::new(
+                image::DynamicImage::new_rgb8(1, 1),
+                bytes::Bytes::from_static(b"image"),
+                ImageDetail::Auto,
+                llm_multimodal::ImageSource::InlineBytes,
+                "image-hash".to_string(),
+            ))]),
+            // Deliberately earlier by offset but later by explicit ordinal.
+            bindings: vec![PromptBinding {
+                item_index: 0,
+                prompt_ordinal: 2,
+                structural: PlaceholderRange {
+                    offset: 1,
+                    length: 1,
+                },
+                patches: vec![],
+            }],
+            placeholder_token_id: Some(10),
+            field_layouts: EncoderFieldLayouts::default(),
+            keep_on_cpu_keys: vec![],
+        };
+        let video_batch = PrecomputedMultimodalIntermediate {
+            preprocessed: one_item_inputs(),
+            media: MediaBatch::Videos(vec![Arc::new(VideoClip::new(
+                vec![image::DynamicImage::new_rgb8(1, 1)],
+                bytes::Bytes::from_static(b"video"),
+                llm_multimodal::VideoSource::InlineBytes,
+                "video-hash".to_string(),
+            ))]),
+            bindings: vec![PromptBinding {
+                item_index: 0,
+                prompt_ordinal: 1,
+                structural: PlaceholderRange {
+                    offset: 50,
+                    length: 1,
+                },
+                patches: vec![],
+            }],
+            placeholder_token_id: Some(30),
+            field_layouts: EncoderFieldLayouts::default(),
+            keep_on_cpu_keys: vec![],
+        };
+        let audio_batch = PrecomputedMultimodalIntermediate {
+            preprocessed: one_item_inputs(),
+            media: MediaBatch::Audios(vec![Arc::new(AudioClip::new(
+                bytes::Bytes::from_static(b"audio"),
+                DecodedAudio {
+                    samples: Vec::new(),
+                    sample_rate: 16_000,
+                },
+                AudioSource::InlineBytes,
+                "audio-hash".to_string(),
+            ))]),
+            bindings: vec![PromptBinding {
+                item_index: 0,
+                prompt_ordinal: 0,
+                structural: PlaceholderRange {
+                    offset: 100,
+                    length: 1,
+                },
+                patches: vec![],
+            }],
+            placeholder_token_id: Some(20),
+            field_layouts: EncoderFieldLayouts::default(),
+            keep_on_cpu_keys: vec![],
+        };
+        let intermediate =
+            MultimodalIntermediate::try_new(vec![image_batch, video_batch, audio_batch]).unwrap();
+        let routing_hashes = encode_routing_hashes(&intermediate).unwrap();
+        let assembled = assemble_tokenspeed_for_encode(&intermediate, None).unwrap();
+
+        assert_eq!(assembled.items.len(), 3);
+        assert_eq!(assembled.items[0].modality, TokenSpeedModality::Audio);
+        assert_eq!(assembled.items[0].mm_placeholders, vec![(100, 1)]);
+        assert_eq!(assembled.items[1].modality, TokenSpeedModality::Video);
+        assert_eq!(assembled.items[1].mm_placeholders, vec![(50, 1)]);
+        assert_eq!(assembled.items[2].modality, TokenSpeedModality::Image);
+        assert_eq!(assembled.items[2].mm_placeholders, vec![(1, 1)]);
+        assert_eq!(
+            routing_hashes,
+            assembled
+                .items
+                .iter()
+                .map(|item| item.content_hash.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen_audio_batched_layout_slices_items_not_mel_bins() {
+        let mut model_specific = HashMap::new();
+        model_specific.insert(
+            "feature_attention_mask".to_string(),
+            ModelSpecificValue::int_2d(vec![1, 1, 1, 1, 1, 1, 0, 0], 2, 4),
+        );
+        model_specific.insert(
+            "audio_feature_lengths".to_string(),
+            ModelSpecificValue::int_1d(vec![4, 2]),
+        );
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(
+                IxDyn(&[2, 3, 4]),
+                (0..24).map(|value| value as f32).collect(),
+            )
+            .unwrap(),
+            feature_token_counts: vec![1, 1],
+            item_sizes: vec![(3, 4), (3, 2)],
+            model_specific,
+        };
+        let layouts = EncoderFieldLayouts::new(
+            FieldLayout::Batched,
+            HashMap::from([
+                ("feature_attention_mask".to_string(), FieldLayout::Batched),
+                ("audio_feature_lengths".to_string(), FieldLayout::Batched),
+            ]),
+        );
+
+        let second = encoder_input_for_item(&preprocessed, &layouts.encoder_input, 1).unwrap();
+        assert_eq!(second.shape(), &[1, 3, 4]);
+        assert_eq!(
+            second.iter().copied().collect::<Vec<_>>(),
+            (12..24).map(|v| v as f32).collect::<Vec<_>>()
+        );
+
+        let extras = serialize_model_specific_for_item(
+            &preprocessed.model_specific,
+            &layouts.model_specific,
+            1,
+        )
+        .unwrap();
+        assert_eq!(extras["feature_attention_mask"].shape, vec![1, 4]);
+        assert_eq!(extras["audio_feature_lengths"].shape, vec![1]);
+    }
+
+    #[test]
+    fn vllm_layout_adapter_restores_legacy_primary_field_name() {
+        let flat = EncoderFieldLayouts::new(
+            FieldLayout::flat("patches_per_image"),
+            HashMap::from([("image_grid_thw".to_string(), FieldLayout::Batched)]),
+        );
+        let (batched_keys, flat_keys) = vllm_field_layout_keys(&flat);
+        assert_eq!(batched_keys, vec!["image_grid_thw"]);
+        assert_eq!(
+            flat_keys.get("pixel_values").map(String::as_str),
+            Some("patches_per_image")
+        );
+
+        let batched = EncoderFieldLayouts::default();
+        let (batched_keys, flat_keys) = vllm_field_layout_keys(&batched);
+        assert_eq!(batched_keys, vec!["pixel_values"]);
+        assert!(flat_keys.is_empty());
     }
 }

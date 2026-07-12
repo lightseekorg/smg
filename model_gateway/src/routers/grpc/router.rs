@@ -2,14 +2,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    http::HeaderMap,
+    http::{header, HeaderMap},
     response::{IntoResponse, Response},
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use openai_protocol::{
-    chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
-    embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    classify::ClassifyRequest,
+    common::{ContentPart, InputAudio},
+    completion::CompletionRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    messages::CreateMessageRequest,
     responses::ResponsesRequest,
+    transcription::{AudioFile, TranscriptionRequest},
 };
+use serde_json::json;
 use tracing::debug;
 
 use super::{
@@ -29,10 +37,197 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
-        RouterTrait,
+        error, RouterTrait,
     },
     worker::WorkerRegistry,
 };
+
+const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
+    ("ar", "Arabic"),
+    ("yue", "Cantonese"),
+    ("zh", "Chinese"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("nl", "Dutch"),
+    ("en", "English"),
+    ("fil", "Filipino"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("hi", "Hindi"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("mk", "Macedonian"),
+    ("ms", "Malay"),
+    ("fa", "Persian"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("es", "Spanish"),
+    ("sv", "Swedish"),
+    ("th", "Thai"),
+    ("tr", "Turkish"),
+    ("vi", "Vietnamese"),
+];
+
+fn normalize_qwen3_asr_language(language: Option<&str>) -> Result<Option<String>, Response> {
+    let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    QWEN3_ASR_LANGUAGES
+        .iter()
+        .find(|(code, name)| {
+            code.eq_ignore_ascii_case(language) || name.eq_ignore_ascii_case(language)
+        })
+        .map(|(_, name)| Some((*name).to_string()))
+        .ok_or_else(|| {
+            error::bad_request(
+                "unsupported_transcription_language",
+                format!("Qwen3-ASR does not support language '{language}'"),
+            )
+        })
+}
+
+fn is_qwen3_asr_identifier(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("qwen3-asr") || value.contains("qwen3_asr")
+}
+
+fn is_qwen3_asr_target(worker_registry: &WorkerRegistry, model_id: &str) -> bool {
+    if is_qwen3_asr_identifier(model_id) {
+        return true;
+    }
+
+    worker_registry.get_by_model(model_id).iter().any(|worker| {
+        let metadata = worker.metadata();
+        is_qwen3_asr_identifier(metadata.model_id())
+            || ["model", "model_path", "tokenizer", "tokenizer_path"]
+                .iter()
+                .filter_map(|key| metadata.spec.labels.get(*key))
+                .any(|value| is_qwen3_asr_identifier(value))
+    })
+}
+
+fn audio_format(audio: &AudioFile) -> String {
+    let content_type = audio.content_type.as_deref().unwrap_or_default();
+    if content_type.eq_ignore_ascii_case("audio/mpeg")
+        || content_type.eq_ignore_ascii_case("audio/mp3")
+    {
+        return "mp3".to_string();
+    }
+    if content_type.eq_ignore_ascii_case("audio/wav")
+        || content_type.eq_ignore_ascii_case("audio/wave")
+        || content_type.eq_ignore_ascii_case("audio/x-wav")
+    {
+        return "wav".to_string();
+    }
+    audio
+        .file_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| "wav".to_string())
+}
+
+fn build_qwen3_asr_chat_request(
+    body: &TranscriptionRequest,
+    audio: &AudioFile,
+    language: Option<&str>,
+) -> ChatCompletionRequest {
+    let mut messages = Vec::with_capacity(3);
+    if let Some(prompt) = body
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        messages.push(ChatMessage::System {
+            content: MessageContent::Text(prompt.to_string()),
+            name: None,
+        });
+    }
+    messages.push(ChatMessage::User {
+        content: MessageContent::Parts(vec![ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: BASE64_STANDARD.encode(&audio.bytes),
+                format: audio_format(audio),
+            },
+        }]),
+        name: None,
+    });
+
+    let continue_final_message = if let Some(language) = language {
+        messages.push(ChatMessage::Assistant {
+            content: Some(MessageContent::Text(format!(
+                "language {language}<asr_text>"
+            ))),
+            name: None,
+            tool_calls: None,
+            reasoning_content: None,
+        });
+        true
+    } else {
+        false
+    };
+
+    ChatCompletionRequest {
+        messages,
+        model: body.model.clone(),
+        n: Some(1),
+        stream: false,
+        temperature: Some(body.temperature.unwrap_or(0.0)),
+        continue_final_message,
+        skip_special_tokens: true,
+        separate_reasoning: false,
+        stream_reasoning: false,
+        ..Default::default()
+    }
+}
+
+fn parse_qwen3_asr_output(raw: &str) -> String {
+    let cleaned = raw.replace("<|im_end|>", "");
+    let cleaned = cleaned.trim();
+    cleaned
+        .split_once("<asr_text>")
+        .map_or(cleaned, |(_, transcription)| transcription)
+        .trim()
+        .to_string()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TranscriptionResponseFormat {
+    Json,
+    Text,
+}
+
+fn parse_transcription_response_format(
+    format: Option<&str>,
+) -> Result<TranscriptionResponseFormat, Response> {
+    match format.unwrap_or("json").to_ascii_lowercase().as_str() {
+        "json" => Ok(TranscriptionResponseFormat::Json),
+        "text" => Ok(TranscriptionResponseFormat::Text),
+        unsupported => Err(error::bad_request(
+            "unsupported_transcription_response_format",
+            format!(
+                "Qwen3-ASR does not provide timestamps required for response format '{unsupported}'"
+            ),
+        )),
+    }
+}
+
+fn transcription_response(format: TranscriptionResponseFormat, text: String) -> Response {
+    match format {
+        TranscriptionResponseFormat::Json => axum::Json(json!({"text": text})).into_response(),
+        TranscriptionResponseFormat::Text => {
+            ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response()
+        }
+    }
+}
 
 /// gRPC router implementation for SGLang
 #[derive(Clone)]
@@ -181,6 +376,10 @@ impl GrpcRouter {
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Err(response) = super::validate_text_only_output(body) {
+            return response;
+        }
+
         // Choose Harmony pipeline if workers indicate Harmony (checks architectures, hf_model_type)
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
@@ -599,6 +798,77 @@ impl RouterTrait for GrpcRouter {
             .await
     }
 
+    async fn route_audio_transcriptions(
+        &self,
+        headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
+        body: &TranscriptionRequest,
+        audio: AudioFile,
+        model_id: &str,
+    ) -> Response {
+        if !is_qwen3_asr_target(&self.worker_registry, model_id) {
+            return error::bad_request(
+                "audio_transcription_model_not_supported",
+                "The TokenSpeed gRPC transcription adapter currently supports Qwen3-ASR only",
+            );
+        }
+        let response_format =
+            match parse_transcription_response_format(body.response_format.as_deref()) {
+                Ok(format) => format,
+                Err(response) => return response,
+            };
+        if body.stream.unwrap_or(false) {
+            return error::bad_request(
+                "streaming_transcription_not_supported",
+                "TokenSpeed Qwen3-ASR currently supports whole-file transcription only",
+            );
+        }
+        if body
+            .timestamp_granularities
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        {
+            return error::bad_request(
+                "transcription_timestamps_not_supported",
+                "Qwen3-ASR timestamps require the forced-aligner model and are not supported",
+            );
+        }
+
+        let requested_language = match normalize_qwen3_asr_language(body.language.as_deref()) {
+            Ok(language) => language,
+            Err(response) => return response,
+        };
+        let chat_request =
+            build_qwen3_asr_chat_request(body, &audio, requested_language.as_deref());
+
+        let chat_response = match self
+            .pipeline
+            .execute_chat_for_responses(
+                Arc::new(chat_request),
+                headers.cloned(),
+                model_id.to_string(),
+                Arc::clone(&self.shared_components),
+                Some(tenant_meta.clone()),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(response) => return response,
+        };
+        let Some(content) = chat_response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+        else {
+            return error::internal_error(
+                "empty_transcription_response",
+                "Qwen3-ASR returned no transcription text",
+            );
+        };
+        let text = parse_qwen3_asr_output(content);
+        transcription_response(response_format, text)
+    }
+
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
@@ -623,5 +893,140 @@ impl RouterTrait for GrpcRouter {
 
     fn router_type(&self) -> &'static str {
         "grpc"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use bytes::Bytes;
+
+    use super::*;
+
+    fn transcription_request() -> TranscriptionRequest {
+        TranscriptionRequest {
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn wav_file() -> AudioFile {
+        AudioFile {
+            bytes: Bytes::from_static(b"RIFFtest"),
+            file_name: "sample.wav".to_string(),
+            content_type: Some("audio/wav".to_string()),
+        }
+    }
+
+    #[test]
+    fn normalizes_qwen3_asr_language_code_or_name() {
+        assert_eq!(
+            normalize_qwen3_asr_language(Some("zh")).unwrap(),
+            Some("Chinese".to_string())
+        );
+        assert_eq!(
+            normalize_qwen3_asr_language(Some("english")).unwrap(),
+            Some("English".to_string())
+        );
+        assert_eq!(normalize_qwen3_asr_language(Some(" ")).unwrap(), None);
+        assert_eq!(
+            normalize_qwen3_asr_language(Some("xx"))
+                .unwrap_err()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn recognizes_qwen3_asr_model_identifiers() {
+        assert!(is_qwen3_asr_identifier("Qwen/Qwen3-ASR-1.7B"));
+        assert!(is_qwen3_asr_identifier("/models/qwen3_asr_0.6b"));
+        assert!(!is_qwen3_asr_identifier("Qwen/Qwen3-Omni-30B-A3B-Thinking"));
+    }
+
+    #[test]
+    fn builds_audio_chat_request_with_language_continuation() {
+        let mut body = transcription_request();
+        body.prompt = Some("domain vocabulary".to_string());
+        body.temperature = Some(0.2);
+
+        let chat = build_qwen3_asr_chat_request(&body, &wav_file(), Some("English"));
+
+        assert_eq!(chat.model, body.model);
+        assert_eq!(chat.temperature, Some(0.2));
+        assert!(chat.continue_final_message);
+        assert_eq!(chat.messages.len(), 3);
+        match &chat.messages[1] {
+            ChatMessage::User {
+                content: MessageContent::Parts(parts),
+                ..
+            } => match &parts[0] {
+                ContentPart::InputAudio { input_audio } => {
+                    assert_eq!(input_audio.data, "UklGRnRlc3Q=");
+                    assert_eq!(input_audio.format, "wav");
+                }
+                other => panic!("expected audio content part, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &chat.messages[2] {
+            ChatMessage::Assistant {
+                content: Some(MessageContent::Text(content)),
+                ..
+            } => assert_eq!(content, "language English<asr_text>"),
+            other => panic!("expected assistant continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transcription_chat_defaults_to_greedy_decoding() {
+        let chat = build_qwen3_asr_chat_request(&transcription_request(), &wav_file(), None);
+
+        assert_eq!(chat.temperature, Some(0.0));
+        assert!(!chat.continue_final_message);
+    }
+
+    #[test]
+    fn parses_qwen3_asr_tagged_and_plain_outputs() {
+        assert_eq!(
+            parse_qwen3_asr_output("language Chinese<asr_text>\u{4f60}\u{597d}<|im_end|>"),
+            "\u{4f60}\u{597d}"
+        );
+        assert_eq!(
+            parse_qwen3_asr_output("plain transcript"),
+            "plain transcript"
+        );
+    }
+
+    #[test]
+    fn transcription_response_rejects_timestamp_formats() {
+        assert_eq!(
+            parse_transcription_response_format(Some("verbose_json"))
+                .unwrap_err()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            parse_transcription_response_format(Some("srt"))
+                .unwrap_err()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            transcription_response(
+                parse_transcription_response_format(Some("json")).unwrap(),
+                "text".to_string(),
+            )
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            transcription_response(
+                parse_transcription_response_format(Some("text")).unwrap(),
+                "text".to_string(),
+            )
+            .status(),
+            StatusCode::OK
+        );
     }
 }

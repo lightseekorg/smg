@@ -4,6 +4,8 @@ use image::{DynamicImage, RgbImage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::audio::DecodedAudio;
+
 /// Supported multimodal modalities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +65,18 @@ pub enum MediaContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    AudioUrl {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    AudioData {
+        data: Vec<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
     VideoUrl {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +95,16 @@ pub enum MediaContentPart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageSource {
+    Url { url: String },
+    DataUrl,
+    InlineBytes,
+    File { path: PathBuf },
+}
+
+/// Audio source metadata (useful for hashing & tracing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudioSource {
     Url { url: String },
     DataUrl,
     InlineBytes,
@@ -108,11 +132,23 @@ pub struct ImageFrame {
     pub hash: String,
 }
 
+/// Decoded audio payload captured by the media connector.
+#[derive(Debug, Clone)]
+pub struct AudioClip {
+    pub raw_bytes: bytes::Bytes,
+    pub decoded: DecodedAudio,
+    pub source: AudioSource,
+    /// Blake3 hex-digest of raw_bytes, computed at decode time.
+    pub hash: String,
+}
+
 /// Decoded video payload captured by the media connector.
 #[derive(Debug, Clone)]
 pub struct VideoClip {
     pub frames: Vec<DynamicImage>,
     pub rgb_video: Option<DecodedRgbVideo>,
+    /// Effective frame rate after connector-side sampling and frame-count clamps.
+    pub sample_fps: f32,
     pub raw_bytes: bytes::Bytes,
     pub source: VideoSource,
     /// Blake3 hex-digest of raw_bytes, computed at decode time.
@@ -200,9 +236,20 @@ impl VideoClip {
         source: VideoSource,
         hash: String,
     ) -> Self {
+        Self::new_with_sample_fps(frames, raw_bytes, source, hash, 2.0)
+    }
+
+    pub fn new_with_sample_fps(
+        frames: Vec<DynamicImage>,
+        raw_bytes: bytes::Bytes,
+        source: VideoSource,
+        hash: String,
+        sample_fps: f32,
+    ) -> Self {
         Self {
             frames,
             rgb_video: None,
+            sample_fps,
             raw_bytes,
             source,
             hash,
@@ -215,9 +262,20 @@ impl VideoClip {
         source: VideoSource,
         hash: String,
     ) -> Self {
+        Self::new_rgb_with_sample_fps(rgb_video, raw_bytes, source, hash, 2.0)
+    }
+
+    pub fn new_rgb_with_sample_fps(
+        rgb_video: DecodedRgbVideo,
+        raw_bytes: bytes::Bytes,
+        source: VideoSource,
+        hash: String,
+        sample_fps: f32,
+    ) -> Self {
         Self {
             frames: Vec::new(),
             rgb_video: Some(rgb_video),
+            sample_fps,
             raw_bytes,
             source,
             hash,
@@ -230,6 +288,10 @@ impl VideoClip {
 
     pub fn rgb_video(&self) -> Option<&DecodedRgbVideo> {
         self.rgb_video.as_ref()
+    }
+
+    pub fn sample_fps(&self) -> f32 {
+        self.sample_fps
     }
 
     pub fn materialized_frames(&self) -> Result<Vec<DynamicImage>, String> {
@@ -247,6 +309,34 @@ impl VideoClip {
     }
 
     pub fn source(&self) -> &VideoSource {
+        &self.source
+    }
+}
+
+impl AudioClip {
+    pub fn new(
+        raw_bytes: bytes::Bytes,
+        decoded: DecodedAudio,
+        source: AudioSource,
+        hash: String,
+    ) -> Self {
+        Self {
+            raw_bytes,
+            decoded,
+            source,
+            hash,
+        }
+    }
+
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+
+    pub fn decoded(&self) -> &DecodedAudio {
+        &self.decoded
+    }
+
+    pub fn source(&self) -> &AudioSource {
         &self.source
     }
 }
@@ -289,9 +379,9 @@ impl ImageFrame {
 #[derive(Debug, Clone)]
 pub enum TrackedMedia {
     Image(Arc<ImageFrame>),
+    Audio(Arc<AudioClip>),
     Video(Arc<VideoClip>),
     /// Placeholder variants for future modalities.
-    Audio,
     Embeddings,
 }
 
@@ -302,8 +392,8 @@ pub type TokenId = i32;
 
 /// Declares how a multimodal tensor's first dimension maps to media items.
 ///
-/// Used by [`ModelProcessorSpec::field_layouts`] to tell the backend how to
-/// split tensors for per-item scheduling (vLLM `MultiModalFieldConfig`).
+/// Used by [`crate::registry::ModelProcessorSpec::encoder_field_layouts_for`] to tell the backend
+/// how to split tensors for per-item scheduling (vLLM `MultiModalFieldConfig`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldLayout {
     /// First dimension equals number of media items (one slice per item).
@@ -319,6 +409,43 @@ impl FieldLayout {
         Self::Flat {
             sizes_key: sizes_key.into(),
         }
+    }
+}
+
+/// Layout contract for one modality's encoder inputs.
+///
+/// The primary encoder input is transported independently from named,
+/// model-specific side tensors. Keeping its layout typed avoids leaking a
+/// vision-specific field name into audio and other modality processors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderFieldLayouts {
+    pub encoder_input: FieldLayout,
+    pub model_specific: HashMap<String, FieldLayout>,
+}
+
+impl EncoderFieldLayouts {
+    pub fn new(encoder_input: FieldLayout, model_specific: HashMap<String, FieldLayout>) -> Self {
+        Self {
+            encoder_input,
+            model_specific,
+        }
+    }
+
+    /// Convert the legacy HF/vLLM-shaped field map into the neutral contract.
+    ///
+    /// Existing vision specs use `pixel_values` for the primary encoder input.
+    /// New specs should construct [`Self`] directly instead.
+    pub fn from_legacy_fields(mut fields: HashMap<String, FieldLayout>) -> Self {
+        let encoder_input = fields
+            .remove("pixel_values")
+            .unwrap_or(FieldLayout::Batched);
+        Self::new(encoder_input, fields)
+    }
+}
+
+impl Default for EncoderFieldLayouts {
+    fn default() -> Self {
+        Self::new(FieldLayout::Batched, HashMap::new())
     }
 }
 
@@ -408,5 +535,25 @@ mod tests {
     fn prompt_replacement_builders() {
         let rep = PromptReplacement::repeated(Modality::Image, "<image>", 100, 3);
         assert_eq!(rep.tokens, vec![100, 100, 100]);
+    }
+
+    #[test]
+    fn legacy_encoder_fields_are_split_into_typed_layouts() {
+        let layouts = EncoderFieldLayouts::from_legacy_fields(HashMap::from([
+            (
+                "pixel_values".to_string(),
+                FieldLayout::flat("patches_per_image"),
+            ),
+            ("image_grid_thw".to_string(), FieldLayout::Batched),
+        ]));
+
+        assert_eq!(
+            layouts.encoder_input,
+            FieldLayout::flat("patches_per_image")
+        );
+        assert_eq!(
+            layouts.model_specific,
+            HashMap::from([("image_grid_thw".to_string(), FieldLayout::Batched)])
+        );
     }
 }

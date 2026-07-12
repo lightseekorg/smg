@@ -5,6 +5,7 @@
 //! instead of `ChatCompletionRequest` / `ChatMessage`.
 #![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
+use llm_multimodal::Modality;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     traits::Tokenizer,
@@ -19,7 +20,7 @@ use openai_protocol::{
 use serde_json::{json, Value};
 
 use super::chat_utils;
-use crate::routers::grpc::ProcessedMessages;
+use crate::routers::grpc::{multimodal::PlaceholderTokens, ProcessedMessages};
 
 // ============================================================================
 // Top-level processing function
@@ -34,13 +35,13 @@ pub fn process_messages(
     request: &CreateMessageRequest,
     tokenizer: &dyn Tokenizer,
     chat_tools: Option<&[ChatTool]>,
-    image_placeholder: Option<&str>,
+    placeholder_tokens: Option<&PlaceholderTokens>,
 ) -> Result<ProcessedMessages, String> {
     let content_format = tokenizer.chat_template_content_format();
 
     // Step 1: Convert InputMessages to chat template JSON values
     let mut transformed_messages =
-        process_message_content_format(&request.messages, content_format, image_placeholder)?;
+        process_message_content_format(&request.messages, content_format, placeholder_tokens)?;
 
     // Step 2: Prepend system message if present
     if let Some(system) = &request.system {
@@ -124,7 +125,7 @@ pub fn process_messages(
 pub(crate) fn process_message_content_format(
     messages: &[InputMessage],
     content_format: ChatTemplateContentFormat,
-    image_placeholder: Option<&str>,
+    placeholder_tokens: Option<&PlaceholderTokens>,
 ) -> Result<Vec<Value>, String> {
     messages.iter().try_fold(Vec::new(), |mut result, message| {
         match message.role {
@@ -132,7 +133,7 @@ pub(crate) fn process_message_content_format(
                 convert_user_message(
                     &message.content,
                     content_format,
-                    image_placeholder,
+                    placeholder_tokens,
                     &mut result,
                 );
             }
@@ -177,7 +178,7 @@ fn convert_system_message(content: &InputContent) -> Value {
 fn convert_user_message(
     content: &InputContent,
     content_format: ChatTemplateContentFormat,
-    image_placeholder: Option<&str>,
+    placeholder_tokens: Option<&PlaceholderTokens>,
     result: &mut Vec<Value>,
 ) {
     match content {
@@ -212,7 +213,7 @@ fn convert_user_message(
             );
 
             if !user_parts.is_empty() {
-                let content = format_content_parts(user_parts, content_format, image_placeholder);
+                let content = format_content_parts(user_parts, content_format, placeholder_tokens);
                 result.push(json!({"role": "user", "content": content}));
             }
             result.extend(tool_msgs);
@@ -301,8 +302,9 @@ fn convert_assistant_message(
 fn format_content_parts(
     parts: Vec<Value>,
     content_format: ChatTemplateContentFormat,
-    image_placeholder: Option<&str>,
+    placeholder_tokens: Option<&PlaceholderTokens>,
 ) -> Value {
+    let image_placeholder = placeholder_tokens.and_then(|tokens| tokens.get(Modality::Image));
     match content_format {
         ChatTemplateContentFormat::String => {
             // Extract text parts; optionally replace image parts with placeholders

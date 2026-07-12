@@ -22,6 +22,8 @@ use tokio::{fs, process::Command, task, time};
 use tracing::info;
 use url::Url;
 
+use crate::audio::decode_audio_mono_f32;
+
 const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_VIDEO_MAX_DECODED_BYTES: usize = 1024 * 1024 * 1024;
 static VIDEO_DECODE_BACKEND: OnceLock<Option<String>> = OnceLock::new();
@@ -48,8 +50,8 @@ const OPENCV_HIGH_CONCURRENCY_CPU_BUDGET_DENOMINATOR: usize = 7;
 use super::{
     error::MediaConnectorError,
     types::{
-        DecodedRgbFrame, DecodedRgbVideo, ImageDetail, ImageFrame, ImageSource, VideoClip,
-        VideoSource,
+        AudioClip, AudioSource, DecodedRgbFrame, DecodedRgbVideo, ImageDetail, ImageFrame,
+        ImageSource, VideoClip, VideoSource,
     },
 };
 
@@ -174,6 +176,21 @@ impl MediaConnector {
         }
     }
 
+    pub async fn fetch_audio(
+        &self,
+        source: MediaSource,
+    ) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        match source {
+            MediaSource::Url(url) => self.fetch_http_audio(url).await,
+            MediaSource::DataUrl(data_url) => self.fetch_audio_data_url(data_url).await,
+            MediaSource::InlineBytes(bytes) => {
+                self.decode_audio(bytes.into(), AudioSource::InlineBytes)
+                    .await
+            }
+            MediaSource::File(path) => self.fetch_audio_file(path).await,
+        }
+    }
+
     async fn fetch_http_image(
         &self,
         url: String,
@@ -249,6 +266,26 @@ impl MediaConnector {
             .await
     }
 
+    async fn fetch_audio_data_url(
+        &self,
+        data_url: String,
+    ) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        let (metadata, data) = data_url
+            .split_once(',')
+            .ok_or_else(|| MediaConnectorError::DataUrl("missing comma in data url".into()))?;
+
+        if !metadata.ends_with(";base64") {
+            return Err(MediaConnectorError::DataUrl(
+                "only base64 encoded data URLs are supported".into(),
+            ));
+        }
+
+        let data = data.trim();
+        let decoded = BASE64_STANDARD.decode(data)?;
+        self.decode_audio(decoded.into(), AudioSource::DataUrl)
+            .await
+    }
+
     async fn fetch_file(
         &self,
         path: PathBuf,
@@ -308,6 +345,34 @@ impl MediaConnector {
         .await
     }
 
+    async fn fetch_http_audio(&self, url: String) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        let parsed = Url::parse(&url).map_err(|_| MediaConnectorError::InvalidUrl(url.clone()))?;
+        self.ensure_domain_allowed(&parsed)?;
+
+        let mut req = self.client.get(parsed.as_str());
+        if self.fetch_timeout > Duration::ZERO {
+            req = req.timeout(self.fetch_timeout);
+        }
+
+        let resp = req.send().await.map_err(|err| {
+            if err.is_timeout() {
+                MediaConnectorError::Timeout(self.fetch_timeout)
+            } else {
+                MediaConnectorError::Http(err)
+            }
+        })?;
+
+        let resp = resp.error_for_status()?;
+        let bytes = resp.bytes().await?;
+        self.decode_audio(
+            bytes,
+            AudioSource::Url {
+                url: parsed.to_string(),
+            },
+        )
+        .await
+    }
+
     async fn fetch_video_file(
         &self,
         path: PathBuf,
@@ -327,6 +392,24 @@ impl MediaConnector {
 
         let bytes = fs::read(&canonical).await?;
         self.decode_video(bytes.into(), cfg, VideoSource::File { path: canonical })
+            .await
+    }
+
+    async fn fetch_audio_file(&self, path: PathBuf) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        let allowed_root = self
+            .allowed_local_media_path
+            .as_ref()
+            .ok_or_else(|| MediaConnectorError::DisallowedLocalPath(path.display().to_string()))?;
+
+        let canonical = fs::canonicalize(&path).await?;
+        if !canonical.starts_with(allowed_root) {
+            return Err(MediaConnectorError::DisallowedLocalPath(
+                path.display().to_string(),
+            ));
+        }
+
+        let bytes = fs::read(&canonical).await?;
+        self.decode_audio(bytes.into(), AudioSource::File { path: canonical })
             .await
     }
 
@@ -375,6 +458,18 @@ impl MediaConnector {
         )))
     }
 
+    async fn decode_audio(
+        &self,
+        bytes: Bytes,
+        source: AudioSource,
+    ) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        let hash = crate::hasher::hash_audio(&bytes);
+        let decoded = decode_audio_mono_f32(&bytes)
+            .await
+            .map_err(|e| MediaConnectorError::AudioDecode(e.to_string()))?;
+        Ok(Arc::new(AudioClip::new(bytes, decoded, source, hash)))
+    }
+
     async fn decode_video(
         &self,
         bytes: Bytes,
@@ -406,9 +501,11 @@ impl MediaConnector {
         let decoded = decode_video_frames(bytes.clone(), cfg).await?;
 
         let clip = match decoded {
-            DecodedVideoFrames::Images(frames) => VideoClip::new(frames, bytes, source, hash),
-            DecodedVideoFrames::Rgb(rgb_video) => {
-                VideoClip::new_rgb(rgb_video, bytes, source, hash)
+            DecodedVideoFrames::Images { frames, sample_fps } => {
+                VideoClip::new_with_sample_fps(frames, bytes, source, hash, sample_fps)
+            }
+            DecodedVideoFrames::Rgb { video, sample_fps } => {
+                VideoClip::new_rgb_with_sample_fps(video, bytes, source, hash, sample_fps)
             }
         };
         Ok(Arc::new(clip))
@@ -416,8 +513,14 @@ impl MediaConnector {
 }
 
 enum DecodedVideoFrames {
-    Images(Vec<image::DynamicImage>),
-    Rgb(DecodedRgbVideo),
+    Images {
+        frames: Vec<image::DynamicImage>,
+        sample_fps: f32,
+    },
+    Rgb {
+        video: DecodedRgbVideo,
+        sample_fps: f32,
+    },
 }
 
 async fn decode_video_frames(
@@ -903,7 +1006,14 @@ where
             MediaConnectorError::VideoDecode("OpenCV produced no RGB output".to_string())
         })?
         .into_bytes();
-    Ok(DecodedVideoFrames::Rgb(DecodedRgbVideo::new(data, frames)))
+    let sample_fps = effective_sample_fps(
+        (fps.is_finite() && fps > 0.0).then_some(total_frames as f64 / fps),
+        cfg,
+    );
+    Ok(DecodedVideoFrames::Rgb {
+        video: DecodedRgbVideo::new(data, frames),
+        sample_fps,
+    })
 }
 
 #[cfg(feature = "opencv-video")]
@@ -1067,11 +1177,15 @@ async fn decode_video_with_ffmpeg(
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     if let Ok(metadata) = probe_video_metadata(input_path).await {
+        let sample_fps = effective_sample_fps(metadata.duration_seconds, cfg);
         let started = Instant::now();
         match decode_video_with_ffmpeg_ppm(input_path, cfg, metadata).await {
             Ok(rgb_video) => {
                 log_video_decode_backend_timing("ffmpeg_ppm_file", started, input_bytes, cfg, None);
-                return Ok(DecodedVideoFrames::Rgb(rgb_video));
+                return Ok(DecodedVideoFrames::Rgb {
+                    video: rgb_video,
+                    sample_fps,
+                });
             }
             Err(error) => {
                 log_video_decode_backend_timing(
@@ -1088,7 +1202,10 @@ async fn decode_video_with_ffmpeg(
         match decode_video_with_ffmpeg_raw(input_path, cfg, metadata).await {
             Ok(rgb_video) => {
                 log_video_decode_backend_timing("ffmpeg_raw_file", started, input_bytes, cfg, None);
-                return Ok(DecodedVideoFrames::Rgb(rgb_video));
+                return Ok(DecodedVideoFrames::Rgb {
+                    video: rgb_video,
+                    sample_fps,
+                });
             }
             Err(error) => {
                 log_video_decode_backend_timing(
@@ -1104,9 +1221,9 @@ async fn decode_video_with_ffmpeg(
 
     let started = Instant::now();
     match decode_video_with_ffmpeg_png(input_path, cfg).await {
-        Ok(frames) => {
+        Ok((frames, sample_fps)) => {
             log_video_decode_backend_timing("ffmpeg_png_file", started, input_bytes, cfg, None);
-            Ok(DecodedVideoFrames::Images(frames))
+            Ok(DecodedVideoFrames::Images { frames, sample_fps })
         }
         Err(error) => {
             log_video_decode_backend_timing(
@@ -1358,8 +1475,8 @@ async fn decode_video_with_ffmpeg_raw(
 async fn decode_video_with_ffmpeg_png(
     input_path: &std::path::Path,
     cfg: VideoFetchConfig,
-) -> Result<Vec<image::DynamicImage>, MediaConnectorError> {
-    let fps_filter = fps_filter_for_video(input_path, cfg).await;
+) -> Result<(Vec<image::DynamicImage>, f32), MediaConnectorError> {
+    let (fps_filter, sample_fps) = sampling_filter_for_video(input_path, cfg).await;
     let max_frames = cfg.max_frames.to_string();
     let output_limit = video_max_decoded_bytes().to_string();
     let mut command = Command::new("ffmpeg");
@@ -1405,7 +1522,7 @@ async fn decode_video_with_ffmpeg_png(
             "ffmpeg produced no frames".to_string(),
         ));
     }
-    Ok(frames)
+    Ok((frames, sample_fps))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1415,21 +1532,44 @@ struct VideoMetadata {
     duration_seconds: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProbedVideoInfo {
+    width: Option<u32>,
+    height: Option<u32>,
+    duration_seconds: Option<f64>,
+}
+
 async fn probe_video_metadata(
     input_path: &std::path::Path,
 ) -> Result<VideoMetadata, MediaConnectorError> {
+    let info = probe_video_info(input_path).await?;
+    let width = info.width.ok_or_else(|| {
+        MediaConnectorError::VideoDecode("ffprobe did not return video width".to_string())
+    })?;
+    let height = info.height.ok_or_else(|| {
+        MediaConnectorError::VideoDecode("ffprobe did not return video height".to_string())
+    })?;
+    Ok(VideoMetadata {
+        width,
+        height,
+        duration_seconds: info.duration_seconds,
+    })
+}
+
+async fn probe_video_info(
+    input_path: &std::path::Path,
+) -> Result<ProbedVideoInfo, MediaConnectorError> {
     let mut command = Command::new("ffprobe");
     command
         .args([
             "-v",
             "error",
-            "-nostdin",
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height:format=duration",
+            "stream=width,height,duration,duration_ts,time_base:format=duration",
             "-of",
-            "default=noprint_wrappers=1",
+            "json",
         ])
         .arg(input_path);
     let output = run_video_command_output(command, "ffprobe").await?;
@@ -1441,33 +1581,70 @@ async fn probe_video_metadata(
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut width = None;
-    let mut height = None;
-    let mut duration_seconds = None;
-    for line in stdout.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        match key {
-            "width" => width = value.parse::<u32>().ok(),
-            "height" => height = value.parse::<u32>().ok(),
-            "duration" if value != "N/A" => duration_seconds = value.parse::<f64>().ok(),
-            _ => {}
-        }
-    }
+    parse_ffprobe_video_info(&output.stdout)
+}
 
-    let width = width.ok_or_else(|| {
-        MediaConnectorError::VideoDecode("ffprobe did not return video width".to_string())
+fn parse_ffprobe_video_info(stdout: &[u8]) -> Result<ProbedVideoInfo, MediaConnectorError> {
+    let probe: serde_json::Value = serde_json::from_slice(stdout).map_err(|error| {
+        MediaConnectorError::VideoDecode(format!("failed to parse ffprobe output: {error}"))
     })?;
-    let height = height.ok_or_else(|| {
-        MediaConnectorError::VideoDecode("ffprobe did not return video height".to_string())
-    })?;
-    Ok(VideoMetadata {
+    let video_stream = probe
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|streams| streams.first());
+
+    let width = video_stream
+        .and_then(|stream| stream.get("width"))
+        .and_then(json_u32);
+    let height = video_stream
+        .and_then(|stream| stream.get("height"))
+        .and_then(json_u32);
+    let stream_duration = video_stream
+        .and_then(|stream| stream.get("duration"))
+        .and_then(json_positive_f64);
+    let stream_time_base_duration = video_stream.and_then(|stream| {
+        let duration_ts = stream.get("duration_ts").and_then(json_positive_f64)?;
+        let time_base = stream
+            .get("time_base")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_time_base)?;
+        let duration = duration_ts * time_base;
+        (duration.is_finite() && duration > 0.0).then_some(duration)
+    });
+    let format_duration = probe
+        .get("format")
+        .and_then(|format| format.get("duration"))
+        .and_then(json_positive_f64);
+
+    Ok(ProbedVideoInfo {
         width,
         height,
-        duration_seconds,
+        duration_seconds: stream_duration
+            .or(stream_time_base_duration)
+            .or(format_duration),
     })
+}
+
+fn json_u32(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| value.as_str()?.parse::<u32>().ok())
+}
+
+fn json_positive_f64(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn parse_time_base(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.parse::<f64>().ok()?;
+    let denominator = denominator.parse::<f64>().ok()?;
+    let time_base = numerator / denominator;
+    (time_base.is_finite() && time_base > 0.0).then_some(time_base)
 }
 
 fn fps_filter_for_metadata(metadata: VideoMetadata, cfg: VideoFetchConfig) -> String {
@@ -1491,6 +1668,19 @@ fn expected_sampled_frame_count(metadata: VideoMetadata, cfg: VideoFetchConfig) 
     cfg.max_frames
 }
 
+fn effective_sample_fps(duration_seconds: Option<f64>, cfg: VideoFetchConfig) -> f32 {
+    duration_seconds
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map(|duration| {
+            let target_frames = (duration * cfg.sample_fps as f64)
+                .round()
+                .clamp(cfg.min_frames as f64, cfg.max_frames as f64);
+            (target_frames / duration) as f32
+        })
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(cfg.sample_fps)
+}
+
 fn fps_filter_for_duration(duration: f64, cfg: VideoFetchConfig) -> Option<String> {
     if !duration.is_finite() || duration <= 0.0 {
         return None;
@@ -1502,38 +1692,27 @@ fn fps_filter_for_duration(duration: f64, cfg: VideoFetchConfig) -> Option<Strin
     Some(format!("fps={fps:.6}"))
 }
 
-async fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> String {
+async fn sampling_filter_for_video(
+    input_path: &std::path::Path,
+    cfg: VideoFetchConfig,
+) -> (String, f32) {
     if let Ok(duration) = probe_video_duration_seconds(input_path).await {
         if let Some(filter) = fps_filter_for_duration(duration, cfg) {
-            return filter;
+            return (filter, effective_sample_fps(Some(duration), cfg));
         }
     }
 
-    format!("fps={}", cfg.sample_fps)
+    (format!("fps={}", cfg.sample_fps), cfg.sample_fps)
 }
 
 async fn probe_video_duration_seconds(
     input_path: &std::path::Path,
 ) -> Result<f64, MediaConnectorError> {
-    let mut command = Command::new("ffprobe");
-    command
-        .args([
-            "-v",
-            "error",
-            "-nostdin",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-        ])
-        .arg(input_path);
-    match run_video_command_output(command, "ffprobe").await {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.trim().parse::<f64>().map_err(|err| {
-                MediaConnectorError::VideoDecode(format!("failed to parse ffprobe duration: {err}"))
-            })
-        }
+    match probe_video_info(input_path).await {
+        Ok(ProbedVideoInfo {
+            duration_seconds: Some(duration),
+            ..
+        }) => Ok(duration),
         Ok(_) | Err(_) => probe_video_duration_seconds_with_ffmpeg(input_path).await,
     }
 }
@@ -1786,7 +1965,9 @@ fn skip_ppm_whitespace_and_comments(bytes: &[u8], pos: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_ffmpeg_duration_seconds, parse_ppm_stream, split_png_stream, video_temp_suffix,
+        effective_sample_fps, expected_sampled_frame_count, fps_filter_for_metadata,
+        parse_ffmpeg_duration_seconds, parse_ffprobe_video_info, parse_ppm_stream,
+        split_png_stream, video_temp_suffix, VideoFetchConfig, VideoMetadata,
     };
 
     const TINY_PNG: &[u8] = &[
@@ -1817,6 +1998,53 @@ mod tests {
     }
 
     #[test]
+    fn ffprobe_metadata_prefers_short_video_stream_over_long_container() {
+        let output = br#"{
+            "streams": [{
+                "width": 320,
+                "height": 240,
+                "duration": "1.000000",
+                "duration_ts": 30,
+                "time_base": "1/30"
+            }],
+            "format": {"duration": "120.000000"}
+        }"#;
+        let info = parse_ffprobe_video_info(output).expect("valid ffprobe output");
+        assert_eq!(info.duration_seconds, Some(1.0));
+
+        let cfg = VideoFetchConfig {
+            min_frames: 4,
+            max_frames: 8,
+            sample_fps: 2.0,
+        };
+        let metadata = VideoMetadata {
+            width: info.width.expect("video width"),
+            height: info.height.expect("video height"),
+            duration_seconds: info.duration_seconds,
+        };
+        assert_eq!(expected_sampled_frame_count(metadata, cfg), 4);
+        assert_eq!(fps_filter_for_metadata(metadata, cfg), "fps=4.000000");
+    }
+
+    #[test]
+    fn ffprobe_metadata_uses_stream_time_base_before_container_duration() {
+        let output = br#"{
+            "streams": [{
+                "width": "640",
+                "height": "360",
+                "duration": "N/A",
+                "duration_ts": 45,
+                "time_base": "1/30"
+            }],
+            "format": {"duration": "90.000000"}
+        }"#;
+        let info = parse_ffprobe_video_info(output).expect("valid ffprobe output");
+        assert_eq!(info.width, Some(640));
+        assert_eq!(info.height, Some(360));
+        assert_eq!(info.duration_seconds, Some(1.5));
+    }
+
+    #[test]
     fn detects_video_temp_suffix_from_container_header() {
         let mut mp4 = vec![0; 12];
         mp4[4..8].copy_from_slice(b"ftyp");
@@ -1841,6 +2069,20 @@ mod tests {
         assert_eq!(frames[0].height(), 1);
         assert_eq!(frames[1].width(), 1);
         assert_eq!(frames[1].height(), 2);
+    }
+
+    #[test]
+    fn effective_sample_fps_tracks_min_and_max_frame_clamps() {
+        let cfg = VideoFetchConfig {
+            min_frames: 4,
+            max_frames: 8,
+            sample_fps: 2.0,
+        };
+
+        assert_eq!(effective_sample_fps(Some(1.0), cfg), 4.0);
+        assert!((effective_sample_fps(Some(10.0), cfg) - 0.8).abs() < 1e-6);
+        assert_eq!(effective_sample_fps(Some(3.0), cfg), 2.0);
+        assert_eq!(effective_sample_fps(None, cfg), 2.0);
     }
 
     #[test]

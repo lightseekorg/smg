@@ -310,19 +310,16 @@ impl VisionPreProcessor for KimiK25Processor {
             ))
         })?;
 
-        let result = PreprocessedEncoderInputs::new_dynamic(
-            encoder_input.into_dyn(),
-            feature_token_counts,
-            item_sizes,
-        )
-        .with_extra(
-            "grid_thws",
-            ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
-        )
-        .with_extra(
-            "patches_per_image",
-            ModelSpecificValue::int_1d(patches_per_image),
-        );
+        let result =
+            PreprocessedEncoderInputs::new(encoder_input, feature_token_counts, item_sizes)
+                .with_extra(
+                    "grid_thws",
+                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
+                )
+                .with_extra(
+                    "patches_per_image",
+                    ModelSpecificValue::int_1d(patches_per_image),
+                );
 
         Ok(result)
     }

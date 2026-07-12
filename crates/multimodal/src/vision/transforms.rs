@@ -11,34 +11,13 @@ use fast_image_resize::{
 };
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4};
-use thiserror::Error;
 
 use super::{
     execution::{scope as parallel_scope, task_count},
     scratch,
 };
 
-/// Errors that can occur during image transformations.
-#[derive(Error, Debug)]
-pub enum TransformError {
-    #[error("Invalid tensor shape: expected {expected}, got {actual:?}")]
-    InvalidShape {
-        expected: String,
-        actual: Vec<usize>,
-    },
-
-    #[error("Image operation failed: {0}")]
-    ImageError(#[from] image::ImageError),
-
-    #[error("Empty batch: cannot stack zero tensors")]
-    EmptyBatch,
-
-    #[error("Inconsistent tensor shapes in batch")]
-    InconsistentShapes,
-
-    #[error("Shape error: {0}")]
-    ShapeError(String),
-}
+pub use crate::error::TransformError;
 
 pub type Result<T> = std::result::Result<T, TransformError>;
 

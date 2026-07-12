@@ -20,7 +20,7 @@ use std::ops::Deref;
 
 use image::DynamicImage;
 
-use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
+use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase, QwenVideoResizeMode};
 use crate::{
     types::RgbFrameRef,
     vision::{
@@ -88,6 +88,9 @@ impl Qwen3VLProcessor {
                 merge_size: DEFAULT_MERGE_SIZE,
                 min_pixels: DEFAULT_MIN_PIXELS,
                 max_pixels: DEFAULT_MAX_PIXELS,
+                video_min_pixels: DEFAULT_MIN_PIXELS,
+                video_max_pixels: DEFAULT_MAX_PIXELS,
+                video_resize_mode: QwenVideoResizeMode::TotalVolume,
                 temporal_patch_size: DEFAULT_TEMPORAL_PATCH_SIZE,
                 mean: QWEN3_MEAN,
                 std: QWEN3_STD,
@@ -110,6 +113,9 @@ impl Qwen3VLProcessor {
                 merge_size,
                 min_pixels,
                 max_pixels,
+                video_min_pixels: min_pixels,
+                video_max_pixels: max_pixels,
+                video_resize_mode: QwenVideoResizeMode::TotalVolume,
                 temporal_patch_size,
                 mean: QWEN3_MEAN,
                 std: QWEN3_STD,
@@ -132,6 +138,15 @@ impl Qwen3VLProcessor {
                     .max_pixels
                     .or_else(|| config.get_longest_edge())
                     .unwrap_or(DEFAULT_MAX_PIXELS),
+                video_min_pixels: config
+                    .min_pixels
+                    .or_else(|| config.get_shortest_edge())
+                    .unwrap_or(DEFAULT_MIN_PIXELS),
+                video_max_pixels: config
+                    .max_pixels
+                    .or_else(|| config.get_longest_edge())
+                    .unwrap_or(DEFAULT_MAX_PIXELS),
+                video_resize_mode: QwenVideoResizeMode::TotalVolume,
                 temporal_patch_size: config
                     .temporal_patch_size
                     .unwrap_or(DEFAULT_TEMPORAL_PATCH_SIZE),
@@ -548,6 +563,11 @@ mod tests {
         } else {
             panic!("Expected video_grid_thw to be IntTensor");
         }
+        assert!(matches!(
+            result.model_specific.get("video_second_per_grid"),
+            Some(ModelSpecificValue::Tensor { data, shape })
+                if data == &vec![1.0] && shape == &vec![1]
+        ));
     }
 
     #[test]

@@ -14,34 +14,37 @@
 //!   namespace verification.
 
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     sync::{Arc, OnceLock},
 };
 
 use llm_multimodal::{
-    FieldLayout, ImageFrame, Modality, PlaceholderRange, PreprocessedEncoderInputs, VideoClip,
+    AudioClip, EncoderFieldLayouts, ImageFrame, Modality, PlaceholderRange,
+    PreprocessedEncoderInputs, VideoClip,
 };
 
 mod assemble;
 mod config;
 mod detect;
 mod pixel_cache;
+mod plan;
 mod process;
 mod serialize;
 mod transport;
 
 pub(crate) use assemble::{
-    assemble_multimodal_data, assemble_multimodal_data_after_encode, assemble_tokenspeed,
-    precomputed_encode_routing_hashes,
+    assemble_multimodal_data, assemble_multimodal_data_after_encode,
+    assemble_tokenspeed_for_encode, encode_routing_hashes,
 };
 pub(crate) use config::{
     load_preprocessor_config_file, load_video_preprocessor_config, MultimodalComponents,
     MultimodalConfigRegistry, MultimodalModelConfig,
 };
-pub(crate) use detect::{chat_modalities, has_multimodal_content_messages};
-pub(crate) use process::{
-    process_multimodal, process_multimodal_messages, resolve_placeholder_token,
+pub(crate) use detect::{media_plan_chat, media_plan_messages};
+pub(crate) use plan::{
+    prepare_placeholder_tokens, validate_rendered_media_anchors, PlaceholderTokens,
 };
+pub(crate) use process::process_multimodal_plan;
 pub(crate) use transport::init_mm_transport_defaults;
 #[cfg(feature = "mm-rdma")]
 pub(crate) use transport::mm_default_transport_is_rdma;
@@ -73,28 +76,97 @@ pub(crate) struct MultimodalOutput {
 /// The assembly stage converts this into a backend-specific `MultimodalData`
 /// variant once the target backend is known (after worker selection).
 #[derive(Debug)]
-pub(crate) enum MultimodalIntermediate {
-    Precomputed(PrecomputedMultimodalIntermediate),
+pub(crate) struct MultimodalIntermediate {
+    /// Independently preprocessed modality batches sharing one expanded prompt.
+    /// A single-modality request is represented by a one-element vector.
+    batches: Vec<PrecomputedMultimodalIntermediate>,
+}
+
+impl MultimodalIntermediate {
+    pub(crate) fn try_new(batches: Vec<PrecomputedMultimodalIntermediate>) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !batches.is_empty(),
+            "multimodal intermediate requires at least one batch"
+        );
+        let mut modalities = HashSet::with_capacity(batches.len());
+        for batch in &batches {
+            let modality = batch.media.modality();
+            anyhow::ensure!(
+                modalities.insert(modality),
+                "multimodal intermediate contains duplicate {modality} batches"
+            );
+            anyhow::ensure!(
+                batch.media.len() > 0,
+                "multimodal intermediate contains an empty {modality} batch"
+            );
+        }
+        Ok(Self { batches })
+    }
+
+    pub(crate) fn batches(&self) -> &[PrecomputedMultimodalIntermediate] {
+        &self.batches
+    }
+
+    pub(crate) fn into_batches(self) -> Vec<PrecomputedMultimodalIntermediate> {
+        self.batches
+    }
+}
+
+/// Raw media for one preprocessed batch.
+///
+/// Encoding the modality in the enum prevents contradictory states such as an
+/// audio batch carrying images or an image batch carrying both images and
+/// videos.
+#[derive(Debug, Clone)]
+pub(crate) enum MediaBatch {
+    Images(Vec<Arc<ImageFrame>>),
+    Audios(Vec<Arc<AudioClip>>),
+    Videos(Vec<Arc<VideoClip>>),
+}
+
+impl MediaBatch {
+    pub(crate) fn modality(&self) -> Modality {
+        match self {
+            Self::Images(_) => Modality::Image,
+            Self::Audios(_) => Modality::Audio,
+            Self::Videos(_) => Modality::Video,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Images(items) => items.len(),
+            Self::Audios(items) => items.len(),
+            Self::Videos(items) => items.len(),
+        }
+    }
+}
+
+/// Explicit association between one media item and its expanded prompt span.
+#[derive(Debug, Clone)]
+pub(crate) struct PromptBinding {
+    /// Index of the media/preprocessed item within its modality batch.
+    pub item_index: usize,
+    /// Position of this media item among all modalities in the rendered prompt.
+    pub prompt_ordinal: usize,
+    /// Full replacement span, including structural tokens.
+    pub structural: PlaceholderRange,
+    /// Patch-only spans within `structural`.
+    pub patches: Vec<PlaceholderRange>,
 }
 
 #[derive(Debug)]
 pub(crate) struct PrecomputedMultimodalIntermediate {
-    /// Active modality for this preprocessed payload.
-    pub modality: Modality,
     /// Preprocessed encoder input and model-specific tensors (not yet serialized).
     pub preprocessed: PreprocessedEncoderInputs,
-    /// Raw image frames (bytes + blake3 hashes).
-    pub images: Vec<Arc<ImageFrame>>,
-    /// Raw video clips (bytes + blake3 hashes + sampled frames).
-    pub videos: Vec<Arc<VideoClip>>,
-    /// Full structural placeholder ranges (offset, length).
-    pub placeholders: Vec<PlaceholderRange>,
-    /// Patch-only placeholder offsets for sglang.
-    pub patch_offsets: Option<Vec<(u32, u32)>>,
+    /// Raw media whose variant determines this batch's modality.
+    pub media: MediaBatch,
+    /// Exact media-to-prompt associations for this batch.
+    pub bindings: Vec<PromptBinding>,
     /// Placeholder token ID from model config for the active modality.
     pub placeholder_token_id: Option<u32>,
-    /// Per-tensor field layout classification from the model spec.
-    pub field_layouts: HashMap<String, FieldLayout>,
+    /// Primary encoder input and model-specific side-tensor layouts.
+    pub field_layouts: EncoderFieldLayouts,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
     pub keep_on_cpu_keys: Vec<String>,
 }

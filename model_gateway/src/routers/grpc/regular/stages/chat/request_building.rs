@@ -82,14 +82,6 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Build chat request
         let request_id = format!("chatcmpl-{}", Uuid::now_v7());
 
-        // Reject multimodal for backends that don't support it, before assembling
-        if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
-            return Err(error::bad_request(
-                "multimodal_not_supported",
-                "MLX backend does not support multimodal inputs".to_string(),
-            ));
-        }
-
         // Assemble backend-specific multimodal data now that the backend is known.
         // In EPD, request building also mints the encode->prefill rooms and
         // carries the encode dispatch plan into the execution plan.

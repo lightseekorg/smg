@@ -63,7 +63,24 @@ pub fn create_tokenizer_with_chat_template(
             );
         }
 
-        // Priority 2: tiktoken.model / *.tiktoken
+        let has_vocab_and_merges =
+            path.join("vocab.json").is_file() && path.join("merges.txt").is_file();
+
+        // Priority 2: Hugging Face Qwen2-style byte-level BPE files. Some
+        // official checkpoints (including Qwen3-ASR) intentionally omit
+        // tokenizer.json and ship only vocab.json + merges.txt.
+        if has_vocab_and_merges && has_qwen2_tokenizer_class(path) {
+            let final_chat_template =
+                resolve_and_log_chat_template(chat_template_path, path, file_path);
+            return Ok(Arc::new(
+                HuggingFaceTokenizer::from_vocab_and_merges_dir_with_chat_template(
+                    path,
+                    final_chat_template.as_deref(),
+                )?,
+            ));
+        }
+
+        // Priority 3: tiktoken.model / *.tiktoken
         // Only forward the user's explicit chat_template_path — tiktoken handles
         // its own config/discovery (tokenizer_config.json → directory discovery).
         if has_tiktoken_file(path) {
@@ -71,6 +88,19 @@ pub fn create_tokenizer_with_chat_template(
                 path,
                 chat_template_path,
             )?));
+        }
+
+        // Preserve the specific validation error for vocab + merges layouts
+        // when there is no supported tokenizer to fall back to.
+        if has_vocab_and_merges {
+            let final_chat_template =
+                resolve_and_log_chat_template(chat_template_path, path, file_path);
+            return Ok(Arc::new(
+                HuggingFaceTokenizer::from_vocab_and_merges_dir_with_chat_template(
+                    path,
+                    final_chat_template.as_deref(),
+                )?,
+            ));
         }
 
         return Err(Error::msg(format!(
@@ -113,6 +143,19 @@ pub fn create_tokenizer_with_chat_template(
     };
 
     result
+}
+
+fn has_qwen2_tokenizer_class(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|config| {
+            config
+                .get("tokenizer_class")
+                .and_then(serde_json::Value::as_str)
+                .map(|class| matches!(class, "Qwen2Tokenizer" | "Qwen2TokenizerFast"))
+        })
+        .unwrap_or(false)
 }
 
 /// Auto-detect tokenizer type by examining file content
