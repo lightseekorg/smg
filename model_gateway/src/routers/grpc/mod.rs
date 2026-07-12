@@ -4,6 +4,7 @@ use openai_protocol::common::StringOrArray;
 
 pub mod client; // Used by core/
 pub(crate) mod common;
+pub(crate) mod completion_batch;
 pub(crate) mod context;
 pub(crate) mod epd_encode;
 pub(crate) mod harmony;

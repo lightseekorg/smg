@@ -16,6 +16,7 @@ use super::{
     common::responses::{
         handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
     },
+    completion_batch,
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
     multimodal::MultimodalComponents,
@@ -453,7 +454,26 @@ impl GrpcRouter {
     ) -> Response {
         debug!("Processing completion request for model: {}", model_id);
 
-        let request = Arc::new(body.clone());
+        if let Some(response) = completion_batch::execute_batch(body, model_id, |request| {
+            self.route_single_completion_impl(headers, tenant_meta, request, model_id)
+        })
+        .await
+        {
+            return response;
+        }
+
+        self.route_single_completion_impl(headers, tenant_meta, body.clone(), model_id)
+            .await
+    }
+
+    async fn route_single_completion_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
+        body: CompletionRequest,
+        model_id: &str,
+    ) -> Response {
+        let request = Arc::new(body);
         let headers_cloned = headers.cloned();
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
