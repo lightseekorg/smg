@@ -45,9 +45,7 @@ pub(crate) use plan::{
     prepare_placeholder_tokens, validate_rendered_media_anchors, PlaceholderTokens,
 };
 pub(crate) use process::process_multimodal_plan;
-pub(crate) use transport::init_mm_transport_defaults;
-#[cfg(feature = "mm-rdma")]
-pub(crate) use transport::mm_default_transport_is_rdma;
+pub(crate) use transport::{init_mm_transport_defaults, mm_rdma_exporter};
 
 /// Whether verbose multimodal timing logs are enabled via `SMG_LOG_MM_TIMING`.
 /// Read from the environment once and cached; the flag is not expected to change

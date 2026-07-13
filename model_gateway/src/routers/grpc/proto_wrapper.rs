@@ -38,7 +38,7 @@ use smg_grpc_client::{
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
 
-use crate::routers::grpc::mm_rdma;
+use crate::routers::grpc::multimodal::mm_rdma_exporter;
 
 /// Backend-neutral encode->prefill bootstrap info for one multimodal item.
 ///
@@ -194,10 +194,10 @@ impl TokenSpeedTensor {
         }
     }
 
-    pub fn try_export_nixl_remote(self, room: i64) -> Self {
-        if !mm_rdma::rdma_enabled() {
+    pub fn try_export_nixl_remote(self, slot_key: i64) -> Self {
+        let Some(exporter) = mm_rdma_exporter() else {
             return self;
-        }
+        };
 
         let Self {
             storage,
@@ -219,7 +219,7 @@ impl TokenSpeedTensor {
         }
 
         let nbytes = data.len() as u64;
-        match mm_rdma::export_pixel_buffer(room, data) {
+        match exporter.export(slot_key, data) {
             Ok(descriptor) => Self::remote(
                 common::RemoteTensorHandle {
                     transport: "nixl".to_string(),
@@ -349,14 +349,14 @@ impl TokenSpeedMultimodalData {
     /// its own room-matched export path because the room must also be injected
     /// into the encode->prefill handshake.
     pub fn try_export_encoder_inputs_nixl_remote(mut self) -> Self {
-        if !mm_rdma::rdma_enabled() {
+        if mm_rdma_exporter().is_none() {
             return self;
         }
         for item in &mut self.items {
-            let room = rand::rng().random_range(0..i64::MAX);
+            let slot_key = rand::rng().random_range(0..i64::MAX);
             let placeholder = TokenSpeedTensor::inline(Vec::new(), Vec::new(), String::new());
             let encoder_input = std::mem::replace(&mut item.encoder_input, placeholder);
-            item.encoder_input = encoder_input.try_export_nixl_remote(room);
+            item.encoder_input = encoder_input.try_export_nixl_remote(slot_key);
         }
         self
     }

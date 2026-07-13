@@ -1,0 +1,25 @@
+[package]
+name = "smg-mm-rdma"
+version = "0.1.0"
+edition = "2021"
+description = "Multimodal pixel RDMA (NIXL) transport for the SMG gateway"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+
+[features]
+default = []
+# Compile the real NIXL implementation. The default build uses a no-op stub so
+# ordinary gateway builds need no NIXL headers / clang / bindgen or libnixl.
+nixl = ["dep:nixl-sys"]
+
+[dependencies]
+tracing.workspace = true
+# Pure slot bookkeeping (compiled for the `nixl` impl and for tests); lightweight,
+# no bindgen, so it stays a plain dependency rather than feature-gated.
+dashmap.workspace = true
+parking_lot.workspace = true
+# The NIXL FFI: bindgen-heavy, so optional and pulled in only by the `nixl` feature.
+nixl-sys = { version = "0.10.1", features = ["stub-api"], optional = true }
+
+[lints]
+workspace = true

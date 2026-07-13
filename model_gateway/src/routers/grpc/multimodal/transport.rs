@@ -10,11 +10,15 @@
 //! `SMG_TOKENSPEED_MM_*` names as a fallback) → built-in default (`inline`,
 //! 64 KiB).
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use llm_multimodal::Modality;
 use openai_protocol::worker::TransportMode;
-use tracing::{info, warn};
+use smg_mm_rdma::{RdmaConfig, RdmaExporter};
+use tracing::{error, info, warn};
 
 use crate::routers::grpc::{context::WorkerSelection, proto_wrapper::mm_shm_dev_writable};
 
@@ -150,16 +154,117 @@ pub(super) fn resolve_mm_shm_min_bytes(workers: Option<&WorkerSelection>) -> usi
     worker_shm_min_bytes_override(workers).unwrap_or_else(|| mm_transport_defaults().shm_min_bytes)
 }
 
-/// Whether the router-level transport mode selects the RDMA pixel lane.
-///
-/// The `mm_rdma` gate consults this so `rdma` is a first-class [`TransportMode`]
-/// alongside `inline`/`shm`/`auto` (settable via `--multimodal-tensor-transport`
-/// / `SMG_MM_TENSOR_TRANSPORT`). The legacy `SMG_MM_PIXEL_RDMA` env stays a
-/// fallback inside the gate for backward compatibility. Only compiled with the
-/// `mm-rdma` feature, since the no-op RDMA shim never consults it.
-#[cfg(feature = "mm-rdma")]
-pub(crate) fn mm_default_transport_is_rdma() -> bool {
+// ===================== RDMA pixel lane =====================
+//
+// The gateway owns all RDMA *policy*: it decides whether the lane is on (a
+// first-class `TransportMode::Rdma`, with the legacy `SMG_MM_PIXEL_RDMA` env as a
+// backward-compatible fallback), parses the env-derived `RdmaConfig`, and builds
+// the single process-wide exporter. The engine-neutral `smg-mm-rdma` crate owns
+// only the NIXL mechanics + wire format; it reads no env and no globals. In the
+// default (stub) build the exporter is inert, so every export falls back to inline.
+
+/// Fixed agent name the encode worker passes to `fetch_remote_metadata`.
+const RDMA_GATEWAY_AGENT_NAME: &str = "smg-gateway-encode";
+/// Default arena geometry: 64 slots x 32 MiB = 2 GiB host DRAM. A slot must hold
+/// one image's framed pixel buffer; raise `SMG_RDMA_SLOT_BYTES` for larger images.
+const DEFAULT_RDMA_POOL_SLOTS: usize = 64;
+const DEFAULT_RDMA_SLOT_BYTES: usize = 32 * 1024 * 1024;
+/// Fixed slack added to the derived worker-max-hold when deriving the slot TTL.
+/// A const rather than an env knob: it only ever widens the lost-notif leak window
+/// (a capacity nit, never correctness -- the crate's per-lease gen framing makes a
+/// recycled-under-read slot detectable independent of the TTL), and 30s dwarfs any
+/// Encode-RPC delivery jitter. `SMG_RDMA_SLOT_TTL_S` remains the full-TTL override.
+const RDMA_SLOT_TTL_SLACK: Duration = Duration::from_secs(30);
+
+/// Process-wide RDMA pixel exporter, built lazily on first use from env-derived
+/// config when the RDMA lane is enabled. `None` when the lane is off or NIXL init
+/// fails (callers then stay on the inline path).
+pub(crate) fn mm_rdma_exporter() -> Option<&'static RdmaExporter> {
+    static EXPORTER: OnceLock<Option<RdmaExporter>> = OnceLock::new();
+    EXPORTER
+        .get_or_init(|| {
+            if !rdma_lane_enabled() {
+                return None;
+            }
+            match RdmaExporter::new(build_rdma_config_from_env()) {
+                Ok(exporter) => Some(exporter),
+                Err(e) => {
+                    error!(error = %e, "EPD RDMA: exporter init failed; inline fallback");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// Whether the RDMA pixel lane is active: the first-class `TransportMode::Rdma`
+/// (`--multimodal-tensor-transport rdma` / `SMG_MM_TENSOR_TRANSPORT=rdma`), with
+/// the legacy `SMG_MM_PIXEL_RDMA` env as a backward-compatible fallback.
+fn rdma_lane_enabled() -> bool {
     mm_transport_defaults().mode == TransportMode::Rdma
+        || matches!(
+            std::env::var("SMG_MM_PIXEL_RDMA").as_deref(),
+            Ok("1") | Ok("true")
+        )
+}
+
+/// Build the exporter config from the `SMG_RDMA_*` env knobs. All RDMA policy lives
+/// here; the crate consumes the resulting [`RdmaConfig`] verbatim.
+fn build_rdma_config_from_env() -> RdmaConfig {
+    RdmaConfig {
+        // Empty listener IP => the exporter cannot do the cross-node metadata
+        // exchange, so it leaves callers on the inline path.
+        listen_ip: std::env::var("SMG_RDMA_LISTEN_IP").unwrap_or_default(),
+        listen_port: rdma_env_parse("SMG_RDMA_LISTEN_PORT", 18515),
+        agent_name: RDMA_GATEWAY_AGENT_NAME.to_string(),
+        pool_slots: rdma_env_positive("SMG_RDMA_POOL_SLOTS", DEFAULT_RDMA_POOL_SLOTS),
+        slot_bytes: rdma_env_positive("SMG_RDMA_SLOT_BYTES", DEFAULT_RDMA_SLOT_BYTES),
+        slot_ttl: derive_rdma_slot_ttl(),
+    }
+}
+
+/// The worst-case wall time the encode worker may hold a shipped descriptor before
+/// and during its one-sided READ: it waits up to `SMG_RDMA_LANDING_WAIT_S` for a
+/// free landing slot, then READs for up to `SMG_RDMA_READ_TIMEOUT_S`. These mirror
+/// the encode servicer's own knobs (same env names, same defaults) so the two sides
+/// cannot drift. The gateway must not reclaim a slot inside this window.
+fn worker_max_hold() -> Duration {
+    Duration::from_secs(
+        rdma_env_parse::<u64>("SMG_RDMA_LANDING_WAIT_S", 120)
+            + rdma_env_parse::<u64>("SMG_RDMA_READ_TIMEOUT_S", 60),
+    )
+}
+
+/// How long a leased slot may live without a free-notif before the reaper
+/// force-reclaims it. MUST exceed [`worker_max_hold`] or the TTL races a still-valid
+/// READ: the reaper frees the slot, the next image re-leases the SAME address, and
+/// the late READ silently returns the WRONG image's pixels. Derived by default
+/// (= `worker_max_hold` + [`RDMA_SLOT_TTL_SLACK`]); `SMG_RDMA_SLOT_TTL_S` overrides.
+fn derive_rdma_slot_ttl() -> Duration {
+    if let Ok(v) = std::env::var("SMG_RDMA_SLOT_TTL_S") {
+        if let Ok(secs) = v.parse::<u64>() {
+            return Duration::from_secs(secs);
+        }
+    }
+    worker_max_hold() + RDMA_SLOT_TTL_SLACK
+}
+
+/// Parse a numeric env knob, falling back to `default` when unset or unparsable.
+fn rdma_env_parse<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Parse a positive `usize` env knob, falling back to `default` when unset,
+/// unparsable, or zero.
+fn rdma_env_positive(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
 }
 
 fn worker_transport_mode_override(workers: Option<&WorkerSelection>) -> Option<TransportMode> {
@@ -392,6 +497,20 @@ mod tests {
             "bfloat16"
         );
         assert_eq!(resolve_mm_encoder_input_dtype(None, None, None), "bfloat16");
+    }
+
+    /// The derived slot TTL must strictly exceed the worker's max hold, so the
+    /// reaper can never reclaim a slot the worker could still be reading (a late
+    /// READ against a recycled slot cross-wires images). The crate's `SlotPool`
+    /// tests cover the mechanics; this pins the gateway's TTL-derivation policy.
+    #[test]
+    fn derived_rdma_slot_ttl_exceeds_worker_max_hold() {
+        assert!(
+            derive_rdma_slot_ttl() > worker_max_hold(),
+            "slot_ttl {:?} must exceed worker_max_hold {:?} or a late READ cross-wires",
+            derive_rdma_slot_ttl(),
+            worker_max_hold()
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
 [workspace]
-members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "crates/mock_worker"]
+members = ["model_gateway", "crates/protocols", "crates/reasoning_parser", "crates/tool_parser", "crates/workflow", "crates/tokenizer", "crates/auth", "crates/mcp", "crates/kv_index", "crates/data_connector", "crates/multimodal", "crates/mm_rdma", "crates/wasm", "crates/mesh", "crates/grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen", "crates/mock_worker"]
 resolver = "2"
 
 [workspace.dependencies]
 # Internal workspace crates
 openai-protocol = { version = "1.9.0", path = "crates/protocols" }
+smg-mm-rdma = { version = "0.1.0", path = "crates/mm_rdma" }
 reasoning-parser = { version = "1.4.0", path = "crates/reasoning_parser" }
 tool-parser = { version = "1.4.0", path = "crates/tool_parser" }
 wfaas = { version = "1.0.5", path = "crates/workflow" }
