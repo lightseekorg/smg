@@ -15,11 +15,11 @@ use uuid::Uuid;
 use super::{
     client::GrpcClient,
     context::{ClientSelection, WorkerSelection},
-    multimodal::{assemble_tokenspeed_for_encode, MultimodalIntermediate},
+    multimodal::{assemble_tokenspeed_for_encode, mm_rdma_exporter, MultimodalIntermediate},
     proto_wrapper::{
         cleanup_mm_shm_handles, cleanup_tokenspeed_items_encoder_shm,
-        collect_tokenspeed_multimodal_inputs_shm_handles, EncodeItemBootstrapInfo,
-        TokenSpeedMultimodalData, TokenSpeedMultimodalItem,
+        collect_tokenspeed_multimodal_inputs_shm_handles, stage_tokenspeed_tensor_rdma,
+        EncodeItemBootstrapInfo, TokenSpeedMultimodalData, TokenSpeedMultimodalItem,
     },
 };
 use crate::worker::DEFAULT_BOOTSTRAP_PORT;
@@ -108,7 +108,12 @@ impl PreparedEncodeItem {
                     .take()
                     .ok_or_else(|| "encode item was already dispatched".to_string())?;
                 *cleanup_on_drop = false;
-                item.encoder_input = item.encoder_input.try_export_nixl_remote(bootstrap_room);
+                // Stage with bootstrap_room as the slot key (load-bearing), so
+                // into_proto(false) below does not re-stage with a random key.
+                if let Some(exporter) = mm_rdma_exporter() {
+                    item.encoder_input =
+                        stage_tokenspeed_tensor_rdma(exporter, bootstrap_room, item.encoder_input);
+                }
                 let request = tokenspeed_encoder::EncodeRequest {
                     request_id: format!("encode-{}", Uuid::now_v7()),
                     mm_inputs: Some(
@@ -117,7 +122,7 @@ impl PreparedEncodeItem {
                             shm_enabled: *shm_enabled,
                             shm_min_bytes: *shm_min_bytes,
                         }
-                        .into_proto(),
+                        .into_proto(false),
                     ),
                     items: vec![tokenspeed_encoder::EncodeItemAssignment { bootstrap_room }],
                 };

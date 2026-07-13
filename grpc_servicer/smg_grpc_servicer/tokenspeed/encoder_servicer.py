@@ -22,7 +22,7 @@ from smg_grpc_proto.generated import (
     tokenspeed_encoder_pb2_grpc,
 )
 
-from smg_grpc_servicer.tokenspeed.rdma_pixel import RdmaPixelPuller
+from smg_grpc_servicer.mm_rdma import RdmaPixelPuller
 from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
 
 if TYPE_CHECKING:
@@ -125,27 +125,24 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             # before the swap and pre-set on the item.
             td = item_proto.encoder_input
             if td.WhichOneof("payload") == "remote":
-                # EPD RDMA: pull the encoder input from exported NIXL memory.
-                # With EPD_PIXEL_SHM, the received slot is published directly to
-                # scheduler SHM so the scheduler ingest path still avoids pickle
-                # copies of the full encoder tensor.
-                feature, feat_hash = self._rdma_pixel_puller.feature_from_remote(
+                feature = self._rdma_pixel_puller.feature_from_remote(
                     td,
                     explicit_room=bootstrap_room,
                     cast_to=model_dtype,
-                    publish_shm=self._pixel_shm,
                 )
             else:
                 feature = TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
-                feat_hash = None
-                if self._pixel_shm:
-                    from tokenspeed.runtime.multimodal.hash import hash_feature
-                    from tokenspeed.runtime.multimodal.shm_transport import (
-                        ShmTensorHandle,
-                    )
 
-                    feat_hash = hash_feature(feature)
-                    feature = ShmTensorHandle.publish(feature)
+            # EPD_PIXEL_SHM publishes the feature to scheduler SHM so the ZMQ hop
+            # pickles ~KB instead of the full encoder tensor; the content hash is
+            # taken on the real bytes first.
+            feat_hash = None
+            if self._pixel_shm:
+                from tokenspeed.runtime.multimodal.hash import hash_feature
+                from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
+
+                feat_hash = hash_feature(feature)
+                feature = ShmTensorHandle.publish(feature)
 
             item = MultimodalDataItem(
                 modality=item_modality,

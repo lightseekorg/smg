@@ -39,9 +39,9 @@ from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
 from tokenspeed.runtime.pd.kv_events import KVEventBatch
 
 from smg_grpc_servicer.kv_events import endpoint_for_rank, stream_kv_events
+from smg_grpc_servicer.mm_rdma import RdmaPixelPuller
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 from smg_grpc_servicer.tokenspeed.kv_events import resolve_kv_events_config
-from smg_grpc_servicer.tokenspeed.rdma_pixel import RdmaPixelPuller
 
 if TYPE_CHECKING:
     # Type-only — keeps these out of the cold-path graph when the servicer is
@@ -1072,11 +1072,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 feature_started = time.perf_counter() if LOG_MM_TIMING else None
                 encoder_input = item_proto.encoder_input
                 if encoder_input.WhichOneof("payload") == "remote":
-                    feature, _ = self._rdma_pixel_puller.feature_from_remote(
+                    feature = self._rdma_pixel_puller.feature_from_remote(
                         encoder_input,
                         explicit_room=None,
                         cast_to=model_dtype,
-                        publish_shm=False,
                     )
                 else:
                     feature = self._feature_from_proto(encoder_input, cast_to=model_dtype)

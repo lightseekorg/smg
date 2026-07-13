@@ -1,4 +1,4 @@
-"""Shared NIXL pixel-payload puller for TokenSpeed multimodal inputs."""
+"""Engine-neutral NIXL pixel-payload puller for gateway-exported multimodal inputs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 _DESCRIPTOR_MAGIC = b"SMGRDMA1"
 _GEN_BYTES = 8
 _FRAME_BYTES = 2 * _GEN_BYTES
-_GATEWAY_AGENT_NAME = "smg-gateway-encode"
+# The gateway's fixed NIXL agent name (see RDMA_GATEWAY_AGENT_NAME gateway-side).
+DEFAULT_GATEWAY_AGENT_NAME = "smg-gateway-encode"
 _LOCAL_IP_CACHE: dict[str, bool] = {}
 
 
@@ -102,8 +103,15 @@ def _parse_descriptor(td, explicit_room: int | None) -> _RemotePixelDescriptor:
 class RdmaPixelPuller:
     """Persistent NIXL READ agent for gateway-exported multimodal pixel buffers."""
 
-    def __init__(self, *, agent_name: str, log_prefix: str):
+    def __init__(
+        self,
+        *,
+        agent_name: str,
+        log_prefix: str,
+        gateway_agent_name: str = DEFAULT_GATEWAY_AGENT_NAME,
+    ):
         self._log_prefix = log_prefix
+        self._gateway_agent_name = gateway_agent_name
         self._nixl_agent = None
         self._rdma_md_ready = set()
         self._rdma_md_lock = threading.Lock()
@@ -171,7 +179,7 @@ class RdmaPixelPuller:
                 return
 
             agent = self._nixl_agent
-            agent.fetch_remote_metadata(_GATEWAY_AGENT_NAME, ip, port)
+            agent.fetch_remote_metadata(self._gateway_agent_name, ip, port)
 
             send_md_env = os.environ.get("SMG_RDMA_SEND_MD")
             if send_md_env in ("1", "true"):
@@ -194,7 +202,7 @@ class RdmaPixelPuller:
 
             ready = False
             for _ in range(5000):
-                if agent.check_remote_metadata(_GATEWAY_AGENT_NAME, remote):
+                if agent.check_remote_metadata(self._gateway_agent_name, remote):
                     ready = True
                     break
                 time.sleep(0.001)
@@ -202,15 +210,8 @@ class RdmaPixelPuller:
                 raise RuntimeError(f"NIXL remote metadata not ready room={room}")
             self._rdma_md_ready.add(key)
 
-    def feature_from_remote(
-        self,
-        td,
-        *,
-        explicit_room: int | None,
-        cast_to,
-        publish_shm: bool = False,
-    ):
-        """Read a remote TensorData payload and return ``(feature, content_hash)``."""
+    def feature_from_remote(self, td, *, explicit_room: int | None, cast_to):
+        """Read a remote TensorData payload and return the feature tensor."""
         import numpy as np
         import torch
 
@@ -271,7 +272,7 @@ class RdmaPixelPuller:
                 "READ",
                 local,
                 remote,
-                _GATEWAY_AGENT_NAME,
+                self._gateway_agent_name,
                 str(descriptor.room).encode(),
             )
             read_deadline = time.monotonic() + float(os.environ.get("SMG_RDMA_READ_TIMEOUT_S", 60))
@@ -327,13 +328,7 @@ class RdmaPixelPuller:
                 tensor = tensor.to(cast_to)
                 copied = True
 
-            if publish_shm:
-                from tokenspeed.runtime.multimodal.hash import hash_feature
-                from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
-
-                feat_hash = hash_feature(tensor)
-                return ShmTensorHandle.publish(tensor), feat_hash
-
-            return (tensor if copied else tensor.clone()), None
+            # Copy out of the landing slot before it returns to the free ring.
+            return tensor if copied else tensor.clone()
         finally:
             self._landing_free.put(slot)
