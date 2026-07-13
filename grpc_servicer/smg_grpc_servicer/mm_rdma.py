@@ -20,6 +20,14 @@ DEFAULT_GATEWAY_AGENT_NAME = "smg-gateway-encode"
 _LOCAL_IP_CACHE: dict[str, bool] = {}
 
 
+def _rdma_enabled_from_env() -> bool:
+    """Whether the RDMA lane is on: the first-class `SMG_MM_TENSOR_TRANSPORT=rdma`
+    (matching the gateway) or the legacy `SMG_MM_PIXEL_RDMA` flag."""
+    if os.environ.get("SMG_MM_PIXEL_RDMA") in ("1", "true"):
+        return True
+    return os.environ.get("SMG_MM_TENSOR_TRANSPORT", "").strip().lower() == "rdma"
+
+
 @dataclass(frozen=True)
 class _RemotePixelDescriptor:
     remote_addr: int
@@ -121,7 +129,7 @@ class RdmaPixelPuller:
         self._landing_slot_bytes = 0
         self._landing_free = None
 
-        if os.environ.get("SMG_MM_PIXEL_RDMA") not in ("1", "true"):
+        if not _rdma_enabled_from_env():
             return
 
         try:

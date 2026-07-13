@@ -157,7 +157,9 @@ pub(super) fn resolve_mm_shm_min_bytes(workers: Option<&WorkerSelection>) -> usi
 /// Resolve whether vLLM `pixel_values` may use the RDMA lane for this request: the
 /// resolved transport mode is `rdma`, the gateway exporter is up, and the worker
 /// advertises it can pull. The capability gate keeps SMG from emitting a `remote`
-/// payload to a worker that would reject it.
+/// payload to a worker that would reject it. The exporter is a process-wide
+/// resource (NIXL agent + arena), so a per-worker mode override can gate RDMA off
+/// but cannot turn it on without the router-level transport mode / env.
 pub(super) fn resolve_mm_rdma_enabled(workers: Option<&WorkerSelection>) -> bool {
     let mode =
         worker_transport_mode_override(workers).unwrap_or_else(|| mm_transport_defaults().mode);

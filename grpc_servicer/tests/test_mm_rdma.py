@@ -78,11 +78,29 @@ class TestParseDescriptor:
             mm_rdma._parse_descriptor(_td(legacy), explicit_room=None)
 
 
-class TestReadiness:
+class TestEnvGate:
     def test_disabled_when_env_unset(self, monkeypatch):
         monkeypatch.delenv("SMG_MM_PIXEL_RDMA", raising=False)
+        monkeypatch.delenv("SMG_MM_TENSOR_TRANSPORT", raising=False)
+        assert mm_rdma._rdma_enabled_from_env() is False
         puller = mm_rdma.RdmaPixelPuller(agent_name="test-agent", log_prefix="test")
         assert puller.ready is False
+
+    def test_enabled_by_legacy_flag(self, monkeypatch):
+        monkeypatch.setenv("SMG_MM_PIXEL_RDMA", "1")
+        monkeypatch.delenv("SMG_MM_TENSOR_TRANSPORT", raising=False)
+        assert mm_rdma._rdma_enabled_from_env() is True
+
+    def test_enabled_by_transport_mode(self, monkeypatch):
+        # The first-class transport switch (matching the gateway) enables the lane.
+        monkeypatch.delenv("SMG_MM_PIXEL_RDMA", raising=False)
+        monkeypatch.setenv("SMG_MM_TENSOR_TRANSPORT", "rdma")
+        assert mm_rdma._rdma_enabled_from_env() is True
+
+    def test_other_transport_mode_stays_disabled(self, monkeypatch):
+        monkeypatch.delenv("SMG_MM_PIXEL_RDMA", raising=False)
+        monkeypatch.setenv("SMG_MM_TENSOR_TRANSPORT", "shm")
+        assert mm_rdma._rdma_enabled_from_env() is False
 
     def test_default_gateway_agent_name(self):
         assert mm_rdma.DEFAULT_GATEWAY_AGENT_NAME == "smg-gateway-encode"

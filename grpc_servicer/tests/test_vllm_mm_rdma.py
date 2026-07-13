@@ -40,8 +40,9 @@ def _servicer(puller, dtype):
     return s
 
 
-def test_bfloat16_is_a_supported_wire_dtype():
+def test_half_precision_wire_dtypes_supported():
     assert vllm_servicer._PROTO_DTYPE_MAP["bfloat16"] is torch.bfloat16
+    assert vllm_servicer._PROTO_DTYPE_MAP["float16"] is torch.float16
 
 
 def test_remote_payload_routes_to_puller_with_model_dtype():

@@ -72,6 +72,7 @@ def _filtered_sampling_defaults(params: dict | None) -> dict:
 # Proto dtype string → torch dtype
 _PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
+    "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "int64": torch.int64,
     "uint32": torch.uint32,
@@ -212,8 +213,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
                 # Token IDs already have expanded placeholders; tensors are
-                # ready for the model. Bypass the renderer entirely.
-                prompt = self._build_preprocessed_mm_inputs(request.tokenized, request.mm_inputs)
+                # ready for the model. Bypass the renderer entirely. Offloaded to
+                # a thread: the RDMA (remote) tensor pull does blocking NIXL waits
+                # that must not stall the asyncio event loop.
+                prompt = await asyncio.to_thread(
+                    self._build_preprocessed_mm_inputs,
+                    request.tokenized,
+                    request.mm_inputs,
+                )
                 prompt["arrival_time"] = arrival_time
             elif input_type == "tokenized":
                 prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
