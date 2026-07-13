@@ -49,6 +49,8 @@ blake3.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+futures.workspace = true
+http.workspace = true
 npyz = { version = "0.9", features = ["npz"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

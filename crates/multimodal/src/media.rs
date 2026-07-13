@@ -164,9 +164,9 @@ impl MediaConnector {
         source: MediaSource,
         cfg: VideoFetchConfig,
     ) -> Result<Arc<VideoClip>, MediaConnectorError> {
-        // TODO: add a configurable max-video-bytes guard before fully buffering
-        // URL/data/file/inline payloads. VideoClip retains the original bytes,
-        // so oversized inputs should be rejected before decode.
+        // TODO: apply the streaming URL limit to data/file/inline payloads too.
+        // VideoClip retains the original bytes, so those inputs should also be
+        // rejected before decode.
         match source {
             MediaSource::Url(url) => self.fetch_http_video(url, cfg).await,
             MediaSource::DataUrl(data_url) => self.fetch_video_data_url(data_url, cfg).await,
@@ -283,7 +283,7 @@ impl MediaConnector {
         }
 
         let data = data.trim();
-        let decoded = BASE64_STANDARD.decode(data)?;
+        let decoded = decode_base64_with_limit(data, audio_max_input_bytes(), "audio")?;
         self.decode_audio(decoded.into(), AudioSource::DataUrl)
             .await
     }
@@ -336,7 +336,7 @@ impl MediaConnector {
         })?;
 
         let resp = resp.error_for_status()?;
-        let bytes = resp.bytes().await?;
+        let bytes = collect_http_body_with_limit(resp, video_max_decoded_bytes(), "video").await?;
         self.decode_video(
             bytes,
             cfg,
@@ -544,6 +544,25 @@ fn checked_payload_length(
         .checked_add(additional)
         .filter(|length| *length <= limit)
         .ok_or(MediaConnectorError::PayloadTooLarge { media, limit })
+}
+
+fn decode_base64_with_limit(
+    encoded: &str,
+    limit: usize,
+    media: &'static str,
+) -> Result<Vec<u8>, MediaConnectorError> {
+    // A padded base64 encoding of at most `limit` bytes needs no more than
+    // ceil(limit / 3) * 4 input bytes. Reject longer strings before the base64
+    // decoder allocates; the exact decoded-length check below handles the up
+    // to two-byte slack at the boundary.
+    let max_encoded_len = (limit as u128).div_ceil(3) * 4;
+    if encoded.len() as u128 > max_encoded_len {
+        return Err(MediaConnectorError::PayloadTooLarge { media, limit });
+    }
+
+    let decoded = BASE64_STANDARD.decode(encoded)?;
+    checked_payload_length(0, decoded.len(), limit, media)?;
+    Ok(decoded)
 }
 
 fn audio_max_input_bytes() -> usize {
@@ -2008,10 +2027,14 @@ fn skip_ppm_whitespace_and_comments(bytes: &[u8], pos: &mut usize) {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use futures::stream;
+
     use super::{
-        checked_payload_length, effective_sample_fps, expected_sampled_frame_count,
-        fps_filter_for_metadata, parse_ffmpeg_duration_seconds, parse_ffprobe_video_info,
-        parse_ppm_stream, split_png_stream, video_temp_suffix, VideoFetchConfig, VideoMetadata,
+        checked_payload_length, collect_http_body_with_limit, decode_base64_with_limit,
+        effective_sample_fps, expected_sampled_frame_count, fps_filter_for_metadata,
+        parse_ffmpeg_duration_seconds, parse_ffprobe_video_info, parse_ppm_stream,
+        split_png_stream, video_temp_suffix, MediaConnectorError, VideoFetchConfig, VideoMetadata,
     };
 
     const TINY_PNG: &[u8] = &[
@@ -2156,6 +2179,69 @@ mod tests {
         assert_eq!(checked_payload_length(4, 4, 8, "audio").unwrap(), 8);
         assert!(checked_payload_length(4, 5, 8, "audio").is_err());
         assert!(checked_payload_length(usize::MAX, 1, usize::MAX, "audio").is_err());
+    }
+
+    #[test]
+    fn enforces_base64_payload_limit_before_and_after_decode() {
+        assert!(matches!(
+            decode_base64_with_limit("AAAAAAAAAAAAAAAA", 8, "audio"),
+            Err(MediaConnectorError::PayloadTooLarge {
+                media: "audio",
+                limit: 8
+            })
+        ));
+        assert!(matches!(
+            decode_base64_with_limit("AAAAAAAAAAAA", 8, "audio"),
+            Err(MediaConnectorError::PayloadTooLarge {
+                media: "audio",
+                limit: 8
+            })
+        ));
+        assert_eq!(
+            decode_base64_with_limit("AAAA", 3, "audio").unwrap().len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn collects_http_body_with_content_and_streaming_limits(
+    ) -> Result<(), MediaConnectorError> {
+        let known_oversized = reqwest::Response::from(http::Response::new(reqwest::Body::from(
+            Bytes::from_static(b"12345"),
+        )));
+        assert!(matches!(
+            collect_http_body_with_limit(known_oversized, 4, "video").await,
+            Err(MediaConnectorError::PayloadTooLarge {
+                media: "video",
+                limit: 4
+            })
+        ));
+
+        let oversized_stream = stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"123")),
+            Ok(Bytes::from_static(b"45")),
+        ]);
+        let unknown_oversized = reqwest::Response::from(http::Response::new(
+            reqwest::Body::wrap_stream(oversized_stream),
+        ));
+        assert!(matches!(
+            collect_http_body_with_limit(unknown_oversized, 4, "audio").await,
+            Err(MediaConnectorError::PayloadTooLarge {
+                media: "audio",
+                limit: 4
+            })
+        ));
+
+        let within_limit_stream = stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"12")),
+            Ok(Bytes::from_static(b"34")),
+        ]);
+        let within_limit = reqwest::Response::from(http::Response::new(
+            reqwest::Body::wrap_stream(within_limit_stream),
+        ));
+        let body = collect_http_body_with_limit(within_limit, 4, "audio").await?;
+        assert_eq!(body, Bytes::from_static(b"1234"));
+        Ok(())
     }
 
     #[cfg(feature = "opencv-video")]

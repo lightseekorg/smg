@@ -42,9 +42,9 @@
       "width": 37,
       "height": 35,
       "frame_count": 3,
-      "shape": [200, 1536],
-      "grid_thw": [2, 10, 10],
-      "fnv1a_patch_u8": "3f34d7b3e45ed9d7"
+      "shape": [8, 1536],
+      "grid_thw": [2, 2, 2],
+      "fnv1a_patch_u8": "c862984777479f6d"
     }
   ]
 }

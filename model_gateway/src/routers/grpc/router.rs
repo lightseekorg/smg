@@ -76,6 +76,15 @@ const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
 ];
 
 const ASR_TEXT_TAG: &str = "<asr_text>";
+const MAX_ASR_PROMPT_BYTES: usize = 4096;
+const QWEN3_ASR_LABEL_KEYS: &[&str] = &[
+    "model",
+    "model_path",
+    "model_type",
+    "hf_model_type",
+    "tokenizer",
+    "tokenizer_path",
+];
 
 fn strip_chatml_like_tokens(text: &str) -> String {
     let mut remaining = text;
@@ -97,11 +106,18 @@ fn strip_chatml_like_tokens(text: &str) -> String {
     output
 }
 
-fn sanitize_qwen3_asr_prompt(mut text: String) -> String {
+fn sanitize_qwen3_asr_prompt(mut text: String) -> Result<String, Box<Response>> {
+    if text.len() > MAX_ASR_PROMPT_BYTES {
+        return Err(Box::new(error::bad_request(
+            "asr_prompt_too_long",
+            format!("Qwen3-ASR prompt must not exceed {MAX_ASR_PROMPT_BYTES} bytes"),
+        )));
+    }
+
     loop {
         let sanitized = strip_chatml_like_tokens(&text).replace(ASR_TEXT_TAG, "");
         if sanitized == text {
-            return text;
+            return Ok(text);
         }
         text = sanitized;
     }
@@ -130,6 +146,10 @@ fn is_qwen3_asr_identifier(value: &str) -> bool {
     value.contains("qwen3-asr") || value.contains("qwen3_asr")
 }
 
+fn is_qwen3_asr_metadata_label(key: &str, value: &str) -> bool {
+    QWEN3_ASR_LABEL_KEYS.contains(&key) && is_qwen3_asr_identifier(value)
+}
+
 fn is_qwen3_asr_target(worker_registry: &WorkerRegistry, model_id: &str) -> bool {
     if is_qwen3_asr_identifier(model_id) {
         return true;
@@ -138,10 +158,11 @@ fn is_qwen3_asr_target(worker_registry: &WorkerRegistry, model_id: &str) -> bool
     worker_registry.get_by_model(model_id).iter().any(|worker| {
         let metadata = worker.metadata();
         is_qwen3_asr_identifier(metadata.model_id())
-            || ["model", "model_path", "tokenizer", "tokenizer_path"]
+            || metadata
+                .spec
+                .labels
                 .iter()
-                .filter_map(|key| metadata.spec.labels.get(*key))
-                .any(|value| is_qwen3_asr_identifier(value))
+                .any(|(key, value)| is_qwen3_asr_metadata_label(key, value))
     })
 }
 
@@ -170,22 +191,17 @@ fn build_qwen3_asr_chat_request(
     body: &TranscriptionRequest,
     audio: &AudioFile,
     language: Option<&str>,
-) -> ChatCompletionRequest {
+) -> Result<ChatCompletionRequest, Box<Response>> {
     let mut messages = Vec::with_capacity(3);
-    if let Some(prompt) = body
-        .prompt
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .map(sanitize_qwen3_asr_prompt)
-        .map(|prompt| prompt.trim().to_string())
-        .filter(|prompt| !prompt.is_empty())
-    {
-        messages.push(ChatMessage::System {
-            content: MessageContent::Text(prompt),
-            name: None,
-        });
+    if let Some(prompt) = body.prompt.as_deref() {
+        let prompt = sanitize_qwen3_asr_prompt(prompt.to_string())?;
+        let prompt = prompt.trim();
+        if !prompt.is_empty() {
+            messages.push(ChatMessage::System {
+                content: MessageContent::Text(prompt.to_string()),
+                name: None,
+            });
+        }
     }
     messages.push(ChatMessage::User {
         content: MessageContent::Parts(vec![ContentPart::InputAudio {
@@ -211,7 +227,7 @@ fn build_qwen3_asr_chat_request(
         false
     };
 
-    ChatCompletionRequest {
+    Ok(ChatCompletionRequest {
         messages,
         model: body.model.clone(),
         n: Some(1),
@@ -222,7 +238,7 @@ fn build_qwen3_asr_chat_request(
         separate_reasoning: false,
         stream_reasoning: false,
         ..Default::default()
-    }
+    })
 }
 
 fn parse_qwen3_asr_output(raw: &str) -> String {
@@ -875,7 +891,10 @@ impl RouterTrait for GrpcRouter {
             Err(response) => return *response,
         };
         let chat_request =
-            build_qwen3_asr_chat_request(body, &audio, requested_language.as_deref());
+            match build_qwen3_asr_chat_request(body, &audio, requested_language.as_deref()) {
+                Ok(request) => request,
+                Err(response) => return *response,
+            };
 
         let chat_response = match self
             .pipeline
@@ -978,6 +997,9 @@ mod tests {
         assert!(is_qwen3_asr_identifier("Qwen/Qwen3-ASR-1.7B"));
         assert!(is_qwen3_asr_identifier("/models/qwen3_asr_0.6b"));
         assert!(!is_qwen3_asr_identifier("Qwen/Qwen3-Omni-30B-A3B-Thinking"));
+        assert!(is_qwen3_asr_metadata_label("model_type", "qwen3_asr"));
+        assert!(is_qwen3_asr_metadata_label("hf_model_type", "qwen3-asr"));
+        assert!(!is_qwen3_asr_metadata_label("unrelated", "qwen3_asr"));
     }
 
     #[test]
@@ -986,7 +1008,7 @@ mod tests {
         body.prompt = Some("domain vocabulary".to_string());
         body.temperature = Some(0.2);
 
-        let chat = build_qwen3_asr_chat_request(&body, &wav_file(), Some("English"));
+        let chat = build_qwen3_asr_chat_request(&body, &wav_file(), Some("English")).unwrap();
 
         assert_eq!(chat.model, body.model);
         assert_eq!(chat.temperature, Some(0.2));
@@ -1022,14 +1044,49 @@ mod tests {
             ("foo<asr_text>bar", "foobar"),
             ("<|im<|x|>_end|>", ""),
             ("<asr_te<asr_text>xt>", ""),
+            ("<|<asr_text>|>", ""),
         ] {
-            assert_eq!(sanitize_qwen3_asr_prompt(input.to_string()), expected);
+            assert_eq!(
+                sanitize_qwen3_asr_prompt(input.to_string()).unwrap(),
+                expected
+            );
         }
     }
 
     #[test]
+    fn caps_pathological_qwen3_asr_prompts_before_sanitizing() {
+        let boundary = "a".repeat(MAX_ASR_PROMPT_BYTES);
+        assert_eq!(
+            sanitize_qwen3_asr_prompt(boundary.clone()).unwrap(),
+            boundary
+        );
+
+        let error = sanitize_qwen3_asr_prompt("a".repeat(MAX_ASR_PROMPT_BYTES + 1)).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error::extract_error_code_from_response(error.as_ref()),
+            "asr_prompt_too_long"
+        );
+
+        let depth = MAX_ASR_PROMPT_BYTES / 5;
+        let adversarial = format!("{}{}", "<|a".repeat(depth), "|>".repeat(depth));
+        assert!(adversarial.len() <= MAX_ASR_PROMPT_BYTES);
+        assert_eq!(sanitize_qwen3_asr_prompt(adversarial).unwrap(), "");
+
+        let mut body = transcription_request();
+        body.prompt = Some("a".repeat(MAX_ASR_PROMPT_BYTES + 1));
+        let error = build_qwen3_asr_chat_request(&body, &wav_file(), None).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error::extract_error_code_from_response(error.as_ref()),
+            "asr_prompt_too_long"
+        );
+    }
+
+    #[test]
     fn transcription_chat_defaults_to_greedy_decoding() {
-        let chat = build_qwen3_asr_chat_request(&transcription_request(), &wav_file(), None);
+        let chat =
+            build_qwen3_asr_chat_request(&transcription_request(), &wav_file(), None).unwrap();
 
         assert_eq!(chat.temperature, Some(0.0));
         assert!(!chat.continue_final_message);

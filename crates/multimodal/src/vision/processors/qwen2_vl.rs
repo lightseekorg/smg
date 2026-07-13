@@ -144,13 +144,7 @@ impl Qwen2VLProcessor {
     /// Build the effective processor for a request, applying any structural
     /// overrides from `config`; otherwise reuse the existing defaults.
     fn with_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
-        if config.patch_size.is_some()
-            || config.merge_size.is_some()
-            || config.min_pixels.is_some()
-            || config.max_pixels.is_some()
-            || config.temporal_patch_size.is_some()
-            || config.size.is_some()
-        {
+        if config.has_structural_overrides() {
             Self::from_preprocessor_config(config)
         } else {
             self.clone()

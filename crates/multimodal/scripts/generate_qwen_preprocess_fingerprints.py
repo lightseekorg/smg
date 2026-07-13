@@ -76,8 +76,8 @@ def qwen3_video_case(processor: Qwen3VLVideoProcessor) -> dict:
         width,
         temporal_factor=temporal_patch_size,
         factor=32,
-        min_pixels=65536,
-        max_pixels=16777216,
+        min_pixels=4096,
+        max_pixels=25165824,
     )
     # Keep PIL as the resize oracle for SMG's PIL-compatible kernel, then use
     # the real HF video processor for temporal padding and patchification.
@@ -133,7 +133,7 @@ def main() -> None:
         patch_size=16,
         merge_size=2,
         temporal_patch_size=2,
-        size={"shortest_edge": 65536, "longest_edge": 16777216},
+        size={"shortest_edge": 4096, "longest_edge": 25165824},
         image_mean=[0.5, 0.5, 0.5],
         image_std=[0.5, 0.5, 0.5],
         resample=Image.Resampling.BICUBIC,

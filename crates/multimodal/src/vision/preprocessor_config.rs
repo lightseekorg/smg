@@ -300,6 +300,16 @@ impl PreProcessorConfig {
             .unwrap_or(default)
     }
 
+    /// Whether this config changes Qwen-style processor structure or budgets.
+    pub(crate) fn has_structural_overrides(&self) -> bool {
+        self.patch_size.is_some()
+            || self.merge_size.is_some()
+            || self.min_pixels.is_some()
+            || self.max_pixels.is_some()
+            || self.temporal_patch_size.is_some()
+            || self.size.is_some()
+    }
+
     /// Get image mean as fixed array, with fallback to CLIP defaults.
     pub fn get_image_mean(&self) -> [f64; 3] {
         self.image_mean

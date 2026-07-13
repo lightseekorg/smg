@@ -1,5 +1,7 @@
 //! Message API preparation stage: Convert tools, process messages, tokenize, build constraints
 
+use std::fmt::Display;
+
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::{
@@ -24,6 +26,13 @@ use crate::routers::{
 /// Converts Anthropic Messages API types into the internal chat template format,
 /// tokenizes, and builds tool constraints.
 pub(crate) struct MessagePreparationStage;
+
+fn invalid_multimodal_request(error: impl Display) -> Response {
+    error::bad_request(
+        "invalid_multimodal_request",
+        format!("Invalid multimodal request: {error}"),
+    )
+}
 
 #[async_trait]
 impl PipelineStage for MessagePreparationStage {
@@ -117,10 +126,7 @@ impl MessagePreparationStage {
                     error = %e,
                     "Failed to resolve multimodal placeholder token"
                 );
-                error::bad_request(
-                    "invalid_multimodal_request",
-                    format!("Invalid multimodal request: {e}"),
-                )
+                invalid_multimodal_request(e)
             })?;
 
             (
@@ -305,5 +311,19 @@ impl MessagePreparationStage {
         ctx.state.response.skip_special_tokens = Some(skip_special_tokens);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::invalid_multimodal_request;
+
+    #[test]
+    fn invalid_multimodal_input_maps_to_bad_request() {
+        let response = invalid_multimodal_request("unsupported audio modality");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

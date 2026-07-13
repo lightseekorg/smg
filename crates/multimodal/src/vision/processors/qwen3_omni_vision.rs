@@ -120,17 +120,8 @@ impl Qwen3OmniVisionProcessor {
             })
     }
 
-    fn has_structural_overrides(config: &PreProcessorConfig) -> bool {
-        config.patch_size.is_some()
-            || config.merge_size.is_some()
-            || config.min_pixels.is_some()
-            || config.max_pixels.is_some()
-            || config.temporal_patch_size.is_some()
-            || config.size.is_some()
-    }
-
     fn with_image_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
-        if Self::has_structural_overrides(config) {
+        if config.has_structural_overrides() {
             Self::from_preprocessor_config(config)
         } else {
             self.clone()
@@ -138,7 +129,7 @@ impl Qwen3OmniVisionProcessor {
     }
 
     fn with_video_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
-        if Self::has_structural_overrides(config) {
+        if config.has_structural_overrides() {
             if Self::contains_image_only_processor_config(config) {
                 // Qwen3-Omni's shared preprocessor_config.json carries image
                 // limits. The HF processor supplies separate video defaults at

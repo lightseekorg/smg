@@ -157,3 +157,86 @@ fn greatest_common_divisor(mut lhs: usize, mut rhs: usize) -> usize {
     }
     lhs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::bandlimited_resample;
+    use crate::error::TransformError;
+
+    #[test]
+    fn bandlimited_resample_matches_torchaudio_golden_vector() {
+        let input = [0.0, 0.25, -0.5, 0.75, -1.0, 0.5, 0.125, -0.25];
+        // torchaudio 2.11 functional.resample(input, 8000, 16000), using
+        // the default Hann-windowed sinc kernel.
+        let expected = [
+            0.012_859_77,
+            0.347_330_45,
+            0.230_903_15,
+            -0.388_803_3,
+            -0.476_089_15,
+            0.325_961_17,
+            0.724_112_45,
+            -0.117_642_37,
+            -0.975_495_4,
+            -0.540_876_27,
+            0.479_874_4,
+            0.698_470_23,
+            0.138_904_54,
+            -0.281_137_47,
+            -0.257_479_25,
+            -0.095_786_646,
+        ];
+
+        let actual = bandlimited_resample(&input, 8_000, 16_000).unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 2e-5,
+                "resampled sample {index}: {actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn bandlimited_resample_uses_torchaudio_output_length_formula() {
+        for (input_len, source_rate, destination_rate) in [
+            (17, 16_000, 8_000),
+            (8, 8_000, 11_025),
+            (161, 48_000, 44_100),
+        ] {
+            let input = vec![0.0; input_len];
+            let output = bandlimited_resample(&input, source_rate, destination_rate).unwrap();
+            let expected_len =
+                (input_len as u128 * destination_rate as u128).div_ceil(source_rate as u128);
+
+            assert_eq!(
+                output.len(),
+                expected_len as usize,
+                "unexpected output length for {source_rate} Hz to {destination_rate} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn bandlimited_resample_handles_empty_and_passthrough_inputs() {
+        assert_eq!(
+            bandlimited_resample(&[], 8_000, 16_000).unwrap(),
+            Vec::<f32>::new()
+        );
+
+        let input = [0.25, -0.5, 1.0];
+        assert_eq!(bandlimited_resample(&input, 16_000, 16_000).unwrap(), input);
+    }
+
+    #[test]
+    fn bandlimited_resample_rejects_zero_rates() {
+        for (source_rate, destination_rate) in [(0, 16_000), (16_000, 0)] {
+            assert!(matches!(
+                bandlimited_resample(&[0.0], source_rate, destination_rate),
+                Err(TransformError::ShapeError(message))
+                    if message == "audio resampling rates must be positive"
+            ));
+        }
+    }
+}

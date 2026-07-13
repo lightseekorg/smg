@@ -224,9 +224,7 @@ impl Qwen3AudioProcessor {
 
         for waveform in waveforms {
             let original_samples = waveform.len();
-            let feature_length = original_samples
-                .div_ceil(self.params.hop_length)
-                .min(max_frames);
+            let feature_length = (original_samples / self.params.hop_length).min(max_frames);
             let mut padded = waveform;
             padded.resize(max_samples, self.params.padding_value);
             let features = whisper_log_mel(&padded, max_frames, &self.params, fft.as_ref())?;
@@ -492,7 +490,7 @@ mod tests {
     #[test]
     fn batches_variable_lengths_with_feature_mask() {
         let output = Qwen3AudioProcessor::new()
-            .preprocess_decoded_clips(vec![decoded(1000), decoded(800)])
+            .preprocess_decoded_clips(vec![decoded(1000), decoded(801)])
             .unwrap();
 
         assert_eq!(output.encoder_input.shape(), &[2, 128, 6]);
