@@ -184,6 +184,19 @@ impl GrpcClient {
         matches!(self, Self::TokenSpeed(_))
     }
 
+    /// Runtime type backing this client. Lets shared logic (e.g. the multimodal
+    /// capability matrix) key on the backend without matching every variant.
+    pub fn runtime_type(&self) -> crate::worker::RuntimeType {
+        use crate::worker::RuntimeType;
+        match self {
+            Self::Sglang(_) => RuntimeType::Sglang,
+            Self::Vllm(_) => RuntimeType::Vllm,
+            Self::Trtllm(_) => RuntimeType::Trtllm,
+            Self::Mlx(_) => RuntimeType::Mlx,
+            Self::TokenSpeed(_) => RuntimeType::TokenSpeed,
+        }
+    }
+
     pub async fn connect(
         url: &str,
         runtime_type: &str,

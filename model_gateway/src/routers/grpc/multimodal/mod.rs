@@ -24,6 +24,7 @@ use llm_multimodal::{
 };
 
 mod assemble;
+mod capability;
 mod config;
 mod detect;
 mod pixel_cache;
@@ -36,6 +37,7 @@ pub(crate) use assemble::{
     assemble_multimodal_data, assemble_multimodal_data_after_encode,
     assemble_tokenspeed_for_encode, encode_routing_hashes,
 };
+pub(crate) use capability::ensure_backend_supports_modalities;
 pub(crate) use config::{
     load_preprocessor_config_file, load_video_preprocessor_config, MultimodalComponents,
     MultimodalConfigRegistry, MultimodalModelConfig,

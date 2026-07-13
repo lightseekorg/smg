@@ -19,6 +19,7 @@ use smg_grpc_client::common_proto as common;
 use tracing::{info, warn};
 
 use super::{
+    capability::ensure_backend_supports_modalities,
     log_mm_timing_enabled,
     serialize::{
         model_specific_to_tensor_bytes, serialize_array_as_tokenspeed_tensor,
@@ -66,17 +67,21 @@ async fn assemble_multimodal_data_impl(
     omit_prefill_pixels: bool,
 ) -> Result<MultimodalData> {
     validate_intermediate(&intermediate)?;
+    // Defense in depth: worker selection already rejected unsupported (backend,
+    // modality) combinations. Re-assert here against the same capability matrix
+    // so assembly can never silently mishandle a modality the backend lacks.
+    ensure_client_supports_intermediate(client, &intermediate)?;
     match client {
         GrpcClient::Sglang(_) => {
-            let batch = into_single_image_batch(intermediate, "SGLang")?;
+            let batch = into_single_batch(intermediate, "SGLang")?;
             Ok(MultimodalData::Sglang(assemble_sglang(batch)?))
         }
         GrpcClient::Vllm(_) => {
-            let batch = into_single_vision_batch(intermediate, "vLLM")?;
+            let batch = into_single_batch(intermediate, "vLLM")?;
             Ok(MultimodalData::Vllm(assemble_vllm(batch, workers)?))
         }
         GrpcClient::Trtllm(_) => {
-            let batch = into_single_image_batch(intermediate, "TRT-LLM")?;
+            let batch = into_single_batch(intermediate, "TRT-LLM")?;
             Ok(MultimodalData::Trtllm(assemble_trtllm(batch)?))
         }
         GrpcClient::TokenSpeed(_) => {
@@ -132,46 +137,34 @@ impl Drop for PendingTokenSpeedAssembly {
     }
 }
 
-fn into_single_image_batch(
+/// Backends other than TokenSpeed take a single preprocessed batch (one
+/// modality). The per-modality capability is enforced by
+/// [`ensure_client_supports_intermediate`]; this only enforces the structural
+/// single-batch constraint (multiple modalities in one request are TokenSpeed-
+/// only).
+fn into_single_batch(
     intermediate: MultimodalIntermediate,
     backend: &str,
 ) -> Result<PrecomputedMultimodalIntermediate> {
     anyhow::ensure!(
         intermediate.batches().len() == 1,
-        "{backend} multimodal path requires exactly one image batch; got {} batches",
+        "{backend} multimodal path requires exactly one batch; got {} batches",
         intermediate.batches().len()
     );
-    let mut batches = intermediate.into_batches();
-    let batch = batches
+    intermediate
+        .into_batches()
         .pop()
-        .context("multimodal intermediate is missing its sole batch")?;
-    anyhow::ensure!(
-        matches!(&batch.media, MediaBatch::Images(_)),
-        "{backend} multimodal path currently supports image inputs only; got {}",
-        batch.media.modality()
-    );
-    Ok(batch)
+        .context("multimodal intermediate is missing its sole batch")
 }
 
-fn into_single_vision_batch(
-    intermediate: MultimodalIntermediate,
-    backend: &str,
-) -> Result<PrecomputedMultimodalIntermediate> {
-    anyhow::ensure!(
-        intermediate.batches().len() == 1,
-        "{backend} multimodal path requires exactly one vision batch; got {} batches",
-        intermediate.batches().len()
-    );
-    let mut batches = intermediate.into_batches();
-    let batch = batches
-        .pop()
-        .context("multimodal intermediate is missing its sole batch")?;
-    anyhow::ensure!(
-        matches!(&batch.media, MediaBatch::Images(_) | MediaBatch::Videos(_)),
-        "{backend} multimodal path currently supports image and video inputs only; got {}",
-        batch.media.modality()
-    );
-    Ok(batch)
+/// Defense-in-depth capability assertion mirroring the early worker-selection
+/// check, keyed on the concrete backend client. See
+/// [`crate::routers::grpc::multimodal::capability::ensure_backend_supports_modalities`].
+fn ensure_client_supports_intermediate(
+    client: &GrpcClient,
+    intermediate: &MultimodalIntermediate,
+) -> Result<()> {
+    ensure_backend_supports_modalities(client.runtime_type(), intermediate)
 }
 
 fn assemble_sglang(
