@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::{
+    audio::{AudioPreProcessor, Qwen3AudioProcessor},
     encoder_inputs::PreprocessedEncoderInputs,
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
+    vision::PreProcessorConfig,
 };
 
 const IMAGE_PAD_TOKEN: &str = "<|image_pad|>";
@@ -118,6 +120,17 @@ impl ModelProcessorSpec for Qwen3OmniSpec {
 
     fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
         Ok(json!({"use_audio_in_video": false}))
+    }
+
+    fn audio_processor(
+        &self,
+        model_config: &Value,
+        preprocessor_config: &PreProcessorConfig,
+    ) -> Option<Box<dyn AudioPreProcessor>> {
+        Some(Box::new(Qwen3AudioProcessor::from_configs(
+            model_config,
+            preprocessor_config,
+        )))
     }
 
     fn prompt_replacements(
@@ -305,5 +318,48 @@ mod tests {
         assert!(Qwen3OmniSpec
             .keep_on_cpu_keys_for(Modality::Audio)
             .is_empty());
+    }
+
+    #[test]
+    fn omni_spec_builds_qwen_audio_processor() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+
+        use crate::{
+            audio::DecodedAudio,
+            types::{AudioClip, AudioSource},
+            vision::PreProcessorConfig,
+        };
+
+        let tokenizer = omni_tokenizer();
+        let config = json!({"model_type": "qwen3_omni_moe"});
+        let metadata = ModelMetadata {
+            model_id: "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).unwrap();
+
+        let preprocessor_config = PreProcessorConfig::from_json(
+            r#"{"feature_size": 16, "sampling_rate": 16000, "n_fft": 400, "hop_length": 160}"#,
+        )
+        .unwrap();
+        let processor = spec
+            .audio_processor(&config, &preprocessor_config)
+            .expect("qwen3_omni spec must provide an audio processor");
+
+        let clip = Arc::new(AudioClip::new(
+            Bytes::from_static(b"audio"),
+            DecodedAudio {
+                samples: vec![0.0; 800],
+                sample_rate: 16_000,
+            },
+            AudioSource::InlineBytes,
+            "audio-hash".to_string(),
+        ));
+        let result = processor.preprocess(&[clip]).unwrap();
+        assert_eq!(result.encoder_input.shape(), &[1, 16, 5]);
     }
 }

@@ -5,8 +5,10 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
+    audio::AudioPreProcessor,
     encoder_inputs::PreprocessedEncoderInputs,
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
+    vision::PreProcessorConfig,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -151,6 +153,24 @@ pub trait ModelProcessorSpec: Send + Sync {
     }
 
     fn processor_kwargs(&self, metadata: &ModelMetadata) -> RegistryResult<Value>;
+
+    /// Build the audio preprocessor for this model, if it supports audio.
+    ///
+    /// This is the single source of truth for audio-processor selection: the
+    /// same spec that owns a model's prompt/placeholder logic also owns its
+    /// audio preprocessor factory, so there is no separate string-keyed
+    /// registry to keep in sync. Audio-less specs use the default (`None`).
+    ///
+    /// The processor is built from the current model config because its feature
+    /// shapes and quantization parameters can be checkpoint-specific.
+    fn audio_processor(
+        &self,
+        _model_config: &Value,
+        _preprocessor_config: &PreProcessorConfig,
+    ) -> Option<Box<dyn AudioPreProcessor>> {
+        None
+    }
+
     /// Compute per-media prompt replacement token sequences.
     ///
     /// Receives the full preprocessed output so each model can extract whatever

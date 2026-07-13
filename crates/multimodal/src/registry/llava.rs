@@ -199,4 +199,22 @@ mod tests {
         let spec = registry.lookup(&metadata).expect("llava alias");
         assert_eq!(spec.name(), "llava");
     }
+
+    #[test]
+    fn llava_spec_has_no_audio_processor() {
+        use crate::vision::PreProcessorConfig;
+
+        let tokenizer = TestTokenizer::new(&[("<image>", 32000)]);
+        let config = json!({"model_type": "llava", "image_token_index": 32000});
+        let metadata = ModelMetadata {
+            model_id: "llava-v1.5",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("llava spec");
+        assert!(spec
+            .audio_processor(&config, &PreProcessorConfig::default())
+            .is_none());
+    }
 }

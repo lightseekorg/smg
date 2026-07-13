@@ -10,8 +10,8 @@ use anyhow::Result;
 use futures::future::try_join_all;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, EncoderFieldLayouts, ImageFrame, Modality, ModelMetadata,
-    PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement,
-    TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
+    ModelProcessorSpec, PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs,
+    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
 use tracing::{debug, info, warn};
@@ -194,7 +194,7 @@ pub(crate) async fn process_multimodal_plan(
             components,
             model_id,
             model_type,
-            spec.name(),
+            spec,
             tokenizer_id,
             &model_config,
         )
@@ -334,7 +334,7 @@ async fn preprocess_modality(
     components: &MultimodalComponents,
     model_id: &str,
     model_type: Option<&str>,
-    model_spec: &str,
+    spec: &dyn ModelProcessorSpec,
     tokenizer_id: &str,
     model_config: &MultimodalModelConfig,
 ) -> Result<PreprocessedEncoderInputs> {
@@ -371,15 +371,12 @@ async fn preprocess_modality(
     let media_for_preprocess = media.clone(); // cheap Arc refcount bumps
     let audio_processor = if modality == Modality::Audio {
         Some(
-            components
-                .audio_processor_registry
-                .create(
-                    model_spec,
-                    &model_config.config,
-                    &model_config.preprocessor_config,
-                )
+            spec.audio_processor(&model_config.config, &model_config.preprocessor_config)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("No audio processor registered for model spec: {model_spec}")
+                    anyhow::anyhow!(
+                        "No audio processor registered for model spec: {}",
+                        spec.name()
+                    )
                 })?,
         )
     } else {
