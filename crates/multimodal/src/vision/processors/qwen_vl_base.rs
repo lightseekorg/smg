@@ -543,9 +543,9 @@ impl QwenVLProcessorBase {
 
     /// Smart resize for Qwen3-style video processors.
     ///
-    /// Unlike image resize, the pixel budget is applied to the full sampled
-    /// video volume (`T * H * W`), matching HuggingFace's Qwen3 video
-    /// processor.
+    /// `TotalVolume` applies the pixel budget to the padded sampled video
+    /// volume (`T * H * W`), while `PerFrame` applies it to each frame's
+    /// spatial area (`H * W`).
     pub fn smart_resize_video(
         &self,
         num_frames: usize,

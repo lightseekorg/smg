@@ -10,7 +10,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 #[cfg(feature = "opencv-video")]
 use opencv::{
     core::{Mat, Vector},
@@ -26,10 +26,12 @@ use crate::audio::decode_audio_mono_f32;
 
 const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_VIDEO_MAX_DECODED_BYTES: usize = 1024 * 1024 * 1024;
+const DEFAULT_AUDIO_MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
 static VIDEO_DECODE_BACKEND: OnceLock<Option<String>> = OnceLock::new();
 static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
 static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
+static AUDIO_MAX_INPUT_BYTES: OnceLock<usize> = OnceLock::new();
 #[cfg(feature = "opencv-video")]
 static ACTIVE_OPENCV_DECODES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "opencv-video")]
@@ -363,7 +365,7 @@ impl MediaConnector {
         })?;
 
         let resp = resp.error_for_status()?;
-        let bytes = resp.bytes().await?;
+        let bytes = collect_http_body_with_limit(resp, audio_max_input_bytes(), "audio").await?;
         self.decode_audio(
             bytes,
             AudioSource::Url {
@@ -510,6 +512,48 @@ impl MediaConnector {
         };
         Ok(Arc::new(clip))
     }
+}
+
+async fn collect_http_body_with_limit(
+    mut response: reqwest::Response,
+    limit: usize,
+    media: &'static str,
+) -> Result<Bytes, MediaConnectorError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(MediaConnectorError::PayloadTooLarge { media, limit });
+    }
+
+    let mut body = BytesMut::new();
+    while let Some(chunk) = response.chunk().await? {
+        checked_payload_length(body.len(), chunk.len(), limit, media)?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
+
+fn checked_payload_length(
+    current: usize,
+    additional: usize,
+    limit: usize,
+    media: &'static str,
+) -> Result<usize, MediaConnectorError> {
+    current
+        .checked_add(additional)
+        .filter(|length| *length <= limit)
+        .ok_or(MediaConnectorError::PayloadTooLarge { media, limit })
+}
+
+fn audio_max_input_bytes() -> usize {
+    *AUDIO_MAX_INPUT_BYTES.get_or_init(|| {
+        std::env::var("SMG_AUDIO_MAX_INPUT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(DEFAULT_AUDIO_MAX_INPUT_BYTES)
+    })
 }
 
 enum DecodedVideoFrames {
@@ -1965,9 +2009,9 @@ fn skip_ppm_whitespace_and_comments(bytes: &[u8], pos: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_sample_fps, expected_sampled_frame_count, fps_filter_for_metadata,
-        parse_ffmpeg_duration_seconds, parse_ffprobe_video_info, parse_ppm_stream,
-        split_png_stream, video_temp_suffix, VideoFetchConfig, VideoMetadata,
+        checked_payload_length, effective_sample_fps, expected_sampled_frame_count,
+        fps_filter_for_metadata, parse_ffmpeg_duration_seconds, parse_ffprobe_video_info,
+        parse_ppm_stream, split_png_stream, video_temp_suffix, VideoFetchConfig, VideoMetadata,
     };
 
     const TINY_PNG: &[u8] = &[
@@ -2105,6 +2149,13 @@ mod tests {
     #[test]
     fn rejects_overflowing_ppm_frame_size() {
         assert!(parse_ppm_stream(b"P6\n4294967295 4294967295\n255\n").is_err());
+    }
+
+    #[test]
+    fn enforces_http_media_payload_limit() {
+        assert_eq!(checked_payload_length(4, 4, 8, "audio").unwrap(), 8);
+        assert!(checked_payload_length(4, 5, 8, "audio").is_err());
+        assert!(checked_payload_length(usize::MAX, 1, usize::MAX, "audio").is_err());
     }
 
     #[cfg(feature = "opencv-video")]

@@ -122,6 +122,7 @@ fn decode_audio_mono_f32_symphonia_with_limits(
 
     let mut sample_rate = audio_params.sample_rate.map(|rate| rate as usize);
     let mut mono = Vec::new();
+    let mut interleaved = Vec::new();
     loop {
         ensure_symphonia_deadline(started, timeout)?;
         let Some(packet) = format.next_packet().map_err(|error| {
@@ -168,7 +169,7 @@ fn decode_audio_mono_f32_symphonia_with_limits(
                 "failed to reserve {additional_samples} decoded audio samples: {error}"
             ))
         })?;
-        let mut interleaved = vec![0.0_f32; interleaved_samples];
+        interleaved.resize(interleaved_samples, 0.0);
         audio_buf.copy_to_slice_interleaved(&mut interleaved);
         for frame in interleaved.chunks_exact(channels) {
             mono.push(frame.iter().copied().sum::<f32>() / channels as f32);

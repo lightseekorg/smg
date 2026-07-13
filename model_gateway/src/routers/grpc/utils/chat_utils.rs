@@ -200,9 +200,9 @@ pub(crate) fn process_content_format(
 /// Transform a single content field based on content format.
 ///
 /// For `String` templates, every media URL is replaced with its
-/// modality-specific structural anchor. This mirrors vLLM's behavior of
-/// injecting model-specific placeholder tokens while allowing image, audio,
-/// and video to use different anchors.
+/// modality-specific structural anchor when placeholders are configured. The
+/// public preprocessing bindings do not have model metadata, so their legacy
+/// `None` path continues to omit media parts.
 ///
 /// Media parts are always emitted BEFORE text, matching vLLM's default
 /// (`interleave_mm_strings=false`), which prepends media placeholders to the
@@ -249,13 +249,14 @@ fn transform_content_field(
                         let modality = modality_for_chat_part(type_name).ok_or_else(|| {
                             format!("unsupported media content part type: {type_name}")
                         })?;
-                        let placeholder = placeholder_tokens
-                            .and_then(|tokens| tokens.get(modality))
-                            .ok_or_else(|| {
-                                format!(
-                                    "missing {modality} placeholder for string-format chat template"
-                                )
-                            })?;
+                        let Some(tokens) = placeholder_tokens else {
+                            continue;
+                        };
+                        let placeholder = tokens.get(modality).ok_or_else(|| {
+                            format!(
+                                "missing {modality} placeholder for string-format chat template"
+                            )
+                        })?;
                         media_parts.push(placeholder.to_string());
                     }
                     _ => {}
@@ -762,6 +763,29 @@ mod tests {
             "<|image|>\nHello\nWorld"
         );
         assert_eq!(transformed_message["role"].as_str().unwrap(), "user");
+    }
+
+    #[test]
+    fn test_transform_messages_string_format_without_placeholders_omits_media() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Describe this".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.png".to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+            name: None,
+        }];
+
+        let result =
+            process_content_format(&messages, ChatTemplateContentFormat::String, None).unwrap();
+
+        assert_eq!(result[0]["content"], "Describe this");
     }
 
     #[test]

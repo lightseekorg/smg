@@ -110,26 +110,6 @@ impl Qwen3OmniVisionProcessor {
         )
     }
 
-    fn from_shared_preprocessor_config_for_video(config: &PreProcessorConfig) -> Self {
-        Self::with_limits(
-            config
-                .min_pixels
-                .or_else(|| config.get_shortest_edge())
-                .unwrap_or(DEFAULT_IMAGE_MIN_PIXELS),
-            config
-                .max_pixels
-                .or_else(|| config.get_longest_edge())
-                .unwrap_or(DEFAULT_IMAGE_MAX_PIXELS),
-            DEFAULT_VIDEO_MIN_PIXELS,
-            DEFAULT_VIDEO_MAX_PIXELS,
-            config.get_patch_size(DEFAULT_PATCH_SIZE),
-            config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
-            config
-                .temporal_patch_size
-                .unwrap_or(DEFAULT_TEMPORAL_PATCH_SIZE),
-        )
-    }
-
     fn contains_image_only_processor_config(config: &PreProcessorConfig) -> bool {
         config
             .image_processor_type
@@ -164,7 +144,7 @@ impl Qwen3OmniVisionProcessor {
                 // limits. The HF processor supplies separate video defaults at
                 // call time, so those image limits must not become a per-frame
                 // video budget here.
-                Self::from_shared_preprocessor_config_for_video(config)
+                Self::from_preprocessor_config(config)
             } else {
                 Self::from_video_preprocessor_config(config)
             }

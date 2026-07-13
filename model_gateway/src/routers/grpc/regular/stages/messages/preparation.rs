@@ -117,9 +117,9 @@ impl MessagePreparationStage {
                     error = %e,
                     "Failed to resolve multimodal placeholder token"
                 );
-                error::internal_error(
-                    "multimodal_placeholder_resolution_failed",
-                    format!("Failed to resolve multimodal placeholder token: {e}"),
+                error::bad_request(
+                    "invalid_multimodal_request",
+                    format!("Invalid multimodal request: {e}"),
                 )
             })?;
 

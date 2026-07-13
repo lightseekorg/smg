@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ndarray::{Array2, Array3};
-use rustfft::{num_complex::Complex32, FftPlanner};
+use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use serde_json::Value;
 
 use crate::{
@@ -219,6 +219,8 @@ impl Qwen3AudioProcessor {
         let mut feature_lengths = Vec::with_capacity(batch_size);
         let mut token_counts = Vec::with_capacity(batch_size);
         let mut item_sizes = Vec::with_capacity(batch_size);
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(self.params.n_fft);
 
         for waveform in waveforms {
             let original_samples = waveform.len();
@@ -227,7 +229,7 @@ impl Qwen3AudioProcessor {
                 .min(max_frames);
             let mut padded = waveform;
             padded.resize(max_samples, self.params.padding_value);
-            let features = whisper_log_mel(&padded, max_frames, &self.params)?;
+            let features = whisper_log_mel(&padded, max_frames, &self.params, fft.as_ref())?;
             all_features.extend(features.into_raw_vec_and_offset().0);
 
             attention_mask.extend((0..max_frames).map(|frame| i64::from(frame < feature_length)));
@@ -334,14 +336,13 @@ fn whisper_log_mel(
     samples: &[f32],
     frame_count: usize,
     params: &Qwen3AudioParams,
+    fft: &dyn Fft<f32>,
 ) -> Result<Array2<f32>, TransformError> {
     let center_pad = params.n_fft / 2;
     let padded = reflect_pad(samples, center_pad);
     let fft_bins = params.n_fft / 2 + 1;
     let window = hann_window(params.n_fft);
     let mel_filters = mel_basis(params.sample_rate, params.n_fft, params.n_mels);
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(params.n_fft);
     let mut buffer = vec![Complex32::new(0.0, 0.0); params.n_fft];
     let mut output = vec![0.0_f32; params.n_mels * frame_count];
 

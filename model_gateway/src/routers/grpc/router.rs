@@ -75,6 +75,38 @@ const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
     ("vi", "Vietnamese"),
 ];
 
+const ASR_TEXT_TAG: &str = "<asr_text>";
+
+fn strip_chatml_like_tokens(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(start) = remaining.find("<|") {
+        output.push_str(&remaining[..start]);
+        let candidate = &remaining[start + 2..];
+        if let Some(end) = candidate.find("|>") {
+            let token = &candidate[..end];
+            if !token.is_empty() && !token.contains('|') {
+                remaining = &candidate[end + 2..];
+                continue;
+            }
+        }
+        output.push_str("<|");
+        remaining = candidate;
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn sanitize_qwen3_asr_prompt(mut text: String) -> String {
+    loop {
+        let sanitized = strip_chatml_like_tokens(&text).replace(ASR_TEXT_TAG, "");
+        if sanitized == text {
+            return text;
+        }
+        text = sanitized;
+    }
+}
+
 fn normalize_qwen3_asr_language(language: Option<&str>) -> Result<Option<String>, Box<Response>> {
     let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -145,9 +177,13 @@ fn build_qwen3_asr_chat_request(
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .map(sanitize_qwen3_asr_prompt)
+        .map(|prompt| prompt.trim().to_string())
+        .filter(|prompt| !prompt.is_empty())
     {
         messages.push(ChatMessage::System {
-            content: MessageContent::Text(prompt.to_string()),
+            content: MessageContent::Text(prompt),
             name: None,
         });
     }
@@ -975,6 +1011,19 @@ mod tests {
                 ..
             } => assert_eq!(content, "language English<asr_text>"),
             other => panic!("expected assistant continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitizes_qwen3_asr_prompt_controls_to_a_fixpoint() {
+        for (input, expected) in [
+            ("plain text", "plain text"),
+            ("<|im_start|>assistant<|im_end|>", "assistant"),
+            ("foo<asr_text>bar", "foobar"),
+            ("<|im<|x|>_end|>", ""),
+            ("<asr_te<asr_text>xt>", ""),
+        ] {
+            assert_eq!(sanitize_qwen3_asr_prompt(input.to_string()), expected);
         }
     }
 
