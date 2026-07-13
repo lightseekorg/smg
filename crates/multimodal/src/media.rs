@@ -594,34 +594,38 @@ fn decode_base64_with_limit(
     Ok(decoded)
 }
 
-fn image_max_input_bytes() -> usize {
-    *IMAGE_MAX_INPUT_BYTES.get_or_init(|| {
-        std::env::var("SMG_IMAGE_MAX_INPUT_BYTES")
+fn max_input_bytes(cache: &'static OnceLock<usize>, env_var: &str, default: usize) -> usize {
+    *cache.get_or_init(|| {
+        std::env::var(env_var)
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|bytes| *bytes > 0)
-            .unwrap_or(DEFAULT_IMAGE_MAX_INPUT_BYTES)
+            .unwrap_or(default)
     })
+}
+
+fn image_max_input_bytes() -> usize {
+    max_input_bytes(
+        &IMAGE_MAX_INPUT_BYTES,
+        "SMG_IMAGE_MAX_INPUT_BYTES",
+        DEFAULT_IMAGE_MAX_INPUT_BYTES,
+    )
 }
 
 fn video_max_input_bytes() -> usize {
-    *VIDEO_MAX_INPUT_BYTES.get_or_init(|| {
-        std::env::var("SMG_VIDEO_MAX_INPUT_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|bytes| *bytes > 0)
-            .unwrap_or(DEFAULT_VIDEO_MAX_INPUT_BYTES)
-    })
+    max_input_bytes(
+        &VIDEO_MAX_INPUT_BYTES,
+        "SMG_VIDEO_MAX_INPUT_BYTES",
+        DEFAULT_VIDEO_MAX_INPUT_BYTES,
+    )
 }
 
 fn audio_max_input_bytes() -> usize {
-    *AUDIO_MAX_INPUT_BYTES.get_or_init(|| {
-        std::env::var("SMG_AUDIO_MAX_INPUT_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|bytes| *bytes > 0)
-            .unwrap_or(DEFAULT_AUDIO_MAX_INPUT_BYTES)
-    })
+    max_input_bytes(
+        &AUDIO_MAX_INPUT_BYTES,
+        "SMG_AUDIO_MAX_INPUT_BYTES",
+        DEFAULT_AUDIO_MAX_INPUT_BYTES,
+    )
 }
 
 enum DecodedVideoFrames {
@@ -1400,13 +1404,11 @@ fn video_process_timeout() -> Duration {
 }
 
 fn video_max_decoded_bytes() -> usize {
-    *VIDEO_MAX_DECODED_BYTES.get_or_init(|| {
-        std::env::var("SMG_VIDEO_MAX_DECODED_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|bytes| *bytes > 0)
-            .unwrap_or(DEFAULT_VIDEO_MAX_DECODED_BYTES)
-    })
+    max_input_bytes(
+        &VIDEO_MAX_DECODED_BYTES,
+        "SMG_VIDEO_MAX_DECODED_BYTES",
+        DEFAULT_VIDEO_MAX_DECODED_BYTES,
+    )
 }
 
 fn ensure_decoded_byte_limit(bytes: usize) -> Result<(), MediaConnectorError> {
