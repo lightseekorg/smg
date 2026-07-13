@@ -41,7 +41,7 @@ pub enum MediaConnectorError {
     Base64Decode(#[from] base64::DecodeError),
     #[error("data URL parse error: {0}")]
     DataUrl(String),
-    #[error("{media} payload exceeds the maximum size of {limit} bytes")]
+    #[error("{media} input payload exceeds the maximum size of {limit} bytes")]
     PayloadTooLarge { media: &'static str, limit: usize },
     #[error("media decode task failed: {0}")]
     Blocking(#[from] tokio::task::JoinError),

@@ -162,7 +162,7 @@ impl Qwen3AudioProcessor {
         }
 
         let mut waveforms = Vec::with_capacity(clips.len());
-        for clip in clips {
+        for (clip_index, clip) in clips.into_iter().enumerate() {
             if clip.sample_rate == 0 {
                 return Err(TransformError::ShapeError(
                     "decoded audio sample rate must be positive".to_string(),
@@ -191,6 +191,13 @@ impl Qwen3AudioProcessor {
                 return Err(TransformError::ShapeError(
                     "decoded audio contains no samples after truncation".to_string(),
                 ));
+            }
+            if samples.len() < self.params.hop_length {
+                return Err(TransformError::ShapeError(format!(
+                    "Qwen3 audio clip at batch index {clip_index} has {} samples after resampling and truncation; at least {} are required",
+                    samples.len(),
+                    self.params.hop_length
+                )));
             }
             waveforms.push(samples);
         }
@@ -507,6 +514,45 @@ mod tests {
                 if data == &vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
                     && shape == &vec![2, 6]
         ));
+    }
+
+    #[test]
+    fn rejects_sub_hop_clip_in_mixed_batch() {
+        let error = Qwen3AudioProcessor::new()
+            .preprocess_decoded_clips(vec![decoded(320), decoded(159)])
+            .unwrap_err();
+
+        match error {
+            TransformError::ShapeError(message) => assert_eq!(
+                message,
+                "Qwen3 audio clip at batch index 1 has 159 samples after resampling and truncation; at least 160 are required"
+            ),
+            other => panic!("expected a shape error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn accepts_per_clip_hop_length_boundary() {
+        let processor = Qwen3AudioProcessor::new();
+        let expected_token_counts = vec![
+            qwen3_audio_output_length(
+                320 / processor.params().hop_length,
+                processor.params().n_window,
+            ),
+            qwen3_audio_output_length(
+                160 / processor.params().hop_length,
+                processor.params().n_window,
+            ),
+        ];
+        assert_eq!(expected_token_counts, vec![1, 1]);
+
+        let output = processor
+            .preprocess_decoded_clips(vec![decoded(320), decoded(160)])
+            .unwrap();
+
+        assert_eq!(output.encoder_input.shape(), &[2, 128, 2]);
+        assert_eq!(output.feature_token_counts, expected_token_counts);
+        assert_eq!(output.item_sizes, vec![(128, 2), (128, 1)]);
     }
 
     #[test]

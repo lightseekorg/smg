@@ -18,18 +18,23 @@ use opencv::{
     videoio,
 };
 use reqwest::Client;
-use tokio::{fs, process::Command, task, time};
+use tokio::{fs, io::AsyncReadExt, process::Command, task, time};
 use tracing::info;
 use url::Url;
 
 use crate::audio::decode_audio_mono_f32;
 
 const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_IMAGE_MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_VIDEO_MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_VIDEO_MAX_DECODED_BYTES: usize = 1024 * 1024 * 1024;
 const DEFAULT_AUDIO_MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
+const _: () = assert!(DEFAULT_VIDEO_MAX_INPUT_BYTES < DEFAULT_VIDEO_MAX_DECODED_BYTES);
 static VIDEO_DECODE_BACKEND: OnceLock<Option<String>> = OnceLock::new();
 static LOG_VIDEO_DECODE_TIMING: OnceLock<bool> = OnceLock::new();
 static VIDEO_PROCESS_TIMEOUT: OnceLock<Duration> = OnceLock::new();
+static IMAGE_MAX_INPUT_BYTES: OnceLock<usize> = OnceLock::new();
+static VIDEO_MAX_INPUT_BYTES: OnceLock<usize> = OnceLock::new();
 static VIDEO_MAX_DECODED_BYTES: OnceLock<usize> = OnceLock::new();
 static AUDIO_MAX_INPUT_BYTES: OnceLock<usize> = OnceLock::new();
 #[cfg(feature = "opencv-video")]
@@ -164,9 +169,6 @@ impl MediaConnector {
         source: MediaSource,
         cfg: VideoFetchConfig,
     ) -> Result<Arc<VideoClip>, MediaConnectorError> {
-        // TODO: apply the streaming URL limit to data/file/inline payloads too.
-        // VideoClip retains the original bytes, so those inputs should also be
-        // rejected before decode.
         match source {
             MediaSource::Url(url) => self.fetch_http_video(url, cfg).await,
             MediaSource::DataUrl(data_url) => self.fetch_video_data_url(data_url, cfg).await,
@@ -215,7 +217,7 @@ impl MediaConnector {
         })?;
 
         let resp = resp.error_for_status()?;
-        let bytes = resp.bytes().await?;
+        let bytes = collect_http_body_with_limit(resp, image_max_input_bytes(), "image").await?;
         self.decode_image(
             bytes,
             cfg.detail,
@@ -242,7 +244,7 @@ impl MediaConnector {
         }
 
         let data = data.trim();
-        let decoded = BASE64_STANDARD.decode(data)?;
+        let decoded = decode_base64_with_limit(data, image_max_input_bytes(), "image")?;
         self.decode_image(decoded.into(), cfg.detail, ImageSource::DataUrl)
             .await
     }
@@ -263,7 +265,7 @@ impl MediaConnector {
         }
 
         let data = data.trim();
-        let decoded = BASE64_STANDARD.decode(data)?;
+        let decoded = decode_base64_with_limit(data, video_max_input_bytes(), "video")?;
         self.decode_video(decoded.into(), cfg, VideoSource::DataUrl)
             .await
     }
@@ -305,13 +307,9 @@ impl MediaConnector {
             ));
         }
 
-        let bytes = fs::read(&canonical).await?;
-        self.decode_image(
-            bytes.into(),
-            cfg.detail,
-            ImageSource::File { path: canonical },
-        )
-        .await
+        let bytes = read_file_with_limit(&canonical, image_max_input_bytes(), "image").await?;
+        self.decode_image(bytes, cfg.detail, ImageSource::File { path: canonical })
+            .await
     }
 
     async fn fetch_http_video(
@@ -336,7 +334,7 @@ impl MediaConnector {
         })?;
 
         let resp = resp.error_for_status()?;
-        let bytes = collect_http_body_with_limit(resp, video_max_decoded_bytes(), "video").await?;
+        let bytes = collect_http_body_with_limit(resp, video_max_input_bytes(), "video").await?;
         self.decode_video(
             bytes,
             cfg,
@@ -392,8 +390,8 @@ impl MediaConnector {
             ));
         }
 
-        let bytes = fs::read(&canonical).await?;
-        self.decode_video(bytes.into(), cfg, VideoSource::File { path: canonical })
+        let bytes = read_file_with_limit(&canonical, video_max_input_bytes(), "video").await?;
+        self.decode_video(bytes, cfg, VideoSource::File { path: canonical })
             .await
     }
 
@@ -410,8 +408,8 @@ impl MediaConnector {
             ));
         }
 
-        let bytes = fs::read(&canonical).await?;
-        self.decode_audio(bytes.into(), AudioSource::File { path: canonical })
+        let bytes = read_file_with_limit(&canonical, audio_max_input_bytes(), "audio").await?;
+        self.decode_audio(bytes, AudioSource::File { path: canonical })
             .await
     }
 
@@ -434,6 +432,7 @@ impl MediaConnector {
         detail: ImageDetail,
         source: ImageSource,
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
+        ensure_input_byte_limit(bytes.len(), image_max_input_bytes(), "image")?;
         let hash = crate::hasher::hash_image(&bytes);
 
         // Decode JPEGs through libjpeg-turbo (PIL-compatible defaults: accurate
@@ -465,6 +464,7 @@ impl MediaConnector {
         bytes: Bytes,
         source: AudioSource,
     ) -> Result<Arc<AudioClip>, MediaConnectorError> {
+        ensure_input_byte_limit(bytes.len(), audio_max_input_bytes(), "audio")?;
         let hash = crate::hasher::hash_audio(&bytes);
         let decoded = decode_audio_mono_f32(&bytes)
             .await
@@ -478,6 +478,7 @@ impl MediaConnector {
         cfg: VideoFetchConfig,
         source: VideoSource,
     ) -> Result<Arc<VideoClip>, MediaConnectorError> {
+        ensure_input_byte_limit(bytes.len(), video_max_input_bytes(), "video")?;
         if cfg.max_frames == 0 {
             return Err(MediaConnectorError::VideoDecode(
                 "max_frames must be greater than 0".to_string(),
@@ -512,6 +513,34 @@ impl MediaConnector {
         };
         Ok(Arc::new(clip))
     }
+}
+
+async fn read_file_with_limit(
+    path: &std::path::Path,
+    limit: usize,
+    media: &'static str,
+) -> Result<Bytes, MediaConnectorError> {
+    let file = fs::File::open(path).await?;
+    let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
+    if file.metadata().await?.len() > limit_u64 {
+        return Err(MediaConnectorError::PayloadTooLarge { media, limit });
+    }
+
+    // Read at most one byte beyond the limit. The post-read exact check also
+    // covers a file growing after the metadata check.
+    let mut reader = file.take(limit_u64.saturating_add(1));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    ensure_input_byte_limit(bytes.len(), limit, media)?;
+    Ok(Bytes::from(bytes))
+}
+
+fn ensure_input_byte_limit(
+    input_bytes: usize,
+    limit: usize,
+    media: &'static str,
+) -> Result<(), MediaConnectorError> {
+    checked_payload_length(0, input_bytes, limit, media).map(|_| ())
 }
 
 async fn collect_http_body_with_limit(
@@ -563,6 +592,26 @@ fn decode_base64_with_limit(
     let decoded = BASE64_STANDARD.decode(encoded)?;
     checked_payload_length(0, decoded.len(), limit, media)?;
     Ok(decoded)
+}
+
+fn image_max_input_bytes() -> usize {
+    *IMAGE_MAX_INPUT_BYTES.get_or_init(|| {
+        std::env::var("SMG_IMAGE_MAX_INPUT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(DEFAULT_IMAGE_MAX_INPUT_BYTES)
+    })
+}
+
+fn video_max_input_bytes() -> usize {
+    *VIDEO_MAX_INPUT_BYTES.get_or_init(|| {
+        std::env::var("SMG_VIDEO_MAX_INPUT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(DEFAULT_VIDEO_MAX_INPUT_BYTES)
+    })
 }
 
 fn audio_max_input_bytes() -> usize {
@@ -2027,14 +2076,17 @@ fn skip_ppm_whitespace_and_comments(bytes: &[u8], pos: &mut usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use bytes::Bytes;
     use futures::stream;
 
     use super::{
         checked_payload_length, collect_http_body_with_limit, decode_base64_with_limit,
-        effective_sample_fps, expected_sampled_frame_count, fps_filter_for_metadata,
-        parse_ffmpeg_duration_seconds, parse_ffprobe_video_info, parse_ppm_stream,
-        split_png_stream, video_temp_suffix, MediaConnectorError, VideoFetchConfig, VideoMetadata,
+        effective_sample_fps, ensure_input_byte_limit, expected_sampled_frame_count,
+        fps_filter_for_metadata, parse_ffmpeg_duration_seconds, parse_ffprobe_video_info,
+        parse_ppm_stream, read_file_with_limit, split_png_stream, video_temp_suffix,
+        MediaConnectorError, VideoFetchConfig, VideoMetadata,
     };
 
     const TINY_PNG: &[u8] = &[
@@ -2175,14 +2227,30 @@ mod tests {
     }
 
     #[test]
-    fn enforces_http_media_payload_limit() {
-        assert_eq!(checked_payload_length(4, 4, 8, "audio").unwrap(), 8);
-        assert!(checked_payload_length(4, 5, 8, "audio").is_err());
+    fn enforces_media_payload_limit_for_each_label() {
+        for media in ["image", "video", "audio"] {
+            assert!(ensure_input_byte_limit(4, 4, media).is_ok());
+            assert!(matches!(
+                ensure_input_byte_limit(5, 4, media),
+                Err(MediaConnectorError::PayloadTooLarge { media: actual, limit: 4 })
+                    if actual == media
+            ));
+        }
+
         assert!(checked_payload_length(usize::MAX, 1, usize::MAX, "audio").is_err());
     }
 
     #[test]
     fn enforces_base64_payload_limit_before_and_after_decode() {
+        for media in ["image", "video", "audio"] {
+            assert_eq!(decode_base64_with_limit("AAAA", 3, media).unwrap().len(), 3);
+            assert!(matches!(
+                decode_base64_with_limit("AAAA", 2, media),
+                Err(MediaConnectorError::PayloadTooLarge { media: actual, limit: 2 })
+                    if actual == media
+            ));
+        }
+
         assert!(matches!(
             decode_base64_with_limit("AAAAAAAAAAAAAAAA", 8, "audio"),
             Err(MediaConnectorError::PayloadTooLarge {
@@ -2197,10 +2265,25 @@ mod tests {
                 limit: 8
             })
         ));
-        assert_eq!(
-            decode_base64_with_limit("AAAA", 3, "audio").unwrap().len(),
-            3
-        );
+    }
+
+    #[tokio::test]
+    async fn reads_files_at_limit_and_rejects_limit_plus_one() -> Result<(), MediaConnectorError> {
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(b"12345")?;
+        file.flush()?;
+
+        for media in ["image", "video", "audio"] {
+            let bytes = read_file_with_limit(file.path(), 5, media).await?;
+            assert_eq!(bytes, Bytes::from_static(b"12345"));
+
+            assert!(matches!(
+                read_file_with_limit(file.path(), 4, media).await,
+                Err(MediaConnectorError::PayloadTooLarge { media: actual, limit: 4 })
+                    if actual == media
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2210,9 +2293,9 @@ mod tests {
             Bytes::from_static(b"12345"),
         )));
         assert!(matches!(
-            collect_http_body_with_limit(known_oversized, 4, "video").await,
+            collect_http_body_with_limit(known_oversized, 4, "image").await,
             Err(MediaConnectorError::PayloadTooLarge {
-                media: "video",
+                media: "image",
                 limit: 4
             })
         ));
@@ -2225,9 +2308,9 @@ mod tests {
             reqwest::Body::wrap_stream(oversized_stream),
         ));
         assert!(matches!(
-            collect_http_body_with_limit(unknown_oversized, 4, "audio").await,
+            collect_http_body_with_limit(unknown_oversized, 4, "video").await,
             Err(MediaConnectorError::PayloadTooLarge {
-                media: "audio",
+                media: "video",
                 limit: 4
             })
         ));

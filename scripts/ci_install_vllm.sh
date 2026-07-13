@@ -21,7 +21,7 @@ echo "Using uv version: $(uv --version)"
 
 # Floor 0.25.0: older vllm releases do not guarantee torchcodec, while the
 # import canary below deliberately validates it. This line also admits only
-# transformers >= 5.5.1, preserving e5-mistral last-token pooling.
+# transformers >= 5.5.3, preserving e5-mistral last-token pooling.
 # FastAPI 0.137 makes vLLM's prometheus-fastapi-instrumentator health route
 # crash on _IncludedRouter entries; keep the last known-good FastAPI line.
 # --torch-backend=auto matches the torch CUDA variant to the pod's driver.

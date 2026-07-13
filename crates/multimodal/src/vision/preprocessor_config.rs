@@ -310,6 +310,16 @@ impl PreProcessorConfig {
             || self.size.is_some()
     }
 
+    /// Whether the declared processor type is image-only rather than video-capable.
+    pub(crate) fn is_image_only_processor_type(&self) -> bool {
+        self.image_processor_type
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|processor| {
+                processor.contains("imageprocessor") && !processor.contains("video")
+            })
+    }
+
     /// Get image mean as fixed array, with fallback to CLIP defaults.
     pub fn get_image_mean(&self) -> [f64; 3] {
         self.image_mean
@@ -517,6 +527,23 @@ mod tests {
         assert!(!config.should_rescale()); // false by default
         assert!(config.should_resize()); // true by default
         assert!(!config.should_center_crop()); // false by default
+    }
+
+    #[test]
+    fn test_image_only_processor_type_detection() {
+        for (processor_type, expected) in [
+            (Some("Qwen3VLImageProcessor"), true),
+            (Some("qWeN3vLiMaGePrOcEsSoR"), true),
+            (Some("Qwen3VLVideoProcessor"), false),
+            (Some("Qwen3VLImageProcessorVideo"), false),
+            (None, false),
+        ] {
+            let config = PreProcessorConfig {
+                image_processor_type: processor_type.map(str::to_owned),
+                ..Default::default()
+            };
+            assert_eq!(config.is_image_only_processor_type(), expected);
+        }
     }
 
     #[test]

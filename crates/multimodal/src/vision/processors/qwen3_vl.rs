@@ -197,16 +197,6 @@ impl Qwen3VLProcessor {
         )
     }
 
-    fn contains_image_only_processor_config(config: &PreProcessorConfig) -> bool {
-        config
-            .image_processor_type
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .is_some_and(|processor| {
-                processor.contains("imageprocessor") && !processor.contains("video")
-            })
-    }
-
     fn with_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
         if config.has_structural_overrides() {
             Self::from_image_preprocessor_config(config)
@@ -219,7 +209,7 @@ impl Qwen3VLProcessor {
         if !config.has_structural_overrides() {
             return self.clone();
         }
-        if Self::contains_image_only_processor_config(config) {
+        if config.is_image_only_processor_type() {
             Self::from_image_preprocessor_config(config)
         } else {
             Self::from_video_preprocessor_config(config)
