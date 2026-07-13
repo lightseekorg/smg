@@ -223,6 +223,8 @@ fn assemble_vllm(
         modality,
         shm_enabled: resolve_mm_shm_enabled(workers, false),
         shm_min_bytes: resolve_mm_shm_min_bytes(workers),
+        // vLLM workers cannot pull RDMA payloads yet.
+        rdma_enabled: false,
     })
 }
 
