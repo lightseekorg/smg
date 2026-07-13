@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use llm_multimodal::{MediaContentPart, Modality, ModelMetadata};
 use llm_tokenizer::TokenizerTrait;
 
-use super::config::MultimodalComponents;
+use super::{config::MultimodalComponents, MultimodalTokenizer};
 
 /// Ordered media extracted from an API request.
 ///
@@ -107,7 +107,7 @@ pub(crate) async fn prepare_placeholder_tokens(
         .await?;
     let metadata = ModelMetadata {
         model_id,
-        tokenizer,
+        tokenizer: &MultimodalTokenizer::new(tokenizer),
         config: &model_config.config,
     };
     let spec = components

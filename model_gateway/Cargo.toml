@@ -75,7 +75,7 @@ smg-auth.workspace = true
 smg-mcp.workspace = true
 kv-index.workspace = true
 smg-data-connector.workspace = true
-llm-multimodal = { workspace = true, default-features = false }
+llm-multimodal.workspace = true
 smg-mm-rdma.workspace = true
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true

@@ -21,8 +21,8 @@ use super::{
     log_mm_timing_enabled,
     pixel_cache::{config_fingerprint, CachedPreprocessedItem, PixelCache, PixelCacheKey},
     plan::MediaPlan,
-    MediaBatch, MultimodalIntermediate, MultimodalOutput, PrecomputedMultimodalIntermediate,
-    PromptBinding,
+    MediaBatch, MultimodalIntermediate, MultimodalOutput, MultimodalTokenizer,
+    PrecomputedMultimodalIntermediate, PromptBinding,
 };
 
 struct PreparedMultimodalPart {
@@ -173,7 +173,7 @@ pub(crate) async fn process_multimodal_plan(
         .and_then(|v| v.as_str());
     let metadata = ModelMetadata {
         model_id,
-        tokenizer,
+        tokenizer: &MultimodalTokenizer::new(tokenizer),
         config: &model_config.config,
     };
     let spec = components

@@ -22,6 +22,7 @@ use llm_multimodal::{
     AudioClip, EncoderFieldLayouts, ImageFrame, Modality, PlaceholderRange,
     PreprocessedEncoderInputs, VideoClip,
 };
+use llm_tokenizer::TokenizerTrait;
 
 mod assemble;
 mod capability;
@@ -48,6 +49,34 @@ pub(crate) use plan::{
 };
 pub(crate) use process::process_multimodal_plan;
 pub(crate) use transport::{init_mm_transport_defaults, mm_rdma_exporter};
+
+/// Adapts SMG's tokenizer to the narrow interface used by llm-multimodal.
+struct MultimodalTokenizer<'a> {
+    inner: &'a dyn TokenizerTrait,
+}
+
+impl<'a> MultimodalTokenizer<'a> {
+    fn new(inner: &'a dyn TokenizerTrait) -> Self {
+        Self { inner }
+    }
+}
+
+impl llm_multimodal::Tokenizer for MultimodalTokenizer<'_> {
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.inner.token_to_id(token)
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        self.inner.id_to_token(id)
+    }
+
+    fn encode_text(&self, text: &str) -> Option<Vec<u32>> {
+        self.inner
+            .encode(text, false)
+            .ok()
+            .map(|encoding| encoding.token_ids().to_vec())
+    }
+}
 
 /// Whether verbose multimodal timing logs are enabled via `SMG_LOG_MM_TIMING`.
 /// Read from the environment once and cached; the flag is not expected to change
