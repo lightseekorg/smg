@@ -594,7 +594,7 @@ fn decode_base64_with_limit(
     Ok(decoded)
 }
 
-fn max_input_bytes(cache: &'static OnceLock<usize>, env_var: &str, default: usize) -> usize {
+fn env_byte_limit(cache: &'static OnceLock<usize>, env_var: &str, default: usize) -> usize {
     *cache.get_or_init(|| {
         std::env::var(env_var)
             .ok()
@@ -605,7 +605,7 @@ fn max_input_bytes(cache: &'static OnceLock<usize>, env_var: &str, default: usiz
 }
 
 fn image_max_input_bytes() -> usize {
-    max_input_bytes(
+    env_byte_limit(
         &IMAGE_MAX_INPUT_BYTES,
         "SMG_IMAGE_MAX_INPUT_BYTES",
         DEFAULT_IMAGE_MAX_INPUT_BYTES,
@@ -613,7 +613,7 @@ fn image_max_input_bytes() -> usize {
 }
 
 fn video_max_input_bytes() -> usize {
-    max_input_bytes(
+    env_byte_limit(
         &VIDEO_MAX_INPUT_BYTES,
         "SMG_VIDEO_MAX_INPUT_BYTES",
         DEFAULT_VIDEO_MAX_INPUT_BYTES,
@@ -621,7 +621,7 @@ fn video_max_input_bytes() -> usize {
 }
 
 fn audio_max_input_bytes() -> usize {
-    max_input_bytes(
+    env_byte_limit(
         &AUDIO_MAX_INPUT_BYTES,
         "SMG_AUDIO_MAX_INPUT_BYTES",
         DEFAULT_AUDIO_MAX_INPUT_BYTES,
@@ -1404,7 +1404,7 @@ fn video_process_timeout() -> Duration {
 }
 
 fn video_max_decoded_bytes() -> usize {
-    max_input_bytes(
+    env_byte_limit(
         &VIDEO_MAX_DECODED_BYTES,
         "SMG_VIDEO_MAX_DECODED_BYTES",
         DEFAULT_VIDEO_MAX_DECODED_BYTES,
