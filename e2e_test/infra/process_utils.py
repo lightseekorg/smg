@@ -186,11 +186,42 @@ def wait_for_workers_ready(
 
 
 def detect_ib_device() -> str | None:
-    """Detect first active InfiniBand device (e.g., mlx5_0).
+    """Detect the first RDMA device with an active port (e.g., "mlx5_0").
+
+    Reads ``/sys/class/infiniband`` directly so it works for both InfiniBand and
+    RoCE and does NOT depend on the ``ibv_devinfo`` CLI, which isn't installed on
+    every GPU runner (the tokenspeed image ships libibverbs but not the utils).
+    Without a device the mooncake transfer engine enumerates every NIC on the
+    node and hangs, so returning None here must be a genuine "no RDMA" signal,
+    not just "the CLI is missing". Falls back to ``ibv_devinfo`` if sysfs is
+    absent.
 
     Returns:
         Device name if found (e.g., "mlx5_0"), None otherwise.
     """
+    ib_root = "/sys/class/infiniband"
+    if os.path.isdir(ib_root):
+
+        def _dev_key(name: str) -> tuple[str, int]:
+            # Numeric sort so mlx5_2 precedes mlx5_10 (lexical order would not).
+            head, _, tail = name.rpartition("_")
+            return (head, int(tail)) if tail.isdigit() else (name, 0)
+
+        for dev in sorted(os.listdir(ib_root), key=_dev_key):
+            ports = os.path.join(ib_root, dev, "ports")
+            if not os.path.isdir(ports):
+                continue
+            for port in sorted(os.listdir(ports)):
+                try:
+                    with open(os.path.join(ports, port, "state")) as f:
+                        # e.g. "4: ACTIVE"
+                        if "ACTIVE" in f.read():
+                            logger.info("Detected IB device: %s (port %s)", dev, port)
+                            return dev
+                except OSError:
+                    continue
+
+    # Fallback: the ibv_devinfo CLI, if the sysfs tree wasn't available.
     try:
         subprocess.run(
             ["ibv_devinfo", "-l"],
@@ -199,6 +230,7 @@ def detect_ib_device() -> str | None:
             timeout=1,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.warning("detect_ib_device: no active RDMA device (sysfs empty, ibv_devinfo absent)")
         return None
 
     for i in range(12):
@@ -217,4 +249,5 @@ def detect_ib_device() -> str | None:
                         return dev
         except Exception:
             pass
+    logger.warning("detect_ib_device: no active RDMA device found")
     return None

@@ -22,7 +22,10 @@ fi
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
 # caught up.
-TOKENSPEED_REF="${TOKENSPEED_REF:-5e145afae8e5651cd66234e68c988c31aac6639f}"
+# Bumped to include the EPD encode pipeline (tokenspeed #548, b5c762d): the SMG
+# encode servicer already expects `--disaggregation-mode encode`, which the old
+# pin (5e145af) predated — the EPD e2e's encode worker died on "invalid choice".
+TOKENSPEED_REF="${TOKENSPEED_REF:-69091e10c90c0e0f6e97c2bfdd332d61362ddd55}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 
@@ -39,35 +42,47 @@ echo "uv version: $(uv --version)"
 # SDK (nvcc, headers). Install them on demand — same approach as
 # ``ci_install_sglang.sh``.
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
-    echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
+if [ ! -x "${CUDA_HOME}/bin/nvcc" ] && [ ! -x "/usr/local/cuda-13.0/bin/nvcc" ]; then
+    echo "Installing CUDA toolkit (nvcc not found)..."
     curl -fsSL -o /tmp/cuda-keyring.deb \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
     sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends \
-        cuda-nvcc-13-0 \
-        cuda-cudart-dev-13-0 \
-        cuda-libraries-dev-13-0
-    # apt installs under /usr/local/cuda-13.0; expose the /usr/local/cuda
-    # alias the job-level ``CUDA_HOME: /usr/local/cuda`` env expects.
-    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
-        sudo ln -sfn /usr/local/cuda-13.0 "${CUDA_HOME}"
-    fi
-    echo "nvcc installed: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
-else
-    echo "nvcc already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
+    # Install the FULL CUDA 13.0 toolkit (mirrors the proven TRT-LLM lane in
+    # ci_install_trtllm.sh) so the system headers -- which the kernel build
+    # compiles against -- are a complete, self-consistent 13.0.88 set matching
+    # the system nvcc.
+    sudo apt-get install -y cuda-toolkit-13-0
+fi
+# Point CUDA_HOME at the versioned toolkit dir directly (mirrors
+# ci_install_trtllm.sh). The job env sets CUDA_HOME=/usr/local/cuda, but on this
+# runner that symlink is stale/partial: its include/ has cuda_runtime.h but not
+# crt/host_runtime.h, so the kernel's host-stub compile falls through to torch's
+# mismatched bundled crt and dies with "'__cudaLaunch' was not declared". The
+# apt-installed /usr/local/cuda-13.0 is complete (ships cuda-crt-13-0).
+if [ -x "/usr/local/cuda-13.0/bin/nvcc" ]; then
+    CUDA_HOME="/usr/local/cuda-13.0"
 fi
 export CUDA_HOME
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
-# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
-# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and
-# doesn't pass ``-I$CUDA_HOME/include``; expose the headers via CPATH /
-# CPLUS_INCLUDE_PATH so the compile picks them up.
-export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
-export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+echo "Using CUDA_HOME=${CUDA_HOME} ($(${CUDA_HOME}/bin/nvcc --version | tail -1))"
+# The kernel's launch stubs need this exact header from the system toolkit; if
+# it's missing the build falls through to torch's bundled cu13 crt and fails.
+if [ -f "${CUDA_HOME}/include/crt/host_runtime.h" ]; then
+    echo "system crt/host_runtime.h: present under CUDA_HOME"
+else
+    echo "WARNING: ${CUDA_HOME}/include/crt/host_runtime.h is MISSING" >&2
+fi
+# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime extensions
+# (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and doesn't pass
+# ``-I$CUDA_HOME/include``; expose the system CUDA headers via CPATH so those
+# g++ compiles find them (CUDA 13 keeps CCCL under ``include/cccl``).
+_cuda_inc="${CUDA_HOME}/include:${CUDA_HOME}/include/cccl"
+export CPATH="${_cuda_inc}${CPATH:+:$CPATH}"
+export CPLUS_INCLUDE_PATH="${_cuda_inc}${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+export C_INCLUDE_PATH="${_cuda_inc}${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 # ``git clone --branch`` only accepts branch/tag names, not SHAs, so we
@@ -94,6 +109,20 @@ sudo apt-get install -y --no-install-recommends libssl-dev libopenmpi-dev cmake
 # ── TokenSpeed packages ────────────────────────────────────────────────────
 export MAX_JOBS="${MAX_JOBS:-16}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a 10.0a}"
+# Select the CUDA kernel backend explicitly, as TokenSpeed's own install_deps.sh
+# does on the kernel build (otherwise the native build path can differ).
+export TOKENSPEED_KERNEL_BACKEND="${TOKENSPEED_KERNEL_BACKEND:-cuda}"
+
+# The kernel's torch cpp_extension build must link a torch built for CUDA 13.
+# TokenSpeed's CI runs on a cu130 Docker base image that already ships it; the
+# generic k8s runner does not, so pip/uv would pull the default PyPI torch
+# (CUDA 12.x). That drops nvidia-cuda-runtime-cu12's own crt/host_runtime.h on
+# the include path, and nvcc 13's cudafe++ then generates a host stub that fails
+# to compile against those cu12 headers: "'__cudaLaunch' was not declared".
+# Point pip/uv at the cu130 wheel index (mirrors install_deps.sh line 118) so
+# every install below resolves the CUDA-13 torch + nvidia deps.
+export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
 # The kernel requirements leave ``nvidia-cutlass-dsl`` unpinned, and 4.6.0
 # dropped ``cute.core.ThrMma`` — which quack (pulled via flash-attn's cute
@@ -113,6 +142,37 @@ export PIP_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
 # ``build-system.requires``, and we install with ``--no-build-isolation``.
 uv pip install setuptools wheel pybind11
 
+# Install the CUDA-13 torch build explicitly (the +cu130 local wheel) before the
+# --no-build-isolation kernel compile below, so the build links matching CUDA 13
+# headers instead of the default PyPI (cu12.x) torch. Pin tracks TokenSpeed's
+# torch requirement; bump alongside TOKENSPEED_REF.
+uv pip install "torch==2.11.0+cu130"
+
+# The kernel's host-stub compile binds crt/host_runtime.h from torch's bundled
+# cu13 headers (site-packages/nvidia/cu*/include/crt) no matter the -I order,
+# and those are a newer patch (nvidia-cuda-runtime 13.0.96) than the apt system
+# nvcc (13.0.88): the 88 nvcc emits a 2-arg __cudaLaunch stub the 96 header's
+# 1-arg macro can't satisfy -> "'__cudaLaunch' was not declared". Those crt dirs
+# are pulled by the kernel build's own dependency resolution, so materialize
+# them with a first build pass (tolerate its compile failure), realign every
+# bundled crt to the system toolkit, then build for real -- deps are satisfied
+# now, so nothing re-pulls the crt.
+uv pip install -e tokenspeed-kernel/python/ --no-build-isolation || \
+    echo "first kernel build pass failed (expected: crt skew); realigning crt headers"
+
+_sys_crt="${CUDA_HOME}/include/crt"
+_purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+if [ -d "$_sys_crt" ] && [ -d "$_purelib" ]; then
+    _aligned=0
+    while IFS= read -r -d '' _pip_crt; do
+        echo "Aligning bundled CUDA crt to system: ${_pip_crt} -> ${_sys_crt}"
+        rm -rf "$_pip_crt"
+        ln -sfnT "$_sys_crt" "$_pip_crt"
+        _aligned=1
+    done < <(find "$_purelib" -type d -path '*/nvidia/cu*/include/crt' -print0 2>/dev/null)
+    [ "$_aligned" = 1 ] || echo "WARNING: no bundled nvidia crt dirs found under ${_purelib}" >&2
+fi
+
 uv pip install -e tokenspeed-kernel/python/ --no-build-isolation
 uv pip install -e tokenspeed-scheduler/
 uv pip install -e "./python" --no-build-isolation
@@ -125,6 +185,7 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     # CUDA headers when it bypasses nvcc for .cpp sources.
     echo "CPATH=$CPATH" >> "$GITHUB_ENV"
     echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >> "$GITHUB_ENV"
+    echo "C_INCLUDE_PATH=$C_INCLUDE_PATH" >> "$GITHUB_ENV"
 fi
 if [ -n "${GITHUB_PATH:-}" ]; then
     # Make ``nvcc`` discoverable to downstream steps (pytest spawns the
@@ -178,5 +239,42 @@ shadowed = [str(p) for p in paths if repo not in p.parents]
 assert not shadowed, f'smg gRPC modules shadowed by site-packages copies: {shadowed}'
 print('smg gRPC modules resolve to repo source: OK')
 "
+
+# ── RDMA / mooncake GPU-registration probe (TEMPORARY — remove before merge) ──
+# Answers definitively whether the H100 CI box supports the mooncake RDMA
+# GPU-memory registration EPD needs: the EPD workers hang right after mooncake's
+# transfer engine starts listening, and the next step is register_memory on a
+# GPU buffer (needs GPUDirect: nvidia_peermem or dmabuf). Runs under a hard
+# timeout so it can never hang the lane; never fails the lane either.
+echo "=== RDMA probe: kernel modules / GPUDirect ==="
+lsmod 2>/dev/null | grep -iE "peermem|mlx5_ib|ib_uverbs|nvidia_fs" || echo "  (no matching modules)"
+if [ -d /sys/module/nvidia_peermem ]; then echo "  nvidia_peermem: LOADED"; else echo "  nvidia_peermem: NOT loaded"; fi
+command -v rdma >/dev/null 2>&1 && rdma link 2>/dev/null | head -3 || true
+echo "=== RDMA probe: mooncake GPU register_memory — peermem (default) vs dmabuf ==="
+set +e
+cat > /tmp/mc_probe.py <<'PY'
+import subprocess, sys, os
+try:
+    import torch
+    from mooncake.engine import TransferEngine
+except Exception as e:
+    print("PROBE import failed:", e); sys.exit(3)
+if not torch.cuda.is_available():
+    print("PROBE: no CUDA device visible"); sys.exit(4)
+ips = [x for x in subprocess.check_output(["hostname", "-I"]).decode().split() if not x.startswith("127.")]
+ip = ips[0] if ips else "127.0.0.1"
+eng = TransferEngine()
+if eng.initialize(ip, "P2PHANDSHAKE", "rdma", "mlx5_0") != 0:
+    print("PROBE initialize failed"); sys.exit(5)
+buf = torch.zeros(4 << 20, device="cuda")
+rc = eng.register_memory(buf.data_ptr(), buf.numel() * buf.element_size())
+mode = os.environ.get("WITH_NVIDIA_PEERMEM", "<default:true>")
+print(f"PROBE[WITH_NVIDIA_PEERMEM={mode}] GPU register rc={rc}", "-> WORKS" if rc == 0 else "-> FAIL", flush=True)
+sys.exit(0 if rc == 0 else 6)
+PY
+echo "-- peermem (default) --";                 timeout 60 python3 /tmp/mc_probe.py; echo "  (rc=$?)"
+echo "-- dmabuf (WITH_NVIDIA_PEERMEM=false) --"; WITH_NVIDIA_PEERMEM=false timeout 60 python3 /tmp/mc_probe.py; echo "  (rc=$?)"
+rm -f /tmp/mc_probe.py
+set -e
 
 echo "TokenSpeed installation complete"

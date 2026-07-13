@@ -2241,6 +2241,14 @@ mod tests {
     }
 
     fn vllm_mm_data(modality: common::Modality) -> VllmMultimodalData {
+        vllm_mm_data_with_shm(modality, false, 0)
+    }
+
+    fn vllm_mm_data_with_shm(
+        modality: common::Modality,
+        shm_enabled: bool,
+        shm_min_bytes: usize,
+    ) -> VllmMultimodalData {
         let is_video = modality == common::Modality::Video;
         VllmMultimodalData {
             pixel_values: vec![0u8; 16],
@@ -2253,8 +2261,8 @@ mod tests {
             flat_keys: HashMap::new(),
             keep_on_cpu_keys: vec![],
             modality,
-            shm_enabled: false,
-            shm_min_bytes: 0,
+            shm_enabled,
+            shm_min_bytes,
         }
     }
 
@@ -2268,5 +2276,43 @@ mod tests {
 
         let image = vllm_mm_data(common::Modality::Image).into_proto();
         assert_eq!(image.modality, common::Modality::Image as i32);
+    }
+
+    #[test]
+    fn vllm_inline_pixel_values_into_proto_uses_inline_payload() {
+        // shm_enabled=false must keep pixel_values inline regardless of size.
+        let proto = vllm_mm_data_with_shm(common::Modality::Image, false, 0).into_proto();
+        let tensor = proto.pixel_values.as_ref().unwrap();
+        assert!(
+            matches!(
+                tensor.payload.as_ref(),
+                Some(vllm::tensor_data::Payload::Inline(_))
+            ),
+            "expected inline pixel_values payload, got {:?}",
+            tensor.payload
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn vllm_shm_pixel_values_into_proto_uses_shm_payload() {
+        // shm_enabled=true + a low min-bytes threshold (below the 16-byte
+        // pixel_values buffer) must place pixel_values in /dev/shm, not inline.
+        let proto = vllm_mm_data_with_shm(common::Modality::Image, true, 1).into_proto();
+
+        // Collect + unlink any /dev/shm files this proto references before
+        // asserting, so a panic can't leak the segment (mirrors the tokenspeed
+        // shm tests' cleanup discipline).
+        let handles = collect_vllm_multimodal_inputs_shm_handles(&proto);
+        let payload_is_shm = matches!(
+            proto.pixel_values.as_ref().and_then(|t| t.payload.as_ref()),
+            Some(vllm::tensor_data::Payload::Shm(_))
+        );
+        cleanup_mm_shm_handles(&handles);
+
+        assert!(payload_is_shm, "expected shm pixel_values payload");
+        // The shm path must produce exactly one handle for pixel_values (no
+        // model-specific tensors in this fixture).
+        assert_eq!(handles.len(), 1);
     }
 }

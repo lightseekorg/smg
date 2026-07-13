@@ -174,6 +174,64 @@ class TestMultimodalQwen3VL:
 
 
 # =============================================================================
+# /dev/shm tensor-transport verification (1 GPU, vLLM)
+# =============================================================================
+
+
+@pytest.mark.engine("vllm")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
+@pytest.mark.model("Qwen/Qwen3-VL-8B-Instruct")
+# Force the /dev/shm tensor transport. A low min-bytes so any real image tensor
+# crosses the threshold, making the shm path deterministic regardless of size.
+@pytest.mark.gateway(
+    extra_args=["--multimodal-tensor-transport", "shm", "--multimodal-shm-min-bytes", "1024"]
+)
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestMultimodalShmTransport:
+    """Ground truth that the /dev/shm tensor transport actually engages.
+
+    Gateway and worker are co-located in CI, so they share /dev/shm and the shm
+    path can be used. This asserts not just that multimodal works, but that the
+    pixel tensor traveled over shm (``smg_mm_tensors_total{path="shm"}``) rather
+    than silently falling back to the inline gRPC payload.
+    """
+
+    def test_single_image_uses_shm_transport(self, model, setup_backend):
+        _, _, client, gateway = setup_backend
+
+        before = gateway.metric_sum("smg_mm_tensors_total", path="shm")
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What animal is in this image?"},
+                        _make_image_content(_image_to_base64_url(DOG_IMAGE_PATH)),
+                    ],
+                }
+            ],
+            temperature=0,
+            max_tokens=100,
+        )
+
+        text = _extract_text(response, False)
+        assert any(k in text.lower() for k in ["dog", "puppy", "labrador"]), (
+            f"Expected dog-related content, got: {text}"
+        )
+
+        after = gateway.metric_sum("smg_mm_tensors_total", path="shm")
+        assert after > before, (
+            "expected the /dev/shm tensor transport to be used "
+            f"(smg_mm_tensors_total path=shm before={before} after={after}); "
+            "the pixel tensor silently fell back to the inline gRPC payload"
+        )
+        logger.info("shm transport: path=shm count rose %s -> %s", before, after)
+
+
+# =============================================================================
 # Llama-4-Scout multimodal tests (4 GPU)
 # =============================================================================
 

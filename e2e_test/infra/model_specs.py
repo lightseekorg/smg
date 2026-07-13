@@ -162,6 +162,39 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "multimodal"],
     },
+    # TokenSpeed EPD multimodal model: Qwen3.6-35B-A3B (arch
+    # Qwen3_5MoeForConditionalGeneration — in TokenSpeed's multimodal registry —
+    # with a SigLIP vision tower). FP8 (not NVFP4): FP8 is Hopper-native so it runs
+    # on the h100 runner, whereas NVFP4 needs Blackwell. Only 3B params are active,
+    # so the FP8 weights (~35GB) fit one H100 at tp=1; that lets every EPD topology
+    # (1e1p1d/1e2p1d/2e1p1d/1e1p2d) run on the 4-GPU h100 runner, one worker per
+    # card. EPD (Encode-Prefill-Decode) disaggregation is TokenSpeed-only: the
+    # encode worker runs the vision tower, prefill/decode run the LM.
+    "Qwen/Qwen3.6-35B-A3B-FP8": {
+        "model": _resolve_model_path("Qwen/Qwen3.6-35B-A3B-FP8"),
+        "tp": 1,
+        "features": ["chat", "streaming", "multimodal", "moe"],
+        "startup_timeout": 600,
+        # Keep the 35B FP8 LM (prefill/decode) inside one 80GB H100 with headroom
+        # for generation activations + the mooncake/EPD buffers. TokenSpeed's
+        # defaults (gpu-mem-util auto ~0.9, kvstore-ratio 2.0, 131K-token KV pool)
+        # fill the card and OOM mid-generate -> empty response. A short context is
+        # ample for the single-image smoke test; the encode role ignores LM knobs.
+        "tokenspeed_args": [
+            "--gpu-memory-utilization",
+            "0.75",
+            "--max-model-len",
+            "8192",
+            "--max-num-seqs",
+            "8",
+            "--kvstore-ratio",
+            "0.5",
+        ],
+        # ~35GB and TokenSpeed-only (EPD). Exclude from tier-wide pre-download so
+        # the sglang/vLLM/TRT lanes (which never run EPD) don't pull it; the
+        # tokenspeed EPD job downloads it explicitly by id.
+        "skip_tier_download": True,
+    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),

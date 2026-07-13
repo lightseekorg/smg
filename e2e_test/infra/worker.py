@@ -41,6 +41,7 @@ class Worker:
     gpu_ids: list[int]
     mode: ConnectionMode = ConnectionMode.HTTP
     worker_type: WorkerType = WorkerType.REGULAR
+    tp_override: int | None = None  # per-worker tp (else model spec's tp)
     bootstrap_port: int | None = None
     nixl_port: int | None = None
     ib_device: str | None = None
@@ -173,7 +174,10 @@ class Worker:
         """Build engine-specific launch command using model specs."""
         spec = get_model_spec(self.model_id)
         model_path = spec["model"]
-        tp_size = spec.get("tp", 1)
+        # tp defaults to the spec's tp. A per-worker ``tp_override`` (e.g. the EPD
+        # encode worker's vision tower at tp=1) wins — it decouples tp from the
+        # spec tp without disturbing the ``gpus``-only DP path (gpus=dp*tp, tp=1).
+        tp_size = self.tp_override if self.tp_override is not None else spec.get("tp", 1)
         features = spec.get("features", [])
 
         if self.engine == "sglang":
@@ -341,6 +345,34 @@ class Worker:
             # ``logprobs=True`` requests get real per-token data back.
             "--enable-output-logprobs",
         ]
+
+        # EPD disaggregation: encode/prefill/decode are the SAME module, split by
+        # ``--disaggregation-mode``. Encode + prefill get a bootstrap port for the
+        # mooncake rendezvous; decode has none (mirrors the SGLang PD branch).
+        if self.worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE):
+            cmd.extend(["--disaggregation-mode", self.worker_type.value])
+            if self.bootstrap_port:
+                cmd.extend(["--disaggregation-bootstrap-port", str(self.bootstrap_port)])
+            # Pin mooncake to one IB device, exactly as the PD branch does.
+            # Without it the transfer engine enumerates every RoCE NIC on the
+            # node (18 on the 4-GPU H100 runner), fails to register a local
+            # segment, and the worker hangs before it can become healthy.
+            if self.ib_device:
+                cmd.extend(["--disaggregation-ib-device", self.ib_device])
+            # Match tokenspeed's EPD serve script (tokenspeed#549): explicit
+            # mooncake transfer backend + layerwise transfer, and skip the engine
+            # server warmup (the disaggregated warmup path hangs; the gRPC-side
+            # warmup is skipped via TOKENSPEED_SKIP_GRPC_WARMUP in _build_env).
+            cmd.extend(
+                [
+                    "--disaggregation-transfer-backend",
+                    "mooncake",
+                    "--disaggregation-layerwise-interval",
+                    "1",
+                    "--skip-server-warmup",
+                ]
+            )
+
         extra = spec.get("tokenspeed_args", [])
         if extra:
             cmd.extend(extra)
@@ -412,6 +444,44 @@ class Worker:
                 env["NCCL_IB_DISABLE"] = "1"
                 env["NCCL_SHM_DISABLE"] = "1"
                 env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
+
+        # EPD's mooncake transfer engine registers GPU memory for RDMA. mooncake
+        # defaults to the legacy nvidia_peermem GPUDirect path (WITH_NVIDIA_PEERMEM,
+        # a runtime env var that defaults to true), which fails to register GPU
+        # buffers with EFAULT on the NVIDIA Open Kernel driver the GPU runners use
+        # (no nvidia_peermem module). Force the dmabuf path instead — the open
+        # driver supports it and it registers GPU memory fine — so encode/prefill/
+        # decode workers come up instead of hanging on the swallowed registration
+        # failure. Verified on a GB300 box: peermem -> EFAULT, dmabuf -> rc=0.
+        if self.engine == "tokenspeed" and self.worker_type in (
+            WorkerType.ENCODE,
+            WorkerType.PREFILL,
+            WorkerType.DECODE,
+        ):
+            env.setdefault("WITH_NVIDIA_PEERMEM", "false")
+            # [temp diag] enable faulthandler so a SIGABRT on health timeout dumps
+            # every thread's Python stack to the worker log (see _dump_worker_stack).
+            env.setdefault("PYTHONFAULTHANDLER", "1")
+            # EPD runtime config mirrored from tokenspeed's own EPD serve script
+            # (serve_qwen35_122b_nvfp4_epd_1e2p1d.sh, tokenspeed#549). THE hang fix:
+            # the smg servicer's gRPC warmup drives stub.Generate, which on a
+            # disaggregated prefill/decode worker can't complete and hangs until the
+            # health timeout (server.py:_wait_and_warmup; the encode role self-skips,
+            # which is why only encode came up). Skip it so prefill/decode reach
+            # SERVING. The rest make the actual same-node encode<->prefill<->decode
+            # transfer work: NVLink-IPC intranode transport (RoCE loopback fails on
+            # one host), proxy bypass for the local mooncake bootstrap, and a large
+            # gRPC limit for the inline pixel payload to the encode worker.
+            env.setdefault("TOKENSPEED_SKIP_GRPC_WARMUP", "1")
+            env.setdefault("MC_INTRANODE_NVLINK", "1")
+            env.setdefault("MC_INTRA_NVLINK", "1")
+            env.setdefault("NO_PROXY", "*")
+            env.setdefault("no_proxy", "*")
+            env.setdefault("TOKENSPEED_GRPC_MAX_MESSAGE_BYTES", "2000000000")
+            # The 35B FP8 LM is tight on one 80GB card; reduce allocator
+            # fragmentation so generation doesn't OOM on reserved-but-unallocated
+            # memory (the OOM error explicitly recommends this).
+            env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
         return env
 
@@ -488,10 +558,27 @@ class Worker:
         finally:
             channel.close()
 
+        # [temp diag] turn a silent health timeout into a precise stack: SIGABRT +
+        # PYTHONFAULTHANDLER makes the worker print every thread's traceback to its
+        # log before dying, so we can see exactly where EPD prefill is stuck.
+        self._dump_worker_stack()
         raise TimeoutError(
             f"gRPC worker {self.model_id} on port {self.port} "
             f"did not become healthy within {timeout}s"
         )
+
+    def _dump_worker_stack(self) -> None:
+        """[temp diag] SIGABRT the worker so faulthandler dumps stacks to its log."""
+        if not self.process or self.process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(self.process.pid), signal.SIGABRT)
+        except Exception:
+            try:
+                self.process.send_signal(signal.SIGABRT)
+            except Exception:
+                return
+        time.sleep(3)  # let faulthandler flush the traceback to the log
 
 
 def start_workers(
@@ -537,9 +624,14 @@ def start_workers(
     gpus_per_worker = gpus or spec.get("tp", 1)
     timeout = spec.get("startup_timeout", timeout)
 
-    # Detect IB device for PD workers
-    has_pd = worker_type in (WorkerType.PREFILL, WorkerType.DECODE)
+    # Detect IB device for disaggregated (PD / EPD) workers
+    has_pd = worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE)
     ib_device = detect_ib_device() if has_pd else None
+
+    # The EPD encode worker runs the vision tower at tp == its GPU count (not DP),
+    # so its tp must track ``gpus`` rather than the LM's spec tp. Other worker
+    # types keep spec tp (``gpus``-only DP callers pass gpus=dp*tp with tp=1).
+    tp_override = gpus_per_worker if worker_type == WorkerType.ENCODE else None
 
     workers: list[Worker] = []
 
@@ -548,7 +640,10 @@ def start_workers(
             gpu_ids = list(range(gpu_offset, gpu_offset + gpus_per_worker))
             gpu_offset += gpus_per_worker
             port = get_open_port()
-            bootstrap_port = get_open_port() if worker_type == WorkerType.PREFILL else None
+            # Encode + prefill advertise a bootstrap port for the mooncake
+            # rendezvous; decode connects out and needs none.
+            needs_bootstrap = worker_type in (WorkerType.ENCODE, WorkerType.PREFILL)
+            bootstrap_port = get_open_port() if needs_bootstrap else None
 
             worker = Worker(
                 model_id=model_id,
@@ -557,6 +652,7 @@ def start_workers(
                 gpu_ids=gpu_ids,
                 mode=mode,
                 worker_type=worker_type,
+                tp_override=tp_override,
                 bootstrap_port=bootstrap_port,
                 ib_device=ib_device if has_pd else None,
                 log_dir=log_dir,

@@ -176,6 +176,20 @@ fn build_plan(
         });
     }
 
+    plan_encode_jobs(items, workers)
+}
+
+/// Match prepared encode items to their per-item encode-worker assignments,
+/// producing the encode->prefill bootstrap info and the dispatch jobs.
+///
+/// Validates that the EPD worker selection carries exactly one encode assignment
+/// per item, in item order, then assigns each item a random bootstrap room.
+/// Callers must handle the empty-`items` case before calling this (encode
+/// planning requires at least one item and a matching non-empty assignment set).
+fn plan_encode_jobs(
+    items: Vec<PreparedEncodeItem>,
+    workers: &WorkerSelection,
+) -> Result<EncodePlan> {
     let encode_assignments = workers
         .encode_assignments()
         .filter(|assignments| !assignments.is_empty())
@@ -290,4 +304,203 @@ async fn send_tokenspeed_encode_rpc(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use llm_multimodal::{
+        FieldLayout, ImageDetail, ImageFrame, ImageSource, Modality, PlaceholderRange,
+        PreprocessedEncoderInputs,
+    };
+    use ndarray::{ArrayD, IxDyn};
+
+    use super::*;
+    use crate::{
+        routers::grpc::{
+            context::{EncodeWorkerAssignment, WorkerSelection},
+            proto_wrapper::{TokenSpeedModality, TokenSpeedMultimodalItem, TokenSpeedTensor},
+        },
+        worker::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
+    };
+
+    /// Build a precomputed intermediate carrying `n` image items, mirroring the
+    /// batched-layout fixture used in the assemble.rs tests.
+    fn image_intermediate(n: usize) -> PrecomputedMultimodalIntermediate {
+        // encoder_input: one row per item, 2 features each.
+        let data: Vec<f32> = (0..n * 2).map(|v| v as f32).collect();
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(IxDyn(&[n, 2]), data).unwrap(),
+            feature_token_counts: vec![1; n],
+            item_sizes: vec![(1, 1); n],
+            model_specific: HashMap::new(),
+        };
+        let images = (0..n)
+            .map(|i| {
+                Arc::new(ImageFrame::new(
+                    image::DynamicImage::new_rgb8(1, 1),
+                    bytes::Bytes::from_static(b"x"),
+                    ImageDetail::Auto,
+                    ImageSource::InlineBytes,
+                    format!("hash-{i}"),
+                ))
+            })
+            .collect();
+        let placeholders = (0..n)
+            .map(|i| PlaceholderRange {
+                offset: 10 * (i + 1),
+                length: 1,
+            })
+            .collect();
+        PrecomputedMultimodalIntermediate {
+            modality: Modality::Image,
+            preprocessed,
+            images,
+            videos: vec![],
+            placeholders,
+            patch_offsets: None,
+            placeholder_token_id: Some(151655),
+            field_layouts: HashMap::from([("pixel_values".to_string(), FieldLayout::Batched)]),
+            keep_on_cpu_keys: vec![],
+        }
+    }
+
+    /// A synthetic prepared item with an inline (non-SHM) encoder input, so its
+    /// `Drop` never touches /dev/shm.
+    fn synthetic_item() -> PreparedEncodeItem {
+        let item = TokenSpeedMultimodalItem {
+            modality: TokenSpeedModality::Image,
+            encoder_input: TokenSpeedTensor::inline(
+                vec![0u8; 4],
+                vec![2, 1],
+                "bfloat16".to_string(),
+            ),
+            model_specific_tensors: HashMap::new(),
+            placeholder_token_id: Some(151655),
+            mm_placeholders: vec![(0, 1)],
+            content_hash: vec![],
+        };
+        PreparedEncodeItem::tokenspeed(item, false, 0)
+    }
+
+    /// An encode worker whose URL yields `bootstrap_host` and whose spec sets a
+    /// non-default `bootstrap_port`, so both are assertable in the plan output.
+    fn encode_worker(host: &str, port: u16) -> Arc<dyn Worker> {
+        let worker = BasicWorkerBuilder::new(format!("http://{host}:8080"))
+            .worker_type(WorkerType::Encode)
+            .bootstrap_port(Some(port))
+            .build();
+        Arc::new(worker)
+    }
+
+    fn disaggregated(assignments: Vec<EncodeWorkerAssignment>) -> WorkerSelection {
+        WorkerSelection::Disaggregated {
+            encode_assignments: Some(assignments),
+            prefill: Arc::new(BasicWorkerBuilder::new("http://prefill:8080").build()),
+            decode: Arc::new(BasicWorkerBuilder::new("http://decode:8080").build()),
+            runtime_type: RuntimeType::TokenSpeed,
+        }
+    }
+
+    #[test]
+    fn prepare_tokenspeed_items_yields_one_item_per_image() {
+        // assemble_tokenspeed splits the batched encoder input into per-item
+        // tensors; prepare_tokenspeed_items wraps each as a PreparedEncodeItem.
+        let precomputed = image_intermediate(3);
+        let items = prepare_tokenspeed_items(&precomputed, None).unwrap();
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn plan_encode_jobs_count_mismatch_errors() {
+        // 1 item but 2 assignments: the count guard must fire.
+        let items = vec![synthetic_item()];
+        let workers = disaggregated(vec![
+            EncodeWorkerAssignment {
+                item_index: 0,
+                worker: encode_worker("enc-a", 9001),
+            },
+            EncodeWorkerAssignment {
+                item_index: 1,
+                worker: encode_worker("enc-b", 9002),
+            },
+        ]);
+
+        // Avoid unwrap_err (EncodePlan is not Debug); match the Err directly.
+        let err = match plan_encode_jobs(items, &workers) {
+            Ok(_) => panic!("expected count-mismatch error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("count mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_encode_jobs_order_mismatch_errors() {
+        // Single item whose assignment is labeled item_index=1 (should be 0):
+        // the order guard must fire.
+        let items = vec![synthetic_item()];
+        let workers = disaggregated(vec![EncodeWorkerAssignment {
+            item_index: 1,
+            worker: encode_worker("enc-a", 9001),
+        }]);
+
+        // Avoid unwrap_err (EncodePlan is not Debug); match the Err directly.
+        let err = match plan_encode_jobs(items, &workers) {
+            Ok(_) => panic!("expected order-mismatch error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("order mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_encode_jobs_happy_path_builds_bootstrap_info() {
+        let items = vec![synthetic_item(), synthetic_item()];
+        let workers = disaggregated(vec![
+            EncodeWorkerAssignment {
+                item_index: 0,
+                worker: encode_worker("enc-a", 9001),
+            },
+            EncodeWorkerAssignment {
+                item_index: 1,
+                worker: encode_worker("enc-b", 9002),
+            },
+        ]);
+
+        let plan = plan_encode_jobs(items, &workers).unwrap();
+        let (bootstrap_info, dispatch) = plan.into_parts();
+
+        assert_eq!(dispatch.len(), 2);
+        assert_eq!(bootstrap_info.len(), 2);
+
+        assert_eq!(bootstrap_info[0].item_index, 0);
+        assert_eq!(bootstrap_info[0].bootstrap_host, "enc-a");
+        assert_eq!(bootstrap_info[0].bootstrap_port, 9001);
+
+        assert_eq!(bootstrap_info[1].item_index, 1);
+        assert_eq!(bootstrap_info[1].bootstrap_host, "enc-b");
+        assert_eq!(bootstrap_info[1].bootstrap_port, 9002);
+    }
+
+    #[test]
+    fn plan_encode_jobs_defaults_bootstrap_port_when_unset() {
+        // A worker without an explicit bootstrap_port falls back to
+        // DEFAULT_BOOTSTRAP_PORT in the bootstrap info.
+        let worker = Arc::new(
+            BasicWorkerBuilder::new("http://enc-c:8080")
+                .worker_type(WorkerType::Encode)
+                .build(),
+        ) as Arc<dyn Worker>;
+        let workers = disaggregated(vec![EncodeWorkerAssignment {
+            item_index: 0,
+            worker,
+        }]);
+
+        let plan = plan_encode_jobs(vec![synthetic_item()], &workers).unwrap();
+        let (bootstrap_info, _) = plan.into_parts();
+        assert_eq!(
+            bootstrap_info[0].bootstrap_port,
+            DEFAULT_BOOTSTRAP_PORT as i32
+        );
+    }
 }

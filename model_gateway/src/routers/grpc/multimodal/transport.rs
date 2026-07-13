@@ -367,7 +367,97 @@ fn compute_shm_namespace_id() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use openai_protocol::worker::WorkerSpec;
+
     use super::*;
+    use crate::{
+        routers::grpc::context::WorkerSelection,
+        worker::{BasicWorkerBuilder, Worker},
+    };
+
+    /// Build an `Arc<dyn Worker>` with the given per-request transport override
+    /// and optional `shm_namespace_id` label (the token `auto` compares against).
+    fn worker_with(
+        transport: Option<TransportMode>,
+        shm_namespace_id: Option<&str>,
+    ) -> Arc<dyn Worker> {
+        let mut spec = WorkerSpec::new("http://localhost:8080");
+        spec.multimodal_tensor_transport = transport;
+        let mut labels = HashMap::new();
+        if let Some(id) = shm_namespace_id {
+            labels.insert("shm_namespace_id".to_string(), id.to_string());
+        }
+        spec.labels = labels;
+        Arc::new(BasicWorkerBuilder::from_spec(spec).build())
+    }
+
+    fn single(transport: Option<TransportMode>, shm_namespace_id: Option<&str>) -> WorkerSelection {
+        WorkerSelection::Single {
+            worker: worker_with(transport, shm_namespace_id),
+        }
+    }
+
+    #[test]
+    fn inline_override_never_enables_shm() {
+        let sel = single(Some(TransportMode::Inline), None);
+        assert!(!resolve_mm_shm_enabled(Some(&sel), false));
+    }
+
+    #[test]
+    fn rdma_override_never_enables_shm() {
+        // rdma routes large tensors through the NIXL pixel lane, not SHM.
+        let sel = single(Some(TransportMode::Rdma), None);
+        assert!(!resolve_mm_shm_enabled(Some(&sel), false));
+    }
+
+    #[test]
+    fn shm_override_follows_dev_writable() {
+        // `shm` forces SHM whenever SMG can write /dev/shm, independent of the
+        // worker's namespace label. Assert against the real probe so the test is
+        // environment-robust (true on Linux CI, false where /dev/shm isn't writable).
+        let sel = single(Some(TransportMode::Shm), None);
+        assert_eq!(
+            resolve_mm_shm_enabled(Some(&sel), false),
+            mm_shm_dev_writable()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn auto_override_with_matching_namespace_follows_dev_writable() {
+        // `auto` enables SHM only when the worker is verified to share the
+        // gateway's /dev/shm (matching token) AND /dev/shm is writable.
+        let local = local_shm_namespace_id().expect("shm namespace id resolves on Linux");
+        let sel = single(Some(TransportMode::Auto), Some(local));
+        assert_eq!(
+            resolve_mm_shm_enabled(Some(&sel), false),
+            mm_shm_dev_writable()
+        );
+    }
+
+    #[test]
+    fn auto_override_with_mismatched_namespace_disables_shm() {
+        // A non-matching token means "not verified as sharing /dev/shm", so `auto`
+        // must fall back to inline even where /dev/shm is writable.
+        let sel = single(Some(TransportMode::Auto), Some("boot-x:99999999"));
+        assert!(!resolve_mm_shm_enabled(Some(&sel), false));
+    }
+
+    #[test]
+    fn auto_override_with_empty_namespace_disables_shm() {
+        // A missing/empty token is treated as non-sharing.
+        let sel = single(Some(TransportMode::Auto), Some(""));
+        assert!(!resolve_mm_shm_enabled(Some(&sel), false));
+    }
+
+    #[test]
+    fn no_workers_disables_shm() {
+        // Without a worker selection there is no locality proof and no override;
+        // the router default is `inline`, so SHM stays off.
+        assert!(!resolve_mm_shm_enabled(None, false));
+    }
 
     #[test]
     fn modality_dtype_precedes_global_then_worker_with_bfloat16_fallback() {

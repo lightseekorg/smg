@@ -126,6 +126,13 @@ jobs:
       - name: Download models
         run: bash scripts/ci_download_model.sh --gpu-tier ${{ inputs.gpu_tier }}
 
+      # The TokenSpeed EPD model is skip_tier_download (large, engine-specific), so
+      # the tier step above skips it; pull it by id only for the 4-GPU tokenspeed
+      # lane that runs the EPD e2e — other lanes never touch it.
+      - name: Download EPD model (tokenspeed only)
+        if: inputs.engine == 'tokenspeed' && inputs.gpu_tier == '4'
+        run: bash scripts/ci_download_model.sh "Qwen/Qwen3.6-35B-A3B-FP8"
+
       # Run tests
       - name: Run E2E tests
         timeout-minutes: ${{ inputs.test_timeout }}

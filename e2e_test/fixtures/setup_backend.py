@@ -107,6 +107,7 @@ def setup_backend(request: pytest.FixtureRequest):
     Backend type is determined by parametrize value via ``request.param``:
       - ``"http"``, ``"grpc"``: Local workers (SGLang, vLLM, or TRT-LLM)
       - ``"pd_http"``, ``"pd_grpc"``: PD disaggregation workers
+      - ``"epd_grpc"``: EPD (encode-prefill-decode) disaggregation (TokenSpeed)
       - ``"openai"``, ``"xai"``, ``"anthropic"``: Cloud backends (no workers)
 
     Configuration via markers:
@@ -115,12 +116,21 @@ def setup_backend(request: pytest.FixtureRequest):
       - ``@pytest.mark.workers(gpus=2, extra_engine_args=[...])``: Per-worker
         GPU count and extra engine CLI args (local workers only)
       - ``@pytest.mark.workers(prefill=1, decode=1)``: PD worker counts
+      - EPD topology: pass a ("epd_grpc", (encode, prefill, decode)) param
       - ``@pytest.mark.gateway(policy=..., timeout=..., extra_args=...)``: Gateway config
 
     Returns:
         Tuple of ``(backend_name, model_path, client, gateway)``
     """
-    backend_name: str = request.param
+    # EPD topologies pass a ("epd_grpc", (n_encode, n_prefill, n_decode)) tuple;
+    # every other backend passes a bare protocol string. Read the topology from
+    # request.param, NOT a marker — this fixture is class-scoped, so per-param
+    # marks on the generated test items aren't visible on request.node.
+    param = request.param
+    if isinstance(param, tuple):
+        backend_name, epd_topology = param
+    else:
+        backend_name, epd_topology = param, None
 
     if os.environ.get(ENV_SKIP_BACKEND_SETUP, "").lower() in ("1", "true", "yes"):
         pytest.skip(f"{ENV_SKIP_BACKEND_SETUP} is set")
@@ -137,8 +147,9 @@ def setup_backend(request: pytest.FixtureRequest):
         return
 
     # Local backends
+    is_epd = backend_name.startswith("epd_")
     is_pd = backend_name.startswith("pd_")
-    protocol = backend_name.replace("pd_", "")
+    protocol = backend_name.replace("epd_", "").replace("pd_", "")
     connection_mode = ConnectionMode(protocol)
     engine = get_runtime()
     model_path = get_model_spec(model_id)["model"]
@@ -154,7 +165,18 @@ def setup_backend(request: pytest.FixtureRequest):
 
     gateway = Gateway()
     try:
-        if is_pd:
+        if is_epd:
+            yield from _setup_epd(
+                model_id,
+                model_path,
+                engine,
+                connection_mode,
+                epd_topology or (1, 1, 1),
+                gateway_config,
+                gateway,
+                log_dir,
+            )
+        elif is_pd:
             yield from _setup_pd(
                 model_id,
                 model_path,
@@ -295,6 +317,98 @@ def _setup_pd(
         yield backend_name, model_path, _make_openai_client(gateway), gateway
     finally:
         logger.info("Tearing down %s PD backend", runtime_label)
+        gateway.shutdown()
+        stop_workers(all_workers)
+
+
+# ---------------------------------------------------------------------------
+# EPD disaggregation backend (TokenSpeed)
+# ---------------------------------------------------------------------------
+
+
+def _setup_epd(
+    model_id,
+    model_path,
+    engine,
+    connection_mode,
+    epd_topology,
+    gateway_config,
+    gateway,
+    log_dir,
+):
+    """Launch encode + prefill + decode workers + EPD gateway, yield, tear down.
+
+    Mirrors ``_setup_pd``. ``epd_topology`` is ``(n_encode, n_prefill, n_decode)``.
+    The encode worker runs the vision tower at tp=1 (``gpus=1``); prefill/decode
+    run the LM at the model spec's tp. GPU offsets are laid out encode-first so
+    co-located workers don't share GPUs.
+    """
+    spec = get_model_spec(model_id)
+    tp = spec.get("tp", 1)
+    num_encode, num_prefill, num_decode = epd_topology
+    backend_name = f"epd_{connection_mode.value}"
+    runtime_label = RUNTIME_LABELS.get(engine, engine)
+
+    logger.info(
+        "Starting %s EPD backend: model=%s, %d encode + %d prefill + %d decode",
+        runtime_label,
+        model_id,
+        num_encode,
+        num_prefill,
+        num_decode,
+    )
+
+    all_workers: list = []
+    try:
+        # Encode workers: vision tower at tp=1, one GPU each, starting at GPU 0.
+        encode_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=num_encode,
+            worker_type=WorkerType.ENCODE,
+            log_dir=log_dir,
+            gpus=1,
+        )
+        all_workers.extend(encode_workers)
+
+        # Prefill workers start on GPUs after the (tp=1) encode workers.
+        prefill_gpu_offset = num_encode
+        prefill_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=num_prefill,
+            worker_type=WorkerType.PREFILL,
+            log_dir=log_dir,
+            gpu_offset=prefill_gpu_offset,
+        )
+        all_workers.extend(prefill_workers)
+
+        # Decode workers start on GPUs after encode + prefill.
+        decode_gpu_offset = prefill_gpu_offset + num_prefill * tp
+        decode_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=num_decode,
+            worker_type=WorkerType.DECODE,
+            log_dir=log_dir,
+            gpu_offset=decode_gpu_offset,
+        )
+        all_workers.extend(decode_workers)
+
+        _start_gateway(
+            gateway,
+            gateway_config,
+            encode_workers=encode_workers,
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+        )
+        logger.info("%s EPD backend ready at %s", runtime_label, gateway.base_url)
+        yield backend_name, model_path, _make_openai_client(gateway), gateway
+    finally:
+        logger.info("Tearing down %s EPD backend", runtime_label)
         gateway.shutdown()
         stop_workers(all_workers)
 

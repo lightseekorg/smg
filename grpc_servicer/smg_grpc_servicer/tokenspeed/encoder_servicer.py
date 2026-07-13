@@ -176,6 +176,15 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
 
         bootstrap_room = request.items[0].bootstrap_room
 
+        # Per-request marker so operators (and the EPD e2e) can confirm the encode
+        # worker actually received the dispatch — the defining EPD step, and the
+        # signal a naive "the answer looks right" check would miss.
+        logger.info(
+            "EPD encode: accepted request_id=%s bootstrap_room=%d",
+            request.request_id,
+            bootstrap_room,
+        )
+
         if os.environ.get("EPD_INGEST_OFFLOOP", "1").lower() not in ("0", "false", "no"):
             # Per-item ingest (proto->tensor + pickle) BLOCKS the lone asyncio
             # event loop, so grpc.aio cannot deliver the next Encode message until

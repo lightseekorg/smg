@@ -17,6 +17,7 @@ class WorkerType(StrEnum):
     REGULAR = "regular"
     PREFILL = "prefill"
     DECODE = "decode"
+    ENCODE = "encode"  # EPD encode worker (vision tower); TokenSpeed-only
 
 
 class Runtime(StrEnum):
