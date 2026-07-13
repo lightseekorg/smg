@@ -169,6 +169,11 @@ class RdmaPixelPuller:
             self._nixl_agent = None
             self._landing_free = None
 
+    @property
+    def ready(self) -> bool:
+        """True once the NIXL agent + landing pool initialized (RDMA pulls possible)."""
+        return self._nixl_agent is not None and self._landing_free is not None
+
     def _ensure_remote_ready(self, ip: str, port: int, remote, room: int) -> None:
         """One-time metadata handshake per gateway listener."""
         key = (ip, port)
