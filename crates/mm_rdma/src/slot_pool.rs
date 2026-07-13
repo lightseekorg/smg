@@ -4,6 +4,7 @@
 //! lives) is unit-testable without a registered agent or any RDMA hardware.
 
 use std::{
+    collections::VecDeque,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -24,8 +25,12 @@ pub(crate) struct SlotPool {
     /// Raw base address of the leaked arena allocation (usize => Send+Sync).
     base: usize,
     slot_bytes: usize,
-    /// Available slot indices.
-    free: Mutex<Vec<u32>>,
+    /// Available slot indices. A FIFO queue (not a LIFO stack) so reuse is
+    /// round-robin across all slots: this maximizes the time before any freed slot
+    /// is re-leased, widening the safety window against a slow worker READ still
+    /// referencing a slot the reaper just reclaimed (a LIFO stack would hammer the
+    /// same few slots and shorten that window).
+    free: Mutex<VecDeque<u32>>,
     /// Leased slots keyed by the caller's slot key (free-on-notif + TTL reclaim).
     occupied: DashMap<i64, OccSlot>,
     /// Monotonic per-lease generation stamp (see [`crate::GEN_BYTES`]). Starts at 1
@@ -61,7 +66,7 @@ impl SlotPool {
         if bytes.len() + FRAME_OVERHEAD > self.slot_bytes {
             return None;
         }
-        let slot = self.free.lock().pop()?;
+        let slot = self.free.lock().pop_front()?;
         let addr = self.base + slot as usize * self.slot_bytes;
         // A fresh, monotonically increasing stamp for THIS lease; a later lease of the
         // same slot gets a strictly larger gen. Relaxed is fine: we only need
@@ -97,7 +102,7 @@ impl SlotPool {
     /// Return the slot leased for `slot_key` to the free list (idempotent).
     pub(crate) fn free_slot_key(&self, slot_key: i64) {
         if let Some((_key, occ)) = self.occupied.remove(&slot_key) {
-            self.free.lock().push(occ.slot);
+            self.free.lock().push_back(occ.slot);
         }
     }
 
@@ -108,7 +113,9 @@ impl SlotPool {
         let stale: Vec<i64> = self
             .occupied
             .iter()
-            .filter(|e| now.duration_since(e.value().at) >= ttl)
+            // Saturate rather than `duration_since` (which can panic if `now` is
+            // ever observed before the lease stamp, e.g. cross-core clock skew).
+            .filter(|e| now.saturating_duration_since(e.value().at) >= ttl)
             .map(|e| *e.key())
             .collect();
         let n = stale.len();

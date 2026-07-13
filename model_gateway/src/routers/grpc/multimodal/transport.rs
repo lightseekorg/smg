@@ -169,6 +169,12 @@ const RDMA_GATEWAY_AGENT_NAME: &str = "smg-gateway-encode";
 /// one image's framed pixel buffer; raise `SMG_RDMA_SLOT_BYTES` for larger images.
 const DEFAULT_RDMA_POOL_SLOTS: usize = 64;
 const DEFAULT_RDMA_SLOT_BYTES: usize = 32 * 1024 * 1024;
+/// Upper bound on the pre-registered arena (`pool_slots * slot_bytes`). A plausible
+/// env misconfiguration (huge `SMG_RDMA_POOL_SLOTS` x `SMG_RDMA_SLOT_BYTES`) would
+/// otherwise flow into a single `vec![0u8; total]` whose allocation failure aborts
+/// the process instead of falling back to inline. 8 GiB is well above the 2 GiB
+/// default and any realistic pool.
+const MAX_RDMA_ARENA_BYTES: usize = 8 * 1024 * 1024 * 1024;
 /// Fixed slack added to the derived worker-max-hold when deriving the slot TTL.
 /// A const rather than an env knob: it only ever widens the lost-notif leak window
 /// (a capacity nit, never correctness -- the crate's per-lease gen framing makes a
@@ -186,7 +192,17 @@ pub(crate) fn mm_rdma_exporter() -> Option<&'static RdmaExporter> {
             if !rdma_lane_enabled() {
                 return None;
             }
-            match RdmaExporter::new(build_rdma_config_from_env()) {
+            let cfg = build_rdma_config_from_env();
+            if cfg.listen_ip.is_empty() {
+                // Without a listener IP the worker can't do the cross-node metadata
+                // exchange, so every export would fall back to inline anyway. Skip
+                // building the NIXL agent + (2 GiB default) arena for nothing.
+                warn!(
+                    "EPD RDMA: lane enabled but SMG_RDMA_LISTEN_IP is unset; staying on the inline path"
+                );
+                return None;
+            }
+            match RdmaExporter::new(cfg) {
                 Ok(exporter) => Some(exporter),
                 Err(e) => {
                     error!(error = %e, "EPD RDMA: exporter init failed; inline fallback");
@@ -211,16 +227,43 @@ fn rdma_lane_enabled() -> bool {
 /// Build the exporter config from the `SMG_RDMA_*` env knobs. All RDMA policy lives
 /// here; the crate consumes the resulting [`RdmaConfig`] verbatim.
 fn build_rdma_config_from_env() -> RdmaConfig {
+    // Bound both slot size and count so the arena stays within MAX_RDMA_ARENA_BYTES:
+    // a fat-fingered env pair must not turn into an unbounded startup allocation.
+    let slot_bytes =
+        rdma_env_positive("SMG_RDMA_SLOT_BYTES", DEFAULT_RDMA_SLOT_BYTES).min(MAX_RDMA_ARENA_BYTES);
+    let pool_slots = clamp_pool_slots(
+        rdma_env_positive("SMG_RDMA_POOL_SLOTS", DEFAULT_RDMA_POOL_SLOTS),
+        slot_bytes,
+    );
     RdmaConfig {
         // Empty listener IP => the exporter cannot do the cross-node metadata
-        // exchange, so it leaves callers on the inline path.
+        // exchange, so the caller stays on the inline path (checked before we build
+        // the exporter in `mm_rdma_exporter`).
         listen_ip: std::env::var("SMG_RDMA_LISTEN_IP").unwrap_or_default(),
         listen_port: rdma_env_parse("SMG_RDMA_LISTEN_PORT", 18515),
         agent_name: RDMA_GATEWAY_AGENT_NAME.to_string(),
-        pool_slots: rdma_env_positive("SMG_RDMA_POOL_SLOTS", DEFAULT_RDMA_POOL_SLOTS),
-        slot_bytes: rdma_env_positive("SMG_RDMA_SLOT_BYTES", DEFAULT_RDMA_SLOT_BYTES),
+        pool_slots,
+        slot_bytes,
         slot_ttl: derive_rdma_slot_ttl(),
     }
+}
+
+/// Clamp the slot count so the arena (`pool_slots * slot_bytes`) stays within
+/// [`MAX_RDMA_ARENA_BYTES`], bounding the startup allocation. Keeps at least one
+/// slot; warns when it has to reduce an oversized request.
+fn clamp_pool_slots(pool_slots: usize, slot_bytes: usize) -> usize {
+    let max_slots = (MAX_RDMA_ARENA_BYTES / slot_bytes.max(1)).max(1);
+    if pool_slots > max_slots {
+        warn!(
+            requested = pool_slots,
+            capped = max_slots,
+            slot_bytes,
+            max_arena_bytes = MAX_RDMA_ARENA_BYTES,
+            "EPD RDMA: requested pixel arena exceeds the cap; reducing slot count"
+        );
+        return max_slots;
+    }
+    pool_slots
 }
 
 /// The worst-case wall time the encode worker may hold a shipped descriptor before
@@ -239,14 +282,33 @@ fn worker_max_hold() -> Duration {
 /// force-reclaims it. MUST exceed [`worker_max_hold`] or the TTL races a still-valid
 /// READ: the reaper frees the slot, the next image re-leases the SAME address, and
 /// the late READ silently returns the WRONG image's pixels. Derived by default
-/// (= `worker_max_hold` + [`RDMA_SLOT_TTL_SLACK`]); `SMG_RDMA_SLOT_TTL_S` overrides.
+/// (= `worker_max_hold` + [`RDMA_SLOT_TTL_SLACK`]); `SMG_RDMA_SLOT_TTL_S` overrides,
+/// but an override that does not exceed the hold is rejected (see [`resolve_slot_ttl`]).
 fn derive_rdma_slot_ttl() -> Duration {
-    if let Ok(v) = std::env::var("SMG_RDMA_SLOT_TTL_S") {
-        if let Ok(secs) = v.parse::<u64>() {
-            return Duration::from_secs(secs);
+    let override_secs = std::env::var("SMG_RDMA_SLOT_TTL_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    resolve_slot_ttl(override_secs, worker_max_hold())
+}
+
+/// Apply the TTL invariant to an optional `SMG_RDMA_SLOT_TTL_S` override: honor it
+/// only if it strictly exceeds `hold` (otherwise the reaper could reclaim a slot the
+/// worker is still READing and cross-wire images). A too-small override is ignored
+/// with a warning in favor of the derived `hold + RDMA_SLOT_TTL_SLACK`. Pure (takes
+/// `hold` as a parameter) so the invariant is unit-tested without touching the env.
+fn resolve_slot_ttl(override_secs: Option<u64>, hold: Duration) -> Duration {
+    if let Some(secs) = override_secs {
+        let ttl = Duration::from_secs(secs);
+        if ttl > hold {
+            return ttl;
         }
+        warn!(
+            ttl_s = secs,
+            hold_s = hold.as_secs(),
+            "SMG_RDMA_SLOT_TTL_S must exceed the worker's max hold; ignoring override"
+        );
     }
-    worker_max_hold() + RDMA_SLOT_TTL_SLACK
+    hold + RDMA_SLOT_TTL_SLACK
 }
 
 /// Parse a numeric env knob, falling back to `default` when unset or unparsable.
@@ -511,6 +573,35 @@ mod tests {
             derive_rdma_slot_ttl(),
             worker_max_hold()
         );
+    }
+
+    /// The `SMG_RDMA_SLOT_TTL_S` override is honored only when it exceeds the worker
+    /// hold; a too-small (or absent) value falls back to the derived `hold + slack`,
+    /// so an operator can never silently reintroduce the recycled-under-READ bug.
+    #[test]
+    fn slot_ttl_override_must_exceed_hold() {
+        let hold = Duration::from_secs(180);
+        // Override above the hold is honored verbatim.
+        assert_eq!(resolve_slot_ttl(Some(600), hold), Duration::from_secs(600));
+        // Override at or below the hold is rejected -> derived hold + slack.
+        assert_eq!(
+            resolve_slot_ttl(Some(180), hold),
+            hold + RDMA_SLOT_TTL_SLACK
+        );
+        assert_eq!(resolve_slot_ttl(Some(10), hold), hold + RDMA_SLOT_TTL_SLACK);
+        // No override -> derived.
+        assert_eq!(resolve_slot_ttl(None, hold), hold + RDMA_SLOT_TTL_SLACK);
+    }
+
+    /// A slot count that would blow past the arena cap is reduced to fit (>= 1),
+    /// while a normal request passes through untouched.
+    #[test]
+    fn pool_slots_capped_to_arena_max() {
+        let slot_bytes = 1024 * 1024 * 1024; // 1 GiB
+        let capped = clamp_pool_slots(1_000_000, slot_bytes);
+        assert_eq!(capped, MAX_RDMA_ARENA_BYTES / slot_bytes);
+        assert!(capped >= 1, "must keep at least one slot");
+        assert_eq!(clamp_pool_slots(64, 32 * 1024 * 1024), 64);
     }
 
     #[test]

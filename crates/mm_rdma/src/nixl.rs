@@ -28,20 +28,30 @@ use nixl_sys::{
     OptArgs, RegistrationHandle,
 };
 use parking_lot::Mutex;
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::{slot_pool::SlotPool, RdmaConfig, DESCRIPTOR_MAGIC, GEN_BYTES};
 
 /// Reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_millis(20);
 
-/// Failure constructing a [`RdmaExporter`] (NIXL agent init or arena registration).
+/// Failure constructing a [`RdmaExporter`].
 #[derive(Debug)]
-pub struct RdmaError(NixlError);
+pub enum RdmaError {
+    /// NIXL agent init or arena registration failed.
+    Nixl(NixlError),
+    /// The background reaper thread could not be spawned. Without it, leased slots
+    /// are never reclaimed, so the pool would exhaust; the gateway must fall back to
+    /// inline rather than run with a dead reaper.
+    Reaper(std::io::Error),
+}
 
 impl std::fmt::Display for RdmaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RDMA exporter init failed: {:?}", self.0)
+        match self {
+            RdmaError::Nixl(e) => write!(f, "RDMA exporter init failed: {e:?}"),
+            RdmaError::Reaper(e) => write!(f, "RDMA reaper thread spawn failed: {e}"),
+        }
     }
 }
 
@@ -49,7 +59,7 @@ impl std::error::Error for RdmaError {}
 
 impl From<NixlError> for RdmaError {
     fn from(e: NixlError) -> Self {
-        RdmaError(e)
+        RdmaError::Nixl(e)
     }
 }
 
@@ -126,7 +136,7 @@ impl RdmaExporter {
         let agent = Mutex::new(gw);
         let arena = build_arena(&agent, &cfg)?;
         let inner = Arc::new(ExporterInner { cfg, agent, arena });
-        spawn_reaper(Arc::clone(&inner));
+        spawn_reaper(Arc::clone(&inner)).map_err(RdmaError::Reaper)?;
         debug!(
             slots = inner.cfg.pool_slots,
             slot_bytes = inner.cfg.slot_bytes,
@@ -203,24 +213,48 @@ fn build_arena(agent: &Mutex<GatewayRdma>, cfg: &RdmaConfig) -> Result<SlotArena
     let boxed = vec![0u8; total].into_boxed_slice();
     let base = Box::into_raw(boxed) as *mut u8 as usize;
     let region = ArenaRegion { base, size: total };
-    let handle = {
+    let register = || -> Result<RegistrationHandle, NixlError> {
         let guard = agent.lock();
         // Bind the registration to the UCX backend so it gets an rc rkey (needed for
         // the worker's one-sided RDMA READ; without it the READ hangs over rc).
         let mut opt = OptArgs::new()?;
         opt.add_backend(&guard.backend)?;
-        guard.agent.register_memory(&region, Some(&opt))?
+        guard.agent.register_memory(&region, Some(&opt))
     };
-    Ok(SlotArena {
-        pool: SlotPool::new(base, cfg.slot_bytes, cfg.pool_slots),
-        _handle: handle,
-    })
+    match register() {
+        Ok(handle) => Ok(SlotArena {
+            pool: SlotPool::new(base, cfg.slot_bytes, cfg.pool_slots),
+            _handle: handle,
+        }),
+        Err(e) => {
+            // Registration failed: reclaim the arena we just leaked rather than
+            // burning up to `pool_slots * slot_bytes` (2 GiB by default) for the
+            // process lifetime while the gateway falls back to the inline path.
+            // SAFETY: `base`/`total` are exactly the pointer+length produced by the
+            // `Box::into_raw` above and nothing else references the buffer yet
+            // (registration failed, no slot leased), so reconstructing and dropping
+            // the Box is sound.
+            #[expect(
+                unsafe_code,
+                reason = "free the arena leaked via Box::into_raw when NIXL registration fails"
+            )]
+            unsafe {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                    base as *mut u8,
+                    total,
+                )));
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Background reaper: drain free-notifs (tag = slot key) to return the leased slot to
 /// the free list, plus a TTL sweep so a lost notif can never leak a slot. Holds an
-/// `Arc<ExporterInner>` so it runs for the process lifetime.
-fn spawn_reaper(inner: Arc<ExporterInner>) {
+/// `Arc<ExporterInner>` so it runs for the process lifetime. Returns the spawn error
+/// so [`RdmaExporter::new`] can fail (and the gateway stay inline) rather than run
+/// with a dead reaper that would leak every leased slot until the pool exhausts.
+fn spawn_reaper(inner: Arc<ExporterInner>) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("epd-rdma-reaper".into())
         .spawn(move || loop {
@@ -247,7 +281,6 @@ fn spawn_reaper(inner: Arc<ExporterInner>) {
                 .arena
                 .pool
                 .reap_stale(Instant::now(), inner.cfg.slot_ttl);
-        })
-        .map_err(|e| error!(error = ?e, "EPD RDMA: reaper thread spawn failed"))
-        .ok();
+        })?;
+    Ok(())
 }
