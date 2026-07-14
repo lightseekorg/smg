@@ -198,6 +198,11 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
             except Exception as e:  # noqa: BLE001
                 logger.exception("TokenSpeed encode ingest failed")
                 await context.abort(grpc.StatusCode.INTERNAL, str(e))
+        logger.info(
+            "EPD encode: accepted request_id=%s room=%s",
+            request.request_id,
+            bootstrap_room,
+        )
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
 
     def _build_encode_request(self, request, bootstrap_room):

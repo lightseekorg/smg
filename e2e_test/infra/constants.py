@@ -15,6 +15,7 @@ class WorkerType(StrEnum):
     """Worker specialization type."""
 
     REGULAR = "regular"
+    ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
 
