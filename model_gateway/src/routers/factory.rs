@@ -92,8 +92,9 @@ impl RouterFactory {
                         return Err("Gemini mode requires HTTP connection_mode".to_string())
                     }
                 }
-                let mode = grpc_mode(&ctx.router_config)
-                    .ok_or_else(|| "gRPC connection mode requires a gRPC routing mode".to_string())?;
+                let mode = grpc_mode(&ctx.router_config).ok_or_else(|| {
+                    "gRPC connection mode requires a gRPC routing mode".to_string()
+                })?;
                 Self::create_grpc_router(ctx, mode)
             }
             ConnectionMode::Http => match &ctx.router_config.mode {

@@ -129,7 +129,10 @@ impl PipelineDeps {
     fn configured_processors(
         &self,
         backend: &'static str,
-    ) -> (processor::ResponseProcessor, Arc<streaming::StreamingProcessor>) {
+    ) -> (
+        processor::ResponseProcessor,
+        Arc<streaming::StreamingProcessor>,
+    ) {
         let processor = processor::ResponseProcessor::new(
             self.tool_parser_factory.clone(),
             self.reasoning_parser_factory.clone(),
@@ -150,7 +153,10 @@ impl PipelineDeps {
     /// factories (completion does not use configured parsers), labeled `backend`.
     fn default_processors(
         backend: &'static str,
-    ) -> (processor::ResponseProcessor, Arc<streaming::StreamingProcessor>) {
+    ) -> (
+        processor::ResponseProcessor,
+        Arc<streaming::StreamingProcessor>,
+    ) {
         let processor = processor::ResponseProcessor::new(
             ToolParserFactory::default(),
             ReasoningParserFactory::default(),

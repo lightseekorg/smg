@@ -31,10 +31,10 @@ use crate::{
         error,
         grpc::{
             client::GrpcClient,
-            context::{
-                ClientSelection, EncodeOutputs, RequestContext, WorkerSelection,
+            context::{ClientSelection, EncodeOutputs, RequestContext, WorkerSelection},
+            multimodal::{
+                assemble_tokenspeed_for_encode, mm_rdma_exporter, MultimodalIntermediate,
             },
-            multimodal::{assemble_tokenspeed_for_encode, mm_rdma_exporter, MultimodalIntermediate},
             proto_wrapper::{
                 cleanup_mm_shm_handles, cleanup_tokenspeed_items_encoder_shm,
                 collect_tokenspeed_multimodal_inputs_shm_handles, stage_tokenspeed_tensor_rdma,
@@ -439,7 +439,9 @@ mod tests {
                 content_hash: vec![1, 2, 3],
             };
             (
-                PreparedEncodeItem::tokenspeed(item, /*shm_enabled=*/ true, /*shm_min_bytes=*/ 0),
+                PreparedEncodeItem::tokenspeed(
+                    item, /*shm_enabled=*/ true, /*shm_min_bytes=*/ 0,
+                ),
                 path,
             )
         }

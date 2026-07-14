@@ -3,10 +3,11 @@
 //! `router_type` label, the per-endpoint pipeline constructors) will map from
 //! this enum.
 
-use crate::config::types::{RouterConfig, RoutingMode};
-use crate::routers::grpc::common::stages::WorkerSelectionMode;
-use crate::routers::grpc::context::ExecutionPlanKind;
-use crate::worker::ConnectionMode;
+use crate::{
+    config::types::{RouterConfig, RoutingMode},
+    routers::grpc::{common::stages::WorkerSelectionMode, context::ExecutionPlanKind},
+    worker::ConnectionMode,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -66,9 +67,27 @@ mod tests {
     #[test]
     fn mode_maps_to_stage_params() {
         let cases = [
-            (Mode::Regular, WorkerSelectionMode::Regular, ExecutionPlanKind::Single, false, "grpc"),
-            (Mode::PrefillDecode, WorkerSelectionMode::PrefillDecode, ExecutionPlanKind::PrefillDecode, true, "grpc_pd"),
-            (Mode::EncodePrefillDecode, WorkerSelectionMode::EncodePrefillDecode, ExecutionPlanKind::EncodePrefillDecode, false, "grpc_epd"),
+            (
+                Mode::Regular,
+                WorkerSelectionMode::Regular,
+                ExecutionPlanKind::Single,
+                false,
+                "grpc",
+            ),
+            (
+                Mode::PrefillDecode,
+                WorkerSelectionMode::PrefillDecode,
+                ExecutionPlanKind::PrefillDecode,
+                true,
+                "grpc_pd",
+            ),
+            (
+                Mode::EncodePrefillDecode,
+                WorkerSelectionMode::EncodePrefillDecode,
+                ExecutionPlanKind::EncodePrefillDecode,
+                false,
+                "grpc_epd",
+            ),
         ];
         for (m, ws, pk, inject, rt) in cases {
             assert_eq!(m.worker_selection(), ws, "worker_selection {m:?}");
