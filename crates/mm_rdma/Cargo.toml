@@ -19,7 +19,7 @@ tracing.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
 # The NIXL FFI: bindgen-heavy, so optional and pulled in only by the `nixl` feature.
-nixl-sys = { version = "0.10.1", features = ["stub-api"], optional = true }
+nixl-sys = { version = "1.3.1", features = ["stub-api"], optional = true }
 
 [lints]
 workspace = true
