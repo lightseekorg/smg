@@ -482,29 +482,26 @@ mod tests {
             );
         }
 
-        /// A dispatched item transfers SHM ownership to the send path
-        /// (cleanup_on_drop cleared), so the plan's own `Drop` must NOT unlink the
-        /// segment. Guards the success path against a double-unlink regression.
+        /// dispatch() disarms the item's own Drop (cleanup_on_drop=false) and
+        /// hands cleanup to the send-path guard, which reclaims the segment after
+        /// the send attempt — so even a failed dispatch reclaims exactly once
+        /// (no leak, and the disarmed Drop cannot double-unlink).
         #[tokio::test]
-        async fn dispatch_transfers_shm_ownership_off_the_drop_guard() {
+        async fn dispatch_reclaims_shm_via_send_path_guard() {
             if !mm_shm_dev_writable() {
                 return;
             }
 
             let (item, path) = tokenspeed_item_backed_by_shm();
 
-            // dispatch() connects to a bogus endpoint and errors out, but by then
-            // it has already cleared cleanup_on_drop and taken the item,
-            // transferring the SHM lifecycle to the RPC send path. The segment
-            // must survive this Drop.
+            // Bogus endpoint: the encode RPC fails, but the send-path guard still
+            // reclaims the segment when dispatch() returns.
             let _ = item.dispatch("http://127.0.0.1:1".to_string(), 7).await;
 
             assert!(
-                path.exists(),
-                "a dispatched item must not unlink the segment on Drop (send path owns it now)"
+                !path.exists(),
+                "dispatch must reclaim the encode SHM segment (no leak, no double-unlink)"
             );
-            // Clean up the segment ourselves since we bypassed the real send path.
-            let _ = std::fs::remove_file(&path);
         }
     }
 }
