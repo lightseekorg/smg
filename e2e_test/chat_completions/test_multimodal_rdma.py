@@ -2,26 +2,21 @@
 
 Exercises the full RDMA (NIXL) pixel lane end to end: the gateway stages
 ``pixel_values`` into a pre-registered arena and the vLLM worker pulls them with a
-one-sided READ instead of receiving them inline. Asserts the model still
-understands the image AND — critically — that the pixels actually travelled over
-the remote path, so a silent fall-back to inline cannot pass this test.
+one-sided READ instead of receiving them inline. Verifies both that the model
+still understands the image over RDMA AND that the pixels actually travelled the
+remote path (``smg_mm_tensor_bytes_total{path="remote"}`` grew), so a silent
+fall-back to inline fails the test rather than passing on correctness alone.
 
-Opt-in via ``SMG_E2E_MM_RDMA=1`` because it needs more than a stock CI box:
-  - the gateway binary built with ``--features mm-rdma`` and ``libnixl`` on
-    ``LD_LIBRARY_PATH``, and
-  - a NIXL/UCX-capable host (loopback RoCE is fine).
-Without those the RDMA lane safely degrades to inline, which would (correctly)
-fail the remote-path assertion, so the class skips unless explicitly enabled.
+Requires a gateway built with ``--features mm-rdma`` and a NIXL/UCX-capable host.
 
 Usage:
-    SMG_E2E_MM_RDMA=1 pytest e2e_test/chat_completions/test_multimodal_rdma.py -v
+    pytest e2e_test/chat_completions/test_multimodal_rdma.py -v
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-import os
 from pathlib import Path
 
 import httpx
@@ -31,11 +26,6 @@ logger = logging.getLogger(__name__)
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "images"
 DOG_IMAGE_PATH = FIXTURES_DIR / "dog.jpg"  # Black labrador puppy
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("SMG_E2E_MM_RDMA", "").lower() not in ("1", "true", "yes"),
-    reason="RDMA e2e needs a mm-rdma gateway build + NIXL; set SMG_E2E_MM_RDMA=1 to run",
-)
 
 
 def _image_to_base64_url(path: Path) -> str:
