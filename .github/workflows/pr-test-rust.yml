@@ -732,6 +732,20 @@ jobs:
       test_filter: "-k TestIGWMixedWorkerClassification"
     secrets: inherit
 
+  e2e-4gpu-epd:
+    name: e2e-4gpu-epd (tokenspeed)
+    needs: [e2e-1gpu-chat]
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: tokenspeed
+      gpu_tier: "4"
+      runner: 4-gpu-h100
+      timeout: 75
+      test_timeout: 65
+      test_dirs: e2e_test/chat_completions/test_epd_multimodal.py
+      extra_models: "Qwen/Qwen3.5-9B"
+    secrets: inherit
+
   # --- Vendor E2E: CPU-only cloud backend tests ---
 
   e2e-vendor:
