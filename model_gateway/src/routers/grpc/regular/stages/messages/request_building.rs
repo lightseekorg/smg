@@ -154,8 +154,8 @@ impl PipelineStage for MessageRequestBuildingStage {
         // EPD: EncodeStage minted the per-item encode bootstrap info. Inject it
         // into the prefill request; the dispatch plan stays on `encode_outputs`
         // for request execution to take.
-        if let Some(outputs) = ctx.state.encode_outputs.as_ref() {
-            proto_request.set_encode_bootstrap_info(outputs.bootstrap_info.clone());
+        if let Some(outputs) = ctx.state.encode_outputs.as_mut() {
+            proto_request.set_encode_bootstrap_info(std::mem::take(&mut outputs.bootstrap_info));
         }
 
         // EPD: inject the prefill->decode KV rendezvous (mirrors the chat path).
