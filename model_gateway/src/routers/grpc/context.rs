@@ -24,9 +24,10 @@ use tracing::debug;
 use super::{
     client::GrpcClient,
     epd_encode::EncodeDispatchPlan,
-    multimodal::MultimodalComponents,
+    multimodal::{MultimodalComponents, MultimodalIntermediate},
     proto_wrapper::{
-        ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoStream,
+        EncodeItemBootstrapInfo, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
+        ProtoRequest, ProtoStream,
     },
 };
 use crate::{
@@ -110,6 +111,18 @@ pub(crate) struct ProcessingState {
     // Stage 1: Preparation outputs
     pub preparation: Option<PreparationOutput>,
 
+    /// Preprocessed multimodal inputs, re-homed here so T6's EncodeStage can
+    /// borrow them before request-building consumes them (EPD needs two
+    /// serializations of the same intermediate). Still `None`: the intermediate
+    /// is not `Clone` (holds `ArrayD<f32>` tensors) and request-building moves
+    /// it out of `PreparationOutput` by value, so T6 performs the ownership move.
+    #[expect(dead_code, reason = "populated + consumed by EncodeStage in a later task")]
+    pub multimodal_intermediate: Option<MultimodalIntermediate>,
+
+    /// Encode plan outputs produced by EncodeStage (EPD only).
+    #[expect(dead_code, reason = "consumed by EncodeStage in a later task")]
+    pub encode_outputs: Option<EncodeOutputs>,
+
     /// Resolved tokenizer (set once in preparation, reused in response processing)
     /// This avoids redundant registry lookups across pipeline stages.
     pub tokenizer: Option<Arc<dyn Tokenizer>>,
@@ -131,6 +144,20 @@ pub(crate) struct ProcessingState {
 
     // Stage 6: Response processing state
     pub response: ResponseState,
+}
+
+/// Outputs produced by EncodeStage (EPD only): per-item bootstrap rendezvous
+/// info that prefill needs, plus the dispatch plan that fans out to encode
+/// workers.
+///
+/// Intentionally not `#[derive(Debug)]`: `EncodeDispatchPlan` carries the
+/// prepared encode jobs (transitively `TokenSpeedMultimodalItem`, a raw proto
+/// payload) which are not `Debug`. Deriving would force `Debug` across the proto
+/// chain, out of scope for this additive step; T6 can add it if a consumer needs it.
+#[expect(dead_code, reason = "consumed by EncodeStage in a later task")]
+pub(crate) struct EncodeOutputs {
+    pub bootstrap_info: Vec<EncodeItemBootstrapInfo>,
+    pub dispatch: EncodeDispatchPlan,
 }
 
 /// Execution shape produced by request building and consumed by request execution.
