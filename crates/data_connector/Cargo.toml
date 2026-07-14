@@ -23,7 +23,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
 tracing.workspace = true
-ulid = "1.2.1"
+ulid = "2.0.1"
 url = "2.5"
 
 # Database backends
