@@ -195,6 +195,11 @@ impl PipelineStage for WorkerSelectionStage {
     fn name(&self) -> &'static str {
         "WorkerSelection"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!("WorkerSelectionStage({:?})", self.mode)
+    }
 }
 
 /// Runtime of the leg that builds the generate request: the sole worker in

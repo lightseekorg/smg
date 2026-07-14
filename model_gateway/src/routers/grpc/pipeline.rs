@@ -24,6 +24,7 @@ use super::{
     common::{responses::ResponsesContext, stages::*},
     context::*,
     harmony,
+    mode::Mode,
     regular::{
         processor,
         stages::{
@@ -54,6 +55,130 @@ use crate::{
     routers::error,
     worker::WorkerRegistry,
 };
+
+/// Which endpoint a pipeline serves. Selects the endpoint-specific stage list
+/// (preparation / request-building / response-processing); `Mode` then selects
+/// the disaggregation params within that list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    Chat,
+    Messages,
+    Completion,
+    Harmony,
+    Embeddings,
+    Classify,
+}
+
+/// Construction dependencies shared by every endpoint pipeline.
+///
+/// Bundles the args the legacy `new_*` constructors took so `build` and the
+/// constructors can compose the same stage lists from one place. The parser
+/// factories/overrides are consumed only by the chat/messages/harmony processors;
+/// completion builds its own default-factory processors and embeddings/classify
+/// build none, matching the pre-refactor behavior.
+#[derive(Clone)]
+pub(crate) struct PipelineDeps {
+    worker_registry: Arc<WorkerRegistry>,
+    policy_registry: Arc<PolicyRegistry>,
+    tool_parser_factory: ToolParserFactory,
+    reasoning_parser_factory: ReasoningParserFactory,
+    configured_tool_parser: Option<String>,
+    configured_reasoning_parser: Option<String>,
+}
+
+impl PipelineDeps {
+    /// Deps for the two-arg endpoints (embeddings/classify/completion) that carry
+    /// no configured parsers. The parser fields are placeholders those endpoints
+    /// never read.
+    fn pair(worker_registry: Arc<WorkerRegistry>, policy_registry: Arc<PolicyRegistry>) -> Self {
+        Self {
+            worker_registry,
+            policy_registry,
+            tool_parser_factory: ToolParserFactory::default(),
+            reasoning_parser_factory: ReasoningParserFactory::default(),
+            configured_tool_parser: None,
+            configured_reasoning_parser: None,
+        }
+    }
+
+    /// Build the chat/messages response processor pair from the configured
+    /// parser factories, labeled with `backend`.
+    fn configured_processors(
+        &self,
+        backend: &'static str,
+    ) -> (processor::ResponseProcessor, Arc<streaming::StreamingProcessor>) {
+        let processor = processor::ResponseProcessor::new(
+            self.tool_parser_factory.clone(),
+            self.reasoning_parser_factory.clone(),
+            self.configured_tool_parser.clone(),
+            self.configured_reasoning_parser.clone(),
+        );
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            self.tool_parser_factory.clone(),
+            self.reasoning_parser_factory.clone(),
+            self.configured_tool_parser.clone(),
+            self.configured_reasoning_parser.clone(),
+            backend,
+        ));
+        (processor, streaming_processor)
+    }
+
+    /// Build the completion response processor pair from default parser
+    /// factories (completion does not use configured parsers), labeled `backend`.
+    fn default_processors(
+        backend: &'static str,
+    ) -> (processor::ResponseProcessor, Arc<streaming::StreamingProcessor>) {
+        let processor = processor::ResponseProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+        );
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            ToolParserFactory::default(),
+            ReasoningParserFactory::default(),
+            None,
+            None,
+            backend,
+        ));
+        (processor, streaming_processor)
+    }
+
+    #[cfg(test)]
+    fn test_default() -> Self {
+        use crate::config::types::PolicyConfig;
+        Self {
+            worker_registry: Arc::new(WorkerRegistry::new()),
+            policy_registry: Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin)),
+            tool_parser_factory: ToolParserFactory::default(),
+            reasoning_parser_factory: ReasoningParserFactory::default(),
+            configured_tool_parser: None,
+            configured_reasoning_parser: None,
+        }
+    }
+
+    /// The six positional args the full-arg legacy constructors expect.
+    #[cfg(test)]
+    fn clone_full_args(
+        &self,
+    ) -> (
+        Arc<WorkerRegistry>,
+        Arc<PolicyRegistry>,
+        ToolParserFactory,
+        ReasoningParserFactory,
+        Option<String>,
+        Option<String>,
+    ) {
+        (
+            self.worker_registry.clone(),
+            self.policy_registry.clone(),
+            self.tool_parser_factory.clone(),
+            self.reasoning_parser_factory.clone(),
+            self.configured_tool_parser.clone(),
+            self.configured_reasoning_parser.clone(),
+        )
+    }
+}
 
 /// Generic request pipeline for all request types
 ///
@@ -109,6 +234,173 @@ impl RequestPipeline {
         error::internal_error("no_response_produced", "No response produced")
     }
 
+    /// Build the pipeline for `endpoint` in the given disaggregation `mode`.
+    ///
+    /// Single entry point that maps `mode` to the per-stage worker-selection,
+    /// execution-plan, and PD-injection params. Returns `None` for
+    /// endpoint/mode combinations that have no pipeline: Harmony has no EPD
+    /// variant, and embeddings/classify are single-worker only.
+    ///
+    /// This is the one place stage lists are assembled; every legacy `new_*`
+    /// constructor delegates here, so the behavior-parity test guards them all.
+    pub(crate) fn build(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps) -> Option<Self> {
+        // PD and EPD are both served by the "pd" backend metrics bucket; only
+        // plain Regular reports as "regular".
+        let backend = match mode {
+            Mode::Regular => metrics_labels::BACKEND_REGULAR,
+            Mode::PrefillDecode | Mode::EncodePrefillDecode => metrics_labels::BACKEND_PD,
+        };
+        let worker_selection = mode.worker_selection();
+        let plan_kind = mode.plan_kind();
+        let inject_pd_metadata = mode.inject_pd_metadata();
+
+        let stages: Vec<Box<dyn PipelineStage>> = match endpoint {
+            Endpoint::Chat => {
+                let (processor, streaming_processor) = deps.configured_processors(backend);
+                vec![
+                    Box::new(ChatGeneratePreparationStage::new()),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(ChatGenerateRequestBuildingStage::new(
+                        inject_pd_metadata,
+                        plan_kind,
+                    )),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(ChatGenerateResponseProcessingStage::new(
+                        processor,
+                        streaming_processor,
+                    )),
+                ]
+            }
+            Endpoint::Messages => {
+                let (processor, streaming_processor) = deps.configured_processors(backend);
+                vec![
+                    Box::new(MessagePreparationStage),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(MessageRequestBuildingStage::new(
+                        inject_pd_metadata,
+                        plan_kind,
+                    )),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(MessageResponseProcessingStage::new(
+                        processor,
+                        streaming_processor,
+                    )),
+                ]
+            }
+            Endpoint::Completion => {
+                // Completion uses default parser factories, not the configured ones.
+                let (processor, streaming_processor) = PipelineDeps::default_processors(backend);
+                vec![
+                    Box::new(CompletionPreparationStage),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(CompletionRequestBuildingStage::new(
+                        inject_pd_metadata,
+                        plan_kind,
+                    )),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(CompletionResponseProcessingStage::new(
+                        processor,
+                        streaming_processor,
+                    )),
+                ]
+            }
+            Endpoint::Harmony => {
+                // Harmony has no EPD variant.
+                if matches!(mode, Mode::EncodePrefillDecode) {
+                    return None;
+                }
+                vec![
+                    Box::new(harmony::stages::HarmonyPreparationStage::new()),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
+                        inject_pd_metadata,
+                        plan_kind,
+                    )),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
+                ]
+            }
+            Endpoint::Embeddings => {
+                // Embeddings are single-worker only.
+                if !matches!(mode, Mode::Regular) {
+                    return None;
+                }
+                vec![
+                    Box::new(EmbeddingPreparationStage::new()),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(EmbeddingRequestBuildingStage::new()),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(EmbeddingResponseProcessingStage::new()),
+                ]
+            }
+            Endpoint::Classify => {
+                // Classify is single-worker only.
+                if !matches!(mode, Mode::Regular) {
+                    return None;
+                }
+                vec![
+                    Box::new(EmbeddingPreparationStage::new()),
+                    Box::new(WorkerSelectionStage::new(
+                        deps.worker_registry.clone(),
+                        deps.policy_registry.clone(),
+                        worker_selection,
+                    )),
+                    Box::new(ClientAcquisitionStage),
+                    Box::new(EmbeddingRequestBuildingStage::new()),
+                    Box::new(DispatchMetadataStage),
+                    Box::new(RequestExecutionStage::new()),
+                    Box::new(ClassifyResponseProcessingStage::new()),
+                ]
+            }
+        };
+
+        Some(Self {
+            stages: Arc::new(stages),
+            backend_type: backend,
+        })
+    }
+
+    /// `build` for the legacy constructors, which each pass a statically-valid
+    /// endpoint/mode combo. Panics on an invalid combo (a programming error).
+    #[expect(
+        clippy::expect_used,
+        reason = "legacy constructors pass only statically-valid endpoint/mode combos"
+    )]
+    fn build_or_panic(endpoint: Endpoint, mode: Mode, deps: PipelineDeps) -> Self {
+        Self::build(endpoint, mode, &deps)
+            .expect("legacy constructor must map to a valid pipeline")
+    }
+
     /// Create a regular (single-worker) pipeline
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
@@ -118,110 +410,69 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_REGULAR,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(ChatGeneratePreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Chat,
+            Mode::Regular,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::Regular,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::Single,
-            )), // No PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(ChatGenerateResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a Harmony (single-worker) pipeline for Harmony-capable models
     pub fn new_harmony(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
-        _tool_parser_factory: ToolParserFactory,
-        _reasoning_parser_factory: ReasoningParserFactory,
-        _configured_tool_parser: Option<String>,
-        _configured_reasoning_parser: Option<String>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(harmony::stages::HarmonyPreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Harmony,
+            Mode::Regular,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::Regular,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::Single,
-            )),
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a Harmony PD (prefill-decode) pipeline
-    #[expect(dead_code)]
+    // Dead outside tests (no production caller yet); the parity test does call it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Harmony PD pipeline is wired up by a later task")
+    )]
     pub fn new_harmony_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
-        _tool_parser_factory: ToolParserFactory,
-        _reasoning_parser_factory: ReasoningParserFactory,
-        _configured_tool_parser: Option<String>,
-        _configured_reasoning_parser: Option<String>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(harmony::stages::HarmonyPreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Harmony,
+            Mode::PrefillDecode,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::PrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
-                true,
-                ExecutionPlanKind::PrefillDecode,
-            )),
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a PD (prefill-decode) pipeline
@@ -233,45 +484,18 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(ChatGeneratePreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Chat,
+            Mode::PrefillDecode,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::PrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(
-                true,
-                ExecutionPlanKind::PrefillDecode,
-            )), // Inject PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(ChatGenerateResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create an EPD (encode-prefill-decode) pipeline.
@@ -291,45 +515,18 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(ChatGeneratePreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Chat,
+            Mode::EncodePrefillDecode,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::EncodePrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::EncodePrefillDecode,
-            )), // No SGLang PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(ChatGenerateResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create an embeddings pipeline
@@ -337,24 +534,11 @@ impl RequestPipeline {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(EmbeddingPreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
-                worker_registry,
-                policy_registry,
-                WorkerSelectionMode::Regular, // Embeddings are always single
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(EmbeddingRequestBuildingStage::new()),
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(EmbeddingResponseProcessingStage::new()),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR, // Embeddings are regular for now
-        }
+        Self::build_or_panic(
+            Endpoint::Embeddings,
+            Mode::Regular,
+            PipelineDeps::pair(worker_registry, policy_registry),
+        )
     }
 
     /// Create a classify pipeline
@@ -365,24 +549,11 @@ impl RequestPipeline {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(EmbeddingPreparationStage::new()),
-            Box::new(WorkerSelectionStage::new(
-                worker_registry,
-                policy_registry,
-                WorkerSelectionMode::Regular, // Classify is always single worker
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(EmbeddingRequestBuildingStage::new()),
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(ClassifyResponseProcessingStage::new()),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
-        }
+        Self::build_or_panic(
+            Endpoint::Classify,
+            Mode::Regular,
+            PipelineDeps::pair(worker_registry, policy_registry),
+        )
     }
 
     /// Create a Messages API pipeline (single-worker)
@@ -398,45 +569,18 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_REGULAR,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(MessagePreparationStage),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Messages,
+            Mode::Regular,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::Regular,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::Single,
-            )), // No PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(MessageResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a Messages API PD (prefill-decode) pipeline
@@ -448,45 +592,18 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(MessagePreparationStage),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Messages,
+            Mode::PrefillDecode,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::PrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(
-                true,
-                ExecutionPlanKind::PrefillDecode,
-            )), // Inject PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(MessageResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a Messages API EPD (encode-prefill-decode) pipeline.
@@ -502,45 +619,18 @@ impl RequestPipeline {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            configured_tool_parser.clone(),
-            configured_reasoning_parser.clone(),
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            tool_parser_factory,
-            reasoning_parser_factory,
-            configured_tool_parser,
-            configured_reasoning_parser,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(MessagePreparationStage),
-            Box::new(WorkerSelectionStage::new(
+        Self::build_or_panic(
+            Endpoint::Messages,
+            Mode::EncodePrefillDecode,
+            PipelineDeps {
                 worker_registry,
                 policy_registry,
-                WorkerSelectionMode::EncodePrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::EncodePrefillDecode,
-            )), // No SGLang PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(MessageResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+                tool_parser_factory,
+                reasoning_parser_factory,
+                configured_tool_parser,
+                configured_reasoning_parser,
+            },
+        )
     }
 
     /// Create a Completion API pipeline (single-worker)
@@ -552,45 +642,11 @@ impl RequestPipeline {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-            metrics_labels::BACKEND_REGULAR,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(CompletionPreparationStage),
-            Box::new(WorkerSelectionStage::new(
-                worker_registry,
-                policy_registry,
-                WorkerSelectionMode::Regular,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::Single,
-            )), // No PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(CompletionResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_REGULAR,
-        }
+        Self::build_or_panic(
+            Endpoint::Completion,
+            Mode::Regular,
+            PipelineDeps::pair(worker_registry, policy_registry),
+        )
     }
 
     /// Create a Completion API PD (prefill-decode) pipeline
@@ -598,45 +654,11 @@ impl RequestPipeline {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(CompletionPreparationStage),
-            Box::new(WorkerSelectionStage::new(
-                worker_registry,
-                policy_registry,
-                WorkerSelectionMode::PrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(
-                true,
-                ExecutionPlanKind::PrefillDecode,
-            )), // Inject PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(CompletionResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+        Self::build_or_panic(
+            Endpoint::Completion,
+            Mode::PrefillDecode,
+            PipelineDeps::pair(worker_registry, policy_registry),
+        )
     }
 
     /// Create a Completion API EPD pipeline.
@@ -649,45 +671,11 @@ impl RequestPipeline {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
     ) -> Self {
-        let processor = processor::ResponseProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-        );
-
-        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
-            ToolParserFactory::default(),
-            ReasoningParserFactory::default(),
-            None,
-            None,
-            metrics_labels::BACKEND_PD,
-        ));
-
-        let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(CompletionPreparationStage),
-            Box::new(WorkerSelectionStage::new(
-                worker_registry,
-                policy_registry,
-                WorkerSelectionMode::EncodePrefillDecode,
-            )),
-            Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(
-                false,
-                ExecutionPlanKind::EncodePrefillDecode,
-            )), // No SGLang PD metadata
-            Box::new(DispatchMetadataStage),
-            Box::new(RequestExecutionStage::new()),
-            Box::new(CompletionResponseProcessingStage::new(
-                processor,
-                streaming_processor,
-            )),
-        ];
-
-        Self {
-            stages: Arc::new(stages),
-            backend_type: metrics_labels::BACKEND_PD,
-        }
+        Self::build_or_panic(
+            Endpoint::Completion,
+            Mode::EncodePrefillDecode,
+            PipelineDeps::pair(worker_registry, policy_registry),
+        )
     }
 
     /// Execute the complete pipeline for a chat request
@@ -1470,5 +1458,184 @@ impl RequestPipeline {
         let load_guards = ctx.state.load_guards.take();
 
         Ok((execution_result, load_guards))
+    }
+}
+
+#[cfg(test)]
+mod build_parity_tests {
+    use super::*;
+    use crate::routers::grpc::mode::Mode;
+
+    fn sigs(p: &RequestPipeline) -> Vec<String> {
+        p.stages.iter().map(|s| s.signature()).collect()
+    }
+
+    /// Assert `build(endpoint, mode)` reproduces `legacy` (same stage sequence +
+    /// mode-bearing args, same metrics backend label).
+    fn assert_parity(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps, legacy: RequestPipeline) {
+        let built = RequestPipeline::build(endpoint, mode, deps)
+            .unwrap_or_else(|| panic!("build({endpoint:?}, {mode:?}) should be valid"));
+        assert_eq!(
+            sigs(&built),
+            sigs(&legacy),
+            "stage parity for {endpoint:?}/{mode:?}"
+        );
+        assert_eq!(
+            built.backend_type, legacy.backend_type,
+            "backend_type parity for {endpoint:?}/{mode:?}"
+        );
+    }
+
+    #[test]
+    fn build_reproduces_legacy_constructors() {
+        let deps = PipelineDeps::test_default();
+        let (wr, pr, tpf, rpf, ctp, crp) = deps.clone_full_args();
+
+        // Chat/Messages/Completion support every mode.
+        assert_parity(
+            Endpoint::Chat,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_regular(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Chat,
+            Mode::PrefillDecode,
+            &deps,
+            RequestPipeline::new_pd(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Chat,
+            Mode::EncodePrefillDecode,
+            &deps,
+            RequestPipeline::new_epd(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Messages,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_messages(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Messages,
+            Mode::PrefillDecode,
+            &deps,
+            RequestPipeline::new_messages_pd(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Messages,
+            Mode::EncodePrefillDecode,
+            &deps,
+            RequestPipeline::new_messages_epd(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Completion,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_completion(wr.clone(), pr.clone()),
+        );
+        assert_parity(
+            Endpoint::Completion,
+            Mode::PrefillDecode,
+            &deps,
+            RequestPipeline::new_completion_pd(wr.clone(), pr.clone()),
+        );
+        assert_parity(
+            Endpoint::Completion,
+            Mode::EncodePrefillDecode,
+            &deps,
+            RequestPipeline::new_completion_epd(wr.clone(), pr.clone()),
+        );
+
+        // Harmony: Regular + PD only; EPD is invalid.
+        assert!(
+            RequestPipeline::build(Endpoint::Harmony, Mode::EncodePrefillDecode, &deps).is_none(),
+            "Harmony EPD must be invalid"
+        );
+        assert_parity(
+            Endpoint::Harmony,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_harmony(
+                wr.clone(),
+                pr.clone(),
+                tpf.clone(),
+                rpf.clone(),
+                ctp.clone(),
+                crp.clone(),
+            ),
+        );
+        assert_parity(
+            Endpoint::Harmony,
+            Mode::PrefillDecode,
+            &deps,
+            RequestPipeline::new_harmony_pd(wr.clone(), pr.clone(), tpf, rpf, ctp, crp),
+        );
+
+        // Embeddings/Classify: Regular only; PD/EPD are invalid.
+        for endpoint in [Endpoint::Embeddings, Endpoint::Classify] {
+            assert!(
+                RequestPipeline::build(endpoint, Mode::PrefillDecode, &deps).is_none(),
+                "{endpoint:?} PD must be invalid"
+            );
+            assert!(
+                RequestPipeline::build(endpoint, Mode::EncodePrefillDecode, &deps).is_none(),
+                "{endpoint:?} EPD must be invalid"
+            );
+        }
+        assert_parity(
+            Endpoint::Embeddings,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_embeddings(wr.clone(), pr.clone()),
+        );
+        assert_parity(
+            Endpoint::Classify,
+            Mode::Regular,
+            &deps,
+            RequestPipeline::new_classify(wr, pr),
+        );
     }
 }

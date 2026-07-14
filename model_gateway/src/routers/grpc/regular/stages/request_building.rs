@@ -55,4 +55,13 @@ impl PipelineStage for ChatGenerateRequestBuildingStage {
     fn name(&self) -> &'static str {
         "ChatGenerateRequestBuilding"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!(
+            "ChatGenerateRequestBuildingStage({}, {})",
+            self.chat_stage.signature(),
+            self.generate_stage.signature()
+        )
+    }
 }

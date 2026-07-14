@@ -404,4 +404,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
     fn name(&self) -> &'static str {
         "HarmonyRequestBuilding"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!(
+            "HarmonyRequestBuildingStage(inject_pd_metadata={}, {:?})",
+            self.inject_pd_metadata, self.plan_kind
+        )
+    }
 }

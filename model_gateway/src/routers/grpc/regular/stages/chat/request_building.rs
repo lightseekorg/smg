@@ -185,4 +185,12 @@ impl PipelineStage for ChatRequestBuildingStage {
     fn name(&self) -> &'static str {
         "ChatRequestBuilding"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!(
+            "ChatRequestBuildingStage(inject_pd_metadata={}, {:?})",
+            self.inject_pd_metadata, self.plan_kind
+        )
+    }
 }

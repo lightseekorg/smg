@@ -185,4 +185,12 @@ impl PipelineStage for MessageRequestBuildingStage {
     fn name(&self) -> &'static str {
         "MessageRequestBuilding"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!(
+            "MessageRequestBuildingStage(inject_pd_metadata={}, {:?})",
+            self.inject_pd_metadata, self.plan_kind
+        )
+    }
 }

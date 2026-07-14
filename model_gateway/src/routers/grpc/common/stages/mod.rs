@@ -24,6 +24,15 @@ pub trait PipelineStage: Send + Sync {
 
     /// Stage name for logging
     fn name(&self) -> &'static str;
+
+    /// Test-only stable descriptor of the stage + its mode-bearing args, used to
+    /// assert `RequestPipeline::build(endpoint, mode)` reproduces the legacy
+    /// constructors. Stages whose construction args vary by mode override this to
+    /// include those args; the default captures only the concrete stage type.
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        std::any::type_name::<Self>().to_string()
+    }
 }
 
 mod client_acquisition;

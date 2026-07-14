@@ -112,4 +112,12 @@ impl PipelineStage for CompletionRequestBuildingStage {
     fn name(&self) -> &'static str {
         "CompletionRequestBuilding"
     }
+
+    #[cfg(test)]
+    fn signature(&self) -> String {
+        format!(
+            "CompletionRequestBuildingStage(inject_pd_metadata={}, {:?})",
+            self.inject_pd_metadata, self.plan_kind
+        )
+    }
 }
