@@ -19,10 +19,16 @@ import base64
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
-from infra.pd_logs import assert_worker_logs_captured, wait_for_marker, worker_log_dir
+from infra.pd_logs import (
+    LOG_FLUSH_TIMEOUT_S,
+    assert_worker_logs_captured,
+    read_logs,
+    worker_log_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +69,13 @@ class TestEPDMultimodal:
     def test_single_image(self, model, setup_backend):
         _, _, client, *_ = setup_backend
 
+        # Baseline BEFORE the request: worker logs accumulate across the four
+        # parametrized topologies in one shared dir and are never cleared, so a
+        # plain "marker present" check would pass on a stale marker from an
+        # earlier topology. Assert THIS request produced a NEW acceptance.
+        worker_dir = worker_log_dir(_LOG_DIR)
+        markers_before = read_logs(worker_dir, "worker-*.log").count(ENCODE_ACCEPTED_MARKER)
+
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -95,13 +108,21 @@ class TestEPDMultimodal:
         )
         assert response.usage.completion_tokens > 0
 
-        # (3) REAL EPD: the encode worker logged accepting the dispatch, so the
-        # vision stage ran on a dedicated encode worker (not a fallback).
-        worker_dir = worker_log_dir(_LOG_DIR)
-        worker_logs = wait_for_marker(worker_dir, "worker-*.log", ENCODE_ACCEPTED_MARKER)
+        # (3) REAL EPD: a NEW encode acceptance appeared for THIS request, proving
+        # the image ran on a dedicated encode worker (not a single-worker fallback)
+        # for THIS topology — robust to stale markers from earlier topologies.
+        deadline = time.monotonic() + LOG_FLUSH_TIMEOUT_S
+        worker_logs = read_logs(worker_dir, "worker-*.log")
+        while (
+            worker_logs.count(ENCODE_ACCEPTED_MARKER) <= markers_before
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.5)
+            worker_logs = read_logs(worker_dir, "worker-*.log")
         assert_worker_logs_captured(worker_logs, "EPD encode dispatch")
-        assert ENCODE_ACCEPTED_MARKER in worker_logs, (
-            "encode worker never logged accepting the request — the image did not "
-            f"flow through the EPD encode stage; checked {worker_dir}/worker-*.log"
+        assert worker_logs.count(ENCODE_ACCEPTED_MARKER) > markers_before, (
+            "encode worker logged no NEW acceptance for this request — the image did "
+            "not flow through a dedicated EPD encode worker for this topology; checked "
+            f"{worker_dir}/worker-*.log (baseline count={markers_before})"
         )
-        logger.info("EPD image OK (encode worker engaged): %s", text)
+        logger.info("EPD image OK (new encode acceptance observed): %s", text)
