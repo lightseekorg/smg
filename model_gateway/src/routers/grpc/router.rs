@@ -602,8 +602,8 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        // Responses is Regular-only; PD/EPD leave these contexts `None` and the
-        // `RouterTrait::route_responses` wrapper 501s before reaching here.
+        // Responses is Regular-only; PD/EPD leave these contexts `None` and 501
+        // via the guard below.
         let (Some(responses_context), Some(harmony_responses_context)) =
             (&self.responses_context, &self.harmony_responses_context)
         else {
