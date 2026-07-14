@@ -29,7 +29,7 @@ tonic = { version = "0.14.6", features = ["gzip", "transport"] }
 tonic-prost = "0.14.6"
 axum = { version = "0.8.9" }
 blake3 = "1.8"
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 bytemuck = { version = "1.25" }
 chrono = { version = "0.4" }
 dashmap = "6.2.1"
