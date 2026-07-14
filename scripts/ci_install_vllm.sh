@@ -37,6 +37,15 @@ echo "Installing FFmpeg for torchcodec..."
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends ffmpeg
 
+# vLLM >=0.25 eagerly imports torchcodec, which dlopens the FFmpeg shared
+# libraries (libavutil/libavcodec/libavformat/...) at import time. The runner
+# image ships none, so every worker dies importing vllm. Install distro FFmpeg
+# (the metapackage pulls the matching libav* sonames; torchcodec supports
+# FFmpeg 4-7). This step is unconditional, so refresh apt lists first.
+echo "Installing FFmpeg for torchcodec..."
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends ffmpeg
+
 # NIXL for vLLM PD disaggregation. The bare metapackage pulls both cu12 and
 # cu13 backends, so install the top-level shim alone, then the backend
 # matching torch's CUDA (same normalization as vLLM's own CI).
