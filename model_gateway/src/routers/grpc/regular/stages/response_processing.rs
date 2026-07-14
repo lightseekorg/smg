@@ -1,7 +1,7 @@
 //! Response processing stage for the chat + generate pipeline
 //!
 //! Dispatches to ChatResponseProcessingStage or GenerateResponseProcessingStage
-//! based on request type. Only used by new_regular() and new_pd() pipelines.
+//! based on request type.
 
 use std::sync::Arc;
 

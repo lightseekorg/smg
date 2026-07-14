@@ -15,9 +15,9 @@ use crate::routers::{
 
 /// Request building stage for chat and generate pipelines
 ///
-/// These two request types share a single pipeline instance (`new_regular` /
-/// `new_pd`) and are dispatched here. All other request types have
-/// dedicated pipelines and wire their own request building stages directly.
+/// These two request types share a single pipeline instance and are dispatched
+/// here. All other request types have dedicated pipelines and wire their own
+/// request building stages directly.
 pub(crate) struct ChatGenerateRequestBuildingStage {
     chat_stage: ChatRequestBuildingStage,
     generate_stage: GenerateRequestBuildingStage,

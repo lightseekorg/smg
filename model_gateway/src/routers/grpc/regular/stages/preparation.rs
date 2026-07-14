@@ -1,7 +1,7 @@
 //! Preparation stage for the chat + generate pipeline
 //!
 //! Dispatches to ChatPreparationStage or GeneratePreparationStage based on
-//! request type. Only used by new_regular() and new_pd() pipelines.
+//! request type.
 
 use async_trait::async_trait;
 use axum::response::Response;

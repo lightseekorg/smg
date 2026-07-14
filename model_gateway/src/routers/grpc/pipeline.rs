@@ -1221,7 +1221,7 @@ mod build_parity_tests {
         const REGULAR: &str = metrics_labels::BACKEND_REGULAR;
         const PD: &str = metrics_labels::BACKEND_PD;
         match (endpoint, mode) {
-            // Chat: new_regular / new_pd / new_epd
+            // Chat: Regular / PD / EPD
             (Endpoint::Chat, Mode::Regular) => (
                 v(&[
                     "ChatGeneratePreparationStage",
@@ -1259,7 +1259,7 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Messages: new_messages / new_messages_pd / new_messages_epd
+            // Messages: Regular / PD / EPD
             (Endpoint::Messages, Mode::Regular) => (
                 v(&[
                     "MessagePreparationStage",
@@ -1297,7 +1297,7 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Completion: new_completion / new_completion_pd / new_completion_epd
+            // Completion: Regular / PD / EPD
             (Endpoint::Completion, Mode::Regular) => (
                 v(&[
                     "CompletionPreparationStage",
@@ -1335,7 +1335,7 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Harmony: new_harmony / new_harmony_pd (EPD is invalid, no golden)
+            // Harmony: Regular / PD (EPD is invalid, no golden)
             (Endpoint::Harmony, Mode::Regular) => (
                 v(&[
                     "HarmonyPreparationStage",
@@ -1360,7 +1360,7 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Embeddings/Classify: new_embeddings / new_classify (Regular only).
+            // Embeddings/Classify: Regular only.
             // Shared embedding prep + request building (no mode args); classify
             // only swaps the response processor. Both report the regular backend.
             (Endpoint::Embeddings, Mode::Regular) => (
