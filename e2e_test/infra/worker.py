@@ -577,9 +577,7 @@ def start_workers(
             gpu_offset += gpus_per_worker
             port = get_open_port()
             bootstrap_port = (
-                get_open_port()
-                if worker_type in (WorkerType.PREFILL, WorkerType.ENCODE)
-                else None
+                get_open_port() if worker_type in (WorkerType.PREFILL, WorkerType.ENCODE) else None
             )
             is_ts_disagg = engine == "tokenspeed" and worker_type in (
                 WorkerType.ENCODE,
