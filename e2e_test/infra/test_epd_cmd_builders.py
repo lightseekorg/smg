@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from infra.constants import ConnectionMode, WorkerType
 from infra.gateway import build_epd_mode_args
+from infra.model_specs import get_model_spec
 from infra.worker import Worker
 
 
@@ -101,3 +102,13 @@ def test_build_epd_mode_args_multi_encode_repeats_flag():
     )
     assert args.count("--encode") == 2
     assert "grpc://127.0.0.1:50104" in args and "grpc://127.0.0.1:50105" in args
+
+
+def test_qwen35_9b_spec_present_and_multimodal():
+    spec = get_model_spec("Qwen/Qwen3.5-9B")
+    assert spec["tp"] == 1
+    assert "multimodal" in spec["features"]
+    assert spec.get("skip_tier_download") is True
+    ts_args = spec["tokenspeed_args"]
+    assert "--attention-backend" in ts_args
+    assert ts_args[ts_args.index("--attention-backend") + 1] == "fa3"

@@ -162,6 +162,32 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "multimodal"],
     },
+    # TokenSpeed EPD multimodal model. Qwen3.5-9B is a vision-language model
+    # (hybrid Gated DeltaNet + sparse MoE); BF16 ~18GB fits one 80GB H100 at
+    # tp=1, so every EPD topology (1e1p1d/1e2p1d/2e1p1d/1e1p2d) runs on the
+    # 4-GPU h100 runner, one worker per card. EPD is TokenSpeed-only: the encode
+    # worker runs the vision tower; prefill/decode run the LM. FA3 is the H100
+    # attention backend (trtllm fails on H100 for this model). Disaggregation
+    # role flags (--disaggregation-mode etc.) are added per-role in worker.py.
+    "Qwen/Qwen3.5-9B": {
+        "model": _resolve_model_path("Qwen/Qwen3.5-9B"),
+        "tp": 1,
+        "features": ["chat", "streaming", "multimodal", "moe"],
+        "startup_timeout": 600,
+        "tokenspeed_args": [
+            "--attention-backend",
+            "fa3",
+            "--max-model-len",
+            "8192",
+            "--max-num-seqs",
+            "4",
+            "--gpu-memory-utilization",
+            "0.8",
+        ],
+        # TokenSpeed-only (GDN + MoE arch won't load under sglang/vllm/trt), so
+        # keep it out of the tier-wide pre-download; the EPD job fetches it by id.
+        "skip_tier_download": True,
+    },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),

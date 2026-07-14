@@ -120,7 +120,11 @@ def setup_backend(request: pytest.FixtureRequest):
     Returns:
         Tuple of ``(backend_name, model_path, client, gateway)``
     """
-    backend_name: str = request.param
+    raw_param = request.param
+    if isinstance(raw_param, tuple):
+        backend_name, epd_counts = raw_param
+    else:
+        backend_name, epd_counts = raw_param, None
 
     if os.environ.get(ENV_SKIP_BACKEND_SETUP, "").lower() in ("1", "true", "yes"):
         pytest.skip(f"{ENV_SKIP_BACKEND_SETUP} is set")
@@ -137,8 +141,9 @@ def setup_backend(request: pytest.FixtureRequest):
         return
 
     # Local backends
+    is_epd = backend_name.startswith("epd_")
     is_pd = backend_name.startswith("pd_")
-    protocol = backend_name.replace("pd_", "")
+    protocol = backend_name.replace("epd_", "").replace("pd_", "")
     connection_mode = ConnectionMode(protocol)
     engine = get_runtime()
     model_path = get_model_spec(model_id)["model"]
@@ -154,7 +159,18 @@ def setup_backend(request: pytest.FixtureRequest):
 
     gateway = Gateway()
     try:
-        if is_pd:
+        if is_epd:
+            yield from _setup_epd(
+                model_id,
+                model_path,
+                engine,
+                connection_mode,
+                epd_counts,
+                gateway_config,
+                gateway,
+                log_dir,
+            )
+        elif is_pd:
             yield from _setup_pd(
                 model_id,
                 model_path,
@@ -295,6 +311,94 @@ def _setup_pd(
         yield backend_name, model_path, _make_openai_client(gateway), gateway
     finally:
         logger.info("Tearing down %s PD backend", runtime_label)
+        gateway.shutdown()
+        stop_workers(all_workers)
+
+
+# ---------------------------------------------------------------------------
+# EPD (encode-prefill-decode) disaggregation backend
+# ---------------------------------------------------------------------------
+
+
+def _setup_epd(
+    model_id,
+    model_path,
+    engine,
+    connection_mode,
+    epd_counts,
+    gateway_config,
+    gateway,
+    log_dir,
+):
+    """Launch encode + prefill + decode workers + EPD gateway, yield, tear down.
+
+    ``epd_counts`` is ``(n_encode, n_prefill, n_decode)``. Every worker is tp=1
+    (one GPU); GPUs are assigned sequentially E -> P -> D.
+    """
+    if not epd_counts or len(epd_counts) != 3:
+        raise ValueError("epd_grpc backend requires a (n_encode, n_prefill, n_decode) param")
+    n_encode, n_prefill, n_decode = epd_counts
+    spec = get_model_spec(model_id)
+    tp = spec.get("tp", 1)
+    backend_name = f"epd_{connection_mode.value}"
+    runtime_label = RUNTIME_LABELS.get(engine, engine)
+
+    logger.info(
+        "Starting %s EPD backend: model=%s, %de + %dp + %dd",
+        runtime_label,
+        model_id,
+        n_encode,
+        n_prefill,
+        n_decode,
+    )
+
+    all_workers: list = []
+    try:
+        encode_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=n_encode,
+            worker_type=WorkerType.ENCODE,
+            log_dir=log_dir,
+            gpu_offset=0,
+            gpus=1,  # vision tower runs on one GPU regardless of LM tp
+        )
+        all_workers.extend(encode_workers)
+
+        prefill_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=n_prefill,
+            worker_type=WorkerType.PREFILL,
+            log_dir=log_dir,
+            gpu_offset=n_encode,
+        )
+        all_workers.extend(prefill_workers)
+
+        decode_workers = _start_workers_tracked(
+            model_id=model_id,
+            engine=engine,
+            mode=connection_mode,
+            count=n_decode,
+            worker_type=WorkerType.DECODE,
+            log_dir=log_dir,
+            gpu_offset=n_encode + n_prefill * tp,
+        )
+        all_workers.extend(decode_workers)
+
+        _start_gateway(
+            gateway,
+            gateway_config,
+            encode_workers=encode_workers,
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+        )
+        logger.info("%s EPD backend ready at %s", runtime_label, gateway.base_url)
+        yield backend_name, model_path, _make_openai_client(gateway), gateway
+    finally:
+        logger.info("Tearing down %s EPD backend", runtime_label)
         gateway.shutdown()
         stop_workers(all_workers)
 
