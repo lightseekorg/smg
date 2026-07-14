@@ -27,6 +27,36 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def build_epd_mode_args(
+    encode_workers: list[Worker],
+    prefill_workers: list[Worker],
+    decode_workers: list[Worker],
+    encode_policy: str = "consistent_hashing",
+) -> list[str]:
+    """Build the ``smg.launch_router`` args for EPD disaggregation.
+
+    ``--encode`` / ``--prefill`` are repeatable ``URL [BOOTSTRAP_PORT]`` flags;
+    ``--decode`` is a repeatable ``URL`` flag. Multimodal tensors ride inline
+    (SMG -> encode); encode -> prefill embeddings and prefill -> decode KV move
+    over Mooncake independently of this flag.
+    """
+    args = ["--epd-disaggregation"]
+    for en in encode_workers:
+        args += ["--encode", en.base_url]
+        if en.bootstrap_port is not None:
+            args.append(str(en.bootstrap_port))
+    for pf in prefill_workers:
+        args += ["--prefill", pf.base_url]
+        if pf.bootstrap_port is not None:
+            args.append(str(pf.bootstrap_port))
+    for dc in decode_workers:
+        args += ["--decode", dc.worker_url]
+    if encode_policy:
+        args += ["--encode-policy", encode_policy]
+    args += ["--multimodal-tensor-transport", "inline"]
+    return args
+
+
 @dataclass
 class WorkerInfo:
     """Information about a worker connected to the gateway."""
@@ -87,6 +117,8 @@ class Gateway:
         model_path: str | None = None,
         prefill_workers: list[Worker] | None = None,
         decode_workers: list[Worker] | None = None,
+        encode_workers: list[Worker] | None = None,
+        encode_policy: str = "consistent_hashing",
         igw_mode: bool = False,
         cloud_backend: str | None = None,
         history_backend: str = "memory",
@@ -101,16 +133,21 @@ class Gateway:
         if self._started:
             raise RuntimeError("Gateway already started")
 
-        is_pd_mode = prefill_workers is not None or decode_workers is not None
+        is_epd_mode = encode_workers is not None
+        is_pd_mode = (
+            prefill_workers is not None or decode_workers is not None
+        ) and not is_epd_mode
         is_regular_mode = worker_urls is not None
         is_igw_mode = igw_mode
         is_cloud_mode = cloud_backend is not None
 
-        modes_specified = sum([is_pd_mode, is_regular_mode, is_igw_mode, is_cloud_mode])
+        modes_specified = sum(
+            [is_epd_mode, is_pd_mode, is_regular_mode, is_igw_mode, is_cloud_mode]
+        )
         if modes_specified != 1:
             raise ValueError(
-                "Specify exactly one mode: worker_urls, prefill/decode_workers, "
-                "igw_mode=True, or cloud_backend"
+                "Specify exactly one mode: worker_urls, encode/prefill/decode_workers "
+                "(EPD), prefill/decode_workers (PD), igw_mode=True, or cloud_backend"
             )
 
         if show_output is None:
@@ -131,6 +168,23 @@ class Gateway:
                 show_output=show_output,
                 extra_args=extra_args,
                 log_msg="IGW gateway (no workers)",
+            )
+        elif is_epd_mode:
+            self.pd_mode = True
+            self.igw_mode = False
+            encodes = encode_workers or []
+            prefills = prefill_workers or []
+            decodes = decode_workers or []
+            mode_args = build_epd_mode_args(encodes, prefills, decodes, encode_policy)
+            self._launch(
+                mode_args=mode_args,
+                timeout=timeout,
+                show_output=show_output,
+                extra_args=extra_args,
+                log_msg=(
+                    f"EPD gateway ({len(encodes)} encode, "
+                    f"{len(prefills)} prefill, {len(decodes)} decode)"
+                ),
             )
         elif is_pd_mode:
             self.pd_mode = True

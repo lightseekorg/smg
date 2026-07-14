@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from infra.constants import ConnectionMode, WorkerType
+from infra.gateway import build_epd_mode_args
 from infra.worker import Worker
 
 
@@ -62,3 +63,41 @@ def test_prefill_is_eager_decode_and_prefill_cache():
 def test_regular_tokenspeed_worker_has_no_disagg_flags():
     cmd = _ts_worker(WorkerType.REGULAR)._build_cmd()
     assert "--disaggregation-mode" not in cmd
+
+
+def _w(port, worker_type, bootstrap_port=None):
+    return Worker(
+        model_id=_TS_MODEL,
+        engine="tokenspeed",
+        port=port,
+        gpu_ids=[0],
+        mode=ConnectionMode.GRPC,
+        worker_type=worker_type,
+        bootstrap_port=bootstrap_port,
+    )
+
+
+def test_build_epd_mode_args_basic():
+    args = build_epd_mode_args(
+        encode_workers=[_w(50104, WorkerType.ENCODE, 18995)],
+        prefill_workers=[_w(50101, WorkerType.PREFILL, 19311)],
+        decode_workers=[_w(50111, WorkerType.DECODE)],
+    )
+    assert args[0] == "--epd-disaggregation"
+    assert "--encode" in args and "grpc://127.0.0.1:50104" in args
+    assert "18995" in args  # encode bootstrap
+    assert "--prefill" in args and "grpc://127.0.0.1:50101" in args
+    assert "19311" in args  # prefill bootstrap
+    assert "--decode" in args and "grpc://127.0.0.1:50111" in args
+    assert args[args.index("--encode-policy") + 1] == "consistent_hashing"
+    assert args[args.index("--multimodal-tensor-transport") + 1] == "inline"
+
+
+def test_build_epd_mode_args_multi_encode_repeats_flag():
+    args = build_epd_mode_args(
+        encode_workers=[_w(50104, WorkerType.ENCODE, 1), _w(50105, WorkerType.ENCODE, 2)],
+        prefill_workers=[_w(50101, WorkerType.PREFILL, 3)],
+        decode_workers=[_w(50111, WorkerType.DECODE)],
+    )
+    assert args.count("--encode") == 2
+    assert "grpc://127.0.0.1:50104" in args and "grpc://127.0.0.1:50105" in args
