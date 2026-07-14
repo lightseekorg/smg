@@ -12,7 +12,7 @@ use std::{
 use axum::response::Response;
 use bytes::Bytes;
 use llm_tokenizer::{
-    stop::{SequenceDecoderOutput, StopSequenceDecoder},
+    stop::{MatchedStop, SequenceDecoderOutput, StopSequenceDecoder},
     traits::Tokenizer,
 };
 use openai_protocol::{
@@ -334,6 +334,13 @@ impl StreamingProcessor {
         }
 
         // Phase 2: Main streaming loop
+        //
+        // `stopped_early` is set when the router-side stop decoder matches a
+        // string stop the SGLang worker cannot halt on (issue #227). Breaking
+        // without mark_completed() drops the stream, which aborts the worker
+        // request (AbortOnDropStream) instead of letting it generate to
+        // EOS/max_tokens.
+        let mut stopped_early = false;
         while let Some(response) = grpc_stream.next().await {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
@@ -376,10 +383,33 @@ impl StreamingProcessor {
                     });
 
                     // Process tokens through stop decoder
-                    let (chunk_text, _should_stop) =
+                    let (chunk_text, should_stop) =
                         Self::process_chunk_tokens(stop_decoder, chunk.token_ids());
 
+                    // issue #227: the SGLang worker never sees string stops
+                    // (drained at request build), so when the router-side
+                    // decoder matches one, terminate generation here: record
+                    // the stop verdict + usage from this (cumulative) chunk,
+                    // finish emitting, then break — dropping the stream aborts
+                    // the worker request. Restricted to n=1 (multi-choice
+                    // streams interleave choices) and to an actual string
+                    // sequence match (token-id stops halt the worker itself).
+                    let stop_early = should_stop
+                        && grpc_stream.is_sglang()
+                        && original_request.n.unwrap_or(1) == 1
+                        && matches!(stop_decoder.matched_stop(), Some(MatchedStop::Sequence(_)));
+                    if stop_early {
+                        finish_reasons.insert(index, "stop".to_string());
+                        prompt_tokens.insert(index, chunk.prompt_tokens());
+                        completion_tokens
+                            .record_early_termination(index, chunk.completion_tokens());
+                    }
+
                     if chunk_text.is_empty() {
+                        if stop_early {
+                            stopped_early = true;
+                            break;
+                        }
                         continue;
                     }
 
@@ -503,6 +533,11 @@ impl StreamingProcessor {
                         tx.send(Ok(Bytes::from(sse_buffer.clone())))
                             .map_err(|_| "Failed to send content chunk".to_string())?;
                     }
+
+                    if stop_early {
+                        stopped_early = true;
+                        break;
+                    }
                 }
                 ProtoResponseVariant::Complete(complete) => {
                     let index = complete.index();
@@ -584,14 +619,27 @@ impl StreamingProcessor {
 
         // Phase 4: Finish reason chunks
         for (index, finish_reason) in &finish_reasons {
-            let final_finish_reason =
-                if has_tool_calls.get(index).copied().unwrap_or(false) && finish_reason == "stop" {
-                    "tool_calls".to_string()
-                } else {
-                    finish_reason.clone()
-                };
+            // Refine the worker's verdict with the router-side stop decoder's
+            // match (string stops are matched here, not on the SGLang worker —
+            // see refine_stop_metadata / issue #227).
+            let (refined_reason, matched_stop_value) = utils::refine_stop_metadata(
+                finish_reason,
+                matched_stops.get(index).and_then(|v| v.clone()),
+                stop_decoders.get(index).and_then(|d| d.matched_stop()),
+                original_request
+                    .stop
+                    .as_ref()
+                    .map(utils::stop_param_as_slice),
+                &tokenizer,
+            );
 
-            let matched_stop_value = matched_stops.get(index).and_then(|v| v.clone());
+            let final_finish_reason = if has_tool_calls.get(index).copied().unwrap_or(false)
+                && refined_reason == "stop"
+            {
+                "tool_calls".to_string()
+            } else {
+                refined_reason
+            };
 
             let finish_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                 .created(created)
@@ -632,8 +680,13 @@ impl StreamingProcessor {
             }
         }
 
-        // Mark stream as completed successfully to prevent abort on drop
-        grpc_stream.mark_completed();
+        // Mark stream as completed successfully to prevent abort on drop.
+        // Skipped when the router terminated on a string-stop match: the
+        // SGLang worker is still generating, and dropping the un-completed
+        // stream is what sends the Abort RPC (issue #227).
+        if !stopped_early {
+            grpc_stream.mark_completed();
+        }
 
         // Record streaming metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
@@ -1801,7 +1854,10 @@ impl StreamingProcessor {
             },
         )?;
 
-        // Phase 2: Main streaming loop
+        // Phase 2: Main streaming loop. `stopped_early` — see the chat
+        // streaming loop: router-side string-stop match terminates SGLang
+        // generation via stream drop → Abort RPC (issue #227).
+        let mut stopped_early = false;
         while let Some(response) = grpc_stream.next().await {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
@@ -1813,10 +1869,26 @@ impl StreamingProcessor {
 
                     completion_tokens.record_chunk(&chunk);
 
-                    let (chunk_text, _should_stop) =
+                    let (chunk_text, should_stop) =
                         Self::process_chunk_tokens(&mut stop_decoder, chunk.token_ids());
 
+                    // issue #227: terminate on router-side string-stop match
+                    // (SGLang can't halt on it). Messages API is always n=1.
+                    let stop_early = should_stop
+                        && grpc_stream.is_sglang()
+                        && matches!(stop_decoder.matched_stop(), Some(MatchedStop::Sequence(_)));
+                    if stop_early {
+                        finish_reason_str = "stop".to_string();
+                        prompt_tokens = chunk.prompt_tokens();
+                        completion_tokens
+                            .record_early_termination(chunk.index(), chunk.completion_tokens());
+                    }
+
                     if chunk_text.is_empty() {
+                        if stop_early {
+                            stopped_early = true;
+                            break;
+                        }
                         continue;
                     }
 
@@ -2062,6 +2134,11 @@ impl StreamingProcessor {
                             },
                         )?;
                     }
+
+                    if stop_early {
+                        stopped_early = true;
+                        break;
+                    }
                 }
                 ProtoResponseVariant::Complete(complete) => {
                     // Flush stop decoder
@@ -2201,10 +2278,26 @@ impl StreamingProcessor {
             )?;
         }
 
-        // Phase 4: Emit message_delta with stop_reason and usage
+        // Phase 4: Emit message_delta with stop_reason and usage, refining the
+        // worker's verdict with the router-side stop decoder's match (string
+        // stops are matched here — see refine_stop_metadata / issue #227).
+        let (finish_reason_str, matched_stop) = utils::refine_stop_metadata(
+            &finish_reason_str,
+            matched_stop,
+            stop_decoder.matched_stop(),
+            original_request.stop_sequences.as_deref(),
+            &tokenizer,
+        );
+
+        // StopSequence only for an actual string stop match (mirrors the
+        // non-streaming path): a numeric matched_stop (EOS / stop_token_id
+        // that didn't map back to a user stop string) is an end_turn, not a
+        // stop_sequence with a null sequence.
+        let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
+
         let stop_reason = if has_tool_calls || finish_reason_str == "tool_calls" {
             Some(messages::StopReason::ToolUse)
-        } else if matched_stop.is_some() {
+        } else if stop_sequence.is_some() {
             Some(messages::StopReason::StopSequence)
         } else if finish_reason_str == "length" {
             Some(messages::StopReason::MaxTokens)
@@ -2213,7 +2306,7 @@ impl StreamingProcessor {
         };
 
         let stop_sequence = if matches!(stop_reason, Some(messages::StopReason::StopSequence)) {
-            matched_stop.and_then(|v| v.as_str().map(String::from))
+            stop_sequence
         } else {
             None
         };
@@ -2239,8 +2332,11 @@ impl StreamingProcessor {
         // Phase 5: Emit message_stop
         Self::send_messages_event(tx, &mut sse_buffer, &MessageStreamEvent::MessageStop)?;
 
-        // Mark stream completed
-        grpc_stream.mark_completed();
+        // Mark stream completed — skipped on router-side string-stop
+        // termination so the stream drop aborts the SGLang worker (issue #227).
+        if !stopped_early {
+            grpc_stream.mark_completed();
+        }
 
         // Record metrics
         Metrics::record_streaming_metrics(StreamingMetricsParams {
@@ -2449,6 +2545,9 @@ impl StreamingProcessor {
         let mut total_cached = 0u32;
         let mut reasoning_tokens: HashMap<u32, u32> = HashMap::new();
         let mut total_completion = CompletionTokenTracker::new();
+        // See the chat streaming loop: router-side string-stop match terminates
+        // SGLang generation via stream drop → Abort RPC (issue #227).
+        let mut stopped_early = false;
 
         while let Some(response) = grpc_stream.next().await {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
@@ -2562,6 +2661,21 @@ impl StreamingProcessor {
                         Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
                         tx.send(Ok(Bytes::from(sse_buffer.clone())))
                             .map_err(|_| "Channel closed".to_string())?;
+
+                        // issue #227: the SGLang worker can't halt on the
+                        // drained string stop — terminate generation here.
+                        // Usage comes from this chunk's cumulative counters;
+                        // the stream drop (no mark_completed) sends the Abort.
+                        if grpc_stream.is_sglang()
+                            && completion_request.n.unwrap_or(1) == 1
+                            && matches!(stop_decoder.matched_stop(), Some(MatchedStop::Sequence(_)))
+                        {
+                            total_prompt = total_prompt.max(chunk.prompt_tokens());
+                            total_completion
+                                .record_early_termination(index, chunk.completion_tokens());
+                            stopped_early = true;
+                            break;
+                        }
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -2670,6 +2784,28 @@ impl StreamingProcessor {
                         }
                     };
 
+                    // Refine with the router-side stop decoder's verdict
+                    // (string stops are matched here — see issue #227). Keeps
+                    // the final chunk consistent with the mid-stream "stop"
+                    // emitted when the decoder matches.
+                    let finish_reason = {
+                        let (refined, _) = utils::refine_stop_metadata(
+                            finish_reason.as_deref().unwrap_or(""),
+                            complete.matched_stop_json(),
+                            stop_decoders.get(&index).and_then(|d| d.matched_stop()),
+                            completion_request
+                                .stop
+                                .as_ref()
+                                .map(utils::stop_param_as_slice),
+                            &tokenizer,
+                        );
+                        if refined.is_empty() {
+                            None
+                        } else {
+                            Some(refined)
+                        }
+                    };
+
                     let final_chunk = CompletionStreamResponse {
                         id: request_id.clone(),
                         object: "text_completion".to_string(),
@@ -2695,7 +2831,11 @@ impl StreamingProcessor {
         // Mark stream as completed before usage emission — the backend stream
         // is fully consumed at this point, so an abort would be a no-op.
         // This ensures mark_completed runs even if the usage send fails.
-        grpc_stream.mark_completed();
+        // Skipped on router-side string-stop termination: the SGLang worker is
+        // still generating and the stream drop must send the Abort (issue #227).
+        if !stopped_early {
+            grpc_stream.mark_completed();
+        }
 
         if include_usage {
             let total_reasoning: u32 = reasoning_tokens.values().sum();

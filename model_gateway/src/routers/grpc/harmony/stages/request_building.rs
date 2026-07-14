@@ -335,6 +335,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         };
 
+        // NOTE (issue #227): string `stop` sequences are intentionally NOT
+        // drained here. The Harmony pipeline builds no router-side
+        // StopSequenceDecoder to trim output, and converting a user stop to a
+        // stop_token_id can halt generation before the terminal Harmony tokens
+        // (<|return|>/<|call|>) — corrupting the parsed response. SGLang string
+        // stops on Harmony therefore keep returning the pre-existing 400 until a
+        // Harmony-aware stop decoder exists. Only the chat/completions/messages
+        // paths (which trim in every response mode) drain string stops.
+
         // Inject Harmony stop token IDs into sampling params for ALL Harmony requests
         // These stop tokens (<|return|> and <|call|>) prevent the model from generating
         // malformed Harmony sequences

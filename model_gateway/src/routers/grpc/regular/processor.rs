@@ -174,17 +174,23 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 3: Use finish reason directly from proto (already OpenAI-compatible string)
-        let finish_reason_str = complete.finish_reason();
+        // Step 3: Refine the worker's finish_reason/matched_stop with the
+        // router-side stop decoder's verdict (string stops are matched here,
+        // not on the SGLang worker — see refine_stop_metadata / issue #227).
+        let (refined_finish_reason, matched_stop) = utils::refine_stop_metadata(
+            complete.finish_reason(),
+            complete.matched_stop_json(),
+            stop_decoder.matched_stop(),
+            original_request.stop.as_ref().map(utils::stop_param_as_slice),
+            tokenizer,
+        );
 
         // Override finish reason if we have tool calls
         let final_finish_reason_str = if tool_calls.is_some() {
-            "tool_calls"
+            "tool_calls".to_string()
         } else {
-            finish_reason_str
+            refined_finish_reason
         };
-
-        let matched_stop = complete.matched_stop_json();
 
         // Step 4: Convert output logprobs if present
         let logprobs = complete.output_logprobs().map(|ref proto_logprobs| {
@@ -206,7 +212,7 @@ impl ResponseProcessor {
             index: index as u32,
             message: chat_message,
             logprobs,
-            finish_reason: Some(final_finish_reason_str.to_string()),
+            finish_reason: Some(final_finish_reason_str),
             matched_stop,
             hidden_states: None,
         })
@@ -719,9 +725,16 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
-        let finish_reason_str = complete.finish_reason();
-        let matched_stop = complete.matched_stop_json();
+        // Step 4: Determine stop_reason and stop_sequence (derived from same
+        // conditions), refining the worker's verdict with the router-side stop
+        // decoder's match (string stops are matched here — see issue #227).
+        let (finish_reason_str, matched_stop) = utils::refine_stop_metadata(
+            complete.finish_reason(),
+            complete.matched_stop_json(),
+            stop_decoder.matched_stop(),
+            messages_request.stop_sequences.as_deref(),
+            &tokenizer,
+        );
         let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
 
         let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {
@@ -775,7 +788,7 @@ impl ResponseProcessor {
         execution_result: ExecutionResult,
         completion_req: Arc<CompletionRequest>,
         dispatch: DispatchMetadata,
-        _tokenizer: Arc<dyn Tokenizer>,
+        tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
         prompt_text: &str,
     ) -> Result<CompletionResponse, axum::response::Response> {
@@ -820,7 +833,7 @@ impl ResponseProcessor {
             total_prompt = total_prompt.max(complete.prompt_tokens());
             total_completion += complete.completion_tokens();
 
-            let finish_reason = {
+            let normalized_finish_reason = {
                 let reason = complete.finish_reason();
                 if reason.is_empty() {
                     None
@@ -837,7 +850,20 @@ impl ResponseProcessor {
                 }
             };
 
-            let matched_stop = complete.matched_stop_json();
+            // Refine with the router-side stop decoder's verdict (string stops
+            // are matched here, not on the SGLang worker — see issue #227).
+            let (refined_finish_reason, matched_stop) = utils::refine_stop_metadata(
+                normalized_finish_reason.as_deref().unwrap_or(""),
+                complete.matched_stop_json(),
+                stop_decoder.matched_stop(),
+                completion_req.stop.as_ref().map(utils::stop_param_as_slice),
+                &tokenizer,
+            );
+            let finish_reason = if refined_finish_reason.is_empty() {
+                None
+            } else {
+                Some(refined_finish_reason)
+            };
 
             let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
             let echo_len = if completion_req.echo {

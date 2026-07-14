@@ -1981,6 +1981,14 @@ impl ProtoStream {
             Self::TokenSpeed(stream) => stream.mark_completed(),
         }
     }
+
+    /// Whether this is an SGLang stream. Used to gate router-side early
+    /// termination on string-stop match (issue #227): only SGLang workers
+    /// can't halt on string stops themselves (skip_tokenizer_init), and only
+    /// the SGLang stream aborts the worker request on drop.
+    pub fn is_sglang(&self) -> bool {
+        matches!(self, Self::Sglang(_))
+    }
 }
 
 /// Unified EmbedRequest that works with all backends

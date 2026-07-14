@@ -63,6 +63,14 @@ impl CompletionTokenTracker {
         }
     }
 
+    /// Record the count when the router terminates generation early on a
+    /// string-stop match (issue #227): no Complete message will arrive, so the
+    /// cumulative count from the last chunk is authoritative. Never overwrites
+    /// a Complete-provided count.
+    pub fn record_early_termination(&mut self, index: u32, completion_tokens: u32) {
+        self.tokens.entry(index).or_insert(completion_tokens);
+    }
+
     /// Get total completion tokens across all indices
     pub fn total(&self) -> u32 {
         self.tokens.values().sum()

@@ -91,6 +91,9 @@ impl PipelineStage for CompletionRequestBuildingStage {
             ctx.state.workers.as_ref(),
         );
 
+        // issue #227: drain SGLang string stops — see resolve_sglang_string_stops docs.
+        helpers::resolve_sglang_string_stops(&mut proto_request, ctx.tokenizer_arc().as_ref());
+
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
