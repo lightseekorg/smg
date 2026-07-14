@@ -84,14 +84,12 @@ impl PipelineStage for MessageRequestBuildingStage {
         // Build message request
         let request_id = format!("msg_{}", Uuid::now_v7());
 
-        // EncodeStage (EPD) already planned the encode rendezvous and stashed it
-        // on `encode_outputs`. Its presence selects the pixel-drop assembly path.
+        // `encode_outputs` set by EncodeStage selects the pixel-drop assembly path.
         let is_encode_routed = ctx.state.encode_outputs.is_some();
 
-        // Assemble backend-specific multimodal data now that the backend is known.
-        // The intermediate is owned by ProcessingState; take it here for the
-        // prefill serialization (EncodeStage already borrowed it for the encode
-        // payload). When encode-routed, drop the prefill pixels.
+        // Assemble backend-specific multimodal data now that the backend is known;
+        // take the intermediate here for the prefill serialization. When
+        // encode-routed, drop the prefill pixels.
         let multimodal_data = if let Some(intermediate) = ctx.state.multimodal_intermediate.take() {
             let assembled = if is_encode_routed {
                 assemble_multimodal_data_after_encode(
@@ -151,9 +149,9 @@ impl PipelineStage for MessageRequestBuildingStage {
             }
         }
 
-        // EPD: EncodeStage minted the per-item encode bootstrap info. Inject it
-        // into the prefill request; the dispatch plan stays on `encode_outputs`
-        // for request execution to take.
+        // EPD: inject the per-item encode bootstrap info into the prefill
+        // request; the dispatch plan stays on `encode_outputs` for request
+        // execution to take.
         if let Some(outputs) = ctx.state.encode_outputs.as_mut() {
             proto_request.set_encode_bootstrap_info(std::mem::take(&mut outputs.bootstrap_info));
         }

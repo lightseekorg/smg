@@ -262,9 +262,7 @@ impl ChatPreparationStage {
             request.ignore_eos,
         );
 
-        // Store results in context. The multimodal intermediate is owned by
-        // ProcessingState (not nested in PreparationOutput) so EPD's EncodeStage
-        // can borrow it before request building serializes it a second time.
+        // Store results in context.
         ctx.state.multimodal_intermediate = multimodal_intermediate;
         ctx.state.preparation = Some(PreparationOutput::Chat {
             token_ids,

@@ -1,7 +1,4 @@
-//! The single source of truth for the gRPC disaggregation mode. Regular/PD/EPD
-//! is one axis; every place that used to re-derive it (router structs, the
-//! `router_type` label, the per-endpoint pipeline constructors) will map from
-//! this enum.
+//! The gRPC disaggregation mode (Regular/PD/EPD).
 
 use crate::{
     config::types::{RouterConfig, RoutingMode},
@@ -31,12 +28,12 @@ impl Mode {
             Mode::EncodePrefillDecode => ExecutionPlanKind::EncodePrefillDecode,
         }
     }
-    /// SGLang PD bootstrap injection: PD only. EPD (TokenSpeed) uses the encode
-    /// bootstrap info instead, so it must stay false to avoid double injection.
+    /// PD only: EPD (TokenSpeed) injects encode bootstrap info instead, so this
+    /// must stay false there to avoid double injection.
     pub(crate) fn inject_pd_metadata(self) -> bool {
         matches!(self, Mode::PrefillDecode)
     }
-    /// Metrics/introspection label. Strings preserved from the pre-refactor routers.
+    /// Metrics/introspection label.
     pub(crate) fn router_type(self) -> &'static str {
         match self {
             Mode::Regular => "grpc",
@@ -46,8 +43,7 @@ impl Mode {
     }
 }
 
-/// Derive the gRPC mode from config. Returns `None` for non-gRPC backends
-/// (OpenAI/Anthropic/Gemini/HTTP), served by other router types.
+/// Derive the gRPC mode from config. `None` for non-gRPC backends.
 pub(crate) fn grpc_mode(cfg: &RouterConfig) -> Option<Mode> {
     if cfg.connection_mode != ConnectionMode::Grpc {
         return None;

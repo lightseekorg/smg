@@ -81,9 +81,6 @@ impl PipelineStage for WorkerSelectionStage {
             )
         })?;
 
-        // The intermediate is owned by ProcessingState (re-homed out of
-        // PreparationOutput), so borrow it alongside `prep`; both are disjoint
-        // immutable fields of `ctx.state`.
         let intermediate = ctx.state.multimodal_intermediate.as_ref();
 
         let text = prep.routing_text();

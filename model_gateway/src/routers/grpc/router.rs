@@ -282,9 +282,8 @@ fn transcription_response(format: TranscriptionResponseFormat, text: String) -> 
     }
 }
 
-/// Build the `501 NOT_IMPLEMENTED` response the `RouterTrait` defaults return.
-/// Used by the Regular-only endpoints when this router is in PD/EPD mode, so a
-/// disabled endpoint responds identically to a router that never implemented it.
+/// `501 NOT_IMPLEMENTED`, returned by Regular-only endpoints when this router is
+/// in PD/EPD mode (matching the `RouterTrait` default).
 fn not_implemented(message: &'static str) -> Response {
     (StatusCode::NOT_IMPLEMENTED, message).into_response()
 }
@@ -297,8 +296,7 @@ fn not_implemented(message: &'static str) -> Response {
 /// and `router_type`. The Regular-only members (`harmony_pipeline`,
 /// `embedding_pipeline`, `classify_pipeline`, `responses_context`,
 /// `harmony_responses_context`) are `Some` only in `Mode::Regular`; PD/EPD leave
-/// them `None` and 501 the corresponding endpoints, matching the pre-refactor
-/// `GrpcPDRouter`.
+/// them `None` and 501 the corresponding endpoints.
 #[derive(Clone)]
 pub struct GrpcRouter {
     worker_registry: Arc<WorkerRegistry>,
@@ -316,12 +314,9 @@ pub struct GrpcRouter {
 }
 
 impl GrpcRouter {
-    /// Create a new gRPC router for the given disaggregation `mode`.
-    ///
-    /// The chat/generate, messages, and completion pipelines are built for every
-    /// mode. The Harmony, embedding, classify, and responses members are built
-    /// only in `Mode::Regular`; PD/EPD leave them `None` (and thus 501 those
-    /// endpoints), and skip the MCP-orchestrator requirement they alone need.
+    /// Only `Mode::Regular` builds the Harmony, embedding, classify, and
+    /// responses members and requires the MCP orchestrator; PD/EPD leave them
+    /// `None` and 501 those endpoints.
     pub fn new(ctx: &Arc<AppContext>, mode: Mode) -> Result<Self, String> {
         // Get tokenizer registry (no longer requires pre-loaded tokenizer)
         let tokenizer_registry = ctx.tokenizer_registry.clone();
@@ -370,8 +365,7 @@ impl GrpcRouter {
         // Deps for the parser-free endpoints (completion/embeddings/classify).
         let pair_deps = PipelineDeps::pair(worker_registry.clone(), policy_registry.clone());
 
-        // Always-present pipelines: chat/generate, messages, completion. Valid in
-        // every mode, so `build` never returns None here.
+        // Present in every mode: chat/generate, messages, completion.
         let pipeline = RequestPipeline::build(Endpoint::Chat, mode, &configured_deps)
             .ok_or_else(|| format!("gRPC router: no chat pipeline for mode {mode:?}"))?;
         let messages_pipeline = RequestPipeline::build(Endpoint::Messages, mode, &configured_deps)
@@ -438,19 +432,18 @@ impl GrpcRouter {
         })
     }
 
-    /// Resolve the effective retry config for `model_id`: a per-model override
-    /// registered by a worker, else the router default. Applied uniformly at
-    /// every retrying endpoint (chat/generate/messages/completion) across all
-    /// modes — this is what makes PD/EPD completion honor per-model overrides.
+    /// The per-model retry override registered by a worker, else the router
+    /// default. Applied at every retrying endpoint
+    /// (chat/generate/messages/completion) in every mode.
     fn resolve_retry_config(&self, model_id: &str) -> RetryConfig {
         self.worker_registry
             .get_retry_config(model_id)
             .unwrap_or_else(|| self.retry_config.clone())
     }
 
-    /// Record retry metrics for one backoff, labeled per mode: Regular emits a
-    /// single `regular` worker label; PD/EPD emit `prefill` and `decode`
-    /// (never `encode`, matching the pre-refactor routers).
+    /// Retry metrics for one backoff, labeled per mode: Regular emits a single
+    /// `regular` worker label; PD/EPD emit `prefill` and `decode` (never
+    /// `encode`).
     fn record_retry(&self, endpoint: &'static str) {
         match self.mode {
             Mode::Regular => {
@@ -602,8 +595,6 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        // Responses is Regular-only; PD/EPD leave these contexts `None` and 501
-        // via the guard below.
         let (Some(responses_context), Some(harmony_responses_context)) =
             (&self.responses_context, &self.harmony_responses_context)
         else {
@@ -670,7 +661,6 @@ impl GrpcRouter {
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
-        // Embeddings are Regular-only; PD/EPD 501 via the wrapper.
         let Some(embedding_pipeline) = self.embedding_pipeline.as_ref() else {
             return not_implemented("Embeddings not implemented");
         };
@@ -750,10 +740,6 @@ impl GrpcRouter {
         let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.completion_pipeline;
 
-        // Per-model retry override is applied uniformly here for every mode. The
-        // pre-refactor `GrpcPDRouter::route_completion_impl` skipped this override
-        // (used the router default directly); routing PD/EPD completion through
-        // this method fixes that by construction.
         let retry_config = self.resolve_retry_config(model_id);
 
         RetryExecutor::execute_response_with_retry(
@@ -796,7 +782,6 @@ impl GrpcRouter {
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
-        // Classify is Regular-only; PD/EPD 501 via the wrapper.
         let Some(classify_pipeline) = self.classify_pipeline.as_ref() else {
             return not_implemented("Classify not implemented");
         };
@@ -816,8 +801,6 @@ impl GrpcRouter {
 
 impl std::fmt::Debug for GrpcRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Per-mode fields match the pre-refactor routers: Regular reported a
-        // single worker count; PD/EPD reported prefill + decode counts.
         match self.mode {
             Mode::Regular => {
                 let stats = self.worker_registry.stats();
@@ -889,7 +872,6 @@ impl RouterTrait for GrpcRouter {
     }
 
     async fn cancel_response(&self, _headers: Option<&HeaderMap>, response_id: &str) -> Response {
-        // Regular-only; PD/EPD have no responses context (trait-default 501).
         let Some(responses_context) = self.responses_context.as_ref() else {
             return not_implemented("Cancel response not implemented");
         };
@@ -926,8 +908,8 @@ impl RouterTrait for GrpcRouter {
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
-        // Regular-only: this drives the regular chat pipeline via
-        // `execute_chat_for_responses`, which PD/EPD do not serve.
+        // Routes through the regular chat pipeline (`execute_chat_for_responses`),
+        // which PD/EPD do not serve.
         if self.mode != Mode::Regular {
             return not_implemented("Audio transcriptions not implemented");
         }
@@ -1270,10 +1252,8 @@ mod pd_retry_tests {
         )
     }
 
-    /// Completion in PrefillDecode mode must honor a per-model retry override.
-    /// The pre-refactor `GrpcPDRouter::route_completion_impl` used the router
-    /// default directly (skipping the override every other endpoint applied);
-    /// routing PD completion through the unified `resolve_retry_config` fixes it.
+    /// PD-mode completion must honor a per-model retry override, not the router
+    /// default.
     #[test]
     fn pd_completion_honors_per_model_retry_override() {
         let ctx = pd_ctx();
@@ -1289,14 +1269,12 @@ mod pd_retry_tests {
         ctx.worker_registry
             .set_model_retry_config("model-a", override_config, true);
 
-        // The completion path resolves through this exact helper for every mode.
         let resolved = router.resolve_retry_config("model-a");
         assert_eq!(
             resolved.max_retries, override_retries,
             "PD completion must use the per-model override, not the router default"
         );
 
-        // A model without an override still falls back to the router default.
         let fallback = router.resolve_retry_config("model-without-override");
         assert_eq!(fallback.max_retries, default_retries);
     }

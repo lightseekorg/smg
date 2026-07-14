@@ -44,12 +44,9 @@ fn validate_text_only_output(request: &ChatCompletionRequest) -> Result<(), Box<
     Ok(())
 }
 
-/// Processed chat messages ready for gRPC generation
+/// Processed chat messages ready for gRPC generation.
 ///
-/// The preprocessed multimodal intermediate lives on
-/// `ProcessingState::multimodal_intermediate`, not here: EPD's `EncodeStage`
-/// borrows it before request building serializes it a second time, so it is
-/// owned by the pipeline state rather than nested in preparation output.
+/// The multimodal intermediate lives on `ProcessingState`, not here.
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,

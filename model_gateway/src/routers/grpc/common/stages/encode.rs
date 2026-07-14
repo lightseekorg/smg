@@ -1,18 +1,17 @@
 //! EPD encode stage: plan the encode-worker rendezvous and dispatch payloads.
 //!
-//! In encode-prefill-decode (EPD) mode this stage runs after client acquisition
-//! and before request building. It borrows the multimodal intermediate (re-homed
-//! onto `ProcessingState`), mints one bootstrap room per encode item, and
-//! serializes the encode payload WITH pixels for the encode workers. The results
-//! land in `ProcessingState::encode_outputs`:
+//! Runs after client acquisition and before request building. Borrows the
+//! multimodal intermediate, mints one bootstrap room per encode item, and
+//! serializes the encode payload with pixels for the encode workers, landing the
+//! results in `ProcessingState::encode_outputs`:
 //!
 //! - request building injects the per-item bootstrap info into the prefill
 //!   request and drops the prefill pixels;
-//! - request execution fire-and-supervise dispatches the encode jobs alongside
-//!   the prefill/decode leg.
+//! - request execution dispatches the encode jobs alongside the prefill/decode
+//!   leg.
 //!
-//! This module also owns the backend wire details for EPD encode: item
-//! assembly, transport-specific tensor payloads, and the encode-worker RPC.
+//! Also owns the backend wire details for EPD encode: item assembly,
+//! transport-specific tensor payloads, and the encode-worker RPC.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -45,11 +44,9 @@ use crate::{
     worker::DEFAULT_BOOTSTRAP_PORT,
 };
 
-/// EPD encode stage: plan the encode rendezvous + dispatch payloads.
-///
-/// No-op unless the request is multimodal AND worker selection produced encode
-/// assignments (EPD mode with media). Otherwise `encode_outputs` stays `None`
-/// and downstream stages take the plain prefill path.
+/// No-op unless the request is multimodal and worker selection produced encode
+/// assignments; otherwise `encode_outputs` stays `None` and downstream stages
+/// take the plain prefill path.
 pub(crate) struct EncodeStage;
 
 impl EncodeStage {
@@ -61,7 +58,6 @@ impl EncodeStage {
 #[async_trait]
 impl PipelineStage for EncodeStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        // No encode assignments (plain PD, or no media) → nothing to plan.
         if ctx
             .state
             .workers
@@ -86,9 +82,9 @@ impl PipelineStage for EncodeStage {
             error::bad_request("multimodal_not_supported", format!("{e}"))
         })?;
 
-        // An empty plan means no items resolved to encode work; leave
-        // `encode_outputs` unset so request building takes the plain prefill
-        // path (with pixels) rather than the pixel-drop encode path.
+        // No items resolved to encode work: leave `encode_outputs` unset so
+        // request building takes the plain prefill path (with pixels) rather
+        // than the pixel-drop encode path.
         if plan.is_empty() {
             return Ok(None);
         }
@@ -393,11 +389,10 @@ mod tests {
         assert!(dispatch.into_jobs().is_empty());
     }
 
-    /// §7.1 SHM/cancellation guard. Real `/dev/shm` segments back the encode
-    /// jobs, so these run only on Linux (matching the SHM tests in
-    /// `multimodal::assemble`). They prove the encode jobs' SHM Drop guards move
-    /// with the owning state: dropping it before dispatch reclaims the segment,
-    /// while a dispatched item transfers ownership off the guard.
+    /// Real `/dev/shm` segments back the encode jobs, so these run only on
+    /// Linux. They prove the encode jobs' SHM Drop guards move with the owning
+    /// state: dropping it before dispatch reclaims the segment, while a
+    /// dispatched item transfers ownership off the guard.
     #[cfg(target_os = "linux")]
     mod shm_lifecycle {
         use std::collections::HashMap;
@@ -446,9 +441,9 @@ mod tests {
             )
         }
 
-        /// §7.1: dropping the owning `ProcessingState` (as a `RequestContext` drop
-        /// would, on early return / cancellation) BEFORE dispatch must reclaim the
-        /// encode jobs' `/dev/shm` segments via `PreparedEncodeItem`'s `Drop`.
+        /// Dropping the owning `ProcessingState` (as a `RequestContext` drop
+        /// would, on early return / cancellation) before dispatch must reclaim
+        /// the encode jobs' `/dev/shm` segments via `PreparedEncodeItem`'s `Drop`.
         #[test]
         fn dropping_state_before_dispatch_reclaims_encode_shm() {
             if !mm_shm_dev_writable() {

@@ -71,11 +71,9 @@ pub(crate) enum Endpoint {
 
 /// Construction dependencies shared by every endpoint pipeline.
 ///
-/// Bundles the args the legacy `new_*` constructors took so `build` and the
-/// constructors can compose the same stage lists from one place. The parser
-/// factories/overrides are consumed only by the chat/messages/harmony processors;
-/// completion builds its own default-factory processors and embeddings/classify
-/// build none, matching the pre-refactor behavior.
+/// The parser factories/overrides are consumed only by the chat/messages/harmony
+/// processors; completion builds its own default-factory processors and
+/// embeddings/classify build none.
 #[derive(Clone)]
 pub(crate) struct PipelineDeps {
     worker_registry: Arc<WorkerRegistry>,
@@ -107,9 +105,8 @@ impl PipelineDeps {
         }
     }
 
-    /// Deps for the two-arg endpoints (embeddings/classify/completion) that carry
-    /// no configured parsers. The parser fields are placeholders those endpoints
-    /// never read.
+    /// Deps for endpoints (embeddings/classify/completion) with no configured
+    /// parsers; the parser fields are placeholders those endpoints never read.
     pub(crate) fn pair(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -241,15 +238,11 @@ impl RequestPipeline {
         error::internal_error("no_response_produced", "No response produced")
     }
 
-    /// Build the pipeline for `endpoint` in the given disaggregation `mode`.
-    ///
-    /// Single entry point that maps `mode` to the per-stage worker-selection,
-    /// execution-plan, and PD-injection params. Returns `None` for
-    /// endpoint/mode combinations that have no pipeline: Harmony has no EPD
-    /// variant, and embeddings/classify are single-worker only.
-    ///
-    /// This is the one place stage lists are assembled; every legacy `new_*`
-    /// constructor delegates here, so the behavior-parity test guards them all.
+    /// Build the pipeline for `endpoint` in the given disaggregation `mode`,
+    /// mapping `mode` to the per-stage worker-selection, execution-plan, and
+    /// PD-injection params. `None` for endpoint/mode combinations that have no
+    /// pipeline: Harmony has no EPD variant, and embeddings/classify are
+    /// single-worker only.
     pub(crate) fn build(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps) -> Option<Self> {
         // PD and EPD are both served by the "pd" backend metrics bucket; only
         // plain Regular reports as "regular".
@@ -1211,23 +1204,20 @@ mod build_parity_tests {
         stages.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// Frozen, independent oracle: the exact stage signature sequence + metrics
-    /// backend label each pre-refactor `new_*` constructor produced, transcribed
-    /// by hand from `git show origin/main:.../pipeline.rs`. These literals are NOT
-    /// derived from `build`, so a wrong transcription in `build`/`mode.rs` (e.g. a
-    /// flipped `inject_pd_metadata`, a wrong `plan_kind`, or a swapped
-    /// `WorkerSelectionMode`) makes `build`'s output diverge from the golden and
-    /// fails the assert. Do NOT regenerate these from `build` output.
+    /// Hand-transcribed expected stage signatures + metrics backend label per
+    /// endpoint/mode. Do not regenerate from `build()` output, or this stops
+    /// guarding anything: it exists to catch a wrong `build`/`mode.rs` mapping
+    /// (a flipped `inject_pd_metadata`, wrong `plan_kind`, or swapped
+    /// `WorkerSelectionMode`).
     ///
     /// Signature format: stages with no mode-varying args emit their short type
-    /// name; the mode-bearing overrides append their args. Note
-    /// `ChatGenerateRequestBuildingStage` is a composite that wraps the chat and
+    /// name; the mode-bearing overrides append their args.
+    /// `ChatGenerateRequestBuildingStage` is a composite wrapping the chat and
     /// generate request-building stages, both fed the same mode args.
     fn golden(endpoint: Endpoint, mode: Mode) -> (Vec<String>, &'static str) {
         const REGULAR: &str = metrics_labels::BACKEND_REGULAR;
         const PD: &str = metrics_labels::BACKEND_PD;
         match (endpoint, mode) {
-            // Chat: Regular / PD / EPD
             (Endpoint::Chat, Mode::Regular) => (
                 v(&[
                     "ChatGeneratePreparationStage",
@@ -1265,7 +1255,6 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Messages: Regular / PD / EPD
             (Endpoint::Messages, Mode::Regular) => (
                 v(&[
                     "MessagePreparationStage",
@@ -1303,7 +1292,6 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Completion: Regular / PD / EPD
             (Endpoint::Completion, Mode::Regular) => (
                 v(&[
                     "CompletionPreparationStage",
@@ -1341,7 +1329,6 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Harmony: Regular / PD (EPD is invalid, no golden)
             (Endpoint::Harmony, Mode::Regular) => (
                 v(&[
                     "HarmonyPreparationStage",
@@ -1366,9 +1353,8 @@ mod build_parity_tests {
                 ]),
                 PD,
             ),
-            // Embeddings/Classify: Regular only.
-            // Shared embedding prep + request building (no mode args); classify
-            // only swaps the response processor. Both report the regular backend.
+            // Embeddings and classify share prep + request building; classify
+            // only swaps the response processor.
             (Endpoint::Embeddings, Mode::Regular) => (
                 v(&[
                     "EmbeddingPreparationStage",
@@ -1397,10 +1383,8 @@ mod build_parity_tests {
         }
     }
 
-    /// Assert `build(endpoint, mode)` matches the frozen golden (stage sequence +
-    /// mode-bearing args + metrics backend label). The golden is an independent
-    /// transcription, so this is non-vacuous: it catches a wrong `build`/`mode.rs`
-    /// mapping, unlike comparing `build` against the delegating `new_*` ctors.
+    /// Assert `build(endpoint, mode)` matches the hand-transcribed golden (stage
+    /// sequence + mode-bearing args + metrics backend label).
     fn assert_parity(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps) {
         let (expected_sigs, expected_backend) = golden(endpoint, mode);
         let built = RequestPipeline::build(endpoint, mode, deps)
@@ -1420,7 +1404,6 @@ mod build_parity_tests {
     fn build_matches_frozen_goldens() {
         let deps = PipelineDeps::test_default();
 
-        // Chat/Messages/Completion support every mode.
         for endpoint in [Endpoint::Chat, Endpoint::Messages, Endpoint::Completion] {
             for mode in [
                 Mode::Regular,
@@ -1431,7 +1414,6 @@ mod build_parity_tests {
             }
         }
 
-        // Harmony: Regular + PD only; EPD is invalid.
         assert!(
             RequestPipeline::build(Endpoint::Harmony, Mode::EncodePrefillDecode, &deps).is_none(),
             "Harmony EPD must be invalid"
@@ -1439,7 +1421,6 @@ mod build_parity_tests {
         assert_parity(Endpoint::Harmony, Mode::Regular, &deps);
         assert_parity(Endpoint::Harmony, Mode::PrefillDecode, &deps);
 
-        // Embeddings/Classify: Regular only; PD/EPD are invalid.
         for endpoint in [Endpoint::Embeddings, Endpoint::Classify] {
             assert!(
                 RequestPipeline::build(endpoint, Mode::PrefillDecode, &deps).is_none(),

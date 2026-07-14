@@ -56,8 +56,7 @@ impl RouterFactory {
         match ctx.router_config.connection_mode {
             ConnectionMode::Grpc => {
                 // Register the per-role policies each disaggregation mode needs,
-                // then build the one Mode-parameterized gRPC router. `grpc_mode`
-                // is the single source of truth for the Regular/PD/EPD axis.
+                // then build the mode-parameterized gRPC router.
                 match &ctx.router_config.mode {
                     RoutingMode::Regular { .. } => {}
                     RoutingMode::PrefillDecode {
