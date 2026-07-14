@@ -43,6 +43,7 @@ pub(crate) struct WorkerSelectionStage {
     mode: WorkerSelectionMode,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerSelectionMode {
     /// Regular mode: select single worker
     Regular,

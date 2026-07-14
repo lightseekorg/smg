@@ -10,6 +10,11 @@ pub(crate) mod common;
 pub(crate) mod context;
 pub(crate) mod epd_encode;
 pub(crate) mod harmony;
+#[expect(
+    dead_code,
+    reason = "Mode enum + grpc_mode() are wired into the router/pipeline/factory by later tasks of this refactor"
+)]
+pub(crate) mod mode;
 pub(crate) mod multimodal;
 pub(crate) mod pd_router; // Used by routers/factory
 pub(crate) mod pipeline;
