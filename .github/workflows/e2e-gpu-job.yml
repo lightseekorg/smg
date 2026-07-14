@@ -39,6 +39,11 @@ on:
         type: string
         default: ""
         description: "pytest -k filter expression"
+      extra_models:
+        required: false
+        type: string
+        default: ""
+        description: "Extra model ids to download by id (space-separated), for skip_tier_download models"
       setup_agentic_deps:
         required: false
         type: boolean
@@ -125,6 +130,10 @@ jobs:
       # Pre-download models with flock to prevent races between pods on same node
       - name: Download models
         run: bash scripts/ci_download_model.sh --gpu-tier ${{ inputs.gpu_tier }}
+
+      - name: Download extra models
+        if: inputs.extra_models != ''
+        run: bash scripts/ci_download_model.sh ${{ inputs.extra_models }}
 
       # Run tests
       - name: Run E2E tests
