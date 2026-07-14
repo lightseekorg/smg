@@ -44,6 +44,8 @@ class Worker:
     bootstrap_port: int | None = None
     nixl_port: int | None = None
     ib_device: str | None = None
+    dist_init_addr: str | None = None
+    dist_init_port: int | None = None
     log_dir: str | None = None
     extra_engine_args: list[str] | None = None
     process: subprocess.Popen | None = field(default=None, repr=False)
@@ -164,6 +166,9 @@ class Worker:
         if self.nixl_port is not None:
             release_port(self.nixl_port)
             self.nixl_port = None
+        if self.dist_init_port is not None:
+            release_port(self.dist_init_port)
+            self.dist_init_port = None
 
     def is_alive(self) -> bool:
         """Check if the worker process is still running."""
@@ -341,6 +346,19 @@ class Worker:
             # ``logprobs=True`` requests get real per-token data back.
             "--enable-output-logprobs",
         ]
+        if self.worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE):
+            cmd.extend(["--disaggregation-mode", self.worker_type.value])
+            if self.bootstrap_port is not None:
+                cmd.extend(["--disaggregation-bootstrap-port", str(self.bootstrap_port)])
+            cmd.extend(["--disaggregation-transfer-backend", "mooncake"])
+            if self.dist_init_addr:
+                cmd.extend(["--dist-init-addr", self.dist_init_addr])
+            if self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
+                cmd.append("--enable-prefix-caching")
+            if self.worker_type == WorkerType.PREFILL:
+                cmd.append("--enforce-eager")
+            cmd.append("--skip-server-warmup")
+
         extra = spec.get("tokenspeed_args", [])
         if extra:
             cmd.extend(extra)
@@ -385,6 +403,16 @@ class Worker:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_ids))
+
+        if self.engine == "tokenspeed" and self.worker_type in (
+            WorkerType.ENCODE,
+            WorkerType.PREFILL,
+            WorkerType.DECODE,
+        ):
+            env.setdefault("MC_INTRANODE_NVLINK", "1")
+            env.setdefault("TOKENSPEED_SKIP_GRPC_WARMUP", "1")
+            env.setdefault("NO_PROXY", "*")
+            env.setdefault("no_proxy", "*")
 
         # vLLM PD workers need per-worker side-channel ports for their KV backend
         if self.engine == "vllm" and self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
@@ -548,7 +576,18 @@ def start_workers(
             gpu_ids = list(range(gpu_offset, gpu_offset + gpus_per_worker))
             gpu_offset += gpus_per_worker
             port = get_open_port()
-            bootstrap_port = get_open_port() if worker_type == WorkerType.PREFILL else None
+            bootstrap_port = (
+                get_open_port()
+                if worker_type in (WorkerType.PREFILL, WorkerType.ENCODE)
+                else None
+            )
+            is_ts_disagg = engine == "tokenspeed" and worker_type in (
+                WorkerType.ENCODE,
+                WorkerType.PREFILL,
+                WorkerType.DECODE,
+            )
+            dist_init_port = get_open_port() if is_ts_disagg else None
+            dist_init_addr = f"{DEFAULT_HOST}:{dist_init_port}" if dist_init_port else None
 
             worker = Worker(
                 model_id=model_id,
@@ -559,6 +598,8 @@ def start_workers(
                 worker_type=worker_type,
                 bootstrap_port=bootstrap_port,
                 ib_device=ib_device if has_pd else None,
+                dist_init_addr=dist_init_addr,
+                dist_init_port=dist_init_port,
                 log_dir=log_dir,
                 extra_engine_args=extra_engine_args,
             )
