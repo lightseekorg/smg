@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -26,8 +26,9 @@ use super::{
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
+    mode::Mode,
     multimodal::MultimodalComponents,
-    pipeline::RequestPipeline,
+    pipeline::{Endpoint, PipelineDeps, RequestPipeline},
     regular::responses,
 };
 use crate::{
@@ -39,7 +40,7 @@ use crate::{
         common::retry::{is_retryable_status, RetryExecutor},
         error, RouterTrait,
     },
-    worker::WorkerRegistry,
+    worker::{ConnectionMode, WorkerRegistry, WorkerType},
 };
 
 const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
@@ -281,25 +282,47 @@ fn transcription_response(format: TranscriptionResponseFormat, text: String) -> 
     }
 }
 
-/// gRPC router implementation for SGLang
+/// Build the `501 NOT_IMPLEMENTED` response the `RouterTrait` defaults return.
+/// Used by the Regular-only endpoints when this router is in PD/EPD mode, so a
+/// disabled endpoint responds identically to a router that never implemented it.
+fn not_implemented(message: &'static str) -> Response {
+    (StatusCode::NOT_IMPLEMENTED, message).into_response()
+}
+
+/// gRPC router implementation for SGLang.
+///
+/// A single `Mode`-parameterized router serving Regular, PrefillDecode, and
+/// EncodePrefillDecode. `mode` selects the disaggregation params baked into
+/// every pipeline and drives the per-mode retry-metric labels, `Debug` output,
+/// and `router_type`. The Regular-only members (`harmony_pipeline`,
+/// `embedding_pipeline`, `classify_pipeline`, `responses_context`,
+/// `harmony_responses_context`) are `Some` only in `Mode::Regular`; PD/EPD leave
+/// them `None` and 501 the corresponding endpoints, matching the pre-refactor
+/// `GrpcPDRouter`.
 #[derive(Clone)]
 pub struct GrpcRouter {
     worker_registry: Arc<WorkerRegistry>,
+    mode: Mode,
     pipeline: RequestPipeline,
-    harmony_pipeline: RequestPipeline,
-    embedding_pipeline: RequestPipeline,
-    classify_pipeline: RequestPipeline,
+    harmony_pipeline: Option<RequestPipeline>,
+    embedding_pipeline: Option<RequestPipeline>,
+    classify_pipeline: Option<RequestPipeline>,
     messages_pipeline: RequestPipeline,
     completion_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
-    responses_context: ResponsesContext,
-    harmony_responses_context: ResponsesContext,
+    responses_context: Option<ResponsesContext>,
+    harmony_responses_context: Option<ResponsesContext>,
     retry_config: RetryConfig,
 }
 
 impl GrpcRouter {
-    /// Create a new gRPC router
-    pub fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
+    /// Create a new gRPC router for the given disaggregation `mode`.
+    ///
+    /// The chat/generate, messages, and completion pipelines are built for every
+    /// mode. The Harmony, embedding, classify, and responses members are built
+    /// only in `Mode::Regular`; PD/EPD leave them `None` (and thus 501 those
+    /// endpoints), and skip the MCP-orchestrator requirement they alone need.
+    pub fn new(ctx: &Arc<AppContext>, mode: Mode) -> Result<Self, String> {
         // Get tokenizer registry (no longer requires pre-loaded tokenizer)
         let tokenizer_registry = ctx.tokenizer_registry.clone();
 
@@ -315,7 +338,7 @@ impl GrpcRouter {
             .clone();
 
         let worker_registry = ctx.worker_registry.clone();
-        let _policy_registry = ctx.policy_registry.clone();
+        let policy_registry = ctx.policy_registry.clone();
 
         // Create multimodal components (best-effort; non-fatal if initialization fails)
         let multimodal = match MultimodalComponents::new(ctx.multimodal_config_registry.clone()) {
@@ -335,78 +358,73 @@ impl GrpcRouter {
             multimodal,
         });
 
-        // Create regular pipeline
-        let pipeline = RequestPipeline::new_regular(
+        // Deps for the parser-consuming endpoints (chat/messages/harmony).
+        let configured_deps = PipelineDeps::new(
             worker_registry.clone(),
-            _policy_registry.clone(),
+            policy_registry.clone(),
             tool_parser_factory.clone(),
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
         );
+        // Deps for the parser-free endpoints (completion/embeddings/classify).
+        let pair_deps = PipelineDeps::pair(worker_registry.clone(), policy_registry.clone());
 
-        // Create Harmony pipelines
-        let harmony_pipeline = RequestPipeline::new_harmony(
-            worker_registry.clone(),
-            _policy_registry.clone(),
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            ctx.configured_tool_parser.clone(),
-            ctx.configured_reasoning_parser.clone(),
-        );
+        // Always-present pipelines: chat/generate, messages, completion. Valid in
+        // every mode, so `build` never returns None here.
+        let pipeline = RequestPipeline::build(Endpoint::Chat, mode, &configured_deps)
+            .ok_or_else(|| format!("gRPC router: no chat pipeline for mode {mode:?}"))?;
+        let messages_pipeline = RequestPipeline::build(Endpoint::Messages, mode, &configured_deps)
+            .ok_or_else(|| format!("gRPC router: no messages pipeline for mode {mode:?}"))?;
+        let completion_pipeline = RequestPipeline::build(Endpoint::Completion, mode, &pair_deps)
+            .ok_or_else(|| format!("gRPC router: no completion pipeline for mode {mode:?}"))?;
 
-        // Create Embedding pipeline
-        let embedding_pipeline =
-            RequestPipeline::new_embeddings(worker_registry.clone(), _policy_registry.clone());
+        // Regular-only pipelines; `None` in PD/EPD (which 501 these endpoints).
+        let harmony_pipeline = RequestPipeline::build(Endpoint::Harmony, mode, &configured_deps);
+        let embedding_pipeline = RequestPipeline::build(Endpoint::Embeddings, mode, &pair_deps);
+        let classify_pipeline = RequestPipeline::build(Endpoint::Classify, mode, &pair_deps);
 
-        // Create Classify pipeline
-        let classify_pipeline =
-            RequestPipeline::new_classify(worker_registry.clone(), _policy_registry.clone());
+        // Responses contexts are Regular-only and are the sole consumer of the MCP
+        // orchestrator; PD/EPD skip both (they don't serve /v1/responses).
+        let (responses_context, harmony_responses_context) = if mode == Mode::Regular {
+            let mcp_orchestrator = ctx
+                .mcp_orchestrator
+                .get()
+                .ok_or_else(|| "gRPC router requires MCP manager".to_string())?
+                .clone();
 
-        // Create Messages pipeline
-        let messages_pipeline = RequestPipeline::new_messages(
-            worker_registry.clone(),
-            _policy_registry.clone(),
-            tool_parser_factory.clone(),
-            reasoning_parser_factory.clone(),
-            ctx.configured_tool_parser.clone(),
-            ctx.configured_reasoning_parser.clone(),
-        );
+            // Capture storage request context from middleware task-local (before any spawn)
+            let storage_request_context = smg_data_connector::current_request_context();
 
-        // Create Completion pipeline
-        let completion_pipeline =
-            RequestPipeline::new_completion(worker_registry.clone(), _policy_registry.clone());
+            // Helper closure to create responses context with a given pipeline
+            let create_responses_context = |pipeline: &RequestPipeline| {
+                ResponsesContext::new(
+                    Arc::new(pipeline.clone()),
+                    shared_components.clone(),
+                    ctx.response_storage.clone(),
+                    ctx.conversation_storage.clone(),
+                    ctx.conversation_item_storage.clone(),
+                    mcp_orchestrator.clone(),
+                    ctx.mcp_format_registry.clone(),
+                    storage_request_context.clone(),
+                )
+            };
 
-        // Extract shared dependencies for responses contexts
-        let mcp_orchestrator = ctx
-            .mcp_orchestrator
-            .get()
-            .ok_or_else(|| "gRPC router requires MCP manager".to_string())?
-            .clone();
-
-        // Capture storage request context from middleware task-local (before any spawn)
-        let storage_request_context = smg_data_connector::current_request_context();
-
-        // Helper closure to create responses context with a given pipeline
-        let create_responses_context = |pipeline: &RequestPipeline| {
-            ResponsesContext::new(
-                Arc::new(pipeline.clone()),
-                shared_components.clone(),
-                ctx.response_storage.clone(),
-                ctx.conversation_storage.clone(),
-                ctx.conversation_item_storage.clone(),
-                mcp_orchestrator.clone(),
-                ctx.mcp_format_registry.clone(),
-                storage_request_context.clone(),
-            )
+            let responses_context = create_responses_context(&pipeline);
+            let harmony_responses_context = harmony_pipeline
+                .as_ref()
+                .map(&create_responses_context)
+                .ok_or_else(|| {
+                    "gRPC router: regular mode must build a harmony pipeline".to_string()
+                })?;
+            (Some(responses_context), Some(harmony_responses_context))
+        } else {
+            (None, None)
         };
-
-        // Create responses contexts for both pipelines
-        let responses_context = create_responses_context(&pipeline);
-        let harmony_responses_context = create_responses_context(&harmony_pipeline);
 
         Ok(GrpcRouter {
             worker_registry,
+            mode,
             pipeline,
             harmony_pipeline,
             embedding_pipeline,
@@ -418,6 +436,44 @@ impl GrpcRouter {
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
         })
+    }
+
+    /// Resolve the effective retry config for `model_id`: a per-model override
+    /// registered by a worker, else the router default. Applied uniformly at
+    /// every retrying endpoint (chat/generate/messages/completion) across all
+    /// modes — this is what makes PD/EPD completion honor per-model overrides.
+    fn resolve_retry_config(&self, model_id: &str) -> RetryConfig {
+        self.worker_registry
+            .get_retry_config(model_id)
+            .unwrap_or_else(|| self.retry_config.clone())
+    }
+
+    /// Record retry metrics for one backoff, labeled per mode: Regular emits a
+    /// single `regular` worker label; PD/EPD emit `prefill` and `decode`
+    /// (never `encode`, matching the pre-refactor routers).
+    fn record_retry(&self, endpoint: &'static str) {
+        match self.mode {
+            Mode::Regular => {
+                Metrics::record_worker_retry(metrics_labels::WORKER_REGULAR, endpoint);
+            }
+            Mode::PrefillDecode | Mode::EncodePrefillDecode => {
+                Metrics::record_worker_retry(metrics_labels::WORKER_PREFILL, endpoint);
+                Metrics::record_worker_retry(metrics_labels::WORKER_DECODE, endpoint);
+            }
+        }
+    }
+
+    /// Record retry-exhaustion metrics, labeled per mode (see [`Self::record_retry`]).
+    fn record_retries_exhausted(&self, endpoint: &'static str) {
+        match self.mode {
+            Mode::Regular => {
+                Metrics::record_worker_retries_exhausted(metrics_labels::WORKER_REGULAR, endpoint);
+            }
+            Mode::PrefillDecode | Mode::EncodePrefillDecode => {
+                Metrics::record_worker_retries_exhausted(metrics_labels::WORKER_PREFILL, endpoint);
+                Metrics::record_worker_retries_exhausted(metrics_labels::WORKER_DECODE, endpoint);
+            }
+        }
     }
 
     /// Main route_chat implementation
@@ -432,19 +488,19 @@ impl GrpcRouter {
             return *response;
         }
 
-        // Choose Harmony pipeline if workers indicate Harmony (checks architectures, hf_model_type)
-        let is_harmony =
-            HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
+        // Harmony routing is Regular-only: PD/EPD have no Harmony pipeline, so all
+        // chat requests use the single chat/generate pipeline.
+        let is_harmony = self.harmony_pipeline.is_some()
+            && HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
 
         debug!(
             "Processing chat completion request for model: {}, using_harmony={}",
             model_id, is_harmony
         );
 
-        let pipeline = if is_harmony {
-            &self.harmony_pipeline
-        } else {
-            &self.pipeline
+        let pipeline = match self.harmony_pipeline.as_ref() {
+            Some(harmony_pipeline) if is_harmony => harmony_pipeline,
+            _ => &self.pipeline,
         };
 
         // Clone values needed for retry closure
@@ -454,14 +510,10 @@ impl GrpcRouter {
         let components = self.shared_components.clone();
         let tenant_meta_cloned = tenant_meta.clone();
 
-        // Use per-model retry config if set by a worker, otherwise fall back to router default.
-        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
-        let retry_config = per_model_retry_config
-            .as_ref()
-            .unwrap_or(&self.retry_config);
+        let retry_config = self.resolve_retry_config(model_id);
 
         RetryExecutor::execute_response_with_retry(
-            retry_config,
+            &retry_config,
             // Operation: execute pipeline (creates fresh context each attempt)
             |_attempt| {
                 let request = Arc::clone(&request);
@@ -479,18 +531,12 @@ impl GrpcRouter {
             |res, _attempt| is_retryable_status(res.status()),
             // On backoff: record retry metrics
             |delay, attempt| {
-                Metrics::record_worker_retry(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_CHAT,
-                );
+                self.record_retry(metrics_labels::ENDPOINT_CHAT);
                 Metrics::record_worker_retry_backoff(attempt, delay);
             },
             // On exhausted: record exhaustion
             || {
-                Metrics::record_worker_retries_exhausted(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_CHAT,
-                );
+                self.record_retries_exhausted(metrics_labels::ENDPOINT_CHAT);
             },
         )
         .await
@@ -514,14 +560,10 @@ impl GrpcRouter {
         let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.pipeline;
 
-        // Use per-model retry config if set by a worker, otherwise fall back to router default.
-        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
-        let retry_config = per_model_retry_config
-            .as_ref()
-            .unwrap_or(&self.retry_config);
+        let retry_config = self.resolve_retry_config(model_id);
 
         RetryExecutor::execute_response_with_retry(
-            retry_config,
+            &retry_config,
             // Operation: execute pipeline (creates fresh context each attempt)
             |_attempt| {
                 let request = Arc::clone(&request);
@@ -539,18 +581,12 @@ impl GrpcRouter {
             |res, _attempt| is_retryable_status(res.status()),
             // On backoff: record retry metrics
             |delay, attempt| {
-                Metrics::record_worker_retry(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_GENERATE,
-                );
+                self.record_retry(metrics_labels::ENDPOINT_GENERATE);
                 Metrics::record_worker_retry_backoff(attempt, delay);
             },
             // On exhausted: record exhaustion
             || {
-                Metrics::record_worker_retries_exhausted(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_GENERATE,
-                );
+                self.record_retries_exhausted(metrics_labels::ENDPOINT_GENERATE);
             },
         )
         .await
@@ -566,6 +602,17 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
+        // Responses is Regular-only; PD/EPD leave these contexts `None` and the
+        // `RouterTrait::route_responses` wrapper 501s before reaching here.
+        let (Some(responses_context), Some(harmony_responses_context)) =
+            (&self.responses_context, &self.harmony_responses_context)
+        else {
+            return not_implemented("Responses endpoint not implemented");
+        };
+        let Some(harmony_pipeline) = self.harmony_pipeline.as_ref() else {
+            return not_implemented("Responses endpoint not implemented");
+        };
+
         // 0. Fast worker validation (fail-fast before expensive operations)
         if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
         {
@@ -583,15 +630,13 @@ impl GrpcRouter {
                 body.stream.unwrap_or(false)
             );
             let harmony_ctx = ResponsesContext::new(
-                Arc::new(self.harmony_pipeline.clone()),
+                Arc::new(harmony_pipeline.clone()),
                 self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context.mcp_orchestrator.clone(),
-                self.harmony_responses_context.mcp_format_registry.clone(),
+                harmony_responses_context.response_storage.clone(),
+                harmony_responses_context.conversation_storage.clone(),
+                harmony_responses_context.conversation_item_storage.clone(),
+                harmony_responses_context.mcp_orchestrator.clone(),
+                harmony_responses_context.mcp_format_registry.clone(),
                 smg_data_connector::current_request_context(),
             );
 
@@ -607,7 +652,7 @@ impl GrpcRouter {
             }
         } else {
             responses::route_responses(
-                &self.responses_context,
+                responses_context,
                 Arc::new(body.clone()),
                 headers.cloned(),
                 tenant_meta.clone(),
@@ -625,9 +670,13 @@ impl GrpcRouter {
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
+        // Embeddings are Regular-only; PD/EPD 501 via the wrapper.
+        let Some(embedding_pipeline) = self.embedding_pipeline.as_ref() else {
+            return not_implemented("Embeddings not implemented");
+        };
         debug!("Processing embedding request for model: {}", model_id);
 
-        self.embedding_pipeline
+        embedding_pipeline
             .execute_embeddings(
                 Arc::new(body.clone()),
                 headers.cloned(),
@@ -656,14 +705,10 @@ impl GrpcRouter {
         let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.messages_pipeline;
 
-        // Use per-model retry config if set by a worker, otherwise fall back to router default.
-        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
-        let retry_config = per_model_retry_config
-            .as_ref()
-            .unwrap_or(&self.retry_config);
+        let retry_config = self.resolve_retry_config(model_id);
 
         RetryExecutor::execute_response_with_retry(
-            retry_config,
+            &retry_config,
             |_attempt| {
                 let request = Arc::clone(&request);
                 let headers = headers_cloned.clone();
@@ -678,17 +723,11 @@ impl GrpcRouter {
             },
             |res, _attempt| is_retryable_status(res.status()),
             |delay, attempt| {
-                Metrics::record_worker_retry(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_MESSAGES,
-                );
+                self.record_retry(metrics_labels::ENDPOINT_MESSAGES);
                 Metrics::record_worker_retry_backoff(attempt, delay);
             },
             || {
-                Metrics::record_worker_retries_exhausted(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_MESSAGES,
-                );
+                self.record_retries_exhausted(metrics_labels::ENDPOINT_MESSAGES);
             },
         )
         .await
@@ -711,13 +750,14 @@ impl GrpcRouter {
         let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.completion_pipeline;
 
-        let per_model_retry_config = self.worker_registry.get_retry_config(model_id);
-        let retry_config = per_model_retry_config
-            .as_ref()
-            .unwrap_or(&self.retry_config);
+        // Per-model retry override is applied uniformly here for every mode. The
+        // pre-refactor `GrpcPDRouter::route_completion_impl` skipped this override
+        // (used the router default directly); routing PD/EPD completion through
+        // this method fixes that by construction.
+        let retry_config = self.resolve_retry_config(model_id);
 
         RetryExecutor::execute_response_with_retry(
-            retry_config,
+            &retry_config,
             |_attempt| {
                 let request = Arc::clone(&request);
                 let headers = headers_cloned.clone();
@@ -738,17 +778,11 @@ impl GrpcRouter {
             },
             |res, _attempt| is_retryable_status(res.status()),
             |delay, attempt| {
-                Metrics::record_worker_retry(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_COMPLETIONS,
-                );
+                self.record_retry(metrics_labels::ENDPOINT_COMPLETIONS);
                 Metrics::record_worker_retry_backoff(attempt, delay);
             },
             || {
-                Metrics::record_worker_retries_exhausted(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::ENDPOINT_COMPLETIONS,
-                );
+                self.record_retries_exhausted(metrics_labels::ENDPOINT_COMPLETIONS);
             },
         )
         .await
@@ -762,9 +796,13 @@ impl GrpcRouter {
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
+        // Classify is Regular-only; PD/EPD 501 via the wrapper.
+        let Some(classify_pipeline) = self.classify_pipeline.as_ref() else {
+            return not_implemented("Classify not implemented");
+        };
         debug!("Processing classify request for model: {}", model_id);
 
-        self.classify_pipeline
+        classify_pipeline
             .execute_classify(
                 Arc::new(body.clone()),
                 headers.cloned(),
@@ -778,10 +816,36 @@ impl GrpcRouter {
 
 impl std::fmt::Debug for GrpcRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stats = self.worker_registry.stats();
-        f.debug_struct("GrpcRouter")
-            .field("workers_count", &stats.total_workers)
-            .finish()
+        // Per-mode fields match the pre-refactor routers: Regular reported a
+        // single worker count; PD/EPD reported prefill + decode counts.
+        match self.mode {
+            Mode::Regular => {
+                let stats = self.worker_registry.stats();
+                f.debug_struct("GrpcRouter")
+                    .field("workers_count", &stats.total_workers)
+                    .finish()
+            }
+            Mode::PrefillDecode | Mode::EncodePrefillDecode => {
+                let prefill_workers = self.worker_registry.get_workers_filtered(
+                    None,
+                    Some(WorkerType::Prefill),
+                    Some(ConnectionMode::Grpc),
+                    None,
+                    false,
+                );
+                let decode_workers = self.worker_registry.get_workers_filtered(
+                    None,
+                    Some(WorkerType::Decode),
+                    Some(ConnectionMode::Grpc),
+                    None,
+                    false,
+                );
+                f.debug_struct("GrpcRouter")
+                    .field("prefill_workers_count", &prefill_workers.len())
+                    .field("decode_workers_count", &decode_workers.len())
+                    .finish()
+            }
+        }
     }
 }
 
@@ -825,7 +889,11 @@ impl RouterTrait for GrpcRouter {
     }
 
     async fn cancel_response(&self, _headers: Option<&HeaderMap>, response_id: &str) -> Response {
-        cancel_response_impl(&self.responses_context, response_id).await
+        // Regular-only; PD/EPD have no responses context (trait-default 501).
+        let Some(responses_context) = self.responses_context.as_ref() else {
+            return not_implemented("Cancel response not implemented");
+        };
+        cancel_response_impl(responses_context, response_id).await
     }
 
     async fn route_embeddings(
@@ -858,6 +926,11 @@ impl RouterTrait for GrpcRouter {
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
+        // Regular-only: this drives the regular chat pipeline via
+        // `execute_chat_for_responses`, which PD/EPD do not serve.
+        if self.mode != Mode::Regular {
+            return not_implemented("Audio transcriptions not implemented");
+        }
         if !is_qwen3_asr_target(&self.worker_registry, model_id) {
             return error::bad_request(
                 "audio_transcription_model_not_supported",
@@ -947,7 +1020,7 @@ impl RouterTrait for GrpcRouter {
     }
 
     fn router_type(&self) -> &'static str {
-        "grpc"
+        self.mode.router_type()
     }
 }
 
@@ -1134,5 +1207,97 @@ mod tests {
             .status(),
             StatusCode::OK
         );
+    }
+}
+
+#[cfg(test)]
+mod pd_retry_tests {
+    use std::sync::{Arc, OnceLock};
+
+    use llm_tokenizer::registry::TokenizerRegistry;
+    use reasoning_parser::ParserFactory as ReasoningParserFactory;
+    use smg_data_connector::{
+        MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+    };
+    use tool_parser::ParserFactory as ToolParserFactory;
+
+    use super::*;
+    use crate::{
+        config::{PolicyConfig, RouterConfig, RoutingMode},
+        policies::PolicyRegistry,
+        worker::WorkerRegistry,
+    };
+
+    /// Minimal `AppContext` for constructing a gRPC PD router. PD/EPD don't read
+    /// the MCP orchestrator, so an empty `OnceLock` suffices.
+    fn pd_ctx() -> Arc<AppContext> {
+        let config = RouterConfig::builder()
+            .mode(RoutingMode::PrefillDecode {
+                prefill_urls: vec![],
+                decode_urls: vec![],
+                prefill_policy: None,
+                decode_policy: None,
+            })
+            .grpc_connection()
+            .policy(PolicyConfig::Random)
+            .host("127.0.0.1")
+            .port(3001)
+            .max_payload_size(1024 * 1024)
+            .request_timeout_secs(60)
+            .worker_startup_timeout_secs(10)
+            .worker_startup_check_interval_secs(1)
+            .max_concurrent_requests(64)
+            .queue_timeout_secs(60)
+            .build_unchecked();
+
+        Arc::new(
+            AppContext::builder()
+                .router_config(config.clone())
+                .client(reqwest::Client::new())
+                .tokenizer_registry(Arc::new(TokenizerRegistry::new()))
+                .reasoning_parser_factory(Some(ReasoningParserFactory::new()))
+                .tool_parser_factory(Some(ToolParserFactory::new()))
+                .worker_registry(Arc::new(WorkerRegistry::new()))
+                .policy_registry(Arc::new(PolicyRegistry::new(config.policy.clone())))
+                .response_storage(Arc::new(MemoryResponseStorage::new()))
+                .conversation_storage(Arc::new(MemoryConversationStorage::new()))
+                .conversation_item_storage(Arc::new(MemoryConversationItemStorage::new()))
+                .worker_job_queue(Arc::new(OnceLock::new()))
+                .workflow_engines(Arc::new(OnceLock::new()))
+                .mcp_orchestrator(Arc::new(OnceLock::new()))
+                .build()
+                .expect("app context"),
+        )
+    }
+
+    /// Completion in PrefillDecode mode must honor a per-model retry override.
+    /// The pre-refactor `GrpcPDRouter::route_completion_impl` used the router
+    /// default directly (skipping the override every other endpoint applied);
+    /// routing PD completion through the unified `resolve_retry_config` fixes it.
+    #[test]
+    fn pd_completion_honors_per_model_retry_override() {
+        let ctx = pd_ctx();
+        let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
+
+        // Router default differs from the override so the assertion is meaningful.
+        let default_retries = router.retry_config.max_retries;
+        let override_retries = default_retries + 7;
+        let override_config = RetryConfig {
+            max_retries: override_retries,
+            ..RetryConfig::default()
+        };
+        ctx.worker_registry
+            .set_model_retry_config("model-a", override_config, true);
+
+        // The completion path resolves through this exact helper for every mode.
+        let resolved = router.resolve_retry_config("model-a");
+        assert_eq!(
+            resolved.max_retries, override_retries,
+            "PD completion must use the per-model override, not the router default"
+        );
+
+        // A model without an override still falls back to the router default.
+        let fallback = router.resolve_retry_config("model-without-override");
+        assert_eq!(fallback.max_retries, default_retries);
     }
 }

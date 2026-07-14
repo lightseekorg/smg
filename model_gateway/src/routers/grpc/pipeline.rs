@@ -87,10 +87,33 @@ pub(crate) struct PipelineDeps {
 }
 
 impl PipelineDeps {
+    /// Full deps for the chat/messages/harmony endpoints, which consume the
+    /// configured parser factories/overrides.
+    pub(crate) fn new(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        Self {
+            worker_registry,
+            policy_registry,
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+        }
+    }
+
     /// Deps for the two-arg endpoints (embeddings/classify/completion) that carry
     /// no configured parsers. The parser fields are placeholders those endpoints
     /// never read.
-    fn pair(worker_registry: Arc<WorkerRegistry>, policy_registry: Arc<PolicyRegistry>) -> Self {
+    pub(crate) fn pair(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
         Self {
             worker_registry,
             policy_registry,
@@ -380,6 +403,10 @@ impl RequestPipeline {
     }
 
     /// Create a regular (single-worker) pipeline
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -403,6 +430,10 @@ impl RequestPipeline {
     }
 
     /// Create a Harmony (single-worker) pipeline for Harmony-capable models
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_harmony(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -426,7 +457,10 @@ impl RequestPipeline {
     }
 
     /// Create a Harmony PD (prefill-decode) pipeline
-    #[expect(dead_code, reason = "Harmony PD pipeline is wired up by a later task")]
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_harmony_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -450,6 +484,10 @@ impl RequestPipeline {
     }
 
     /// Create a PD (prefill-decode) pipeline
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -481,6 +519,10 @@ impl RequestPipeline {
     /// present;
     /// `inject_pd_metadata` stays false because TokenSpeed EPD uses the encode
     /// bootstrap info rather than SGLang bootstrap metadata.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_epd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -504,6 +546,10 @@ impl RequestPipeline {
     }
 
     /// Create an embeddings pipeline
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_embeddings(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -519,6 +565,10 @@ impl RequestPipeline {
     ///
     /// Classify reuses embedding stages for preparation and request building,
     /// but uses its own response processing for softmax + label mapping.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_classify(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -535,6 +585,10 @@ impl RequestPipeline {
     /// Uses Messages-specific stages for preparation, request building, and response
     /// processing. Shares worker selection, client acquisition, dispatch metadata,
     /// and request execution stages with other pipelines.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_messages(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -558,6 +612,10 @@ impl RequestPipeline {
     }
 
     /// Create a Messages API PD (prefill-decode) pipeline
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_messages_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -585,6 +643,10 @@ impl RequestPipeline {
     /// Mirrors `new_messages_pd` with `ExecutionPlanKind::EncodePrefillDecode`,
     /// so request building plans encode jobs and request execution dispatches
     /// E/P/D together.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_messages_epd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -612,6 +674,10 @@ impl RequestPipeline {
     /// Uses Completion-specific stages for preparation, request building, and response
     /// processing. Shares worker selection, client acquisition, dispatch metadata,
     /// and request execution stages with other pipelines.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_completion(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -624,6 +690,10 @@ impl RequestPipeline {
     }
 
     /// Create a Completion API PD (prefill-decode) pipeline
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_completion_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -641,6 +711,10 @@ impl RequestPipeline {
     /// exists so a TokenSpeed EPD deployment can serve completion requests via
     /// `ExecutionPlan::EncodePrefillDecode` (which bypasses the runtime PD gate
     /// that rejects TokenSpeed) rather than the prefill/decode path.
+    #[expect(
+        dead_code,
+        reason = "superseded by RequestPipeline::build; retained until a later task removes it"
+    )]
     pub fn new_completion_epd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,

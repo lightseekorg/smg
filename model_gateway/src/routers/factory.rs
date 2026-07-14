@@ -5,7 +5,10 @@ use std::sync::Arc;
 use super::{
     anthropic::AnthropicRouter,
     gemini::GeminiRouter,
-    grpc::{pd_router::GrpcPDRouter, router::GrpcRouter},
+    grpc::{
+        mode::{grpc_mode, Mode},
+        router::GrpcRouter,
+    },
     http::{pd_router::PDRouter, router::Router},
     openai::OpenAIRouter,
     RouterTrait,
@@ -51,40 +54,48 @@ impl RouterFactory {
     /// Create a router instance from application context
     pub async fn create_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
         match ctx.router_config.connection_mode {
-            ConnectionMode::Grpc => match &ctx.router_config.mode {
-                RoutingMode::Regular { .. } => Self::create_grpc_router(ctx),
-                RoutingMode::PrefillDecode {
-                    prefill_policy,
-                    decode_policy,
-                    ..
-                } => Self::create_grpc_pd_router(
-                    prefill_policy.as_ref(),
-                    decode_policy.as_ref(),
-                    &ctx.router_config.policy,
-                    ctx,
-                ),
-                RoutingMode::EncodePrefillDecode {
-                    encode_policy,
-                    prefill_policy,
-                    decode_policy,
-                    ..
-                } => Self::create_grpc_epd_router(
-                    encode_policy.as_ref(),
-                    prefill_policy.as_ref(),
-                    decode_policy.as_ref(),
-                    &ctx.router_config.policy,
-                    ctx,
-                ),
-                RoutingMode::OpenAI { .. } => {
-                    Err("OpenAI mode requires HTTP connection_mode".to_string())
+            ConnectionMode::Grpc => {
+                // Register the per-role policies each disaggregation mode needs,
+                // then build the one Mode-parameterized gRPC router. `grpc_mode`
+                // is the single source of truth for the Regular/PD/EPD axis.
+                match &ctx.router_config.mode {
+                    RoutingMode::Regular { .. } => {}
+                    RoutingMode::PrefillDecode {
+                        prefill_policy,
+                        decode_policy,
+                        ..
+                    } => Self::set_pd_policies(
+                        prefill_policy.as_ref(),
+                        decode_policy.as_ref(),
+                        &ctx.router_config.policy,
+                        ctx,
+                    ),
+                    RoutingMode::EncodePrefillDecode {
+                        encode_policy,
+                        prefill_policy,
+                        decode_policy,
+                        ..
+                    } => Self::set_epd_policies(
+                        encode_policy.as_ref(),
+                        prefill_policy.as_ref(),
+                        decode_policy.as_ref(),
+                        &ctx.router_config.policy,
+                        ctx,
+                    ),
+                    RoutingMode::OpenAI { .. } => {
+                        return Err("OpenAI mode requires HTTP connection_mode".to_string())
+                    }
+                    RoutingMode::Anthropic { .. } => {
+                        return Err("Anthropic mode requires HTTP connection_mode".to_string())
+                    }
+                    RoutingMode::Gemini { .. } => {
+                        return Err("Gemini mode requires HTTP connection_mode".to_string())
+                    }
                 }
-                RoutingMode::Anthropic { .. } => {
-                    Err("Anthropic mode requires HTTP connection_mode".to_string())
-                }
-                RoutingMode::Gemini { .. } => {
-                    Err("Gemini mode requires HTTP connection_mode".to_string())
-                }
-            },
+                let mode = grpc_mode(&ctx.router_config)
+                    .ok_or_else(|| "gRPC connection mode requires a gRPC routing mode".to_string())?;
+                Self::create_grpc_router(ctx, mode)
+            }
             ConnectionMode::Http => match &ctx.router_config.mode {
                 RoutingMode::Regular { .. } => Self::create_regular_router(ctx).await,
                 RoutingMode::PrefillDecode {
@@ -149,20 +160,27 @@ impl RouterFactory {
         Ok(Box::new(router))
     }
 
-    /// Create a gRPC router with injected policy
-    pub fn create_grpc_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
-        let router = GrpcRouter::new(ctx)?;
+    /// Create a gRPC router for the given disaggregation `mode`.
+    ///
+    /// For PD/EPD modes the caller must register the prefill/decode (and encode)
+    /// policies first via [`Self::set_pd_policies`] / [`Self::set_epd_policies`].
+    pub(crate) fn create_grpc_router(
+        ctx: &Arc<AppContext>,
+        mode: Mode,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let router = GrpcRouter::new(ctx, mode)?;
 
         Ok(Box::new(router))
     }
 
-    /// Create a gRPC PD router with tokenizer and worker configuration
-    pub fn create_grpc_pd_router(
+    /// Register the prefill/decode policies for a gRPC PD deployment, defaulting
+    /// to the main policy when a per-role policy is unset.
+    fn set_pd_policies(
         prefill_policy_config: Option<&PolicyConfig>,
         decode_policy_config: Option<&PolicyConfig>,
         main_policy_config: &PolicyConfig,
         ctx: &Arc<AppContext>,
-    ) -> Result<Box<dyn RouterTrait>, String> {
+    ) {
         let prefill_policy =
             PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
         let decode_policy =
@@ -170,24 +188,18 @@ impl RouterFactory {
 
         ctx.policy_registry.set_prefill_policy(prefill_policy);
         ctx.policy_registry.set_decode_policy(decode_policy);
-        let router = GrpcPDRouter::new(ctx)?;
-
-        Ok(Box::new(router))
     }
 
-    /// Create a gRPC EPD (encode-prefill-decode) router with injected policy.
-    ///
-    /// Mirrors [`Self::create_grpc_pd_router`]: encode/prefill/decode policies
-    /// are set before routing goes through the EPD pipelines via
-    /// [`GrpcPDRouter::new_epd`]. Encode defaults to consistent hashing over
-    /// each item's content hash.
-    pub fn create_grpc_epd_router(
+    /// Register the encode/prefill/decode policies for a gRPC EPD deployment.
+    /// Encode defaults to consistent hashing over each item's content hash;
+    /// prefill/decode default to the main policy when unset.
+    fn set_epd_policies(
         encode_policy_config: Option<&PolicyConfig>,
         prefill_policy_config: Option<&PolicyConfig>,
         decode_policy_config: Option<&PolicyConfig>,
         main_policy_config: &PolicyConfig,
         ctx: &Arc<AppContext>,
-    ) -> Result<Box<dyn RouterTrait>, String> {
+    ) {
         let default_encode_policy = PolicyConfig::ConsistentHashing;
         let encode_policy = PolicyFactory::create_from_config(
             encode_policy_config.unwrap_or(&default_encode_policy),
@@ -200,9 +212,6 @@ impl RouterFactory {
         ctx.policy_registry.set_encode_policy(encode_policy);
         ctx.policy_registry.set_prefill_policy(prefill_policy);
         ctx.policy_registry.set_decode_policy(decode_policy);
-        let router = GrpcPDRouter::new_epd(ctx)?;
-
-        Ok(Box::new(router))
     }
 
     /// Create an OpenAI router
@@ -264,23 +273,21 @@ impl RouterFactory {
             (
                 router_ids::GRPC_REGULAR,
                 "gRPC Regular",
-                Self::create_grpc_router(ctx),
+                Self::create_grpc_router(ctx, Mode::Regular),
             ),
             (
                 router_ids::HTTP_PD,
                 "HTTP PD",
                 Self::create_pd_router(None, None, policy, ctx).await,
             ),
-            (
-                router_ids::GRPC_PD,
-                "gRPC PD",
-                Self::create_grpc_pd_router(None, None, policy, ctx),
-            ),
-            (
-                router_ids::GRPC_EPD,
-                "gRPC EPD",
-                Self::create_grpc_epd_router(None, None, None, policy, ctx),
-            ),
+            (router_ids::GRPC_PD, "gRPC PD", {
+                Self::set_pd_policies(None, None, policy, ctx);
+                Self::create_grpc_router(ctx, Mode::PrefillDecode)
+            }),
+            (router_ids::GRPC_EPD, "gRPC EPD", {
+                Self::set_epd_policies(None, None, None, policy, ctx);
+                Self::create_grpc_router(ctx, Mode::EncodePrefillDecode)
+            }),
             (
                 router_ids::HTTP_OPENAI,
                 "OpenAI",
@@ -297,5 +304,113 @@ impl RouterFactory {
                 Self::create_gemini_router(ctx).await,
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod grpc_router_type_tests {
+    use std::sync::{Arc, OnceLock};
+
+    use llm_tokenizer::registry::TokenizerRegistry;
+    use reasoning_parser::ParserFactory as ReasoningParserFactory;
+    use smg_data_connector::{
+        MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+    };
+    use smg_mcp::{McpConfig, McpOrchestrator};
+    use tool_parser::ParserFactory as ToolParserFactory;
+
+    use super::*;
+    use crate::{app_context::AppContext, config::RouterConfig, policies::PolicyRegistry};
+
+    /// Build an `AppContext` for a gRPC `RoutingMode` with the components
+    /// `GrpcRouter::new` needs (parser factories always; an initialized MCP
+    /// orchestrator for Regular, which is the only mode that reads it).
+    async fn grpc_ctx(mode: RoutingMode) -> Arc<AppContext> {
+        let config = RouterConfig::builder()
+            .mode(mode)
+            .grpc_connection()
+            .policy(PolicyConfig::Random)
+            .host("127.0.0.1")
+            .port(3001)
+            .max_payload_size(1024 * 1024)
+            .request_timeout_secs(60)
+            .worker_startup_timeout_secs(10)
+            .worker_startup_check_interval_secs(1)
+            .max_concurrent_requests(64)
+            .queue_timeout_secs(60)
+            .build_unchecked();
+
+        let worker_registry = Arc::new(crate::worker::WorkerRegistry::new());
+        let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
+        let mcp_orchestrator = Arc::new(OnceLock::new());
+        mcp_orchestrator
+            .set(Arc::new(
+                McpOrchestrator::new(McpConfig::default())
+                    .await
+                    .expect("mcp orchestrator"),
+            ))
+            .ok();
+
+        Arc::new(
+            AppContext::builder()
+                .router_config(config)
+                .client(reqwest::Client::new())
+                .tokenizer_registry(Arc::new(TokenizerRegistry::new()))
+                .reasoning_parser_factory(Some(ReasoningParserFactory::new()))
+                .tool_parser_factory(Some(ToolParserFactory::new()))
+                .worker_registry(worker_registry)
+                .policy_registry(policy_registry)
+                .response_storage(Arc::new(MemoryResponseStorage::new()))
+                .conversation_storage(Arc::new(MemoryConversationStorage::new()))
+                .conversation_item_storage(Arc::new(MemoryConversationItemStorage::new()))
+                .worker_job_queue(Arc::new(OnceLock::new()))
+                .workflow_engines(Arc::new(OnceLock::new()))
+                .mcp_orchestrator(mcp_orchestrator)
+                .build()
+                .expect("app context"),
+        )
+    }
+
+    // Multi-thread runtime: building the Regular router eagerly constructs the
+    // Harmony pipeline, whose one-shot encoding load uses `block_in_place`
+    // (which panics on a current-thread runtime).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grpc_router_type_reflects_disaggregation_mode() {
+        let cases = [
+            (
+                RoutingMode::Regular {
+                    worker_urls: vec![],
+                },
+                "grpc",
+            ),
+            (
+                RoutingMode::PrefillDecode {
+                    prefill_urls: vec![],
+                    decode_urls: vec![],
+                    prefill_policy: None,
+                    decode_policy: None,
+                },
+                "grpc_pd",
+            ),
+            (
+                RoutingMode::EncodePrefillDecode {
+                    encode_urls: vec![],
+                    prefill_urls: vec![],
+                    decode_urls: vec![],
+                    encode_policy: None,
+                    prefill_policy: None,
+                    decode_policy: None,
+                },
+                "grpc_epd",
+            ),
+        ];
+
+        for (mode, expected) in cases {
+            let ctx = grpc_ctx(mode).await;
+            let router = RouterFactory::create_router(&ctx)
+                .await
+                .expect("router creation");
+            assert_eq!(router.router_type(), expected);
+        }
     }
 }
