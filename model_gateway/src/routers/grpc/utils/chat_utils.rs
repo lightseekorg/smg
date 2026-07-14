@@ -465,7 +465,6 @@ pub(crate) fn process_chat_messages_with_placeholders(
             let Some(last_msg) = transformed_messages.pop() else {
                 return Ok(ProcessedMessages {
                     text: String::new(),
-                    multimodal_intermediate: None,
                     stop_sequences: request.stop.clone(),
                 });
             };
@@ -492,7 +491,6 @@ pub(crate) fn process_chat_messages_with_placeholders(
 
     Ok(ProcessedMessages {
         text: formatted_text,
-        multimodal_intermediate: None,
         stop_sequences: request.stop.clone(),
     })
 }

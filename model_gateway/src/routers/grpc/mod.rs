@@ -8,7 +8,6 @@ use crate::routers::error;
 pub mod client; // Used by core/
 pub(crate) mod common;
 pub(crate) mod context;
-pub(crate) mod epd_encode;
 pub(crate) mod harmony;
 pub(crate) mod mode;
 pub(crate) mod multimodal;
@@ -46,13 +45,14 @@ fn validate_text_only_output(request: &ChatCompletionRequest) -> Result<(), Box<
 }
 
 /// Processed chat messages ready for gRPC generation
+///
+/// The preprocessed multimodal intermediate lives on
+/// `ProcessingState::multimodal_intermediate`, not here: EPD's `EncodeStage`
+/// borrows it before request building serializes it a second time, so it is
+/// owned by the pipeline state rather than nested in preparation output.
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,
-    /// Preprocessed multimodal intermediate (deferred assembly).
-    /// Populated during preparation when multimodal content is detected.
-    /// Assembled into backend-specific `MultimodalData` in request_building.
-    pub(crate) multimodal_intermediate: Option<multimodal::MultimodalIntermediate>,
     pub stop_sequences: Option<StringOrArray>,
 }
 

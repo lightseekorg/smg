@@ -101,8 +101,7 @@ impl PipelineStage for GenerateRequestBuildingStage {
             helpers::maybe_inject_pd_rendezvous(&mut proto_request, workers);
         }
 
-        ctx.state.execution_plan =
-            Some(ExecutionPlan::generate(self.plan_kind, proto_request, None));
+        ctx.state.execution_plan = Some(ExecutionPlan::generate(self.plan_kind, proto_request));
         Ok(None)
     }
 

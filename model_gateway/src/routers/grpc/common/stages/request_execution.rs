@@ -13,11 +13,11 @@ use crate::{
     routers::{
         error,
         grpc::{
+            common::stages::encode::EncodeDispatchPlan,
             context::{
                 ClientSelection, ExecutionPlan, ExecutionResult, LoadGuards, PdTiming,
                 RequestContext, WorkerSelection,
             },
-            epd_encode::EncodeDispatchPlan,
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
                 ProtoStream,
@@ -138,6 +138,12 @@ impl PipelineStage for RequestExecutionStage {
             error::internal_error("execution_plan_not_built", "Execution plan not built")
         })?;
 
+        // EncodeStage stashed the EPD encode dispatch here (None for non-EPD or
+        // text-only EPD). Taking it now transfers the encode jobs' SHM Drop
+        // guards to this stage: if EPD dispatch fires, the jobs are consumed; if
+        // an early error returns before dispatch, dropping them reclaims the SHM.
+        let encode_dispatch = ctx.state.encode_outputs.take().map(|o| o.dispatch);
+
         let clients = ctx.state.clients.as_mut().ok_or_else(|| {
             error!(
                 function = "RequestExecutionStage::execute",
@@ -192,13 +198,10 @@ impl PipelineStage for RequestExecutionStage {
                 ExecutionPlan::PrefillDecode(req) => {
                     self.execute_pd_dispatch(req, clients, workers, model).await
                 }
-                ExecutionPlan::EncodePrefillDecode {
-                    request,
-                    encode_dispatch,
-                } => {
+                ExecutionPlan::EncodePrefillDecode { request } => {
                     // Request building already injected the encode bootstrap info
                     // into the prefill request. Dispatch the matching encode
-                    // jobs here, with the prefill+decode leg.
+                    // jobs (taken from `encode_outputs`) with the prefill+decode leg.
                     self.execute_epd_dispatch(request, clients, workers, model, encode_dispatch)
                         .await
                 }

@@ -396,8 +396,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         }
 
-        ctx.state.execution_plan =
-            Some(ExecutionPlan::generate(self.plan_kind, proto_request, None));
+        ctx.state.execution_plan = Some(ExecutionPlan::generate(self.plan_kind, proto_request));
         Ok(None)
     }
 

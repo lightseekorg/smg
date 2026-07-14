@@ -23,7 +23,7 @@ use tracing::debug;
 
 use super::{
     client::GrpcClient,
-    epd_encode::EncodeDispatchPlan,
+    common::stages::encode::EncodeDispatchPlan,
     multimodal::{MultimodalComponents, MultimodalIntermediate},
     proto_wrapper::{
         EncodeItemBootstrapInfo, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
@@ -111,16 +111,17 @@ pub(crate) struct ProcessingState {
     // Stage 1: Preparation outputs
     pub preparation: Option<PreparationOutput>,
 
-    /// Preprocessed multimodal inputs, re-homed here so T6's EncodeStage can
-    /// borrow them before request-building consumes them (EPD needs two
-    /// serializations of the same intermediate). Still `None`: the intermediate
-    /// is not `Clone` (holds `ArrayD<f32>` tensors) and request-building moves
-    /// it out of `PreparationOutput` by value, so T6 performs the ownership move.
-    #[expect(dead_code, reason = "populated + consumed by EncodeStage in a later task")]
+    /// Preprocessed multimodal inputs, owned here (not nested in
+    /// `PreparationOutput`) so EPD's `EncodeStage` can borrow them for the
+    /// with-pixels encode serialization before request building `take()`s them
+    /// for the prefill serialization. Written by the chat/messages preparation
+    /// stages; consumed by request building.
     pub multimodal_intermediate: Option<MultimodalIntermediate>,
 
-    /// Encode plan outputs produced by EncodeStage (EPD only).
-    #[expect(dead_code, reason = "consumed by EncodeStage in a later task")]
+    /// Encode plan outputs produced by `EncodeStage` (EPD only). `Some` iff the
+    /// request is multimodal AND worker selection produced encode assignments;
+    /// request building then injects the bootstrap info + drops prefill pixels,
+    /// and request execution `take()`s the dispatch plan.
     pub encode_outputs: Option<EncodeOutputs>,
 
     /// Resolved tokenizer (set once in preparation, reused in response processing)
@@ -146,28 +147,32 @@ pub(crate) struct ProcessingState {
     pub response: ResponseState,
 }
 
-/// Outputs produced by EncodeStage (EPD only): per-item bootstrap rendezvous
+/// Outputs produced by `EncodeStage` (EPD only): per-item bootstrap rendezvous
 /// info that prefill needs, plus the dispatch plan that fans out to encode
 /// workers.
 ///
 /// Intentionally not `#[derive(Debug)]`: `EncodeDispatchPlan` carries the
 /// prepared encode jobs (transitively `TokenSpeedMultimodalItem`, a raw proto
 /// payload) which are not `Debug`. Deriving would force `Debug` across the proto
-/// chain, out of scope for this additive step; T6 can add it if a consumer needs it.
-#[expect(dead_code, reason = "consumed by EncodeStage in a later task")]
+/// chain.
+///
+/// Owns the encode jobs' SHM/RDMA Drop guards: if the context is dropped before
+/// request execution dispatches (early return / cancellation), dropping this
+/// reclaims the staged `/dev/shm` segments via `PreparedEncodeItem`'s `Drop`.
 pub(crate) struct EncodeOutputs {
     pub bootstrap_info: Vec<EncodeItemBootstrapInfo>,
     pub dispatch: EncodeDispatchPlan,
 }
 
 /// Execution shape produced by request building and consumed by request execution.
+///
+/// The EPD encode dispatch plan is NOT carried here: `EncodeStage` stashes it on
+/// `ProcessingState::encode_outputs` and request execution `take()`s it from
+/// there, so the enum only needs the prefill/decode request.
 pub(crate) enum ExecutionPlan {
     Single(ProtoRequest),
     PrefillDecode(ProtoGenerateRequest),
-    EncodePrefillDecode {
-        request: ProtoGenerateRequest,
-        encode_dispatch: Option<EncodeDispatchPlan>,
-    },
+    EncodePrefillDecode { request: ProtoGenerateRequest },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,24 +183,11 @@ pub(crate) enum ExecutionPlanKind {
 }
 
 impl ExecutionPlan {
-    pub(crate) fn generate(
-        kind: ExecutionPlanKind,
-        request: ProtoGenerateRequest,
-        encode_dispatch: Option<EncodeDispatchPlan>,
-    ) -> Self {
+    pub(crate) fn generate(kind: ExecutionPlanKind, request: ProtoGenerateRequest) -> Self {
         match kind {
-            ExecutionPlanKind::Single => {
-                debug_assert!(encode_dispatch.is_none());
-                Self::Single(ProtoRequest::Generate(request))
-            }
-            ExecutionPlanKind::PrefillDecode => {
-                debug_assert!(encode_dispatch.is_none());
-                Self::PrefillDecode(request)
-            }
-            ExecutionPlanKind::EncodePrefillDecode => Self::EncodePrefillDecode {
-                request,
-                encode_dispatch,
-            },
+            ExecutionPlanKind::Single => Self::Single(ProtoRequest::Generate(request)),
+            ExecutionPlanKind::PrefillDecode => Self::PrefillDecode(request),
+            ExecutionPlanKind::EncodePrefillDecode => Self::EncodePrefillDecode { request },
         }
     }
 

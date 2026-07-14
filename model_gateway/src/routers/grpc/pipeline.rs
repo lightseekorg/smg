@@ -258,7 +258,7 @@ impl RequestPipeline {
         let stages: Vec<Box<dyn PipelineStage>> = match endpoint {
             Endpoint::Chat => {
                 let (processor, streaming_processor) = deps.configured_processors(backend);
-                vec![
+                let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(ChatGeneratePreparationStage::new()),
                     Box::new(WorkerSelectionStage::new(
                         deps.worker_registry.clone(),
@@ -266,21 +266,27 @@ impl RequestPipeline {
                         worker_selection,
                     )),
                     Box::new(ClientAcquisitionStage),
+                ];
+                if matches!(mode, Mode::EncodePrefillDecode) {
+                    stages.push(Box::new(EncodeStage::new()));
+                }
+                stages.extend([
                     Box::new(ChatGenerateRequestBuildingStage::new(
                         inject_pd_metadata,
                         plan_kind,
-                    )),
+                    )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
                     Box::new(RequestExecutionStage::new()),
                     Box::new(ChatGenerateResponseProcessingStage::new(
                         processor,
                         streaming_processor,
                     )),
-                ]
+                ]);
+                stages
             }
             Endpoint::Messages => {
                 let (processor, streaming_processor) = deps.configured_processors(backend);
-                vec![
+                let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(MessagePreparationStage),
                     Box::new(WorkerSelectionStage::new(
                         deps.worker_registry.clone(),
@@ -288,22 +294,28 @@ impl RequestPipeline {
                         worker_selection,
                     )),
                     Box::new(ClientAcquisitionStage),
+                ];
+                if matches!(mode, Mode::EncodePrefillDecode) {
+                    stages.push(Box::new(EncodeStage::new()));
+                }
+                stages.extend([
                     Box::new(MessageRequestBuildingStage::new(
                         inject_pd_metadata,
                         plan_kind,
-                    )),
+                    )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
                     Box::new(RequestExecutionStage::new()),
                     Box::new(MessageResponseProcessingStage::new(
                         processor,
                         streaming_processor,
                     )),
-                ]
+                ]);
+                stages
             }
             Endpoint::Completion => {
                 // Completion uses default parser factories, not the configured ones.
                 let (processor, streaming_processor) = PipelineDeps::default_processors(backend);
-                vec![
+                let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(CompletionPreparationStage),
                     Box::new(WorkerSelectionStage::new(
                         deps.worker_registry.clone(),
@@ -311,17 +323,23 @@ impl RequestPipeline {
                         worker_selection,
                     )),
                     Box::new(ClientAcquisitionStage),
+                ];
+                if matches!(mode, Mode::EncodePrefillDecode) {
+                    stages.push(Box::new(EncodeStage::new()));
+                }
+                stages.extend([
                     Box::new(CompletionRequestBuildingStage::new(
                         inject_pd_metadata,
                         plan_kind,
-                    )),
+                    )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
                     Box::new(RequestExecutionStage::new()),
                     Box::new(CompletionResponseProcessingStage::new(
                         processor,
                         streaming_processor,
                     )),
-                ]
+                ]);
+                stages
             }
             Endpoint::Harmony => {
                 // Harmony has no EPD variant.
@@ -1568,6 +1586,7 @@ mod build_parity_tests {
                     "ChatGeneratePreparationStage",
                     "WorkerSelectionStage(EncodePrefillDecode)",
                     "ClientAcquisitionStage",
+                    "EncodeStage",
                     "ChatGenerateRequestBuildingStage(ChatRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode), GenerateRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode))",
                     "DispatchMetadataStage",
                     "RequestExecutionStage",
@@ -1605,6 +1624,7 @@ mod build_parity_tests {
                     "MessagePreparationStage",
                     "WorkerSelectionStage(EncodePrefillDecode)",
                     "ClientAcquisitionStage",
+                    "EncodeStage",
                     "MessageRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode)",
                     "DispatchMetadataStage",
                     "RequestExecutionStage",
@@ -1642,6 +1662,7 @@ mod build_parity_tests {
                     "CompletionPreparationStage",
                     "WorkerSelectionStage(EncodePrefillDecode)",
                     "ClientAcquisitionStage",
+                    "EncodeStage",
                     "CompletionRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode)",
                     "DispatchMetadataStage",
                     "RequestExecutionStage",

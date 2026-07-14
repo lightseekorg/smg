@@ -103,7 +103,6 @@ pub fn process_messages(
 
     Ok(ProcessedMessages {
         text: formatted_text,
-        multimodal_intermediate: None, // Multimodal postponed
         stop_sequences,
     })
 }

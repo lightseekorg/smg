@@ -12,9 +12,7 @@ use tracing::{debug, warn};
 
 use crate::{
     routers::grpc::{
-        context::{ClientSelection, RequestType, WorkerSelection},
-        epd_encode::{self, EncodePlan},
-        multimodal::MultimodalIntermediate,
+        context::{RequestType, WorkerSelection},
         proto_wrapper::ProtoGenerateRequest,
     },
     worker::{
@@ -251,26 +249,6 @@ fn apply_tokenspeed_sampling_defaults(
     apply_opt!(top_k);
     apply_opt!(min_p);
     apply_opt!(repetition_penalty);
-}
-
-pub(crate) fn plan_epd_encode(
-    intermediate: &MultimodalIntermediate,
-    clients: &ClientSelection,
-    workers: Option<&WorkerSelection>,
-) -> anyhow::Result<Option<EncodePlan>> {
-    if workers
-        .and_then(WorkerSelection::encode_assignments)
-        .is_none_or(|assignments| assignments.is_empty())
-    {
-        return Ok(None);
-    }
-
-    let plan = epd_encode::build_plan_from_intermediate(intermediate, Some(clients), workers)?;
-    if plan.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(plan))
-    }
 }
 
 /// Inject PD bootstrap metadata for SGLang if needed.

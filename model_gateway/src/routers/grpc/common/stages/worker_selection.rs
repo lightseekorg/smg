@@ -16,7 +16,7 @@ use crate::{
     routers::{
         error,
         grpc::{
-            context::{EncodeWorkerAssignment, PreparationOutput, RequestContext, WorkerSelection},
+            context::{EncodeWorkerAssignment, RequestContext, WorkerSelection},
             multimodal,
         },
     },
@@ -81,6 +81,11 @@ impl PipelineStage for WorkerSelectionStage {
             )
         })?;
 
+        // The intermediate is owned by ProcessingState (re-homed out of
+        // PreparationOutput), so borrow it alongside `prep`; both are disjoint
+        // immutable fields of `ctx.state`.
+        let intermediate = ctx.state.multimodal_intermediate.as_ref();
+
         let text = prep.routing_text();
 
         // Get tokens for PrefixHash policy support
@@ -125,7 +130,7 @@ impl PipelineStage for WorkerSelectionStage {
                 }
             }
             WorkerSelectionMode::EncodePrefillDecode => {
-                let encode_item_hashes = match encode_item_hashes(prep) {
+                let encode_item_hashes = match encode_item_hashes(intermediate) {
                     Ok(hashes) => hashes,
                     Err(err) => {
                         error!(
@@ -176,7 +181,7 @@ impl PipelineStage for WorkerSelectionStage {
         // only to fail deep in assembly. The prefill leg builds the request in
         // disaggregated mode, so its runtime is the one that must support the
         // request's modalities.
-        if let Some(intermediate) = multimodal_intermediate(prep) {
+        if let Some(intermediate) = intermediate {
             if let Err(err) = multimodal::ensure_backend_supports_modalities(
                 selection_runtime(&workers),
                 intermediate,
@@ -208,21 +213,6 @@ fn selection_runtime(workers: &WorkerSelection) -> RuntimeType {
     match workers {
         WorkerSelection::Single { worker } => worker.metadata().spec.runtime_type,
         WorkerSelection::Disaggregated { runtime_type, .. } => *runtime_type,
-    }
-}
-
-/// Borrow the request's multimodal intermediate, if any.
-fn multimodal_intermediate(
-    prep: &PreparationOutput,
-) -> Option<&multimodal::MultimodalIntermediate> {
-    match prep {
-        PreparationOutput::Chat {
-            processed_messages, ..
-        }
-        | PreparationOutput::Messages {
-            processed_messages, ..
-        } => processed_messages.multimodal_intermediate.as_ref(),
-        _ => None,
     }
 }
 
@@ -604,8 +594,10 @@ impl WorkerSelectionStage {
     }
 }
 
-fn encode_item_hashes(prep: &PreparationOutput) -> anyhow::Result<Vec<Vec<u8>>> {
-    let Some(intermediate) = multimodal_intermediate(prep) else {
+fn encode_item_hashes(
+    intermediate: Option<&multimodal::MultimodalIntermediate>,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let Some(intermediate) = intermediate else {
         return Ok(Vec::new());
     };
     multimodal::encode_routing_hashes(intermediate)
