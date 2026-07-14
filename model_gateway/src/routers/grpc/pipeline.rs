@@ -156,28 +156,6 @@ impl PipelineDeps {
             configured_reasoning_parser: None,
         }
     }
-
-    /// The six positional args the full-arg legacy constructors expect.
-    #[cfg(test)]
-    fn clone_full_args(
-        &self,
-    ) -> (
-        Arc<WorkerRegistry>,
-        Arc<PolicyRegistry>,
-        ToolParserFactory,
-        ReasoningParserFactory,
-        Option<String>,
-        Option<String>,
-    ) {
-        (
-            self.worker_registry.clone(),
-            self.policy_registry.clone(),
-            self.tool_parser_factory.clone(),
-            self.reasoning_parser_factory.clone(),
-            self.configured_tool_parser.clone(),
-            self.configured_reasoning_parser.clone(),
-        )
-    }
 }
 
 /// Generic request pipeline for all request types
@@ -448,11 +426,7 @@ impl RequestPipeline {
     }
 
     /// Create a Harmony PD (prefill-decode) pipeline
-    // Dead outside tests (no production caller yet); the parity test does call it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Harmony PD pipeline is wired up by a later task")
-    )]
+    #[expect(dead_code, reason = "Harmony PD pipeline is wired up by a later task")]
     pub fn new_harmony_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -1470,149 +1444,234 @@ mod build_parity_tests {
         p.stages.iter().map(|s| s.signature()).collect()
     }
 
-    /// Assert `build(endpoint, mode)` reproduces `legacy` (same stage sequence +
-    /// mode-bearing args, same metrics backend label).
-    fn assert_parity(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps, legacy: RequestPipeline) {
+    fn v(stages: &[&str]) -> Vec<String> {
+        stages.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Frozen, independent oracle: the exact stage signature sequence + metrics
+    /// backend label each pre-refactor `new_*` constructor produced, transcribed
+    /// by hand from `git show origin/main:.../pipeline.rs`. These literals are NOT
+    /// derived from `build`, so a wrong transcription in `build`/`mode.rs` (e.g. a
+    /// flipped `inject_pd_metadata`, a wrong `plan_kind`, or a swapped
+    /// `WorkerSelectionMode`) makes `build`'s output diverge from the golden and
+    /// fails the assert. Do NOT regenerate these from `build` output.
+    ///
+    /// Signature format: stages with no mode-varying args emit their short type
+    /// name; the mode-bearing overrides append their args. Note
+    /// `ChatGenerateRequestBuildingStage` is a composite that wraps the chat and
+    /// generate request-building stages, both fed the same mode args.
+    fn golden(endpoint: Endpoint, mode: Mode) -> (Vec<String>, &'static str) {
+        const REGULAR: &str = metrics_labels::BACKEND_REGULAR;
+        const PD: &str = metrics_labels::BACKEND_PD;
+        match (endpoint, mode) {
+            // Chat: new_regular / new_pd / new_epd
+            (Endpoint::Chat, Mode::Regular) => (
+                v(&[
+                    "ChatGeneratePreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "ChatGenerateRequestBuildingStage(ChatRequestBuildingStage(inject_pd_metadata=false, Single), GenerateRequestBuildingStage(inject_pd_metadata=false, Single))",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "ChatGenerateResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (Endpoint::Chat, Mode::PrefillDecode) => (
+                v(&[
+                    "ChatGeneratePreparationStage",
+                    "WorkerSelectionStage(PrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "ChatGenerateRequestBuildingStage(ChatRequestBuildingStage(inject_pd_metadata=true, PrefillDecode), GenerateRequestBuildingStage(inject_pd_metadata=true, PrefillDecode))",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "ChatGenerateResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            (Endpoint::Chat, Mode::EncodePrefillDecode) => (
+                v(&[
+                    "ChatGeneratePreparationStage",
+                    "WorkerSelectionStage(EncodePrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "ChatGenerateRequestBuildingStage(ChatRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode), GenerateRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode))",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "ChatGenerateResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            // Messages: new_messages / new_messages_pd / new_messages_epd
+            (Endpoint::Messages, Mode::Regular) => (
+                v(&[
+                    "MessagePreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "MessageRequestBuildingStage(inject_pd_metadata=false, Single)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "MessageResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (Endpoint::Messages, Mode::PrefillDecode) => (
+                v(&[
+                    "MessagePreparationStage",
+                    "WorkerSelectionStage(PrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "MessageRequestBuildingStage(inject_pd_metadata=true, PrefillDecode)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "MessageResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            (Endpoint::Messages, Mode::EncodePrefillDecode) => (
+                v(&[
+                    "MessagePreparationStage",
+                    "WorkerSelectionStage(EncodePrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "MessageRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "MessageResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            // Completion: new_completion / new_completion_pd / new_completion_epd
+            (Endpoint::Completion, Mode::Regular) => (
+                v(&[
+                    "CompletionPreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "CompletionRequestBuildingStage(inject_pd_metadata=false, Single)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "CompletionResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (Endpoint::Completion, Mode::PrefillDecode) => (
+                v(&[
+                    "CompletionPreparationStage",
+                    "WorkerSelectionStage(PrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "CompletionRequestBuildingStage(inject_pd_metadata=true, PrefillDecode)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "CompletionResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            (Endpoint::Completion, Mode::EncodePrefillDecode) => (
+                v(&[
+                    "CompletionPreparationStage",
+                    "WorkerSelectionStage(EncodePrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "CompletionRequestBuildingStage(inject_pd_metadata=false, EncodePrefillDecode)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "CompletionResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            // Harmony: new_harmony / new_harmony_pd (EPD is invalid, no golden)
+            (Endpoint::Harmony, Mode::Regular) => (
+                v(&[
+                    "HarmonyPreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "HarmonyRequestBuildingStage(inject_pd_metadata=false, Single)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "HarmonyResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (Endpoint::Harmony, Mode::PrefillDecode) => (
+                v(&[
+                    "HarmonyPreparationStage",
+                    "WorkerSelectionStage(PrefillDecode)",
+                    "ClientAcquisitionStage",
+                    "HarmonyRequestBuildingStage(inject_pd_metadata=true, PrefillDecode)",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "HarmonyResponseProcessingStage",
+                ]),
+                PD,
+            ),
+            // Embeddings/Classify: new_embeddings / new_classify (Regular only).
+            // Shared embedding prep + request building (no mode args); classify
+            // only swaps the response processor. Both report the regular backend.
+            (Endpoint::Embeddings, Mode::Regular) => (
+                v(&[
+                    "EmbeddingPreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "EmbeddingRequestBuildingStage",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "EmbeddingResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (Endpoint::Classify, Mode::Regular) => (
+                v(&[
+                    "EmbeddingPreparationStage",
+                    "WorkerSelectionStage(Regular)",
+                    "ClientAcquisitionStage",
+                    "EmbeddingRequestBuildingStage",
+                    "DispatchMetadataStage",
+                    "RequestExecutionStage",
+                    "ClassifyResponseProcessingStage",
+                ]),
+                REGULAR,
+            ),
+            (endpoint, mode) => panic!("no golden for invalid combo {endpoint:?}/{mode:?}"),
+        }
+    }
+
+    /// Assert `build(endpoint, mode)` matches the frozen golden (stage sequence +
+    /// mode-bearing args + metrics backend label). The golden is an independent
+    /// transcription, so this is non-vacuous: it catches a wrong `build`/`mode.rs`
+    /// mapping, unlike comparing `build` against the delegating `new_*` ctors.
+    fn assert_parity(endpoint: Endpoint, mode: Mode, deps: &PipelineDeps) {
+        let (expected_sigs, expected_backend) = golden(endpoint, mode);
         let built = RequestPipeline::build(endpoint, mode, deps)
             .unwrap_or_else(|| panic!("build({endpoint:?}, {mode:?}) should be valid"));
         assert_eq!(
             sigs(&built),
-            sigs(&legacy),
+            expected_sigs,
             "stage parity for {endpoint:?}/{mode:?}"
         );
         assert_eq!(
-            built.backend_type, legacy.backend_type,
+            built.backend_type, expected_backend,
             "backend_type parity for {endpoint:?}/{mode:?}"
         );
     }
 
     #[test]
-    fn build_reproduces_legacy_constructors() {
+    fn build_matches_frozen_goldens() {
         let deps = PipelineDeps::test_default();
-        let (wr, pr, tpf, rpf, ctp, crp) = deps.clone_full_args();
 
         // Chat/Messages/Completion support every mode.
-        assert_parity(
-            Endpoint::Chat,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_regular(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Chat,
-            Mode::PrefillDecode,
-            &deps,
-            RequestPipeline::new_pd(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Chat,
-            Mode::EncodePrefillDecode,
-            &deps,
-            RequestPipeline::new_epd(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Messages,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_messages(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Messages,
-            Mode::PrefillDecode,
-            &deps,
-            RequestPipeline::new_messages_pd(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Messages,
-            Mode::EncodePrefillDecode,
-            &deps,
-            RequestPipeline::new_messages_epd(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Completion,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_completion(wr.clone(), pr.clone()),
-        );
-        assert_parity(
-            Endpoint::Completion,
-            Mode::PrefillDecode,
-            &deps,
-            RequestPipeline::new_completion_pd(wr.clone(), pr.clone()),
-        );
-        assert_parity(
-            Endpoint::Completion,
-            Mode::EncodePrefillDecode,
-            &deps,
-            RequestPipeline::new_completion_epd(wr.clone(), pr.clone()),
-        );
+        for endpoint in [Endpoint::Chat, Endpoint::Messages, Endpoint::Completion] {
+            for mode in [
+                Mode::Regular,
+                Mode::PrefillDecode,
+                Mode::EncodePrefillDecode,
+            ] {
+                assert_parity(endpoint, mode, &deps);
+            }
+        }
 
         // Harmony: Regular + PD only; EPD is invalid.
         assert!(
             RequestPipeline::build(Endpoint::Harmony, Mode::EncodePrefillDecode, &deps).is_none(),
             "Harmony EPD must be invalid"
         );
-        assert_parity(
-            Endpoint::Harmony,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_harmony(
-                wr.clone(),
-                pr.clone(),
-                tpf.clone(),
-                rpf.clone(),
-                ctp.clone(),
-                crp.clone(),
-            ),
-        );
-        assert_parity(
-            Endpoint::Harmony,
-            Mode::PrefillDecode,
-            &deps,
-            RequestPipeline::new_harmony_pd(wr.clone(), pr.clone(), tpf, rpf, ctp, crp),
-        );
+        assert_parity(Endpoint::Harmony, Mode::Regular, &deps);
+        assert_parity(Endpoint::Harmony, Mode::PrefillDecode, &deps);
 
         // Embeddings/Classify: Regular only; PD/EPD are invalid.
         for endpoint in [Endpoint::Embeddings, Endpoint::Classify] {
@@ -1624,18 +1683,7 @@ mod build_parity_tests {
                 RequestPipeline::build(endpoint, Mode::EncodePrefillDecode, &deps).is_none(),
                 "{endpoint:?} EPD must be invalid"
             );
+            assert_parity(endpoint, Mode::Regular, &deps);
         }
-        assert_parity(
-            Endpoint::Embeddings,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_embeddings(wr.clone(), pr.clone()),
-        );
-        assert_parity(
-            Endpoint::Classify,
-            Mode::Regular,
-            &deps,
-            RequestPipeline::new_classify(wr, pr),
-        );
     }
 }
