@@ -49,6 +49,33 @@ impl ChatPreparationStage {
         // Step 1: Filter tools if needed
         let body_ref = utils::filter_chat_request_by_tool_choice(request);
 
+        // Resolve the chat-rendering contract from the model registry so
+        // rendering behavior (media order, absent-content, reasoning effort) is
+        // owned by the per-model spec. Falls back to the default when the model
+        // has no multimodal components or matches no spec.
+        let model_id = ctx.input.model_id.as_str();
+        let tokenizer_entry = ctx
+            .components
+            .tokenizer_registry
+            .get_by_name(model_id)
+            .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
+        let render_contract = match (
+            ctx.components.multimodal.as_ref(),
+            tokenizer_entry.as_ref(),
+        ) {
+            (Some(mm_components), Some(entry)) => {
+                multimodal::resolve_chat_render_contract(
+                    model_id,
+                    &*tokenizer,
+                    mm_components,
+                    &entry.id,
+                    &entry.source,
+                )
+                .await
+            }
+            _ => Default::default(),
+        };
+
         // Normalize media once. The same plan drives placeholder resolution,
         // rendering, fetching, preprocessing, and final count validation.
         let media_plan = multimodal::media_plan_chat(&request.messages);
@@ -56,14 +83,8 @@ impl ChatPreparationStage {
             (None, None)
         } else if let Some(mm_components) = ctx.components.multimodal.as_ref() {
             let model_id = ctx.input.model_id.as_str();
-            let entry = ctx
-                .components
-                .tokenizer_registry
-                .get_by_name(model_id)
-                .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
-
-            let (tokenizer_id, tokenizer_source) = match entry {
-                Some(e) => (e.id.clone(), e.source.clone()),
+            let (tokenizer_id, tokenizer_source) = match tokenizer_entry {
+                Some(e) => (e.id, e.source),
                 None => {
                     error!(
                         function = "ChatPreparationStage::execute",
@@ -125,7 +146,7 @@ impl ChatPreparationStage {
             &body_ref,
             &*tokenizer,
             placeholder_tokens.as_ref(),
-            &ctx.input.model_id,
+            &render_contract,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {

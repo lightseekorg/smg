@@ -40,6 +40,52 @@ pub enum ModelRegistryError {
 
 pub type RegistryResult<T> = Result<T, ModelRegistryError>;
 
+/// Ordering of media and text parts when rendering a multipart message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPartOrder {
+    /// Emit media parts before text (vLLM `interleave_mm_strings=false`).
+    MediaFirst,
+    /// Keep parts in request order; part order is protocol-visible.
+    Authored,
+}
+
+/// Value rendered for an assistant message that carries no `content` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbsentAssistantContent {
+    /// Protocol-faithful default: absent content renders as `null`.
+    Null,
+    /// Opt-in for templates that require assistant content to be a string.
+    EmptyString,
+}
+
+/// How `reasoning_effort` is projected onto the chat-template kwargs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReasoningEffortStyle {
+    /// Pass the effort string through unchanged.
+    PassthroughString,
+    /// Map named levels to a numeric directive clamped to `[0, max]`, using
+    /// `default` for chat requests that omit it.
+    Numeric { default: f64, max: f64 },
+}
+
+/// Per-model chat-rendering behaviors resolved once from the registry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChatRenderContract {
+    pub media_order: MediaPartOrder,
+    pub absent_assistant_content: AbsentAssistantContent,
+    pub reasoning_effort: ReasoningEffortStyle,
+}
+
+impl Default for ChatRenderContract {
+    fn default() -> Self {
+        Self {
+            media_order: MediaPartOrder::MediaFirst,
+            absent_assistant_content: AbsentAssistantContent::Null,
+            reasoning_effort: ReasoningEffortStyle::PassthroughString,
+        }
+    }
+}
+
 /// Metadata about the current model used to derive tokenizer/config dependent fields.
 pub struct ModelMetadata<'a> {
     pub model_id: &'a str,
@@ -77,6 +123,14 @@ impl<'a> ModelMetadata<'a> {
 pub trait ModelProcessorSpec: Send + Sync {
     fn name(&self) -> &'static str;
     fn matches(&self, metadata: &ModelMetadata) -> bool;
+
+    /// Chat-rendering behaviors for this model. Most models use the default
+    /// vLLM-compatible contract; families with an authored-order protocol
+    /// override this.
+    fn chat_render(&self) -> ChatRenderContract {
+        ChatRenderContract::default()
+    }
+
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String>;
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId>;
     fn placeholder_token_for(

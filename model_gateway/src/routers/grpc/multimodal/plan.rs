@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use llm_multimodal::{MediaContentPart, Modality, ModelMetadata};
+use llm_multimodal::{ChatRenderContract, MediaContentPart, Modality, ModelMetadata};
 use llm_tokenizer::TokenizerTrait;
 
 use super::config::MultimodalComponents;
@@ -141,6 +141,36 @@ pub(crate) async fn prepare_placeholder_tokens(
     }
 
     Ok(placeholders)
+}
+
+/// Resolve the chat-rendering contract for a model from the same registry that
+/// owns its placeholder/prompt logic. Falls back to the default contract when
+/// the model matches no spec.
+pub(crate) async fn resolve_chat_render_contract(
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    components: &MultimodalComponents,
+    tokenizer_id: &str,
+    tokenizer_source: &str,
+) -> ChatRenderContract {
+    let model_config = match components
+        .config_registry
+        .get_or_load(tokenizer_id, tokenizer_source)
+        .await
+    {
+        Ok(config) => config,
+        Err(_) => return ChatRenderContract::default(),
+    };
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
+    components
+        .model_registry
+        .lookup(&metadata)
+        .map(|spec| spec.chat_render())
+        .unwrap_or_default()
 }
 
 /// Verify a rendered/tokenized multimodal prompt contains exactly one

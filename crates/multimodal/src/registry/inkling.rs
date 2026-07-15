@@ -5,7 +5,10 @@ use serde_json::{json, Value};
 use crate::{
     audio::{AudioPreProcessor, InklingAudioProcessor},
     encoder_inputs::PreprocessedEncoderInputs,
-    registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
+    registry::{
+        AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata,
+        ModelProcessorSpec, ModelRegistryError, ReasoningEffortStyle, RegistryResult,
+    },
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
     vision::PreProcessorConfig,
 };
@@ -45,6 +48,17 @@ impl ModelProcessorSpec for InklingSpec {
             || metadata
                 .config_model_type()
                 .is_some_and(|mt| mt == "inkling_mm_model")
+    }
+
+    fn chat_render(&self) -> ChatRenderContract {
+        ChatRenderContract {
+            media_order: MediaPartOrder::Authored,
+            absent_assistant_content: AbsentAssistantContent::Null,
+            reasoning_effort: ReasoningEffortStyle::Numeric {
+                default: 0.9,
+                max: 0.99,
+            },
+        }
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -239,6 +253,25 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("inkling spec");
         assert_eq!(spec.name(), "inkling");
+    }
+
+    #[test]
+    fn inkling_chat_render_uses_authored_order_and_numeric_effort() {
+        use crate::registry::{
+            AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ReasoningEffortStyle,
+        };
+
+        assert_eq!(
+            InklingSpec.chat_render(),
+            ChatRenderContract {
+                media_order: MediaPartOrder::Authored,
+                absent_assistant_content: AbsentAssistantContent::Null,
+                reasoning_effort: ReasoningEffortStyle::Numeric {
+                    default: 0.9,
+                    max: 0.99,
+                },
+            }
+        );
     }
 
     #[test]

@@ -9,7 +9,9 @@ use std::{
 use anyhow::anyhow;
 use axum::response::Response;
 use bytes::Bytes;
-use llm_multimodal::Modality;
+use llm_multimodal::{
+    AbsentAssistantContent, ChatRenderContract, MediaPartOrder, Modality, ReasoningEffortStyle,
+};
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
@@ -172,47 +174,27 @@ pub(crate) fn process_content_format(
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
 ) -> Result<Vec<Value>, String> {
-    process_content_format_with_order(
+    process_content_format_with_contract(
         messages,
         content_format,
         placeholder_tokens,
-        MediaPartOrder::MediaFirst,
+        &ChatRenderContract::default(),
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaPartOrder {
-    /// Preserve SMG's existing vLLM-compatible behavior for all models that do
-    /// not opt into an authored-order protocol.
-    MediaFirst,
-    /// Keep image/audio/text parts in request order. TML rendering defines
-    /// multipart messages this way, so reordering changes the token stream.
-    Authored,
-}
-
-fn is_tml_model(model_id: &str) -> bool {
-    let model_id = model_id.to_ascii_lowercase();
-    model_id.contains("inkling")
-}
-
-fn has_tml_token_signature(tokenizer: &dyn Tokenizer) -> bool {
-    tokenizer.token_to_id("<|content_image|>") == Some(200_005)
-        && tokenizer.token_to_id("<|content_model_end_sampling|>") == Some(200_006)
-}
-
 const REASONING_EFFORT_KEY: &str = "reasoning_effort";
-const DEFAULT_TML_CHAT_REASONING_EFFORT: f64 = 0.9;
-const MAX_TML_REASONING_EFFORT: f64 = 0.99;
 
-fn validate_tml_reasoning_effort(value: f64) -> Result<f64, String> {
-    if value.is_finite() && (0.0..=MAX_TML_REASONING_EFFORT).contains(&value) {
+fn validate_numeric_reasoning_effort(value: f64, max: f64) -> Result<f64, String> {
+    if value.is_finite() && (0.0..=max).contains(&value) {
         Ok(value)
     } else {
-        Err("Inkling reasoning_effort must be a finite number in [0, 0.99]".to_string())
+        Err(format!(
+            "Inkling reasoning_effort must be a finite number in [0, {max}]"
+        ))
     }
 }
 
-fn parse_tml_reasoning_effort_string(value: &str) -> Result<f64, String> {
+fn parse_numeric_reasoning_effort_string(value: &str, max: f64) -> Result<f64, String> {
     let value = value.trim();
     let mapped = match value {
         "none" | "minimal" => Some(0.0),
@@ -226,38 +208,38 @@ fn parse_tml_reasoning_effort_string(value: &str) -> Result<f64, String> {
     let value = match mapped {
         Some(value) => value,
         None => value.parse::<f64>().map_err(|_| {
-            "Inkling reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max, or a finite number in [0, 0.99]".to_string()
+            format!(
+                "Inkling reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max, or a finite number in [0, {max}]"
+            )
         })?,
     };
-    validate_tml_reasoning_effort(value)
+    validate_numeric_reasoning_effort(value, max)
 }
 
-fn parse_tml_reasoning_effort_value(value: &Value) -> Result<Option<f64>, String> {
+fn parse_numeric_reasoning_effort_value(value: &Value, max: f64) -> Result<Option<f64>, String> {
     match value {
         Value::Null => Ok(None),
-        Value::String(value) => parse_tml_reasoning_effort_string(value).map(Some),
+        Value::String(value) => parse_numeric_reasoning_effort_string(value, max).map(Some),
         Value::Number(value) => value
             .as_f64()
-            .ok_or_else(|| {
-                "Inkling reasoning_effort must be a finite number in [0, 0.99]".to_string()
-            })
-            .and_then(validate_tml_reasoning_effort)
+            .ok_or_else(|| format!("Inkling reasoning_effort must be a finite number in [0, {max}]"))
+            .and_then(|value| validate_numeric_reasoning_effort(value, max))
             .map(Some),
         _ => Err("Inkling reasoning_effort must be a number or supported named level".to_string()),
     }
 }
 
-/// Merge chat-template kwargs while keeping the Inkling effort directive on a
-/// single, canonical path. Other models retain the existing pass-through and
-/// override behavior for vendor-specific effort strings.
+/// Merge chat-template kwargs. `PassthroughString` models keep the existing
+/// pass-through and override behavior for vendor-specific effort strings;
+/// `Numeric` models canonicalize the effort onto a single validated directive.
 fn build_chat_template_kwargs(
     request: &ChatCompletionRequest,
-    request_is_tml: bool,
+    contract: &ChatRenderContract,
 ) -> Result<HashMap<String, Value>, String> {
     let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
     let mut combined = HashMap::with_capacity(kwargs_capacity);
 
-    if !request_is_tml {
+    let ReasoningEffortStyle::Numeric { default, max } = contract.reasoning_effort else {
         if let Some(reasoning_effort) = &request.reasoning_effort {
             combined.insert(
                 REASONING_EFFORT_KEY.to_string(),
@@ -268,7 +250,7 @@ fn build_chat_template_kwargs(
             combined.extend(template_kwargs.clone());
         }
         return Ok(combined);
-    }
+    };
 
     let template_effort = request
         .chat_template_kwargs
@@ -292,18 +274,18 @@ fn build_chat_template_kwargs(
     }
 
     let effective_effort = if let Some(value) = request.reasoning_effort.as_deref() {
-        Some(parse_tml_reasoning_effort_string(value)?)
+        Some(parse_numeric_reasoning_effort_string(value, max)?)
     } else if let Some(value) = template_effort {
-        parse_tml_reasoning_effort_value(value)?
+        parse_numeric_reasoning_effort_value(value, max)?
     } else if request.is_chat_completions_api_request() {
-        Some(DEFAULT_TML_CHAT_REASONING_EFFORT)
+        Some(default)
     } else {
         None
     };
 
     if let Some(effective_effort) = effective_effort {
         let number = serde_json::Number::from_f64(effective_effort).ok_or_else(|| {
-            "Inkling reasoning_effort must be a finite number in [0, 0.99]".to_string()
+            format!("Inkling reasoning_effort must be a finite number in [0, {max}]")
         })?;
         combined.insert(REASONING_EFFORT_KEY.to_string(), Value::Number(number));
     }
@@ -311,26 +293,11 @@ fn build_chat_template_kwargs(
     Ok(combined)
 }
 
-fn process_content_format_for_model(
+fn process_content_format_with_contract(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    model_id: &str,
-    tokenizer_is_tml: bool,
-) -> Result<Vec<Value>, String> {
-    let order = if is_tml_model(model_id) || tokenizer_is_tml {
-        MediaPartOrder::Authored
-    } else {
-        MediaPartOrder::MediaFirst
-    };
-    process_content_format_with_order(messages, content_format, placeholder_tokens, order)
-}
-
-fn process_content_format_with_order(
-    messages: &[ChatMessage],
-    content_format: ChatTemplateContentFormat,
-    placeholder_tokens: Option<&PlaceholderTokens>,
-    media_order: MediaPartOrder,
+    contract: &ChatRenderContract,
 ) -> Result<Vec<Value>, String> {
     messages
         .iter()
@@ -340,16 +307,15 @@ fn process_content_format_with_order(
 
             if let Some(obj) = message_json.as_object_mut() {
                 // Ensure assistant messages always have a content key.
-                // skip_serializing_none omits content when None. TML distinguishes
-                // null from an authored empty text frame (notably for tool-call
-                // history), while legacy templates expect the existing empty-string
-                // fallback.
+                // skip_serializing_none omits content when None; the contract
+                // decides whether an absent assistant content renders as null
+                // (protocol-faithful default) or an empty string.
                 if obj.get("role").and_then(|v| v.as_str()) == Some("assistant")
                     && !obj.contains_key("content")
                 {
-                    let content = match media_order {
-                        MediaPartOrder::Authored => Value::Null,
-                        MediaPartOrder::MediaFirst => Value::String(String::new()),
+                    let content = match contract.absent_assistant_content {
+                        AbsentAssistantContent::Null => Value::Null,
+                        AbsentAssistantContent::EmptyString => Value::String(String::new()),
                     };
                     obj.insert("content".to_string(), content);
                 }
@@ -359,7 +325,7 @@ fn process_content_format_with_order(
                         content_value,
                         content_format,
                         placeholder_tokens,
-                        media_order,
+                        contract.media_order,
                     )?;
                 }
             }
@@ -565,7 +531,7 @@ pub fn process_chat_messages(
         request,
         tokenizer,
         placeholder_tokens.as_ref(),
-        &request.model,
+        &ChatRenderContract::default(),
     )
 }
 
@@ -573,19 +539,16 @@ pub(crate) fn process_chat_messages_with_placeholders(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    model_id: &str,
+    contract: &ChatRenderContract,
 ) -> Result<ProcessedMessages, String> {
     let formatted_text = {
         // Get content format and transform messages accordingly
         let content_format = tokenizer.chat_template_content_format();
-        let tokenizer_is_tml = has_tml_token_signature(tokenizer);
-        let request_is_tml = is_tml_model(model_id) || tokenizer_is_tml;
-        let mut transformed_messages = process_content_format_for_model(
+        let mut transformed_messages = process_content_format_with_contract(
             &request.messages,
             content_format,
             placeholder_tokens,
-            model_id,
-            tokenizer_is_tml,
+            contract,
         )?;
 
         // Process tool call arguments in assistant messages
@@ -604,7 +567,7 @@ pub(crate) fn process_chat_messages_with_placeholders(
             .transpose()
             .map_err(|e| format!("Failed to serialize tools: {e}"))?;
 
-        let combined_template_kwargs = build_chat_template_kwargs(request, request_is_tml)?;
+        let combined_template_kwargs = build_chat_template_kwargs(request, contract)?;
 
         let final_template_kwargs = if combined_template_kwargs.is_empty() {
             None
@@ -1347,6 +1310,17 @@ mod tests {
         assert_eq!(arr[3]["text"], "b");
     }
 
+    fn inkling_contract() -> ChatRenderContract {
+        ChatRenderContract {
+            media_order: MediaPartOrder::Authored,
+            absent_assistant_content: AbsentAssistantContent::Null,
+            reasoning_effort: ReasoningEffortStyle::Numeric {
+                default: 0.9,
+                max: 0.99,
+            },
+        }
+    }
+
     #[test]
     fn test_tml_preserves_authored_multipart_order_openai() {
         let messages = vec![ChatMessage::User {
@@ -1368,31 +1342,18 @@ mod tests {
             {"type": "text", "text": "question"},
             {"type": "image"}
         ]);
-        for model_id in ["inkling-chat", "org/Inkling-Chat"] {
-            let result = process_content_format_for_model(
-                &messages,
-                ChatTemplateContentFormat::OpenAI,
-                None,
-                model_id,
-                false,
-            )
-            .unwrap();
-            assert_eq!(result[0]["content"], expected, "model={model_id}");
-        }
-
-        let local_checkpoint = process_content_format_for_model(
+        let result = process_content_format_with_contract(
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            "/models/checkpoint-0001",
-            true,
+            &inkling_contract(),
         )
         .unwrap();
-        assert_eq!(local_checkpoint[0]["content"], expected);
+        assert_eq!(result[0]["content"], expected);
     }
 
     #[test]
-    fn test_tml_preserves_null_assistant_content_for_tool_history() {
+    fn test_absent_assistant_content_defaults_to_null() {
         let messages = vec![ChatMessage::Assistant {
             content: None,
             name: None,
@@ -1400,25 +1361,26 @@ mod tests {
             reasoning_content: None,
         }];
 
-        let tml = process_content_format_for_model(
+        let null = process_content_format_with_contract(
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            "inkling-chat",
-            false,
+            &ChatRenderContract::default(),
         )
         .unwrap();
-        assert!(tml[0]["content"].is_null());
+        assert!(null[0]["content"].is_null());
 
-        let legacy = process_content_format_for_model(
+        let empty_string = process_content_format_with_contract(
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            "Qwen/Qwen3.5-VL-32B",
-            false,
+            &ChatRenderContract {
+                absent_assistant_content: AbsentAssistantContent::EmptyString,
+                ..ChatRenderContract::default()
+            },
         )
         .unwrap();
-        assert_eq!(legacy[0]["content"], "");
+        assert_eq!(empty_string[0]["content"], "");
     }
 
     #[test]
@@ -1439,12 +1401,11 @@ mod tests {
         }];
         let tokens = placeholders(&[(Modality::Image, "<image>")]);
 
-        let result = process_content_format_for_model(
+        let result = process_content_format_with_contract(
             &messages,
             ChatTemplateContentFormat::String,
             Some(&tokens),
-            "inkling-chat",
-            false,
+            &inkling_contract(),
         )
         .unwrap();
 
@@ -1481,7 +1442,7 @@ mod tests {
             (" 0.5 ", 0.5),
         ] {
             let request = tml_request(Some(input));
-            let kwargs = build_chat_template_kwargs(&request, true).unwrap();
+            let kwargs = build_chat_template_kwargs(&request, &inkling_contract()).unwrap();
             assert_eq!(rendered_effort(&kwargs), Some(expected), "input={input}");
             assert!(kwargs[REASONING_EFFORT_KEY].is_number());
         }
@@ -1491,19 +1452,19 @@ mod tests {
     fn test_tml_reasoning_effort_default_is_chat_and_model_scoped() {
         let mut public_chat = tml_request(None);
         public_chat.mark_chat_completions_api_request();
-        let kwargs = build_chat_template_kwargs(&public_chat, true).unwrap();
+        let kwargs = build_chat_template_kwargs(&public_chat, &inkling_contract()).unwrap();
         assert_eq!(rendered_effort(&kwargs), Some(0.9));
 
         // Mirrors Responses -> Chat conversion: internally constructed request,
         // same shared pipeline, but no public Chat origin marker.
         let internal_chat = tml_request(None);
-        let kwargs = build_chat_template_kwargs(&internal_chat, true).unwrap();
+        let kwargs = build_chat_template_kwargs(&internal_chat, &inkling_contract()).unwrap();
         assert!(!kwargs.contains_key(REASONING_EFFORT_KEY));
 
         // The marker alone does not change another model's template behavior.
         let mut other_model = tml_request(None);
         other_model.mark_chat_completions_api_request();
-        let kwargs = build_chat_template_kwargs(&other_model, false).unwrap();
+        let kwargs = build_chat_template_kwargs(&other_model, &ChatRenderContract::default()).unwrap();
         assert!(!kwargs.contains_key(REASONING_EFFORT_KEY));
     }
 
@@ -1511,7 +1472,7 @@ mod tests {
     fn test_tml_reasoning_effort_rejects_invalid_values() {
         for input in ["", "bogus", "NaN", "inf", "-0.01", "0.991", "1", "1e400"] {
             let request = tml_request(Some(input));
-            let error = build_chat_template_kwargs(&request, true).unwrap_err();
+            let error = build_chat_template_kwargs(&request, &inkling_contract()).unwrap_err();
             assert!(error.contains("reasoning_effort"), "input={input}: {error}");
         }
 
@@ -1520,7 +1481,7 @@ mod tests {
             REASONING_EFFORT_KEY.to_string(),
             Value::Bool(true),
         )]));
-        assert!(build_chat_template_kwargs(&request, true).is_err());
+        assert!(build_chat_template_kwargs(&request, &inkling_contract()).is_err());
     }
 
     #[test]
@@ -1530,7 +1491,7 @@ mod tests {
             REASONING_EFFORT_KEY.to_string(),
             json!("low"),
         )]));
-        let error = build_chat_template_kwargs(&duplicate, true).unwrap_err();
+        let error = build_chat_template_kwargs(&duplicate, &inkling_contract()).unwrap_err();
         assert!(error.contains("must not be specified both"));
 
         // Preserve the legacy kwargs-only input, but replace it with one
@@ -1540,7 +1501,7 @@ mod tests {
             (REASONING_EFFORT_KEY.to_string(), json!("low")),
             ("custom".to_string(), json!(true)),
         ]));
-        let kwargs = build_chat_template_kwargs(&legacy, true).unwrap();
+        let kwargs = build_chat_template_kwargs(&legacy, &inkling_contract()).unwrap();
         assert_eq!(rendered_effort(&kwargs), Some(0.2));
         assert_eq!(kwargs.get("custom"), Some(&Value::Bool(true)));
     }
@@ -1553,7 +1514,7 @@ mod tests {
             json!("vendor-template-override"),
         )]));
 
-        let kwargs = build_chat_template_kwargs(&request, false).unwrap();
+        let kwargs = build_chat_template_kwargs(&request, &ChatRenderContract::default()).unwrap();
         assert_eq!(
             kwargs.get(REASONING_EFFORT_KEY),
             Some(&json!("vendor-template-override"))

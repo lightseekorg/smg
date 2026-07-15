@@ -83,20 +83,39 @@ impl MessagePreparationStage {
             Some(filtered_tools.as_slice())
         };
 
+        // Resolve the chat-rendering contract from the model registry so
+        // /v1/messages renders each model consistently with /v1/chat/completions.
+        let model_id = ctx.input.model_id.as_str();
+        let tokenizer_entry = ctx
+            .components
+            .tokenizer_registry
+            .get_by_name(model_id)
+            .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
+        let render_contract = match (
+            ctx.components.multimodal.as_ref(),
+            tokenizer_entry.as_ref(),
+        ) {
+            (Some(mm_components), Some(entry)) => {
+                multimodal::resolve_chat_render_contract(
+                    model_id,
+                    &*tokenizer,
+                    mm_components,
+                    &entry.id,
+                    &entry.source,
+                )
+                .await
+            }
+            _ => Default::default(),
+        };
+
         // Resolve multimodal context once (see chat/preparation.rs for details).
         let media_plan = multimodal::media_plan_messages(&request.messages);
         let (placeholder_tokens, mm_context) = if media_plan.is_empty() {
             (None, None)
         } else if let Some(mm_components) = ctx.components.multimodal.as_ref() {
             let model_id = ctx.input.model_id.as_str();
-            let entry = ctx
-                .components
-                .tokenizer_registry
-                .get_by_name(model_id)
-                .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
-
-            let (tokenizer_id, tokenizer_source) = match entry {
-                Some(e) => (e.id.clone(), e.source.clone()),
+            let (tokenizer_id, tokenizer_source) = match tokenizer_entry {
+                Some(e) => (e.id, e.source),
                 None => {
                     error!(
                         function = "MessagePreparationStage::execute",
@@ -156,6 +175,7 @@ impl MessagePreparationStage {
             &*tokenizer,
             tools_for_template,
             placeholder_tokens.as_ref(),
+            &render_contract,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {

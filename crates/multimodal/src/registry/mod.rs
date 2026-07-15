@@ -20,7 +20,10 @@ use qwen3_omni::Qwen3OmniSpec;
 use qwen3_vl::Qwen3VLVisionSpec;
 use qwen_vl::QwenVLVisionSpec;
 // Re-export public API from traits.
-pub use traits::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult};
+pub use traits::{
+    AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata, ModelProcessorSpec,
+    ModelRegistryError, ReasoningEffortStyle, RegistryResult,
+};
 
 pub struct ModelRegistry {
     specs: Vec<LazySpec>,
