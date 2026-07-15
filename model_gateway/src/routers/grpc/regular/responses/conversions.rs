@@ -11,9 +11,10 @@ use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
     common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
     responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
-        ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig, TextFormat,
+        ReasoningEffort, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
+        ResponseOutputItem, ResponseReasoningContent::ReasoningText, ResponseStatus,
+        ResponsesRequest, ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig,
+        TextFormat,
     },
     UNKNOWN_MODEL_ID,
 };
@@ -246,8 +247,25 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         tools,
         tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
+        reasoning_effort: req
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort.as_ref())
+            .map(reasoning_effort_to_str)
+            .map(str::to_string),
         ..Default::default()
     })
+}
+
+/// Map the Responses `reasoning.effort` enum to the Chat `reasoning_effort`
+/// string (verbatim snake_case, as the Chat pipeline expects).
+fn reasoning_effort_to_str(effort: &ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+    }
 }
 
 /// Extract text content from ResponseContentPart array. `Refusal` is
@@ -445,6 +463,34 @@ mod tests {
         assert_eq!(chat_req.model, "gpt-4");
         assert_eq!(chat_req.temperature, Some(0.7));
         assert!(!chat_req.is_chat_completions_api_request());
+    }
+
+    #[test]
+    fn test_reasoning_effort_flows_through() {
+        use openai_protocol::responses::ResponseReasoningParam;
+
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            reasoning: Some(ResponseReasoningParam {
+                effort: Some(ReasoningEffort::High),
+                summary: None,
+            }),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_reasoning_effort_absent_when_reasoning_none() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.reasoning_effort, None);
     }
 
     #[test]
