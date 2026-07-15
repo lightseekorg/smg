@@ -67,7 +67,6 @@ CRATES=(
     "smg-mcp|crates/mcp|smg-mcp"
     "kv-index|crates/kv_index|kv-index"
     "data-connector|crates/data_connector|smg-data-connector"
-    "llm-multimodal|crates/multimodal|llm-multimodal"
     "smg-wasm|crates/wasm|smg-wasm"
     "smg-mesh|crates/mesh|smg-mesh"
     "smg-grpc-client|crates/grpc_client|smg-grpc-client"

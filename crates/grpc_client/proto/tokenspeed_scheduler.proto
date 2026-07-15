@@ -10,7 +10,7 @@ import "common.proto";
 // from the cross-engine admin messages in smg.grpc.common (flush/profile).
 // Trimmed to text+multimodal generation (no embed, no LoRA, no hidden-state
 // forwarding). Multimodal carries preprocessed tensors only — media fetch +
-// per-model preprocess happen in the gateway (see crates/multimodal). EPD: a
+// per-model preprocess happen in the gateway (see the llm-multimodal crate). EPD: a
 // prefill request may carry `EncodeBootstrapInfo` so its multimodal embeddings
 // arrive from an encode worker over Mooncake (see tokenspeed_encoder.proto).
 service TokenSpeedScheduler {
@@ -205,7 +205,7 @@ message MultimodalItem {
 }
 
 // Multimodal inputs for vision/audio models. Tensors are produced by the
-// gateway's per-model preprocessor (crates/multimodal); the servicer
+// gateway's per-model preprocessor (llm-multimodal); the servicer
 // only reconstructs them and hands them to the engine — no preprocess.
 message MultimodalInputs {
   // Per-modality itemized payload. Each item owns its tensor payload,

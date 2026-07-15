@@ -33,7 +33,6 @@
 /crates/kv_index @slin1237
 /crates/mcp @key4ng @CatherineSue @slin1237 @zhoug9127
 /crates/mesh @tonyluj @llfl @slin1237
-/crates/multimodal @slin1237 @CatherineSue
 /crates/protocols @CatherineSue @key4ng
 /crates/reasoning_parser @CatherineSue
 /crates/tokenizer @slin1237 @CatherineSue
