@@ -35,9 +35,10 @@ def _image_to_base64_url(path: Path) -> str:
 
 def _remote_pixel_bytes(metrics_url: str) -> float:
     """Sum ``smg_mm_tensor_bytes_total`` samples on the RDMA (remote) path."""
-    text = httpx.get(f"{metrics_url}/metrics", timeout=10).text
+    resp = httpx.get(f"{metrics_url}/metrics", timeout=10)
+    resp.raise_for_status()
     total = 0.0
-    for line in text.splitlines():
+    for line in resp.text.splitlines():
         if line.startswith("smg_mm_tensor_bytes_total") and 'path="remote"' in line:
             total += float(line.rsplit(" ", 1)[1])
     return total

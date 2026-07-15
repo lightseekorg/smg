@@ -156,8 +156,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Resolve KV-event publishing config from the engine. Non-None only when
         # vLLM was started with --kv-events-config enabling the ZMQ publisher.
         self._kv_events_config = resolve_kv_events_config(async_llm)
-        # No-op unless SMG_MM_PIXEL_RDMA is set; a unique agent name avoids NIXL
-        # metadata collisions since vLLM has no bootstrap host/port.
+        # No-op unless the RDMA lane is on (SMG_MM_TENSOR_TRANSPORT=rdma or legacy
+        # SMG_MM_PIXEL_RDMA); a unique agent name avoids NIXL metadata collisions
+        # since vLLM has no bootstrap host/port.
         self._rdma_pixel_puller = RdmaPixelPuller(
             agent_name=f"smg-vllm-{socket.gethostname()}-{os.getpid()}",
             log_prefix="vLLM RDMA",
