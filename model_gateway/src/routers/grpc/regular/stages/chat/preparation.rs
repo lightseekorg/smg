@@ -125,6 +125,7 @@ impl ChatPreparationStage {
             &body_ref,
             &*tokenizer,
             placeholder_tokens.as_ref(),
+            &ctx.input.model_id,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {
@@ -236,20 +237,32 @@ impl ChatPreparationStage {
             None
         };
 
-        // Derive skip_special_tokens from constraint type:
+        let preserve_reasoning_special_tokens = request.separate_reasoning
+            && utils::reasoning_parser_requires_special_tokens(
+                &ctx.components.reasoning_parser_factory,
+                ctx.components.configured_reasoning_parser.as_deref(),
+                &request.model,
+            );
+
+        // Derive skip_special_tokens from parser and constraint type:
+        // - typed reasoning parsers need their control tokens preserved
         // - json_schema: backend forces JSON, no trigger tokens to preserve
         // - structural_tag or no constraint (auto): parser needs trigger tokens
-        let skip_special_tokens = match &tool_call_constraint {
-            Some(c) if c.is_json_schema() => request.skip_special_tokens,
-            _ if request.tools.is_some()
-                && !matches!(
-                    request.tool_choice,
-                    Some(ToolChoice::Value(ToolChoiceValue::None))
-                ) =>
-            {
-                false
+        let skip_special_tokens = if preserve_reasoning_special_tokens {
+            false
+        } else {
+            match &tool_call_constraint {
+                Some(c) if c.is_json_schema() => request.skip_special_tokens,
+                _ if request.tools.is_some()
+                    && !matches!(
+                        request.tool_choice,
+                        Some(ToolChoice::Value(ToolChoiceValue::None))
+                    ) =>
+                {
+                    false
+                }
+                _ => request.skip_special_tokens,
             }
-            _ => request.skip_special_tokens,
         };
 
         // Step 5: Create stop sequence decoder (build once, reuse in non-stream)

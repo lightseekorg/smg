@@ -514,17 +514,21 @@ impl ResponseProcessor {
         #[expect(clippy::unwrap_used, reason = "safe: checked len == 1 above")]
         let complete = all_responses.into_iter().next().unwrap();
 
-        // Check parser availability
-        // Only run reasoning parser when the user explicitly enabled thinking in the request.
-        // Without this gate, the reasoning parser misclassifies normal text and tool call JSON
-        // as thinking content, breaking tool use and producing incorrect content blocks.
-        let separate_reasoning = matches!(
-            &messages_request.thinking,
-            Some(
-                messages::ThinkingConfig::Enabled { .. }
-                    | messages::ThinkingConfig::Adaptive { .. }
-            )
+        // Check parser availability. Run parser when the user explicitly enabled thinking,
+        // or when the selected parser needs structural special tokens (e.g. Inkling).
+        let reasoning_requires_special_tokens = utils::reasoning_parser_requires_special_tokens(
+            &self.reasoning_parser_factory,
+            self.configured_reasoning_parser.as_deref(),
+            &messages_request.model,
         );
+        let separate_reasoning = reasoning_requires_special_tokens
+            || matches!(
+                &messages_request.thinking,
+                Some(
+                    messages::ThinkingConfig::Enabled { .. }
+                        | messages::ThinkingConfig::Adaptive { .. }
+                )
+            );
         let reasoning_parser_available = separate_reasoning
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,

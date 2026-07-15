@@ -7,7 +7,82 @@ use crate::common::{
 
 #[cfg(test)]
 mod request_format_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use axum::{
+        body::Body,
+        http::{header::CONTENT_TYPE, HeaderMap, Request, StatusCode},
+        response::{IntoResponse, Response},
+    };
+    use openai_protocol::chat::ChatCompletionRequest;
+    use smg::{middleware::TenantRequestMeta, routers::RouterTrait};
+    use tower::ServiceExt;
+
+    use crate::common::test_app::{create_test_app_context, create_test_app_with_context};
+
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct CapturingChatRouter {
+        request: Mutex<Option<(bool, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl RouterTrait for CapturingChatRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn route_chat(
+            &self,
+            _headers: Option<&HeaderMap>,
+            _tenant_meta: &TenantRequestMeta,
+            body: &ChatCompletionRequest,
+            _model_id: &str,
+        ) -> Response {
+            *self.request.lock().unwrap() = Some((
+                body.is_chat_completions_api_request(),
+                body.reasoning_effort.clone(),
+            ));
+            StatusCode::OK.into_response()
+        }
+
+        fn router_type(&self) -> &'static str {
+            "capture"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_handler_marks_origin_without_materializing_default_effort() {
+        let capture = Arc::new(CapturingChatRouter::default());
+        let app_context = create_test_app_context().await;
+        let app = create_test_app_with_context(capture.clone(), app_context);
+        let payload = json!({
+            "model": "mock-model",
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = capture.request.lock().unwrap();
+        let (chat_completions_api_request, reasoning_effort) = request
+            .as_ref()
+            .expect("route_chat should receive the request");
+        assert!(*chat_completions_api_request);
+        assert!(reasoning_effort.is_none());
+    }
 
     #[tokio::test]
     async fn test_generate_request_formats() {

@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::future::try_join_all;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, EncoderFieldLayouts, ImageFrame, Modality, ModelMetadata,
@@ -607,7 +607,16 @@ fn expand_tokens_for_modalities(
                 .collect::<Result<Vec<_>>>()?;
             let offset = expanded.len();
             let length = replacement_tokens.len();
-            let patches = patch_ranges(offset, &replacement_tokens, expansion.placeholder_token_id);
+            let patches = if let Some(feature_ranges) = &replacement.feature_ranges {
+                explicit_feature_ranges(offset, length, feature_ranges).with_context(|| {
+                    format!(
+                        "Invalid explicit feature ranges in {} replacement {item_index}",
+                        expansion.modality
+                    )
+                })?
+            } else {
+                patch_ranges(offset, &replacement_tokens, expansion.placeholder_token_id)
+            };
             expanded.extend(replacement_tokens);
             let prefix = replacement.structural_prefix.min(offset);
             bindings[idx].push(PromptBinding {
@@ -678,6 +687,46 @@ fn patch_ranges(
     ranges
 }
 
+fn explicit_feature_ranges(
+    replacement_offset: usize,
+    replacement_length: usize,
+    relative_ranges: &[PlaceholderRange],
+) -> Result<Vec<PlaceholderRange>> {
+    anyhow::ensure!(
+        !relative_ranges.is_empty(),
+        "explicit feature ranges must not be empty"
+    );
+    let mut absolute_ranges = Vec::with_capacity(relative_ranges.len());
+    let mut previous_end = 0usize;
+    for (index, range) in relative_ranges.iter().enumerate() {
+        anyhow::ensure!(range.length > 0, "feature range {index} has zero length");
+        let relative_end = range
+            .offset
+            .checked_add(range.length)
+            .ok_or_else(|| anyhow::anyhow!("feature range {index} overflows usize"))?;
+        anyhow::ensure!(
+            relative_end <= replacement_length,
+            "feature range {index} ({}, {}) exceeds replacement length {replacement_length}",
+            range.offset,
+            range.length
+        );
+        anyhow::ensure!(
+            index == 0 || range.offset >= previous_end,
+            "feature range {index} overlaps or is out of order"
+        );
+        absolute_ranges.push(PlaceholderRange {
+            offset: replacement_offset
+                .checked_add(range.offset)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("feature range {index} absolute offset overflows")
+                })?,
+            length: range.length,
+        });
+        previous_end = relative_end;
+    }
+    Ok(absolute_ranges)
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -707,6 +756,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, 50, 50, 50], // Expand to 4 tokens
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 
@@ -737,6 +787,7 @@ mod tests {
             modality: Modality::Video,
             placeholder_token: "<|video_pad|>".to_string(),
             tokens: vec![50, 50, 50], // expands to 3 video tokens
+            feature_ranges: None,
             structural_prefix: 1,
         }];
 
@@ -779,12 +830,14 @@ mod tests {
                 modality: Modality::Image,
                 placeholder_token: "<image>".to_string(),
                 tokens: vec![50, 50], // 2 tokens for first image
+                feature_ranges: None,
                 structural_prefix: 0,
             },
             PromptReplacement {
                 modality: Modality::Image,
                 placeholder_token: "<image>".to_string(),
                 tokens: vec![60, 60, 60], // 3 tokens for second image
+                feature_ranges: None,
                 structural_prefix: 0,
             },
         ];
@@ -814,6 +867,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![88, 92, 92, 92, 93, 92, 92, 92, 89], // start + patches + sep + patches + end
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 
@@ -838,6 +892,49 @@ mod tests {
     }
 
     #[test]
+    fn test_explicit_feature_range_excludes_same_id_structural_header() {
+        let replacements = vec![PromptReplacement::sequence(
+            Modality::Image,
+            "<|content_image|>",
+            vec![200005, 200005, 200005, 200005],
+        )
+        .with_feature_span(1, 3)];
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(200005),
+            placeholder_token_id: Some(200005),
+            replacements: &replacements,
+        };
+
+        let result = expand_tokens_for_modalities(&[1, 200005, 2], &[expansion]).unwrap();
+
+        assert_eq!(result.token_ids, vec![1, 200005, 200005, 200005, 200005, 2]);
+        assert_eq!(result.bindings[0][0].structural.offset, 1);
+        assert_eq!(result.bindings[0][0].structural.length, 4);
+        assert_eq!(result.bindings[0][0].patches.len(), 1);
+        assert_eq!(result.bindings[0][0].patches[0].offset, 2);
+        assert_eq!(result.bindings[0][0].patches[0].length, 3);
+    }
+
+    #[test]
+    fn test_explicit_feature_range_must_fit_replacement() {
+        let replacements =
+            vec![
+                PromptReplacement::sequence(Modality::Image, "<image>", vec![50, 50])
+                    .with_feature_span(1, 2),
+            ];
+        let expansion = ModalityExpansion {
+            modality: Modality::Image,
+            search_token_id: Some(100),
+            placeholder_token_id: Some(50),
+            replacements: &replacements,
+        };
+
+        let error = expand_tokens_for_modalities(&[100], &[expansion]).unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds replacement length"));
+    }
+
+    #[test]
     fn test_expand_tokens_preserves_template_owned_audio_end() {
         // The template owns the audio end marker. Expansion preserves the
         // anchor, adds feature tokens, and must not inject another end marker.
@@ -854,6 +951,7 @@ mod tests {
                 audio_placeholder as i32,
                 audio_placeholder as i32,
             ],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 
@@ -914,6 +1012,7 @@ mod tests {
                 audio_placeholder as i32,
                 audio_placeholder as i32,
             ],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let image_replacements = vec![PromptReplacement {
@@ -925,6 +1024,7 @@ mod tests {
                 image_placeholder as i32,
                 image_placeholder as i32,
             ],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let expansions = vec![
@@ -979,18 +1079,21 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![110, 101, 111],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let video_replacements = vec![PromptReplacement {
             modality: Modality::Video,
             placeholder_token: "<video>".to_string(),
             tokens: vec![210, 201, 201, 211],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let audio_replacements = vec![PromptReplacement {
             modality: Modality::Audio,
             placeholder_token: "<audio>".to_string(),
             tokens: vec![310, 301, 301],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let expansions = vec![
@@ -1040,6 +1143,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, 50],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 
@@ -1059,6 +1163,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, 50],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 
@@ -1078,12 +1183,14 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let audio_replacements = vec![PromptReplacement {
             modality: Modality::Audio,
             placeholder_token: "<audio>".to_string(),
             tokens: vec![60],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
         let expansions = [
@@ -1111,6 +1218,7 @@ mod tests {
             modality: Modality::Image,
             placeholder_token: "<image>".to_string(),
             tokens: vec![50, -1],
+            feature_ranges: None,
             structural_prefix: 0,
         }];
 

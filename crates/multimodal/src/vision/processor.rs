@@ -272,6 +272,11 @@ impl VisionProcessorRegistry {
             Box::new(super::processors::Qwen3VLProcessor::new()),
         );
 
+        // Inkling/TML multimodal model.
+        registry.register(
+            "inkling",
+            Box::new(super::processors::InklingImageProcessor::new()),
+        );
         // Register Qwen2-VL (matches Qwen/Qwen2-VL-*, etc.)
         registry.register(
             "qwen2-vl",
@@ -374,6 +379,11 @@ mod tests {
         // Get the processor and check model name
         let processor = registry.find("llava-hf/llava-1.5-7b-hf", None).unwrap();
         assert_eq!(processor.model_name(), "llava");
+
+        let processor = registry
+            .find("org/inkling-chat", None)
+            .expect("Inkling model family");
+        assert_eq!(processor.model_name(), "inkling");
     }
 
     #[test]

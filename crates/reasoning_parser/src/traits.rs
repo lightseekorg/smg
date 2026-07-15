@@ -70,6 +70,15 @@ pub trait ReasoningParser: Send + Sync {
     /// Get the model type this parser is designed for.
     fn model_type(&self) -> &str;
 
+    /// Whether detokenization must preserve model control tokens for this parser.
+    ///
+    /// Most reasoning formats use ordinary text delimiters such as `<think>`.
+    /// Typed-output formats can instead use tokenizer special tokens, which must
+    /// reach the parser verbatim rather than being removed by detokenization.
+    fn requires_special_tokens(&self) -> bool {
+        false
+    }
+
     /// Check if the parser is currently in reasoning mode.
     ///
     /// Returns true if the parser is currently parsing reasoning content.

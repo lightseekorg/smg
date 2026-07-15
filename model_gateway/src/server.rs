@@ -158,8 +158,12 @@ async fn v1_chat_completions(
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     cancel: middleware::scheduler::PreemptionGuard,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
+    // Keep endpoint-only policy out of the shared Chat pipeline. Responses and
+    // other APIs also construct ChatCompletionRequest values internally, but
+    // only this public endpoint should receive Chat Completions defaults.
+    body.mark_chat_completions_api_request();
     cancel
         .guard(
             state

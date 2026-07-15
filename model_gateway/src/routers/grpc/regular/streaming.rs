@@ -1691,15 +1691,21 @@ impl StreamingProcessor {
         let mut finish_reason_str = String::new();
         let mut matched_stop: Option<Value> = None;
 
-        // Check parser availability once upfront.
-        // Only run reasoning parser when the user explicitly enabled thinking.
-        let separate_reasoning = matches!(
-            &original_request.thinking,
-            Some(
-                messages::ThinkingConfig::Enabled { .. }
-                    | messages::ThinkingConfig::Adaptive { .. }
-            )
+        // Check parser availability once upfront. Run parser when the user explicitly
+        // enabled thinking, or when the selected parser needs structural special tokens.
+        let reasoning_requires_special_tokens = utils::reasoning_parser_requires_special_tokens(
+            &self.reasoning_parser_factory,
+            self.configured_reasoning_parser.as_deref(),
+            model,
         );
+        let separate_reasoning = reasoning_requires_special_tokens
+            || matches!(
+                &original_request.thinking,
+                Some(
+                    messages::ThinkingConfig::Enabled { .. }
+                        | messages::ThinkingConfig::Adaptive { .. }
+                )
+            );
         let reasoning_parser_available = separate_reasoning
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,

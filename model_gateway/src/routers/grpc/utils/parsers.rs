@@ -123,6 +123,21 @@ pub(crate) fn create_reasoning_parser(
     }
 }
 
+/// Whether the selected reasoning parser needs tokenizer special tokens to be
+/// preserved in decoded output.
+pub(crate) fn reasoning_parser_requires_special_tokens(
+    reasoning_parser_factory: &ReasoningParserFactory,
+    configured_parser: Option<&str>,
+    model: &str,
+) -> bool {
+    create_reasoning_parser(reasoning_parser_factory, configured_parser, model).is_some_and(
+        |parser| {
+            let parser_ref: &dyn ReasoningParser = parser.as_ref();
+            parser_ref.requires_special_tokens()
+        },
+    )
+}
+
 /// Get the appropriate tool parser for a model
 ///
 /// If a parser name is explicitly configured, use that parser.
@@ -226,5 +241,21 @@ mod tests {
         let parser = create_reasoning_parser(&factory, Some("qwen3"), "unknown-model")
             .expect("configured qwen3 parser exists");
         assert_eq!(parser.model_type(), "qwen3");
+    }
+
+    #[test]
+    fn inkling_parser_requires_special_tokens() {
+        let factory = ReasoningParserFactory::new();
+
+        assert!(reasoning_parser_requires_special_tokens(
+            &factory,
+            Some("inkling"),
+            "served-model"
+        ));
+        assert!(!reasoning_parser_requires_special_tokens(
+            &factory,
+            Some("qwen3"),
+            "served-model"
+        ));
     }
 }

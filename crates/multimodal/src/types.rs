@@ -461,7 +461,7 @@ impl ImageSize {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct PlaceholderRange {
     pub offset: usize,
     pub length: usize,
@@ -472,6 +472,13 @@ pub struct PromptReplacement {
     pub modality: Modality,
     pub placeholder_token: String,
     pub tokens: Vec<TokenId>,
+    /// Feature-token ranges relative to the start of `tokens`.
+    ///
+    /// Most model specs leave this unset and let the gateway discover feature
+    /// ranges by scanning for the configured placeholder token id. Specs whose
+    /// transport fill token is also a structural token can set explicit ranges
+    /// so the structural header is not mistaken for an encoder position.
+    pub feature_ranges: Option<Vec<PlaceholderRange>>,
     /// Number of structural tokens the chat template emits *immediately before*
     /// this placeholder (e.g. Qwen's leading `<|vision_start|>`) that belong to
     /// the placeholder's range. `expand_tokens` folds them into the reported
@@ -494,6 +501,7 @@ impl PromptReplacement {
             modality,
             placeholder_token: placeholder_token.to_string(),
             tokens: vec![token_id; count],
+            feature_ranges: None,
             structural_prefix: 0,
         }
     }
@@ -503,8 +511,23 @@ impl PromptReplacement {
             modality,
             placeholder_token: placeholder_token.to_string(),
             tokens: sequence,
+            feature_ranges: None,
             structural_prefix: 0,
         }
+    }
+
+    /// Declare the encoder-feature ranges inside the replacement sequence.
+    /// Offsets are relative to the first replacement token.
+    #[must_use]
+    pub fn with_feature_ranges(mut self, ranges: Vec<PlaceholderRange>) -> Self {
+        self.feature_ranges = Some(ranges);
+        self
+    }
+
+    /// Declare one contiguous encoder-feature span inside the replacement.
+    #[must_use]
+    pub fn with_feature_span(self, offset: usize, length: usize) -> Self {
+        self.with_feature_ranges(vec![PlaceholderRange { offset, length }])
     }
 
     /// Declare that `n` template-emitted structural tokens precede this
@@ -535,6 +558,16 @@ mod tests {
     fn prompt_replacement_builders() {
         let rep = PromptReplacement::repeated(Modality::Image, "<image>", 100, 3);
         assert_eq!(rep.tokens, vec![100, 100, 100]);
+        assert!(rep.feature_ranges.is_none());
+
+        let rep = rep.with_feature_span(1, 2);
+        assert_eq!(
+            rep.feature_ranges,
+            Some(vec![PlaceholderRange {
+                offset: 1,
+                length: 2
+            }])
+        );
     }
 
     #[test]

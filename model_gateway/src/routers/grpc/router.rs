@@ -350,6 +350,7 @@ impl GrpcRouter {
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
             configured_tool_parser: ctx.configured_tool_parser.clone(),
+            configured_reasoning_parser: ctx.configured_reasoning_parser.clone(),
             multimodal,
         });
 

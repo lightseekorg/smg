@@ -6,9 +6,9 @@ use parking_lot::RwLock;
 
 use crate::{
     parsers::{
-        BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
-        Step3Parser,
+        BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, InklingParser,
+        KimiParser, MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser,
+        QwenThinkingParser, Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -148,6 +148,8 @@ impl ParserFactory {
 
         registry.register_parser("nano_v3", || Box::new(NanoV3Parser::new()));
 
+        registry.register_parser("inkling", || Box::new(InklingParser::new()));
+
         // standard think tokens, always_in_reasoning=false
         registry.register_parser("deepseek_v31", || {
             let config = ParserConfig {
@@ -211,6 +213,9 @@ impl ParserFactory {
         registry.register_pattern("nemotron-super", "nano_v3");
         registry.register_pattern("nano-v3", "nano_v3");
 
+        // Inkling checkpoints use the model-family name in their ID or config.
+        registry.register_pattern("inkling", "inkling");
+
         Self { registry }
     }
 
@@ -273,6 +278,12 @@ mod tests {
         let factory = ParserFactory::new();
         let parser = factory.create("kimi-chat");
         assert_eq!(parser.model_type(), "kimi");
+    }
+
+    #[test]
+    fn test_factory_creates_inkling() {
+        let factory = ParserFactory::new();
+        assert_eq!(factory.create("inkling-chat").model_type(), "inkling");
     }
 
     #[test]

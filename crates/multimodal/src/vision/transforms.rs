@@ -3,7 +3,7 @@
 //! This module provides composable transforms that match HuggingFace image processor
 //! behavior, enabling pure Rust preprocessing without Python dependencies.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, f64::consts::PI};
 
 use fast_image_resize::{
     images::{Image as FirImage, ImageRef as FirImageRef},
@@ -318,6 +318,29 @@ fn fir_image_to_dynamic(
 // algorithm exactly, validated against Pillow.
 const PIL_PRECISION_BITS: i64 = 32 - 8 - 2;
 const PIL_BICUBIC_SUPPORT: f64 = 2.0;
+const PIL_LANCZOS_SUPPORT: f64 = 3.0;
+
+#[derive(Clone, Copy)]
+enum PilResizeFilter {
+    Bicubic,
+    Lanczos,
+}
+
+impl PilResizeFilter {
+    fn support(self) -> f64 {
+        match self {
+            Self::Bicubic => PIL_BICUBIC_SUPPORT,
+            Self::Lanczos => PIL_LANCZOS_SUPPORT,
+        }
+    }
+
+    fn weight(self, x: f64) -> f64 {
+        match self {
+            Self::Bicubic => pil_cubic(x),
+            Self::Lanczos => pil_lanczos(x),
+        }
+    }
+}
 
 #[inline]
 fn pil_cubic(x: f64) -> f64 {
@@ -333,12 +356,36 @@ fn pil_cubic(x: f64) -> f64 {
     }
 }
 
+#[inline]
+fn pil_sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        1.0
+    } else {
+        let x = x * PI;
+        x.sin() / x
+    }
+}
+
+#[inline]
+fn pil_lanczos(x: f64) -> f64 {
+    let x = x.abs();
+    if x < PIL_LANCZOS_SUPPORT {
+        pil_sinc(x) * pil_sinc(x / PIL_LANCZOS_SUPPORT)
+    } else {
+        0.0
+    }
+}
+
 /// Pillow `precompute_coeffs` for one axis: integer (fixed-point) kernels plus
 /// per-output bounds `(start, count)`.
-fn pil_precompute_coeffs(in_size: usize, out_size: usize) -> (Vec<(usize, usize)>, Vec<Vec<i64>>) {
+fn pil_precompute_coeffs(
+    in_size: usize,
+    out_size: usize,
+    filter: PilResizeFilter,
+) -> (Vec<(usize, usize)>, Vec<Vec<i64>>) {
     let scale = in_size as f64 / out_size as f64;
     let filterscale = if scale >= 1.0 { scale } else { 1.0 };
-    let support = PIL_BICUBIC_SUPPORT * filterscale;
+    let support = filter.support() * filterscale;
     let inv = 1.0 / filterscale;
     let coeff_scale = (1_i64 << PIL_PRECISION_BITS) as f64;
 
@@ -360,7 +407,7 @@ fn pil_precompute_coeffs(in_size: usize, out_size: usize) -> (Vec<(usize, usize)
         let mut w = vec![0.0_f64; xmax];
         let mut tot = 0.0;
         for (x, wx) in w.iter_mut().enumerate() {
-            let v = pil_cubic(((x + xmin) as f64 - center + 0.5) * inv);
+            let v = filter.weight(((x + xmin) as f64 - center + 0.5) * inv);
             *wx = v;
             tot += v;
         }
@@ -489,8 +536,9 @@ fn pil_resample_horizontal(
     in_w: usize,
     out_w: usize,
     channels: usize,
+    filter: PilResizeFilter,
 ) -> Vec<u8> {
-    let (bounds, kernels) = pil_precompute_coeffs(in_w, out_w);
+    let (bounds, kernels) = pil_precompute_coeffs(in_w, out_w, filter);
     let half = 1_i64 << (PIL_PRECISION_BITS - 1);
     let row_out = out_w * channels;
     let mut out = vec![0_u8; rows * row_out];
@@ -520,8 +568,14 @@ fn pil_resample_horizontal(
     out
 }
 
-fn pil_resample_horizontal_rgb(src: &[u8], rows: usize, in_w: usize, out_w: usize) -> Vec<u8> {
-    let (bounds, kernels) = pil_precompute_coeffs(in_w, out_w);
+fn pil_resample_horizontal_rgb(
+    src: &[u8],
+    rows: usize,
+    in_w: usize,
+    out_w: usize,
+    filter: PilResizeFilter,
+) -> Vec<u8> {
+    let (bounds, kernels) = pil_precompute_coeffs(in_w, out_w, filter);
     let half = 1_i64 << (PIL_PRECISION_BITS - 1);
     let row_out = out_w * 3;
     let mut out = vec![0_u8; rows * row_out];
@@ -641,8 +695,9 @@ fn pil_resample_vertical(
     width: usize,
     out_h: usize,
     channels: usize,
+    filter: PilResizeFilter,
 ) -> Vec<u8> {
-    let (bounds, kernels) = pil_precompute_coeffs(in_h, out_h);
+    let (bounds, kernels) = pil_precompute_coeffs(in_h, out_h, filter);
     let half = 1_i64 << (PIL_PRECISION_BITS - 1);
     let row_out = width * channels;
     let mut out = vec![0_u8; out_h * row_out];
@@ -668,8 +723,14 @@ fn pil_resample_vertical(
     out
 }
 
-fn pil_resample_vertical_rgb(src: &[u8], in_h: usize, width: usize, out_h: usize) -> Vec<u8> {
-    let (bounds, kernels) = pil_precompute_coeffs(in_h, out_h);
+fn pil_resample_vertical_rgb(
+    src: &[u8],
+    in_h: usize,
+    width: usize,
+    out_h: usize,
+    filter: PilResizeFilter,
+) -> Vec<u8> {
+    let (bounds, kernels) = pil_precompute_coeffs(in_h, out_h, filter);
     let half = 1_i64 << (PIL_PRECISION_BITS - 1);
     let row_out = width * 3;
     let mut out = vec![0_u8; out_h * row_out];
@@ -702,7 +763,15 @@ fn pil_resample_vertical_rgb(src: &[u8], in_h: usize, width: usize, out_h: usize
 pub fn resize_bicubic_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> DynamicImage {
     let rgb = image.to_rgb8();
     let (in_w, in_h) = rgb.dimensions();
-    let output = resize_bicubic_pil_bytes(rgb.as_raw(), in_w, in_h, out_w, out_h, false);
+    let output = resize_pil_bytes(
+        rgb.as_raw(),
+        in_w,
+        in_h,
+        out_w,
+        out_h,
+        false,
+        PilResizeFilter::Bicubic,
+    );
     #[expect(
         clippy::expect_used,
         reason = "output is exactly out_w*out_h*3 bytes by construction"
@@ -732,7 +801,15 @@ pub fn resize_bicubic_pil_rgb(
             data.len()
         )));
     }
-    let output = resize_bicubic_pil_bytes(data, width, height, out_w, out_h, true);
+    let output = resize_pil_bytes(
+        data,
+        width,
+        height,
+        out_w,
+        out_h,
+        true,
+        PilResizeFilter::Bicubic,
+    );
     RgbImage::from_raw(out_w, out_h, output).ok_or_else(|| {
         TransformError::ShapeError(format!(
             "failed to build PIL bicubic RGB image for {out_w}x{out_h}"
@@ -740,35 +817,59 @@ pub fn resize_bicubic_pil_rgb(
     })
 }
 
-fn resize_bicubic_pil_bytes(
+/// Pillow-exact LANCZOS resize (RGB8), matching
+/// `PIL.Image.resize(.., LANCZOS)`.
+pub fn resize_lanczos_pil(image: &DynamicImage, out_w: u32, out_h: u32) -> DynamicImage {
+    let rgb = image.to_rgb8();
+    let (in_w, in_h) = rgb.dimensions();
+    let output = resize_pil_bytes(
+        rgb.as_raw(),
+        in_w,
+        in_h,
+        out_w,
+        out_h,
+        false,
+        PilResizeFilter::Lanczos,
+    );
+    #[expect(
+        clippy::expect_used,
+        reason = "output is exactly out_w*out_h*3 bytes by construction"
+    )]
+    DynamicImage::ImageRgb8(
+        RgbImage::from_raw(out_w, out_h, output).expect("pil resize buffer size"),
+    )
+}
+
+fn resize_pil_bytes(
     data: &[u8],
     in_w: u32,
     in_h: u32,
     out_w: u32,
     out_h: u32,
     joint_rgb: bool,
+    filter: PilResizeFilter,
 ) -> Vec<u8> {
     let (in_w, in_h, out_w, out_h) = (in_w as usize, in_h as usize, out_w as usize, out_h as usize);
     if in_w == out_w && in_h == out_h {
         data.to_vec()
     } else if in_w == out_w {
         if joint_rgb {
-            pil_resample_vertical_rgb(data, in_h, in_w, out_h)
+            pil_resample_vertical_rgb(data, in_h, in_w, out_h, filter)
         } else {
-            pil_resample_vertical(data, in_h, in_w, out_h, 3)
+            pil_resample_vertical(data, in_h, in_w, out_h, 3, filter)
         }
     } else {
         let horiz = if joint_rgb {
-            pil_resample_horizontal_rgb(data, in_h, in_w, out_w)
+            pil_resample_horizontal_rgb(data, in_h, in_w, out_w, filter)
         } else {
-            pil_resample_horizontal(data, in_h, in_w, out_w, 3)
+            pil_resample_horizontal(data, in_h, in_w, out_w, 3, filter)
         };
         if in_h == out_h {
             horiz
         } else if joint_rgb {
-            pil_resample_vertical_rgb(&horiz, in_h, out_w, out_h)
+            pil_resample_vertical_rgb(&horiz, in_h, out_w, out_h, filter)
         } else {
-            pil_resample_vertical(&horiz, in_h, out_w, out_h, 3)
+            pil_resample_vertical(&horiz, in_h, out_w, out_h, 3, filter)
         }
     }
 }
@@ -1059,14 +1160,21 @@ mod tests {
         }
 
         for (out_w, out_h) in [(src_w, 17), (19, src_h), (src_w, src_h)] {
-            let horizontal =
-                pil_resample_horizontal(&data, src_h as usize, src_w as usize, out_w as usize, 3);
+            let horizontal = pil_resample_horizontal(
+                &data,
+                src_h as usize,
+                src_w as usize,
+                out_w as usize,
+                3,
+                PilResizeFilter::Bicubic,
+            );
             let expected = pil_resample_vertical(
                 &horizontal,
                 src_h as usize,
                 out_w as usize,
                 out_h as usize,
                 3,
+                PilResizeFilter::Bicubic,
             );
             let actual = resize_bicubic_pil_rgb(&data, src_w, src_h, out_w, out_h)
                 .unwrap()

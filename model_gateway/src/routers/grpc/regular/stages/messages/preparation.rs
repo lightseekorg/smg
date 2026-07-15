@@ -271,20 +271,31 @@ impl MessagePreparationStage {
             .as_ref()
             .map(|seqs| StringOrArray::Array(seqs.clone()));
 
-        // Derive skip_special_tokens from constraint type:
+        let preserve_reasoning_special_tokens = utils::reasoning_parser_requires_special_tokens(
+            &ctx.components.reasoning_parser_factory,
+            ctx.components.configured_reasoning_parser.as_deref(),
+            &request.model,
+        );
+
+        // Derive skip_special_tokens from parser and constraint type:
+        // - typed reasoning parsers need their control tokens preserved
         // - json_schema: backend forces JSON, no trigger tokens to preserve
         // - structural_tag or no constraint (auto): parser needs trigger tokens
-        let skip_special_tokens = match &tool_call_constraint {
-            Some(c) if c.is_json_schema() => true,
-            _ if !filtered_tools.is_empty()
-                && !matches!(
-                    chat_tool_choice,
-                    Some(ToolChoice::Value(ToolChoiceValue::None))
-                ) =>
-            {
-                false
+        let skip_special_tokens = if preserve_reasoning_special_tokens {
+            false
+        } else {
+            match &tool_call_constraint {
+                Some(c) if c.is_json_schema() => true,
+                _ if !filtered_tools.is_empty()
+                    && !matches!(
+                        chat_tool_choice,
+                        Some(ToolChoice::Value(ToolChoiceValue::None))
+                    ) =>
+                {
+                    false
+                }
+                _ => true,
             }
-            _ => true,
         };
 
         let stop_decoder = utils::create_stop_decoder(

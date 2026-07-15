@@ -481,6 +481,17 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         audio_modality = common_pb2.AUDIO
         video_modality = common_pb2.VIDEO
         model_type = config_value(hf_config, "model_type", "") if hf_config is not None else ""
+        is_inkling = model_type == "inkling_mm_model"
+
+        if is_inkling:
+            supported = []
+            vision_config = config_value(hf_config, "vision_config")
+            if config_value(vision_config, "decoder_dmodel") is not None:
+                supported.append(image_modality)
+            audio_config = config_value(hf_config, "audio_config")
+            if config_value(audio_config, "decoder_dmodel") is not None:
+                supported.append(audio_modality)
+            return supported
 
         thinker_config = config_value(hf_config, "thinker_config")
         if model_type == "qwen3_asr":

@@ -199,8 +199,27 @@ pub struct ChatCompletionRequest {
     /// Cache key for prompts (beta feature)
     pub prompt_cache_key: Option<String>,
 
-    /// Effort level for reasoning models (low, medium, high)
+    /// Effort level for reasoning models.
+    ///
+    /// OpenAI-compatible callers normally send a named string, while some
+    /// model integrations accept a numeric value. Keep the public Rust shape
+    /// as a string for compatibility, but accept either JSON representation at
+    /// the HTTP boundary; model-specific normalization happens in the gateway.
+    #[serde(default, deserialize_with = "deserialize_reasoning_effort")]
     pub reasoning_effort: Option<String>,
+
+    /// Internal request-origin marker. It is set only by the
+    /// `/v1/chat/completions` handler and is never accepted from or emitted to
+    /// clients. Shared Chat pipelines (for example `/v1/responses`) therefore
+    /// do not accidentally inherit Chat-only defaults.
+    #[doc(hidden)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "ignore_chat_completions_api_request"
+    )]
+    #[schemars(skip)]
+    pub chat_completions_api_request: bool,
 
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
@@ -339,6 +358,44 @@ pub fn thinking_from_reasoning_effort(reasoning_effort: Option<&str>) -> Option<
     match reasoning_effort {
         Some("none") | Some("minimal") => Some(false),
         _ => None,
+    }
+}
+
+fn deserialize_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(_) => Err(serde::de::Error::custom(
+            "reasoning_effort must be a string, number, or null",
+        )),
+    }
+}
+
+fn ignore_chat_completions_api_request<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(false)
+}
+
+impl ChatCompletionRequest {
+    /// Mark this value as originating at the public Chat Completions endpoint.
+    ///
+    /// This marker is deliberately separate from serde normalization so
+    /// internally constructed Chat requests used by other endpoints remain
+    /// distinguishable.
+    pub fn mark_chat_completions_api_request(&mut self) {
+        self.chat_completions_api_request = true;
+    }
+
+    pub fn is_chat_completions_api_request(&self) -> bool {
+        self.chat_completions_api_request
     }
 }
 
@@ -803,6 +860,48 @@ mod tests {
         // Unspecified / unknown -> defer.
         assert_eq!(thinking_from_reasoning_effort(None), None);
         assert_eq!(thinking_from_reasoning_effort(Some("bogus")), None);
+    }
+
+    #[test]
+    fn reasoning_effort_accepts_scalar_json_and_rejects_other_types() {
+        for (value, expected) in [
+            (json!("high"), Some("high")),
+            (json!(0.2), Some("0.2")),
+            (json!(0.99), Some("0.99")),
+            (Value::Null, None),
+        ] {
+            let request = request_with_output_fields(&[("reasoning_effort", value)]);
+            assert_eq!(request.reasoning_effort.as_deref(), expected);
+        }
+
+        for value in [json!(true), json!([]), json!({"level": "high"})] {
+            let mut request = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            request["reasoning_effort"] = value;
+            let error = serde_json::from_value::<ChatCompletionRequest>(request).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("reasoning_effort must be a string, number, or null"));
+        }
+    }
+
+    #[test]
+    fn chat_origin_marker_cannot_be_spoofed_or_serialized() {
+        let mut request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_completions_api_request": true,
+        }))
+        .expect("request must deserialize");
+        assert!(!request.is_chat_completions_api_request());
+        assert!(!request.other.contains_key("chat_completions_api_request"));
+
+        request.mark_chat_completions_api_request();
+        assert!(request.is_chat_completions_api_request());
+        let serialized = serde_json::to_value(request).expect("request must serialize");
+        assert!(serialized.get("chat_completions_api_request").is_none());
     }
 
     #[test]
