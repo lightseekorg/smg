@@ -194,6 +194,8 @@ impl ParserFactory {
         registry.register_pattern("glm-5", "glm45"); // GLM-5.x reuse glm45 reasoning format
         registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
         registry.register_pattern("kimi-k2.5", "kimi_k25");
+        registry.register_pattern("kimi-k2.6", "kimi_k25"); // K2.6/K2.7 share the K2.5 <think> template
+        registry.register_pattern("kimi-k2.7", "kimi_k25");
         registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
         registry.register_pattern("step3", "step3");
         registry.register_pattern("minimax", "minimax");
@@ -273,6 +275,31 @@ mod tests {
         let factory = ParserFactory::new();
         let parser = factory.create("kimi-chat");
         assert_eq!(parser.model_type(), "kimi");
+    }
+
+    #[test]
+    fn test_kimi_k2_family_automap() {
+        let factory = ParserFactory::new();
+        assert_eq!(
+            factory.create("moonshotai/Kimi-K2.5").model_type(),
+            "kimi_k25"
+        );
+        assert_eq!(
+            factory.create("moonshotai/Kimi-K2.6").model_type(),
+            "kimi_k25"
+        );
+        assert_eq!(
+            factory.create("moonshotai/Kimi-K2.7-Code").model_type(),
+            "kimi_k25"
+        );
+        assert_eq!(
+            factory.create("moonshotai/Kimi-K2-Thinking").model_type(),
+            "kimi_thinking"
+        );
+        assert_eq!(
+            factory.create("moonshotai/Kimi-K2-Instruct").model_type(),
+            "kimi"
+        );
     }
 
     #[test]
