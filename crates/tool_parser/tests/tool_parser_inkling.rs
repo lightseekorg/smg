@@ -123,6 +123,14 @@ fn test_inkling_factory_and_structural_tag() {
             .as_deref(),
         Some("inkling")
     );
+    // Namespaced / differently-cased ids must still resolve (case-insensitive substring).
+    assert_eq!(
+        factory
+            .registry()
+            .resolve_model_to_parser("org/Inkling-Chat")
+            .as_deref(),
+        Some("inkling")
+    );
     assert!(factory.registry().has_structural_tag("inkling"));
 
     let tools = create_test_tools();
@@ -134,6 +142,26 @@ fn test_inkling_factory_and_structural_tag() {
     );
     assert_eq!(tag["format"]["tags"][0]["end"], "}<|end_message|>");
     assert_eq!(tag["format"]["at_least_one"], true);
+}
+
+#[tokio::test]
+async fn test_inkling_namespaced_model_parses_tool_calls() {
+    let factory = ParserFactory::new();
+    let parser = factory
+        .get_parser("org/Inkling-Chat")
+        .expect("namespaced inkling id should resolve to a parser");
+    let tools = create_test_tools();
+    let input = concat!(
+        "<|message_model|>search<|content_invoke_tool_json|>{\"name\":\"search\",\"args\":",
+        "{\"query\":\"Rust\"}}<|end_message|><|content_model_end_sampling|>"
+    );
+
+    let (_normal_text, calls) = parser
+        .parse_complete_with_tools(input, &tools)
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "search");
 }
 
 #[tokio::test]

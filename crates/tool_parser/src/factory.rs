@@ -239,13 +239,18 @@ impl ParserRegistry {
         if let Some(parser_name) = mapping.get(model) {
             return Some(parser_name.clone());
         }
-        // Try prefix matching (longest pattern wins)
+        // Case-insensitive substring matching (longest pattern wins) so namespaced
+        // and differently-cased ids (e.g. "org/Inkling-Chat") still resolve.
+        let model_lower = model.to_lowercase();
         mapping
             .iter()
-            .filter(|(pattern, _)| {
-                pattern.ends_with('*') && model.starts_with(&pattern[..pattern.len() - 1])
+            .filter_map(|(pattern, parser_name)| {
+                let stem = pattern.strip_suffix('*')?;
+                model_lower
+                    .contains(&stem.to_lowercase())
+                    .then_some((stem, parser_name))
             })
-            .max_by_key(|(pattern, _)| pattern.len())
+            .max_by_key(|(stem, _)| stem.len())
             .map(|(_, parser_name)| parser_name.clone())
     }
 
