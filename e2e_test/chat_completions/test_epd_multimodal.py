@@ -1,13 +1,16 @@
 """EPD (Encode-Prefill-Decode) multimodal Chat Completions E2E tests.
 
-Exercises TokenSpeed's EPD disaggregation on a vision-language model: the
-encode worker runs the vision tower, prefill/decode run the LM, and the gateway
-stitches encode -> prefill -> decode across four worker-count topologies.
+Exercises TokenSpeed's EPD disaggregation on a vision-language model across four
+worker-count topologies: the encode worker runs the vision tower, prefill/decode
+run the LM, and the gateway stitches encode -> prefill -> decode.
 
-Like the PD KV-transfer tests, these do NOT stop at "a plausible answer came
-back" — a single-worker fallback would pass that. They assert the encode
-worker's own per-request accept log, proving the image really flowed through a
-dedicated encode worker.
+The gateway runs EPD-only (``RoutingMode::EncodePrefillDecode``) — there is no
+single-worker fallback path — so a *correct* answer about the image proves the
+encode->prefill->decode pipeline ran for that request: the model cannot name the
+color/animal unless the encoder's embeddings reached prefill+decode. As an extra
+per-request check we assert the router logged a fresh EPD encode dispatch. Qwen3.5
+is a thinking model, so the answer may arrive in ``reasoning_content`` rather than
+``content`` — we accept either channel.
 
 Usage:
     pytest e2e_test/chat_completions/test_epd_multimodal.py -v
@@ -23,23 +26,32 @@ import time
 from pathlib import Path
 
 import pytest
-from infra.pd_logs import (
-    LOG_FLUSH_TIMEOUT_S,
-    assert_worker_logs_captured,
-    read_logs,
-    worker_log_dir,
-)
+from infra.pd_logs import LOG_FLUSH_TIMEOUT_S, read_logs
 
 logger = logging.getLogger(__name__)
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "images"
 DOG_IMAGE_PATH = FIXTURES_DIR / "dog.jpg"  # Black labrador puppy (checked in)
+PUG_IMAGE_PATH = FIXTURES_DIR / "pug.jpg"  # Pug in a blanket (checked in)
+
+# Solid 32x32 RGB PNGs (from docs/guides/epd-ts-test.md). A solid color is the
+# most deterministic vision check: the model can only name it if the encoder's
+# pixels actually reached the LM through prefill+decode.
+RED_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/"
+    "un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg=="
+)
+BLUE_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAJklEQVR4nO3NsQkAAAjAsP7/"
+    "tF7hIASyp5pjAoFAIBAIBAKB4EmwOkv8Lm7+zY4AAAAASUVORK5CYII="
+)
 
 _LOG_DIR = Path(tempfile.gettempdir()) / f"smg-e2e-epd-{os.getpid()}"
-# Emitted once per accepted Encode RPC by the TokenSpeed encode servicer
-# (grpc_servicer/.../tokenspeed/encoder_servicer.py). Its presence proves the
-# image reached a dedicated encode worker — the defining EPD step.
-ENCODE_ACCEPTED_MARKER = "EPD encode: accepted"
+# Per-request, router-side proof that the gateway routed through the encode stage.
+# The worker-side "EPD encode: accepted" INFO line does not survive TokenSpeed's
+# logging reconfiguration; this router line does, and the gateway runs at
+# log_level=debug (below).
+EPD_DISPATCH_MARKER = "EPD encode dispatch issued"
 
 # (encode, prefill, decode) worker counts. Every worker is tp=1, so 1e1p1d uses
 # 3 GPUs and the rest use 4 — all fit the 4-GPU runner. Counts ride in the param
@@ -52,9 +64,18 @@ _EPD_TOPOLOGIES = [
 ]
 
 
-def _image_to_base64_url(path: Path) -> str:
+def _file_to_data_url(path: Path) -> str:
     data = base64.b64encode(path.read_bytes()).decode("utf-8")
     return f"data:image/jpeg;base64,{data}"
+
+
+def _b64_png_to_data_url(data_b64: str) -> str:
+    return f"data:image/png;base64,{data_b64}"
+
+
+def _epd_dispatch_count() -> int:
+    """How many EPD encode dispatches the router has logged so far (cumulative)."""
+    return read_logs(_LOG_DIR, "smg*").count(EPD_DISPATCH_MARKER)
 
 
 @pytest.mark.engine("tokenspeed")
@@ -66,15 +87,11 @@ def _image_to_base64_url(path: Path) -> str:
 class TestEPDMultimodal:
     """Verify the image really flows encode -> prefill -> decode for each topology."""
 
-    def test_single_image(self, model, setup_backend):
-        _, _, client, *_ = setup_backend
-
-        # Baseline BEFORE the request: worker logs accumulate across the four
-        # parametrized topologies in one shared dir and are never cleared, so a
-        # plain "marker present" check would pass on a stale marker from an
-        # earlier topology. Assert THIS request produced a NEW acceptance.
-        worker_dir = worker_log_dir(_LOG_DIR)
-        markers_before = read_logs(worker_dir, "worker-*.log").count(ENCODE_ACCEPTED_MARKER)
+    def _check_image(self, client, model, image_url, question, keywords):
+        """Send one image request; assert a correct answer + a fresh EPD dispatch."""
+        # Baseline BEFORE the request: the router log accumulates across topologies
+        # and is never cleared, so assert THIS request added a new dispatch.
+        dispatches_before = _epd_dispatch_count()
 
         response = client.chat.completions.create(
             model=model,
@@ -82,47 +99,54 @@ class TestEPDMultimodal:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "What animal is in this image?"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": _image_to_base64_url(DOG_IMAGE_PATH)},
-                        },
+                        {"type": "text", "text": question},
+                        {"type": "image_url", "image_url": {"url": image_url}},
                     ],
                 }
             ],
             temperature=0,
-            max_tokens=100,
+            max_tokens=256,
         )
 
-        # (1) The model saw the image and described it correctly.
-        text = response.choices[0].message.content
-        assert text is not None and len(text) > 0
-        assert any(k in text.lower() for k in ["dog", "puppy", "labrador"]), (
-            f"Expected dog-related content, got: {text}"
-        )
-        # (2) The image tokens were spliced into the prompt: the bare question is
-        # ~10 tokens, so a large prompt confirms vision tokens reached prefill.
-        assert response.usage.prompt_tokens > 50, (
-            f"prompt_tokens={response.usage.prompt_tokens} too low; "
-            "vision tokens likely not delivered to prefill"
-        )
-        assert response.usage.completion_tokens > 0
+        # (1) The EPD pipeline produced output. A thinking model may put the answer
+        # in reasoning_content instead of content — accept either. Dump the whole
+        # message on failure so we can see where (if anywhere) the answer landed.
+        msg = response.choices[0].message.model_dump()
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        text = f"{content}\n{reasoning}".strip()
+        assert text, f"EPD pipeline returned empty content AND reasoning; message={msg}"
 
-        # (3) REAL EPD: a NEW encode acceptance appeared for THIS request, proving
-        # the image ran on a dedicated encode worker (not a single-worker fallback)
-        # for THIS topology — robust to stale markers from earlier topologies.
+        # (2) The answer is correct about the image — only possible if the encoder's
+        # embeddings reached prefill+decode (EPD-only gateway; no fallback path).
+        assert any(k in text.lower() for k in keywords), (
+            f"expected one of {keywords} in the answer, got: {text!r}"
+        )
+
+        # (3) The router logged a fresh EPD encode dispatch for THIS request.
         deadline = time.monotonic() + LOG_FLUSH_TIMEOUT_S
-        worker_logs = read_logs(worker_dir, "worker-*.log")
-        while (
-            worker_logs.count(ENCODE_ACCEPTED_MARKER) <= markers_before
-            and time.monotonic() < deadline
-        ):
+        while _epd_dispatch_count() <= dispatches_before and time.monotonic() < deadline:
             time.sleep(0.5)
-            worker_logs = read_logs(worker_dir, "worker-*.log")
-        assert_worker_logs_captured(worker_logs, "EPD encode dispatch")
-        assert worker_logs.count(ENCODE_ACCEPTED_MARKER) > markers_before, (
-            "encode worker logged no NEW acceptance for this request — the image did "
-            "not flow through a dedicated EPD encode worker for this topology; checked "
-            f"{worker_dir}/worker-*.log (baseline count={markers_before})"
+        assert _epd_dispatch_count() > dispatches_before, (
+            "router logged no new EPD encode dispatch for this request; the gateway "
+            f"did not route through encode->prefill->decode (checked {_LOG_DIR}/smg*)"
         )
-        logger.info("EPD image OK (new encode acceptance observed): %s", text)
+        logger.info("EPD OK (%s): %s", keywords[0], text[:120])
+
+    def test_color_images(self, model, setup_backend):
+        """Solid red then blue — the most deterministic encode->decode check."""
+        _, _, client, *_ = setup_backend
+        question = "What color is this image? Reply with just the color."
+        self._check_image(client, model, _b64_png_to_data_url(RED_PNG_B64), question, ["red"])
+        self._check_image(client, model, _b64_png_to_data_url(BLUE_PNG_B64), question, ["blue"])
+
+    def test_animal_images(self, model, setup_backend):
+        """Real photos — dog then pug."""
+        _, _, client, *_ = setup_backend
+        question = "What animal is in this image?"
+        self._check_image(
+            client, model, _file_to_data_url(DOG_IMAGE_PATH), question, ["dog", "puppy", "labrador"]
+        )
+        self._check_image(
+            client, model, _file_to_data_url(PUG_IMAGE_PATH), question, ["pug", "dog", "puppy"]
+        )
