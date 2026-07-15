@@ -1,0 +1,74 @@
+name: Release SMG+TokenSpeed Docker Image
+
+run-name: >-
+  SMG+TokenSpeed |
+  ${{ github.event_name == 'push' && 'base=lightseekorg/tokenspeed:tml' || format('base={0}', inputs.base_image_ref || 'lightseekorg/tokenspeed:tml') }} |
+  engine=${{ inputs.tokenspeed_commit || 'latest' }} |
+  smg=${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.7.0' }} |
+  ${{ github.event_name == 'pull_request' && 'dry-run |' || '' }}
+  by @${{ github.actor }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bindings/python/pyproject.toml
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/engine.Dockerfile'
+      - '.github/workflows/_build-engine-image.yml'
+      - '.github/workflows/release-*-docker.yml'
+      - 'scripts/installation/**'
+  workflow_dispatch:
+    inputs:
+      base_image_ref:
+        description: 'Base image (e.g. lightseekorg/tokenspeed:tml). Engine is baked in; leave engine repo empty.'
+        default: 'lightseekorg/tokenspeed:tml'
+        required: true
+        type: string
+      tokenspeed_repo:
+        description: 'TokenSpeed repo URL (empty = use engine from base image)'
+        required: false
+        type: string
+      tokenspeed_commit:
+        description: 'TokenSpeed commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'latest'
+        type: string
+      smg_repo:
+        description: 'SMG repo URL'
+        required: false
+        default: 'https://github.com/lightseekorg/smg'
+        type: string
+      smg_commit:
+        description: 'SMG commit/ref ("latest" for HEAD)'
+        required: false
+        default: 'v1.7.0'
+        type: string
+      tag:
+        description: 'Override image tag (e.g. v1.7.0-tokenspeed-tml)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        base_image: ${{ github.event_name == 'push' && fromJSON('["lightseekorg/tokenspeed:tml"]') || fromJSON(format('["{0}"]', inputs.base_image_ref || 'lightseekorg/tokenspeed:tml')) }}
+    uses: ./.github/workflows/_build-engine-image.yml
+    with:
+      engine: tokenspeed
+      base_image_ref: ${{ matrix.base_image }}
+      engine_repo: ${{ inputs.tokenspeed_repo }}
+      engine_commit: ${{ inputs.tokenspeed_commit || 'latest' }}
+      smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
+      smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.7.0' }}
+      tag: ${{ inputs.tag }}
+      dry_run: ${{ github.event_name == 'pull_request' }}
+    secrets: inherit
