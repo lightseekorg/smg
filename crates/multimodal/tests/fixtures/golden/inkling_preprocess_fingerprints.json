@@ -69,5 +69,51 @@
         2
       ]
     }
+  ],
+  "vision_cases": [
+    {
+      "feature_token_counts": [
+        8
+      ],
+      "fnv1a_f32": "805b484186624851",
+      "height": 4,
+      "name": "seeded_6x4_patch2",
+      "patch_size": 2,
+      "seed": 7,
+      "shape": [
+        8,
+        2,
+        2,
+        2,
+        3
+      ],
+      "temporal_patch_size": 2,
+      "tokens_per_item": [
+        8
+      ],
+      "width": 6
+    },
+    {
+      "feature_token_counts": [
+        12
+      ],
+      "fnv1a_f32": "1230b211e8ebc9d9",
+      "height": 7,
+      "name": "seeded_10x7_patch3",
+      "patch_size": 3,
+      "seed": 29,
+      "shape": [
+        12,
+        2,
+        3,
+        3,
+        3
+      ],
+      "temporal_patch_size": 2,
+      "tokens_per_item": [
+        12
+      ],
+      "width": 10
+    }
   ]
 }

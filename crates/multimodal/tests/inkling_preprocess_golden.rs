@@ -1,16 +1,22 @@
-//! Inkling audio preprocessing regression checks.
+//! Inkling audio and vision preprocessing regression checks.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use image::{DynamicImage, Rgb, RgbImage};
 use llm_multimodal::{
     audio::{DecodedAudio, InklingAudioProcessor},
-    vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
+    vision::{
+        preprocessor_config::{PatchSize, PreProcessorConfig},
+        processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
+        processors::inkling::InklingImageProcessor,
+    },
 };
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct GoldenDocument {
     audio_cases: Vec<AudioCase>,
+    vision_cases: Vec<VisionCase>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +35,45 @@ struct AudioCase {
 
 fn default_audio_amplitude() -> f32 {
     1.0
+}
+
+#[derive(Deserialize)]
+struct VisionCase {
+    name: String,
+    width: u32,
+    height: u32,
+    seed: u32,
+    patch_size: u32,
+    temporal_patch_size: usize,
+    shape: Vec<usize>,
+    tokens_per_item: Vec<i64>,
+    feature_token_counts: Vec<usize>,
+    fnv1a_f32: String,
+}
+
+fn make_seeded_image(width: u32, height: u32, seed: u32) -> DynamicImage {
+    let mut img = RgbImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let base = (x.wrapping_mul(2_654_435_761))
+                ^ (y.wrapping_mul(40_503))
+                ^ seed.wrapping_mul(2_246_822_519);
+            img.put_pixel(
+                x,
+                y,
+                Rgb([base as u8, (base >> 8) as u8, (base >> 16) as u8]),
+            );
+        }
+    }
+    DynamicImage::ImageRgb8(img)
+}
+
+fn fnv1a_f32(values: &[f32]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for value in values {
+        hash = fnv1a_update(hash, &value.to_le_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 fn make_audio_samples(count: usize, seed: u32, amplitude: f32) -> Vec<f32> {
@@ -120,6 +165,55 @@ fn inkling_audio_preprocess_matches_checked_in_golden() {
             fnv1a_i32(values),
             case.fnv1a_i32,
             "Inkling audio int32 fingerprint changed for {}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn inkling_vision_preprocess_matches_checked_in_golden() {
+    let golden = load_golden();
+    let processor = InklingImageProcessor::new();
+    for case in &golden.vision_cases {
+        let config = PreProcessorConfig {
+            patch_size: Some(PatchSize {
+                height: Some(case.patch_size),
+                width: Some(case.patch_size),
+            }),
+            temporal_patch_size: Some(case.temporal_patch_size),
+            ..PreProcessorConfig::default()
+        };
+        let image = make_seeded_image(case.width, case.height, case.seed);
+        let result = processor
+            .preprocess(&[image], &config)
+            .expect("Inkling vision preprocessing failed");
+
+        assert_eq!(
+            result.encoder_input.shape(),
+            case.shape,
+            "vision shape changed for {}",
+            case.name
+        );
+        assert_eq!(
+            result.feature_token_counts, case.feature_token_counts,
+            "vision token counts changed for {}",
+            case.name
+        );
+        assert_eq!(
+            tokens_per_item(&result),
+            case.tokens_per_item,
+            "vision tokens_per_item changed for {}",
+            case.name
+        );
+
+        let values = result
+            .encoder_input
+            .as_slice_memory_order()
+            .expect("Inkling vision encoder input must be contiguous");
+        assert_eq!(
+            fnv1a_f32(values),
+            case.fnv1a_f32,
+            "Inkling vision f32 fingerprint changed for {}",
             case.name
         );
     }

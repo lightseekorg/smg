@@ -144,9 +144,12 @@ impl InklingImageProcessor {
         let height = rgb.height() as usize;
         let raw = rgb.as_raw();
         let (_, npw, _) = self.patch_grid(width, height);
-        let pad_norm: [f32; 3] =
-            std::array::from_fn(|c| ((PAD_RAW_VALUE as f64 - mean[c]) / std[c]) as f32);
-        let inv255 = 1.0_f32 / 255.0;
+        // Fused: (raw/255 - mean) / std = raw * (1/(255*std)) - mean/std.
+        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
+        let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
+        // PAD_RAW_VALUE is in the [0,1] domain; recover the raw byte for scale/bias.
+        let pad_byte = PAD_RAW_VALUE * 255.0;
+        let pad_norm: [f32; 3] = std::array::from_fn(|c| pad_byte * scale[c] + bias[c]);
 
         for patch_idx in 0..height.div_ceil(self.patch_size) * npw {
             let patch_y = patch_idx / npw;
@@ -162,8 +165,7 @@ impl InklingImageProcessor {
                     if iy < height && ix < width {
                         let offset = (iy * width + ix) * 3;
                         for c in 0..3 {
-                            let raw_value = raw[offset + c] as f32 * inv255;
-                            output.push(((raw_value as f64 - mean[c]) / std[c]) as f32);
+                            output.push(raw[offset + c] as f32 * scale[c] + bias[c]);
                         }
                     } else {
                         output.extend_from_slice(&pad_norm);
