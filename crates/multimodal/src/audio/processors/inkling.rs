@@ -369,7 +369,7 @@ mod tests {
     fn seeded_signal(scale: f32) -> Vec<f32> {
         (0..1600)
             .map(|i| {
-                let raw = ((i * 73 + 17 * 977) % 65_536) as i32 - 32_768;
+                let raw = (i * 73 + 17 * 977) % 65_536 - 32_768;
                 raw as f32 / 32_768.0 * scale
             })
             .collect()
