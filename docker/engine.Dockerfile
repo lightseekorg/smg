@@ -66,14 +66,21 @@ RUN if [ "${ENGINE}" = "trtllm" ]; then \
       pip install --no-cache-dir --ignore-installed pyyaml; \
     fi
 
-# TokenSpeed base images bake in `tokenspeed-smg-grpc-proto` /
-# `tokenspeed-smg-grpc-servicer`, which install the same `smg_grpc_proto` /
-# `smg_grpc_servicer` import paths that install-smg.sh reinstalls from source.
-# Left in place they can shadow the source installs and serve stale proto
-# descriptors ("Method not found!"). Drop them first so SMG's own gRPC modules
-# win; the install-smg.sh source installs below replace them. Scoped to
-# tokenspeed so the other engine bases keep their exact pip behavior.
+# TokenSpeed prep. The base is a debian-system-Python image, so it needs the
+# same debian-shadow treatment as the NGC trtllm base plus a gRPC cleanup:
+#  1. pip/pyyaml are debian-owned with no pip RECORD file, so install-smg.sh's
+#     `pip install --upgrade pip` (and the smg wheel's pyyaml dep) fail with
+#     "Cannot uninstall … RECORD file not found". Shadow them with pip-managed
+#     copies (--ignore-installed leaves the distro files alone) so the smg
+#     install can upgrade them normally.
+#  2. The base bakes in `tokenspeed-smg-grpc-proto` / `tokenspeed-smg-grpc-servicer`,
+#     which claim the same `smg_grpc_proto` / `smg_grpc_servicer` import paths
+#     that install-smg.sh reinstalls from source. Left in place they can shadow
+#     the source installs and serve stale proto descriptors ("Method not
+#     found!"). Drop them first so SMG's own gRPC modules win.
+# Scoped to tokenspeed so the other engine bases keep their exact pip behavior.
 RUN if [ "${ENGINE}" = "tokenspeed" ]; then \
+      pip install --no-cache-dir --ignore-installed pip pyyaml; \
       pip uninstall -y tokenspeed-smg-grpc-proto tokenspeed-smg-grpc-servicer || true; \
     fi
 
