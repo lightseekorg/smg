@@ -8,7 +8,7 @@ use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
         MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
-        Step3Parser,
+        Step3Parser, Step3p5Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -139,6 +139,7 @@ impl ParserFactory {
         // glm45/step3 mirror qwen3/deepseek_r1 respectively; kept separate for debugging.
         registry.register_parser("glm45", || Box::new(Glm45Parser::new()));
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
+        registry.register_parser("step3p5", || Box::new(Step3p5Parser::new()));
 
         // appends <think> token at the beginning
         registry.register_parser("minimax", || Box::new(MiniMaxParser::new()));
@@ -195,6 +196,11 @@ impl ParserFactory {
         registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
         registry.register_pattern("kimi-k2.5", "kimi_k25");
         registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
+                                                   // Step-3.5 must be registered BEFORE step3: first substring match wins and
+                                                   // "step3.5"/"step3p5" both contain "step3".
+        registry.register_pattern("step3.5", "step3p5");
+        registry.register_pattern("step-3.5", "step3p5");
+        registry.register_pattern("step3p5", "step3p5");
         registry.register_pattern("step3", "step3");
         registry.register_pattern("minimax", "minimax");
         registry.register_pattern("minimax-m2", "minimax");
@@ -299,6 +305,25 @@ mod tests {
         let factory = ParserFactory::new();
         let step3 = factory.create("step3-model");
         assert_eq!(step3.model_type(), "step3");
+    }
+
+    #[test]
+    fn test_step3p5_model() {
+        let factory = ParserFactory::new();
+
+        // Step-3.5 IDs must route to step3p5, not step3.
+        let a = factory.create("step3.5-model");
+        assert_eq!(a.model_type(), "step3p5");
+
+        let b = factory.create("stepfun-ai/Step-3.5");
+        assert_eq!(b.model_type(), "step3p5");
+
+        let c = factory.create("Step3P5-chat");
+        assert_eq!(c.model_type(), "step3p5");
+
+        // Plain step3 IDs still resolve to step3.
+        let d = factory.create("step3-model");
+        assert_eq!(d.model_type(), "step3");
     }
 
     #[test]
