@@ -133,7 +133,12 @@ jobs:
 
       - name: Download extra models
         if: inputs.extra_models != ''
-        run: bash scripts/ci_download_model.sh ${{ inputs.extra_models }}
+        # Pass the input via env (not interpolated into the run script) so its
+        # text can never become shell syntax; unquoted $EXTRA_MODELS still
+        # word-splits into multiple space-separated model ids.
+        env:
+          EXTRA_MODELS: ${{ inputs.extra_models }}
+        run: bash scripts/ci_download_model.sh $EXTRA_MODELS
 
       # Run tests
       - name: Run E2E tests

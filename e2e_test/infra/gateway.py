@@ -50,7 +50,7 @@ def build_epd_mode_args(
         if pf.bootstrap_port is not None:
             args.append(str(pf.bootstrap_port))
     for dc in decode_workers:
-        args += ["--decode", dc.worker_url]
+        args += ["--decode", dc.base_url]
     if encode_policy:
         args += ["--encode-policy", encode_policy]
     args += ["--multimodal-tensor-transport", "inline"]

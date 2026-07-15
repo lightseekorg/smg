@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 import tempfile
 import time
 from pathlib import Path
@@ -46,7 +45,7 @@ BLUE_PNG_B64 = (
     "tF7hIASyp5pjAoFAIBAIBAKB4EmwOkv8Lm7+zY4AAAAASUVORK5CYII="
 )
 
-_LOG_DIR = Path(tempfile.gettempdir()) / f"smg-e2e-epd-{os.getpid()}"
+_LOG_DIR = Path(tempfile.mkdtemp(prefix="smg-e2e-epd-"))
 # Per-request, router-side proof that the gateway routed through the encode stage.
 # The worker-side "EPD encode: accepted" INFO line does not survive TokenSpeed's
 # logging reconfiguration; this router line does, and the gateway runs at
