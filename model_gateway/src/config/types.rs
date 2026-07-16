@@ -164,11 +164,20 @@ pub struct TenantResolutionConfig {
 }
 
 /// A single tenant-scoped API key for serving-path authentication.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantApiKeyEntry {
     /// Resolves to tenant key `auth:<tenant_id>`, e.g. `team-red`.
     pub tenant_id: String,
     pub key: String,
+}
+
+impl std::fmt::Debug for TenantApiKeyEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantApiKeyEntry")
+            .field("tenant_id", &self.tenant_id)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Default for TenantResolutionConfig {

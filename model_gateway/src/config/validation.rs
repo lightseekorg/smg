@@ -133,9 +133,23 @@ impl ConfigValidator {
         }
 
         for entry in &config.tenant_api_keys {
-            if entry.tenant_id.trim().is_empty() {
+            let trimmed_tenant_id = entry.tenant_id.trim();
+            if trimmed_tenant_id.is_empty() {
                 return Err(ConfigError::ValidationFailed {
                     reason: "tenant_api_keys entries must have a non-empty tenant_id".to_string(),
+                });
+            }
+            // The CLI parser already trims tenant_id, but config-file/binding
+            // entries bypass it — reject padding here instead of silently
+            // normalizing, since `auth:<tenant_id>` embeds it verbatim and a
+            // padded id would resolve to a different, likely-unintended
+            // tenant identity than the canonical one.
+            if trimmed_tenant_id != entry.tenant_id {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "tenant_api_keys tenant_id '{}' must not have surrounding whitespace",
+                        entry.tenant_id
+                    ),
                 });
             }
             if entry.key.trim().is_empty() {
@@ -1108,6 +1122,23 @@ mod tests {
         }];
 
         assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    /// A padded-but-otherwise-valid tenant_id (e.g. supplied via a config
+    /// file or binding, bypassing the CLI parser's own trim) must be
+    /// rejected rather than silently resolving to a different `auth:` key
+    /// than the canonical, unpadded tenant_id.
+    #[test]
+    fn test_validate_padded_tenant_id_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: " team-a ".to_string(),
+            key: "some-secret".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        assert!(err.to_string().contains("whitespace"));
     }
 
     #[test]

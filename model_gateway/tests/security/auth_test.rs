@@ -208,8 +208,8 @@ mod auth_tests {
 
     /// A tenant key must authenticate `/generate` but not admin routes.
     /// Configures a shared key too, so there's a real admin credential to
-    /// test against (with no shared key at all, admin routes are open
-    /// regardless — see `test_tenant_only_deployment_denies_admin_routes`).
+    /// test against. Tenant-only deployments deny admin routes outright;
+    /// see `test_tenant_only_deployment_denies_admin_routes`.
     #[tokio::test]
     async fn test_tenant_key_cannot_access_admin_routes() {
         let mut config = TestRouterConfig::round_robin(4306);

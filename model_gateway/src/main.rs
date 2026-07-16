@@ -902,7 +902,7 @@ fn parse_tenant_api_key(key_str: &str) -> ConfigResult<TenantApiKeyEntry> {
 
     Ok(TenantApiKeyEntry {
         tenant_id: tenant_id.trim().to_string(),
-        key: key.to_string(),
+        key: key.trim().to_string(),
     })
 }
 
