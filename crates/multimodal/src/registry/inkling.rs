@@ -15,16 +15,15 @@ use crate::{
 pub(super) struct InklingSpec;
 
 impl InklingSpec {
-    const CONTENT_IMAGE: &'static str = "<|content_image|>";
-    const CONTENT_AUDIO_INPUT: &'static str = "<|content_audio_input|>";
-    const AUDIO: &'static str = "<|audio|>";
+    const IMAGE_PLACEHOLDER: &'static str = "<|unused_200054|>";
+    const AUDIO_PLACEHOLDER: &'static str = "<|unused_200053|>";
 
-    fn image_transport_fill_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata.token_id(Self::CONTENT_IMAGE)
+    fn image_placeholder_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        metadata.token_id(Self::IMAGE_PLACEHOLDER)
     }
 
     fn audio_placeholder_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata.token_id(Self::AUDIO)
+        metadata.token_id(Self::AUDIO_PLACEHOLDER)
     }
 
     fn tower_enabled(metadata: &ModelMetadata, config_key: &str) -> bool {
@@ -54,11 +53,11 @@ impl ModelProcessorSpec for InklingSpec {
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
-        Ok(Self::CONTENT_IMAGE.to_string())
+        Ok(Self::IMAGE_PLACEHOLDER.to_string())
     }
 
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        Self::image_transport_fill_id(metadata)
+        Self::image_placeholder_id(metadata)
     }
 
     fn placeholder_token_for(
@@ -67,8 +66,8 @@ impl ModelProcessorSpec for InklingSpec {
         modality: Modality,
     ) -> RegistryResult<String> {
         match modality {
-            Modality::Image => Ok(Self::CONTENT_IMAGE.to_string()),
-            Modality::Audio => Ok(Self::CONTENT_AUDIO_INPUT.to_string()),
+            Modality::Image => Ok(Self::IMAGE_PLACEHOLDER.to_string()),
+            Modality::Audio => Ok(Self::AUDIO_PLACEHOLDER.to_string()),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,
@@ -82,7 +81,7 @@ impl ModelProcessorSpec for InklingSpec {
         modality: Modality,
     ) -> RegistryResult<TokenId> {
         match modality {
-            Modality::Image => Self::image_transport_fill_id(metadata),
+            Modality::Image => Self::image_placeholder_id(metadata),
             Modality::Audio => Self::audio_placeholder_id(metadata),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
@@ -135,40 +134,42 @@ impl ModelProcessorSpec for InklingSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         match modality {
             Modality::Image => {
-                let content_image_id = metadata.token_id(Self::CONTENT_IMAGE)?;
+                let image_placeholder_id = Self::image_placeholder_id(metadata)?;
                 Ok(preprocessed
                     .feature_token_counts
                     .iter()
                     .map(|&num_tokens| {
-                        let mut tokens = Vec::with_capacity(num_tokens + 1);
-                        tokens.push(content_image_id);
-                        // TML transports images as a typed span and does not
-                        // define a positive image target token. TokenSpeed only
-                        // needs real ids until it rewrites the explicit feature
-                        // offsets to content-derived MM pad values, so reuse the
-                        // public content token as an internal transport fill.
-                        tokens.extend(std::iter::repeat_n(content_image_id, num_tokens));
-                        PromptReplacement::sequence(Modality::Image, Self::CONTENT_IMAGE, tokens)
-                            .with_feature_span(1, num_tokens)
+                        let tokens = vec![image_placeholder_id; num_tokens];
+                        PromptReplacement::sequence(
+                            Modality::Image,
+                            Self::IMAGE_PLACEHOLDER,
+                            tokens,
+                        )
+                        .with_feature_span(0, num_tokens)
+                        // The checkpoint-provided template emits
+                        // `<|content_image|>` immediately before the one soft
+                        // placeholder that this replacement expands.
+                        .with_structural_prefix(1)
                     })
                     .collect())
             }
             Modality::Audio => {
-                let content_audio_id = metadata.token_id(Self::CONTENT_AUDIO_INPUT)?;
-                let audio_id = Self::audio_placeholder_id(metadata)?;
+                let audio_placeholder_id = Self::audio_placeholder_id(metadata)?;
                 Ok(preprocessed
                     .feature_token_counts
                     .iter()
                     .map(|&num_tokens| {
-                        let mut tokens = Vec::with_capacity(num_tokens + 1);
-                        tokens.push(content_audio_id);
-                        tokens.extend(std::iter::repeat_n(audio_id, num_tokens));
+                        let tokens = vec![audio_placeholder_id; num_tokens];
                         PromptReplacement::sequence(
                             Modality::Audio,
-                            Self::CONTENT_AUDIO_INPUT,
+                            Self::AUDIO_PLACEHOLDER,
                             tokens,
                         )
-                        .with_feature_span(1, num_tokens)
+                        .with_feature_span(0, num_tokens)
+                        // The checkpoint-provided template keeps the typed
+                        // audio marker before the soft placeholder and owns
+                        // `<|audio_end|>`.
+                        .with_structural_prefix(1)
                     })
                     .collect())
             }
@@ -206,7 +207,8 @@ mod tests {
         TestTokenizer::new(&[
             ("<|content_image|>", 200005),
             ("<|content_audio_input|>", 200020),
-            ("<|audio|>", 200023),
+            ("<|unused_200054|>", 200054),
+            ("<|unused_200053|>", 200053),
         ])
     }
 
@@ -324,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn image_replacement_preserves_content_token_and_adds_patch_span() {
+    fn image_replacement_expands_checkpoint_soft_placeholder_after_content_marker() {
         let tokenizer = tokenizer();
         let config = config();
         let metadata = ModelMetadata {
@@ -342,23 +344,30 @@ mod tests {
                 crate::types::Modality::Image,
             )
             .unwrap();
-        assert_eq!(replacements[0].tokens, vec![200005, 200005, 200005, 200005]);
+        assert_eq!(replacements[0].placeholder_token, "<|unused_200054|>");
+        assert_eq!(replacements[0].tokens, vec![200054, 200054, 200054]);
         assert_eq!(
             replacements[0].feature_ranges,
             Some(vec![crate::types::PlaceholderRange {
-                offset: 1,
+                offset: 0,
                 length: 3
             }])
+        );
+        assert_eq!(replacements[0].structural_prefix, 1);
+        assert_eq!(
+            spec.placeholder_token_for(&metadata, crate::types::Modality::Image)
+                .unwrap(),
+            "<|unused_200054|>"
         );
         assert_eq!(
             spec.placeholder_token_id_for(&metadata, crate::types::Modality::Image)
                 .unwrap(),
-            200005
+            200054
         );
     }
 
     #[test]
-    fn audio_replacement_preserves_content_token_and_adds_placeholder_span() {
+    fn audio_replacement_expands_checkpoint_soft_placeholder_after_content_marker() {
         let tokenizer = tokenizer();
         let config = config();
         let metadata = ModelMetadata {
@@ -376,18 +385,25 @@ mod tests {
                 crate::types::Modality::Audio,
             )
             .unwrap();
-        assert_eq!(replacements[0].tokens, vec![200020, 200023, 200023]);
+        assert_eq!(replacements[0].placeholder_token, "<|unused_200053|>");
+        assert_eq!(replacements[0].tokens, vec![200053, 200053]);
         assert_eq!(
             replacements[0].feature_ranges,
             Some(vec![crate::types::PlaceholderRange {
-                offset: 1,
+                offset: 0,
                 length: 2
             }])
+        );
+        assert_eq!(replacements[0].structural_prefix, 1);
+        assert_eq!(
+            spec.placeholder_token_for(&metadata, crate::types::Modality::Audio)
+                .unwrap(),
+            "<|unused_200053|>"
         );
         assert_eq!(
             spec.placeholder_token_id_for(&metadata, crate::types::Modality::Audio)
                 .unwrap(),
-            200023
+            200053
         );
     }
 }

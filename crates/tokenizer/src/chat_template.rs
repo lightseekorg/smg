@@ -832,6 +832,12 @@ fn sort_json_keys(value: &JsonValue) -> JsonValue {
     }
 }
 
+/// Hugging Face chat-template helper for surfacing model-authored validation
+/// errors instead of a generic "unknown function" render failure.
+fn raise_exception(message: String) -> std::result::Result<String, MinijinjaError> {
+    Err(MinijinjaError::new(ErrorKind::InvalidOperation, message))
+}
+
 /// Build a pre-configured `Environment<'static>` with the given template string,
 /// Python-compat method callback, and custom `tojson` filter already registered.
 /// The template is stored under the name `"chat"` using owned storage so the
@@ -856,6 +862,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     // This overrides minijinja's built-in tojson to support additional kwargs
     // like ensure_ascii, separators, and sort_keys that HuggingFace templates use
     env.add_filter("tojson", tojson_filter);
+    env.add_function("raise_exception", raise_exception);
 
     Ok(env)
 }
@@ -1167,6 +1174,21 @@ mod tests {
     fn test_chat_template_processor_invalid_template() {
         let result = ChatTemplateProcessor::new("{% invalid".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_raise_exception_surfaces_template_validation_message() {
+        let state = ChatTemplateState::new(Some(
+            "{{ raise_exception('reasoning_effort is invalid') }}".to_string(),
+        ))
+        .unwrap();
+
+        let error = state
+            .apply(&[], ChatTemplateParams::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("reasoning_effort is invalid"), "{error}");
     }
 
     #[test]
