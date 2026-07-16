@@ -11,8 +11,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use memchr::memmem;
 use openai_protocol::{
-    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-    common::{InputIds, StringOrArray},
+    chat::ChatCompletionRequest,
+    common::{GenerationRequest, InputIds, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     rerank::RerankRequest,
@@ -1442,18 +1442,7 @@ impl RouterTrait for PDRouter {
         let return_logprob = body.logprobs;
 
         let request_text = if self.policies_need_request_text() {
-            body.messages.first().and_then(|msg| match msg {
-                ChatMessage::User { content, .. } => match content {
-                    MessageContent::Text(text) => Some(text.clone()),
-                    MessageContent::Parts(_) => None,
-                },
-                ChatMessage::Developer { content, .. } => match content {
-                    MessageContent::Text(text) => Some(text.clone()),
-                    MessageContent::Parts(_) => None,
-                },
-                ChatMessage::System { content, .. } => Some(content.to_simple_string()),
-                _ => None,
-            })
+            Some(body.extract_text_for_routing())
         } else {
             None
         };
