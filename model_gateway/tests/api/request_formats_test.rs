@@ -19,13 +19,12 @@ mod request_format_tests {
     use smg::{middleware::TenantRequestMeta, routers::RouterTrait};
     use tower::ServiceExt;
 
-    use crate::common::test_app::{create_test_app_context, create_test_app_with_context};
-
     use super::*;
+    use crate::common::test_app::{create_test_app_context, create_test_app_with_context};
 
     #[derive(Debug, Default)]
     struct CapturingChatRouter {
-        request: Mutex<Option<(bool, Option<String>)>>,
+        request: Mutex<Option<Option<String>>>,
     }
 
     #[async_trait]
@@ -41,10 +40,7 @@ mod request_format_tests {
             body: &ChatCompletionRequest,
             _model_id: &str,
         ) -> Response {
-            *self.request.lock().unwrap() = Some((
-                body.is_chat_completions_api_request(),
-                body.reasoning_effort.clone(),
-            ));
+            *self.request.lock().unwrap() = Some(body.reasoning_effort.clone());
             StatusCode::OK.into_response()
         }
 
@@ -54,7 +50,7 @@ mod request_format_tests {
     }
 
     #[tokio::test]
-    async fn test_chat_completions_handler_marks_origin_without_materializing_default_effort() {
+    async fn test_chat_completions_handler_does_not_materialize_default_effort() {
         let capture = Arc::new(CapturingChatRouter::default());
         let app_context = create_test_app_context().await;
         let app = create_test_app_with_context(capture.clone(), app_context);
@@ -77,10 +73,11 @@ mod request_format_tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let request = capture.request.lock().unwrap();
-        let (chat_completions_api_request, reasoning_effort) = request
+        let reasoning_effort = request
             .as_ref()
             .expect("route_chat should receive the request");
-        assert!(*chat_completions_api_request);
+        // The router forwards effort verbatim and injects no default; the chat
+        // template applies its own default when it is absent.
         assert!(reasoning_effort.is_none());
     }
 

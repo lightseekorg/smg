@@ -462,7 +462,6 @@ mod tests {
         assert_eq!(chat_req.messages.len(), 2); // system + user
         assert_eq!(chat_req.model, "gpt-4");
         assert_eq!(chat_req.temperature, Some(0.7));
-        assert!(!chat_req.is_chat_completions_api_request());
     }
 
     #[test]

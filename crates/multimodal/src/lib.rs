@@ -20,7 +20,7 @@ pub use media::{
 };
 pub use registry::{
     AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry, ReasoningEffortStyle,
+    ModelRegistry,
 };
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{

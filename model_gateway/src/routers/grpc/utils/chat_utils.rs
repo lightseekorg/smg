@@ -9,9 +9,7 @@ use std::{
 use anyhow::anyhow;
 use axum::response::Response;
 use bytes::Bytes;
-use llm_multimodal::{
-    AbsentAssistantContent, ChatRenderContract, MediaPartOrder, Modality, ReasoningEffortStyle,
-};
+use llm_multimodal::{AbsentAssistantContent, ChatRenderContract, MediaPartOrder, Modality};
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
@@ -178,126 +176,35 @@ pub(crate) fn process_content_format(
         messages,
         content_format,
         placeholder_tokens,
-        &ChatRenderContract::default(),
+        ChatRenderContract::default(),
     )
 }
 
 const REASONING_EFFORT_KEY: &str = "reasoning_effort";
 
-fn validate_numeric_reasoning_effort(value: f64, max: f64) -> Result<f64, String> {
-    if value.is_finite() && (0.0..=max).contains(&value) {
-        Ok(value)
-    } else {
-        Err(format!(
-            "Inkling reasoning_effort must be a finite number in [0, {max}]"
-        ))
-    }
-}
-
-fn parse_numeric_reasoning_effort_string(value: &str, max: f64) -> Result<f64, String> {
-    let value = value.trim();
-    let mapped = match value {
-        "none" | "minimal" => Some(0.0),
-        "low" => Some(0.2),
-        "medium" => Some(0.7),
-        "high" => Some(0.9),
-        "xhigh" | "max" => Some(0.99),
-        _ => None,
-    };
-
-    let value = match mapped {
-        Some(value) => value,
-        None => value.parse::<f64>().map_err(|_| {
-            format!(
-                "Inkling reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max, or a finite number in [0, {max}]"
-            )
-        })?,
-    };
-    validate_numeric_reasoning_effort(value, max)
-}
-
-fn parse_numeric_reasoning_effort_value(value: &Value, max: f64) -> Result<Option<f64>, String> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(value) => parse_numeric_reasoning_effort_string(value, max).map(Some),
-        Value::Number(value) => value
-            .as_f64()
-            .ok_or_else(|| format!("Inkling reasoning_effort must be a finite number in [0, {max}]"))
-            .and_then(|value| validate_numeric_reasoning_effort(value, max))
-            .map(Some),
-        _ => Err("Inkling reasoning_effort must be a number or supported named level".to_string()),
-    }
-}
-
-/// Merge chat-template kwargs. `PassthroughString` models keep the existing
-/// pass-through and override behavior for vendor-specific effort strings;
-/// `Numeric` models canonicalize the effort onto a single validated directive.
-fn build_chat_template_kwargs(
-    request: &ChatCompletionRequest,
-    contract: &ChatRenderContract,
-) -> Result<HashMap<String, Value>, String> {
+/// Merge the top-level `reasoning_effort` with any request `chat_template_kwargs`,
+/// forwarding the effort verbatim. The chat template owns level→value mapping,
+/// defaulting, and validation; an explicit `chat_template_kwargs` entry wins.
+fn build_chat_template_kwargs(request: &ChatCompletionRequest) -> HashMap<String, Value> {
     let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
     let mut combined = HashMap::with_capacity(kwargs_capacity);
-
-    let ReasoningEffortStyle::Numeric { default, max } = contract.reasoning_effort else {
-        if let Some(reasoning_effort) = &request.reasoning_effort {
-            combined.insert(
-                REASONING_EFFORT_KEY.to_string(),
-                Value::String(reasoning_effort.clone()),
-            );
-        }
-        if let Some(template_kwargs) = &request.chat_template_kwargs {
-            combined.extend(template_kwargs.clone());
-        }
-        return Ok(combined);
-    };
-
-    let template_effort = request
-        .chat_template_kwargs
-        .as_ref()
-        .and_then(|kwargs| kwargs.get(REASONING_EFFORT_KEY))
-        .filter(|value| !value.is_null());
-    if request.reasoning_effort.is_some() && template_effort.is_some() {
-        return Err(
-            "Inkling reasoning_effort must not be specified both at the top level and in chat_template_kwargs"
-                .to_string(),
+    if let Some(reasoning_effort) = &request.reasoning_effort {
+        combined.insert(
+            REASONING_EFFORT_KEY.to_string(),
+            Value::String(reasoning_effort.clone()),
         );
     }
-
     if let Some(template_kwargs) = &request.chat_template_kwargs {
-        combined.extend(
-            template_kwargs
-                .iter()
-                .filter(|(key, _)| key.as_str() != REASONING_EFFORT_KEY)
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
+        combined.extend(template_kwargs.clone());
     }
-
-    let effective_effort = if let Some(value) = request.reasoning_effort.as_deref() {
-        Some(parse_numeric_reasoning_effort_string(value, max)?)
-    } else if let Some(value) = template_effort {
-        parse_numeric_reasoning_effort_value(value, max)?
-    } else if request.is_chat_completions_api_request() {
-        Some(default)
-    } else {
-        None
-    };
-
-    if let Some(effective_effort) = effective_effort {
-        let number = serde_json::Number::from_f64(effective_effort).ok_or_else(|| {
-            format!("Inkling reasoning_effort must be a finite number in [0, {max}]")
-        })?;
-        combined.insert(REASONING_EFFORT_KEY.to_string(), Value::Number(number));
-    }
-
-    Ok(combined)
+    combined
 }
 
 fn process_content_format_with_contract(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: &ChatRenderContract,
+    contract: ChatRenderContract,
 ) -> Result<Vec<Value>, String> {
     messages
         .iter()
@@ -531,7 +438,7 @@ pub fn process_chat_messages(
         request,
         tokenizer,
         placeholder_tokens.as_ref(),
-        &ChatRenderContract::default(),
+        ChatRenderContract::default(),
     )
 }
 
@@ -539,7 +446,7 @@ pub(crate) fn process_chat_messages_with_placeholders(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: &ChatRenderContract,
+    contract: ChatRenderContract,
 ) -> Result<ProcessedMessages, String> {
     let formatted_text = {
         // Get content format and transform messages accordingly
@@ -567,7 +474,7 @@ pub(crate) fn process_chat_messages_with_placeholders(
             .transpose()
             .map_err(|e| format!("Failed to serialize tools: {e}"))?;
 
-        let combined_template_kwargs = build_chat_template_kwargs(request, contract)?;
+        let combined_template_kwargs = build_chat_template_kwargs(request);
 
         let final_template_kwargs = if combined_template_kwargs.is_empty() {
             None
@@ -1314,10 +1221,6 @@ mod tests {
         ChatRenderContract {
             media_order: MediaPartOrder::Authored,
             absent_assistant_content: AbsentAssistantContent::Null,
-            reasoning_effort: ReasoningEffortStyle::Numeric {
-                default: 0.9,
-                max: 0.99,
-            },
         }
     }
 
@@ -1346,7 +1249,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            &inkling_contract(),
+            inkling_contract(),
         )
         .unwrap();
         assert_eq!(result[0]["content"], expected);
@@ -1365,7 +1268,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            &ChatRenderContract::default(),
+            ChatRenderContract::default(),
         )
         .unwrap();
         assert!(null[0]["content"].is_null());
@@ -1374,7 +1277,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            &ChatRenderContract {
+            ChatRenderContract {
                 absent_assistant_content: AbsentAssistantContent::EmptyString,
                 ..ChatRenderContract::default()
             },
@@ -1405,14 +1308,14 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             Some(&tokens),
-            &inkling_contract(),
+            inkling_contract(),
         )
         .unwrap();
 
         assert_eq!(result[0]["content"], "question\n<image>");
     }
 
-    fn tml_request(reasoning_effort: Option<&str>) -> ChatCompletionRequest {
+    fn effort_request(reasoning_effort: Option<&str>) -> ChatCompletionRequest {
         ChatCompletionRequest {
             model: "inkling-chat".to_string(),
             messages: vec![ChatMessage::User {
@@ -1424,101 +1327,28 @@ mod tests {
         }
     }
 
-    fn rendered_effort(kwargs: &HashMap<String, Value>) -> Option<f64> {
-        kwargs.get(REASONING_EFFORT_KEY).and_then(Value::as_f64)
-    }
-
     #[test]
-    fn test_tml_reasoning_effort_named_and_numeric_string_mapping() {
-        for (input, expected) in [
-            ("none", 0.0),
-            ("minimal", 0.0),
-            ("low", 0.2),
-            ("medium", 0.7),
-            ("high", 0.9),
-            ("xhigh", 0.99),
-            ("max", 0.99),
-            ("0.42", 0.42),
-            (" 0.5 ", 0.5),
-        ] {
-            let request = tml_request(Some(input));
-            let kwargs = build_chat_template_kwargs(&request, &inkling_contract()).unwrap();
-            assert_eq!(rendered_effort(&kwargs), Some(expected), "input={input}");
-            assert!(kwargs[REASONING_EFFORT_KEY].is_number());
-        }
-    }
+    fn reasoning_effort_is_forwarded_verbatim() {
+        // The chat template owns level->value mapping, defaulting, and validation;
+        // the router forwards the string and omits it when absent so the template
+        // applies its own default.
+        let kwargs = build_chat_template_kwargs(&effort_request(Some("high")));
+        assert_eq!(kwargs.get(REASONING_EFFORT_KEY), Some(&json!("high")));
 
-    #[test]
-    fn test_tml_reasoning_effort_default_is_chat_and_model_scoped() {
-        let mut public_chat = tml_request(None);
-        public_chat.mark_chat_completions_api_request();
-        let kwargs = build_chat_template_kwargs(&public_chat, &inkling_contract()).unwrap();
-        assert_eq!(rendered_effort(&kwargs), Some(0.9));
-
-        // Mirrors Responses -> Chat conversion: internally constructed request,
-        // same shared pipeline, but no public Chat origin marker.
-        let internal_chat = tml_request(None);
-        let kwargs = build_chat_template_kwargs(&internal_chat, &inkling_contract()).unwrap();
-        assert!(!kwargs.contains_key(REASONING_EFFORT_KEY));
-
-        // The marker alone does not change another model's template behavior.
-        let mut other_model = tml_request(None);
-        other_model.mark_chat_completions_api_request();
-        let kwargs = build_chat_template_kwargs(&other_model, &ChatRenderContract::default()).unwrap();
+        let kwargs = build_chat_template_kwargs(&effort_request(None));
         assert!(!kwargs.contains_key(REASONING_EFFORT_KEY));
     }
 
     #[test]
-    fn test_tml_reasoning_effort_rejects_invalid_values() {
-        for input in ["", "bogus", "NaN", "inf", "-0.01", "0.991", "1", "1e400"] {
-            let request = tml_request(Some(input));
-            let error = build_chat_template_kwargs(&request, &inkling_contract()).unwrap_err();
-            assert!(error.contains("reasoning_effort"), "input={input}: {error}");
-        }
-
-        let mut request = tml_request(None);
-        request.chat_template_kwargs = Some(HashMap::from([(
-            REASONING_EFFORT_KEY.to_string(),
-            Value::Bool(true),
-        )]));
-        assert!(build_chat_template_kwargs(&request, &inkling_contract()).is_err());
-    }
-
-    #[test]
-    fn test_tml_reasoning_effort_has_one_canonical_source() {
-        let mut duplicate = tml_request(Some("high"));
-        duplicate.chat_template_kwargs = Some(HashMap::from([(
-            REASONING_EFFORT_KEY.to_string(),
-            json!("low"),
-        )]));
-        let error = build_chat_template_kwargs(&duplicate, &inkling_contract()).unwrap_err();
-        assert!(error.contains("must not be specified both"));
-
-        // Preserve the legacy kwargs-only input, but replace it with one
-        // validated numeric value before calling the Inkling template.
-        let mut legacy = tml_request(None);
-        legacy.chat_template_kwargs = Some(HashMap::from([
+    fn chat_template_kwargs_override_top_level_effort() {
+        let mut request = effort_request(Some("high"));
+        request.chat_template_kwargs = Some(HashMap::from([
             (REASONING_EFFORT_KEY.to_string(), json!("low")),
             ("custom".to_string(), json!(true)),
         ]));
-        let kwargs = build_chat_template_kwargs(&legacy, &inkling_contract()).unwrap();
-        assert_eq!(rendered_effort(&kwargs), Some(0.2));
+        let kwargs = build_chat_template_kwargs(&request);
+        assert_eq!(kwargs.get(REASONING_EFFORT_KEY), Some(&json!("low")));
         assert_eq!(kwargs.get("custom"), Some(&Value::Bool(true)));
-    }
-
-    #[test]
-    fn test_non_tml_reasoning_effort_preserves_vendor_override_behavior() {
-        let mut request = tml_request(Some("vendor-top-level"));
-        request.chat_template_kwargs = Some(HashMap::from([(
-            REASONING_EFFORT_KEY.to_string(),
-            json!("vendor-template-override"),
-        )]));
-
-        let kwargs = build_chat_template_kwargs(&request, &ChatRenderContract::default()).unwrap();
-        assert_eq!(
-            kwargs.get(REASONING_EFFORT_KEY),
-            Some(&json!("vendor-template-override"))
-        );
     }
 
     /// End-to-end: run a real MMBench-shaped `[text, image]` message through the

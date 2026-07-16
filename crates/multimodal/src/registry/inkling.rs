@@ -7,7 +7,7 @@ use crate::{
     encoder_inputs::PreprocessedEncoderInputs,
     registry::{
         AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata,
-        ModelProcessorSpec, ModelRegistryError, ReasoningEffortStyle, RegistryResult,
+        ModelProcessorSpec, ModelRegistryError, RegistryResult,
     },
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
     vision::PreProcessorConfig,
@@ -54,10 +54,6 @@ impl ModelProcessorSpec for InklingSpec {
         ChatRenderContract {
             media_order: MediaPartOrder::Authored,
             absent_assistant_content: AbsentAssistantContent::Null,
-            reasoning_effort: ReasoningEffortStyle::Numeric {
-                default: 0.9,
-                max: 0.99,
-            },
         }
     }
 
@@ -256,20 +252,14 @@ mod tests {
     }
 
     #[test]
-    fn inkling_chat_render_uses_authored_order_and_numeric_effort() {
-        use crate::registry::{
-            AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ReasoningEffortStyle,
-        };
+    fn inkling_chat_render_uses_authored_order_and_null_content() {
+        use crate::registry::{AbsentAssistantContent, ChatRenderContract, MediaPartOrder};
 
         assert_eq!(
             InklingSpec.chat_render(),
             ChatRenderContract {
                 media_order: MediaPartOrder::Authored,
                 absent_assistant_content: AbsentAssistantContent::Null,
-                reasoning_effort: ReasoningEffortStyle::Numeric {
-                    default: 0.9,
-                    max: 0.99,
-                },
             }
         );
     }

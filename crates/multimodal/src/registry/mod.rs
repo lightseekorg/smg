@@ -22,7 +22,7 @@ use qwen_vl::QwenVLVisionSpec;
 // Re-export public API from traits.
 pub use traits::{
     AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata, ModelProcessorSpec,
-    ModelRegistryError, ReasoningEffortStyle, RegistryResult,
+    ModelRegistryError, RegistryResult,
 };
 
 pub struct ModelRegistry {

@@ -59,10 +59,7 @@ impl ChatPreparationStage {
             .tokenizer_registry
             .get_by_name(model_id)
             .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
-        let render_contract = match (
-            ctx.components.multimodal.as_ref(),
-            tokenizer_entry.as_ref(),
-        ) {
+        let render_contract = match (ctx.components.multimodal.as_ref(), tokenizer_entry.as_ref()) {
             (Some(mm_components), Some(entry)) => {
                 multimodal::resolve_chat_render_contract(
                     model_id,
@@ -146,7 +143,7 @@ impl ChatPreparationStage {
             &body_ref,
             &*tokenizer,
             placeholder_tokens.as_ref(),
-            &render_contract,
+            render_contract,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {

@@ -58,22 +58,13 @@ pub enum AbsentAssistantContent {
     EmptyString,
 }
 
-/// How `reasoning_effort` is projected onto the chat-template kwargs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ReasoningEffortStyle {
-    /// Pass the effort string through unchanged.
-    PassthroughString,
-    /// Map named levels to a numeric directive clamped to `[0, max]`, using
-    /// `default` for chat requests that omit it.
-    Numeric { default: f64, max: f64 },
-}
-
 /// Per-model chat-rendering behaviors resolved once from the registry.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `reasoning_effort` is intentionally absent: the chat template owns level→value
+/// mapping, defaulting, and validation, so the router forwards it verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatRenderContract {
     pub media_order: MediaPartOrder,
     pub absent_assistant_content: AbsentAssistantContent,
-    pub reasoning_effort: ReasoningEffortStyle,
 }
 
 impl Default for ChatRenderContract {
@@ -81,7 +72,6 @@ impl Default for ChatRenderContract {
         Self {
             media_order: MediaPartOrder::MediaFirst,
             absent_assistant_content: AbsentAssistantContent::Null,
-            reasoning_effort: ReasoningEffortStyle::PassthroughString,
         }
     }
 }

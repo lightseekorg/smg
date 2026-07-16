@@ -36,7 +36,7 @@ pub fn process_messages(
     tokenizer: &dyn Tokenizer,
     chat_tools: Option<&[ChatTool]>,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: &ChatRenderContract,
+    contract: ChatRenderContract,
 ) -> Result<ProcessedMessages, String> {
     let content_format = tokenizer.chat_template_content_format();
 
@@ -130,7 +130,7 @@ pub(crate) fn process_message_content_format(
     messages: &[InputMessage],
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: &ChatRenderContract,
+    contract: ChatRenderContract,
 ) -> Result<Vec<Value>, String> {
     messages.iter().try_fold(Vec::new(), |mut result, message| {
         match message.role {
@@ -253,7 +253,7 @@ fn extract_tool_result_text(tool_result: &messages::ToolResultBlock) -> String {
 ///
 /// Extracts text content, tool calls, and reasoning/thinking into the
 /// appropriate JSON fields that the chat template expects.
-fn convert_assistant_message(content: &InputContent, contract: &ChatRenderContract) -> Value {
+fn convert_assistant_message(content: &InputContent, contract: ChatRenderContract) -> Value {
     match content {
         InputContent::String(text) => json!({"role": "assistant", "content": text}),
         InputContent::Blocks(blocks) => {
@@ -486,14 +486,13 @@ mod tests {
             content: InputContent::String("Hello".to_string()),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "user");
         assert_eq!(result[0]["content"], "Hello");
@@ -510,14 +509,13 @@ mod tests {
             })]),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "Hi there");
@@ -542,14 +540,13 @@ mod tests {
             ]),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "Let me check.");
@@ -562,10 +559,6 @@ mod tests {
         ChatRenderContract {
             media_order: MediaPartOrder::Authored,
             absent_assistant_content: AbsentAssistantContent::Null,
-            reasoning_effort: llm_multimodal::ReasoningEffortStyle::Numeric {
-                default: 0.9,
-                max: 0.99,
-            },
         }
     }
 
@@ -587,7 +580,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            &ChatRenderContract::default(),
+            ChatRenderContract::default(),
         )
         .unwrap();
         assert!(null[0]["content"].is_null());
@@ -596,7 +589,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            &ChatRenderContract {
+            ChatRenderContract {
                 absent_assistant_content: AbsentAssistantContent::EmptyString,
                 ..ChatRenderContract::default()
             },
@@ -629,7 +622,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            &ChatRenderContract::default(),
+            ChatRenderContract::default(),
         )
         .unwrap();
         let arr = media_first[0]["content"].as_array().unwrap();
@@ -640,7 +633,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            &inkling_contract(),
+            inkling_contract(),
         )
         .unwrap();
         let arr = authored[0]["content"].as_array().unwrap();
@@ -662,14 +655,13 @@ mod tests {
             )]),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         // Tool result becomes a "tool" role message, not a "user" message
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "tool");
@@ -695,14 +687,13 @@ mod tests {
             ]),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["role"], "assistant");
         assert_eq!(result[0]["content"], "The answer is 42.");
@@ -728,14 +719,13 @@ mod tests {
             ]),
         }];
 
-        let result =
-            process_message_content_format(
-                &messages,
-                ChatTemplateContentFormat::String,
-                None,
-                &ChatRenderContract::default(),
-            )
-                .unwrap();
+        let result = process_message_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            None,
+            ChatRenderContract::default(),
+        )
+        .unwrap();
         assert_eq!(
             result[0]["reasoning_content"],
             "First thought.\nSecond thought."

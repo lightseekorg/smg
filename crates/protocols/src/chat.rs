@@ -208,19 +208,6 @@ pub struct ChatCompletionRequest {
     #[serde(default, deserialize_with = "deserialize_reasoning_effort")]
     pub reasoning_effort: Option<String>,
 
-    /// Internal request-origin marker. It is set only by the
-    /// `/v1/chat/completions` handler and is never accepted from or emitted to
-    /// clients. Shared Chat pipelines (for example `/v1/responses`) therefore
-    /// do not accidentally inherit Chat-only defaults.
-    #[doc(hidden)]
-    #[serde(
-        default,
-        skip_serializing,
-        deserialize_with = "ignore_chat_completions_api_request"
-    )]
-    #[schemars(skip)]
-    pub chat_completions_api_request: bool,
-
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
 
@@ -373,29 +360,6 @@ where
         Some(_) => Err(serde::de::Error::custom(
             "reasoning_effort must be a string, number, or null",
         )),
-    }
-}
-
-fn ignore_chat_completions_api_request<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
-    Ok(false)
-}
-
-impl ChatCompletionRequest {
-    /// Mark this value as originating at the public Chat Completions endpoint.
-    ///
-    /// This marker is deliberately separate from serde normalization so
-    /// internally constructed Chat requests used by other endpoints remain
-    /// distinguishable.
-    pub fn mark_chat_completions_api_request(&mut self) {
-        self.chat_completions_api_request = true;
-    }
-
-    pub fn is_chat_completions_api_request(&self) -> bool {
-        self.chat_completions_api_request
     }
 }
 
@@ -885,23 +849,6 @@ mod tests {
                 .to_string()
                 .contains("reasoning_effort must be a string, number, or null"));
         }
-    }
-
-    #[test]
-    fn chat_origin_marker_cannot_be_spoofed_or_serialized() {
-        let mut request: ChatCompletionRequest = serde_json::from_value(json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}],
-            "chat_completions_api_request": true,
-        }))
-        .expect("request must deserialize");
-        assert!(!request.is_chat_completions_api_request());
-        assert!(!request.other.contains_key("chat_completions_api_request"));
-
-        request.mark_chat_completions_api_request();
-        assert!(request.is_chat_completions_api_request());
-        let serialized = serde_json::to_value(request).expect("request must serialize");
-        assert!(serialized.get("chat_completions_api_request").is_none());
     }
 
     #[test]
