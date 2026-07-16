@@ -9,7 +9,7 @@ use std::{
 use anyhow::anyhow;
 use axum::response::Response;
 use bytes::Bytes;
-use llm_multimodal::{AbsentAssistantContent, ChatRenderContract, MediaPartOrder, Modality};
+use llm_multimodal::{MediaPartOrder, Modality};
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
@@ -172,11 +172,11 @@ pub(crate) fn process_content_format(
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
 ) -> Result<Vec<Value>, String> {
-    process_content_format_with_contract(
+    process_content_format_with_order(
         messages,
         content_format,
         placeholder_tokens,
-        ChatRenderContract::default(),
+        MediaPartOrder::MediaFirst,
     )
 }
 
@@ -200,11 +200,11 @@ fn build_chat_template_kwargs(request: &ChatCompletionRequest) -> HashMap<String
     combined
 }
 
-fn process_content_format_with_contract(
+fn process_content_format_with_order(
     messages: &[ChatMessage],
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: ChatRenderContract,
+    media_order: MediaPartOrder,
 ) -> Result<Vec<Value>, String> {
     messages
         .iter()
@@ -213,18 +213,13 @@ fn process_content_format_with_contract(
                 .map_err(|e| format!("Failed to serialize message: {e}"))?;
 
             if let Some(obj) = message_json.as_object_mut() {
-                // Ensure assistant messages always have a content key.
-                // skip_serializing_none omits content when None; the contract
-                // decides whether an absent assistant content renders as null
-                // (protocol-faithful default) or an empty string.
+                // skip_serializing_none omits content when None; restore it as
+                // `null` — the OpenAI-faithful representation for a tool-call-only
+                // assistant turn — so the chat template renders it correctly.
                 if obj.get("role").and_then(|v| v.as_str()) == Some("assistant")
                     && !obj.contains_key("content")
                 {
-                    let content = match contract.absent_assistant_content {
-                        AbsentAssistantContent::Null => Value::Null,
-                        AbsentAssistantContent::EmptyString => Value::String(String::new()),
-                    };
-                    obj.insert("content".to_string(), content);
+                    obj.insert("content".to_string(), Value::Null);
                 }
 
                 if let Some(content_value) = obj.get_mut("content") {
@@ -232,7 +227,7 @@ fn process_content_format_with_contract(
                         content_value,
                         content_format,
                         placeholder_tokens,
-                        contract.media_order,
+                        media_order,
                     )?;
                 }
             }
@@ -438,7 +433,7 @@ pub fn process_chat_messages(
         request,
         tokenizer,
         placeholder_tokens.as_ref(),
-        ChatRenderContract::default(),
+        MediaPartOrder::MediaFirst,
     )
 }
 
@@ -446,16 +441,16 @@ pub(crate) fn process_chat_messages_with_placeholders(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: ChatRenderContract,
+    media_order: MediaPartOrder,
 ) -> Result<ProcessedMessages, String> {
     let formatted_text = {
         // Get content format and transform messages accordingly
         let content_format = tokenizer.chat_template_content_format();
-        let mut transformed_messages = process_content_format_with_contract(
+        let mut transformed_messages = process_content_format_with_order(
             &request.messages,
             content_format,
             placeholder_tokens,
-            contract,
+            media_order,
         )?;
 
         // Process tool call arguments in assistant messages
@@ -1217,13 +1212,6 @@ mod tests {
         assert_eq!(arr[3]["text"], "b");
     }
 
-    fn inkling_contract() -> ChatRenderContract {
-        ChatRenderContract {
-            media_order: MediaPartOrder::Authored,
-            absent_assistant_content: AbsentAssistantContent::Null,
-        }
-    }
-
     #[test]
     fn test_tml_preserves_authored_multipart_order_openai() {
         let messages = vec![ChatMessage::User {
@@ -1245,18 +1233,18 @@ mod tests {
             {"type": "text", "text": "question"},
             {"type": "image"}
         ]);
-        let result = process_content_format_with_contract(
+        let result = process_content_format_with_order(
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            inkling_contract(),
+            MediaPartOrder::Authored,
         )
         .unwrap();
         assert_eq!(result[0]["content"], expected);
     }
 
     #[test]
-    fn test_absent_assistant_content_defaults_to_null() {
+    fn test_absent_assistant_content_renders_null() {
         let messages = vec![ChatMessage::Assistant {
             content: None,
             name: None,
@@ -1264,26 +1252,14 @@ mod tests {
             reasoning_content: None,
         }];
 
-        let null = process_content_format_with_contract(
+        let result = process_content_format_with_order(
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
-        assert!(null[0]["content"].is_null());
-
-        let empty_string = process_content_format_with_contract(
-            &messages,
-            ChatTemplateContentFormat::OpenAI,
-            None,
-            ChatRenderContract {
-                absent_assistant_content: AbsentAssistantContent::EmptyString,
-                ..ChatRenderContract::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(empty_string[0]["content"], "");
+        assert!(result[0]["content"].is_null());
     }
 
     #[test]
@@ -1304,11 +1280,11 @@ mod tests {
         }];
         let tokens = placeholders(&[(Modality::Image, "<image>")]);
 
-        let result = process_content_format_with_contract(
+        let result = process_content_format_with_order(
             &messages,
             ChatTemplateContentFormat::String,
             Some(&tokens),
-            inkling_contract(),
+            MediaPartOrder::Authored,
         )
         .unwrap();
 

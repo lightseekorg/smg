@@ -44,7 +44,7 @@ pub(crate) use config::{
 };
 pub(crate) use detect::{media_plan_chat, media_plan_messages};
 pub(crate) use plan::{
-    prepare_placeholder_tokens, resolve_chat_render_contract, validate_rendered_media_anchors,
+    prepare_placeholder_tokens, resolve_media_part_order, validate_rendered_media_anchors,
     PlaceholderTokens,
 };
 pub(crate) use process::process_multimodal_plan;

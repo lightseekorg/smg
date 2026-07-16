@@ -49,33 +49,6 @@ pub enum MediaPartOrder {
     Authored,
 }
 
-/// Value rendered for an assistant message that carries no `content` key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AbsentAssistantContent {
-    /// Protocol-faithful default: absent content renders as `null`.
-    Null,
-    /// Opt-in for templates that require assistant content to be a string.
-    EmptyString,
-}
-
-/// Per-model chat-rendering behaviors resolved once from the registry.
-/// `reasoning_effort` is intentionally absent: the chat template owns level→value
-/// mapping, defaulting, and validation, so the router forwards it verbatim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChatRenderContract {
-    pub media_order: MediaPartOrder,
-    pub absent_assistant_content: AbsentAssistantContent,
-}
-
-impl Default for ChatRenderContract {
-    fn default() -> Self {
-        Self {
-            media_order: MediaPartOrder::MediaFirst,
-            absent_assistant_content: AbsentAssistantContent::Null,
-        }
-    }
-}
-
 /// Metadata about the current model used to derive tokenizer/config dependent fields.
 pub struct ModelMetadata<'a> {
     pub model_id: &'a str,
@@ -114,11 +87,11 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn name(&self) -> &'static str;
     fn matches(&self, metadata: &ModelMetadata) -> bool;
 
-    /// Chat-rendering behaviors for this model. Most models use the default
-    /// vLLM-compatible contract; families with an authored-order protocol
-    /// override this.
-    fn chat_render(&self) -> ChatRenderContract {
-        ChatRenderContract::default()
+    /// Ordering of media/text parts this model's chat template expects. Most
+    /// models use vLLM-compatible media-first; families whose template renders
+    /// parts positionally override to `Authored`.
+    fn media_part_order(&self) -> MediaPartOrder {
+        MediaPartOrder::MediaFirst
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String>;

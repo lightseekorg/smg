@@ -6,8 +6,7 @@ use crate::{
     audio::{AudioPreProcessor, InklingAudioProcessor},
     encoder_inputs::PreprocessedEncoderInputs,
     registry::{
-        AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata,
-        ModelProcessorSpec, ModelRegistryError, RegistryResult,
+        MediaPartOrder, ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult,
     },
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
     vision::PreProcessorConfig,
@@ -50,11 +49,8 @@ impl ModelProcessorSpec for InklingSpec {
                 .is_some_and(|mt| mt == "inkling_mm_model")
     }
 
-    fn chat_render(&self) -> ChatRenderContract {
-        ChatRenderContract {
-            media_order: MediaPartOrder::Authored,
-            absent_assistant_content: AbsentAssistantContent::Null,
-        }
+    fn media_part_order(&self) -> MediaPartOrder {
+        MediaPartOrder::Authored
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -252,16 +248,10 @@ mod tests {
     }
 
     #[test]
-    fn inkling_chat_render_uses_authored_order_and_null_content() {
-        use crate::registry::{AbsentAssistantContent, ChatRenderContract, MediaPartOrder};
+    fn inkling_uses_authored_media_order() {
+        use crate::registry::MediaPartOrder;
 
-        assert_eq!(
-            InklingSpec.chat_render(),
-            ChatRenderContract {
-                media_order: MediaPartOrder::Authored,
-                absent_assistant_content: AbsentAssistantContent::Null,
-            }
-        );
+        assert_eq!(InklingSpec.media_part_order(), MediaPartOrder::Authored);
     }
 
     #[test]

@@ -83,17 +83,17 @@ impl MessagePreparationStage {
             Some(filtered_tools.as_slice())
         };
 
-        // Resolve the chat-rendering contract from the model registry so
-        // /v1/messages renders each model consistently with /v1/chat/completions.
+        // Resolve media-part ordering from the model registry so /v1/messages
+        // renders each model consistently with /v1/chat/completions.
         let model_id = ctx.input.model_id.as_str();
         let tokenizer_entry = ctx
             .components
             .tokenizer_registry
             .get_by_name(model_id)
             .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
-        let render_contract = match (ctx.components.multimodal.as_ref(), tokenizer_entry.as_ref()) {
+        let media_order = match (ctx.components.multimodal.as_ref(), tokenizer_entry.as_ref()) {
             (Some(mm_components), Some(entry)) => {
-                multimodal::resolve_chat_render_contract(
+                multimodal::resolve_media_part_order(
                     model_id,
                     &*tokenizer,
                     mm_components,
@@ -102,7 +102,7 @@ impl MessagePreparationStage {
                 )
                 .await
             }
-            _ => Default::default(),
+            _ => llm_multimodal::MediaPartOrder::MediaFirst,
         };
 
         // Resolve multimodal context once (see chat/preparation.rs for details).
@@ -172,7 +172,7 @@ impl MessagePreparationStage {
             &*tokenizer,
             tools_for_template,
             placeholder_tokens.as_ref(),
-            render_contract,
+            media_order,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {

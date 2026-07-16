@@ -18,10 +18,7 @@ pub use error::{MediaConnectorError, MultiModalError, MultiModalResult, Transfor
 pub use media::{
     ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource, VideoFetchConfig,
 };
-pub use registry::{
-    AbsentAssistantContent, ChatRenderContract, MediaPartOrder, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry,
-};
+pub use registry::{MediaPartOrder, ModelMetadata, ModelProcessorSpec, ModelRegistry};
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
     AudioClip, AudioSource, EncoderFieldLayouts, FieldLayout, ImageDetail, ImageFrame, ImageSize,

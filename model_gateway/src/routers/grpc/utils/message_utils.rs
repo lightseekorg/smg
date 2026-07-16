@@ -5,7 +5,7 @@
 //! instead of `ChatCompletionRequest` / `ChatMessage`.
 #![allow(dead_code)] // wired in follow-up PR (pipeline factory)
 
-use llm_multimodal::{AbsentAssistantContent, ChatRenderContract, MediaPartOrder, Modality};
+use llm_multimodal::{MediaPartOrder, Modality};
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     traits::Tokenizer,
@@ -36,7 +36,7 @@ pub fn process_messages(
     tokenizer: &dyn Tokenizer,
     chat_tools: Option<&[ChatTool]>,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: ChatRenderContract,
+    media_order: MediaPartOrder,
 ) -> Result<ProcessedMessages, String> {
     let content_format = tokenizer.chat_template_content_format();
 
@@ -45,7 +45,7 @@ pub fn process_messages(
         &request.messages,
         content_format,
         placeholder_tokens,
-        contract,
+        media_order,
     )?;
 
     // Step 2: Prepend system message if present
@@ -130,7 +130,7 @@ pub(crate) fn process_message_content_format(
     messages: &[InputMessage],
     content_format: ChatTemplateContentFormat,
     placeholder_tokens: Option<&PlaceholderTokens>,
-    contract: ChatRenderContract,
+    media_order: MediaPartOrder,
 ) -> Result<Vec<Value>, String> {
     messages.iter().try_fold(Vec::new(), |mut result, message| {
         match message.role {
@@ -139,12 +139,12 @@ pub(crate) fn process_message_content_format(
                     &message.content,
                     content_format,
                     placeholder_tokens,
-                    contract.media_order,
+                    media_order,
                     &mut result,
                 );
             }
             messages::Role::Assistant => {
-                result.push(convert_assistant_message(&message.content, contract));
+                result.push(convert_assistant_message(&message.content));
             }
             // A `system`-role message in `messages[]` (e.g. from Claude Code) is
             // forwarded in place, preserving its position in the conversation so
@@ -253,7 +253,7 @@ fn extract_tool_result_text(tool_result: &messages::ToolResultBlock) -> String {
 ///
 /// Extracts text content, tool calls, and reasoning/thinking into the
 /// appropriate JSON fields that the chat template expects.
-fn convert_assistant_message(content: &InputContent, contract: ChatRenderContract) -> Value {
+fn convert_assistant_message(content: &InputContent) -> Value {
     match content {
         InputContent::String(text) => json!({"role": "assistant", "content": text}),
         InputContent::Blocks(blocks) => {
@@ -285,14 +285,11 @@ fn convert_assistant_message(content: &InputContent, contract: ChatRenderContrac
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), Value::String("assistant".into()));
 
-            // With no text blocks (e.g. tool-calls-only), the contract decides
-            // whether content renders as null (protocol-faithful default) or an
-            // empty string for templates that require a string.
+            // With no text blocks (e.g. tool-calls-only), render content as
+            // `null` — the OpenAI-faithful representation the chat template
+            // expects — rather than an empty text frame.
             let content = if text_parts.is_empty() {
-                match contract.absent_assistant_content {
-                    AbsentAssistantContent::Null => Value::Null,
-                    AbsentAssistantContent::EmptyString => Value::String(String::new()),
-                }
+                Value::Null
             } else {
                 Value::String(text_parts.join(""))
             };
@@ -490,7 +487,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         assert_eq!(result.len(), 1);
@@ -513,7 +510,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         assert_eq!(result.len(), 1);
@@ -544,7 +541,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         assert_eq!(result.len(), 1);
@@ -555,15 +552,8 @@ mod tests {
         assert_eq!(tool_calls[0]["function"]["name"], "calculator");
     }
 
-    fn inkling_contract() -> ChatRenderContract {
-        ChatRenderContract {
-            media_order: MediaPartOrder::Authored,
-            absent_assistant_content: AbsentAssistantContent::Null,
-        }
-    }
-
     #[test]
-    fn test_absent_assistant_content_defaults_to_null() {
+    fn test_absent_assistant_content_renders_null() {
         let messages = vec![InputMessage {
             role: Role::Assistant,
             content: InputContent::Blocks(vec![InputContentBlock::ToolUse(
@@ -576,26 +566,14 @@ mod tests {
             )]),
         }];
 
-        let null = process_message_content_format(
+        let result = process_message_content_format(
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
-        assert!(null[0]["content"].is_null());
-
-        let empty_string = process_message_content_format(
-            &messages,
-            ChatTemplateContentFormat::String,
-            None,
-            ChatRenderContract {
-                absent_assistant_content: AbsentAssistantContent::EmptyString,
-                ..ChatRenderContract::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(empty_string[0]["content"], "");
+        assert!(result[0]["content"].is_null());
     }
 
     #[test]
@@ -622,7 +600,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         let arr = media_first[0]["content"].as_array().unwrap();
@@ -633,7 +611,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::OpenAI,
             None,
-            inkling_contract(),
+            MediaPartOrder::Authored,
         )
         .unwrap();
         let arr = authored[0]["content"].as_array().unwrap();
@@ -659,7 +637,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         // Tool result becomes a "tool" role message, not a "user" message
@@ -691,7 +669,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         assert_eq!(result.len(), 1);
@@ -723,7 +701,7 @@ mod tests {
             &messages,
             ChatTemplateContentFormat::String,
             None,
-            ChatRenderContract::default(),
+            MediaPartOrder::MediaFirst,
         )
         .unwrap();
         assert_eq!(

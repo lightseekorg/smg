@@ -49,19 +49,18 @@ impl ChatPreparationStage {
         // Step 1: Filter tools if needed
         let body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Resolve the chat-rendering contract from the model registry so
-        // rendering behavior (media order, absent-content, reasoning effort) is
-        // owned by the per-model spec. Falls back to the default when the model
-        // has no multimodal components or matches no spec.
+        // Resolve media-part ordering from the model registry so it stays owned
+        // by the per-model spec. Falls back to vLLM-compatible media-first when
+        // the model has no multimodal components or matches no spec.
         let model_id = ctx.input.model_id.as_str();
         let tokenizer_entry = ctx
             .components
             .tokenizer_registry
             .get_by_name(model_id)
             .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
-        let render_contract = match (ctx.components.multimodal.as_ref(), tokenizer_entry.as_ref()) {
+        let media_order = match (ctx.components.multimodal.as_ref(), tokenizer_entry.as_ref()) {
             (Some(mm_components), Some(entry)) => {
-                multimodal::resolve_chat_render_contract(
+                multimodal::resolve_media_part_order(
                     model_id,
                     &*tokenizer,
                     mm_components,
@@ -70,7 +69,7 @@ impl ChatPreparationStage {
                 )
                 .await
             }
-            _ => Default::default(),
+            _ => llm_multimodal::MediaPartOrder::MediaFirst,
         };
 
         // Normalize media once. The same plan drives placeholder resolution,
@@ -143,7 +142,7 @@ impl ChatPreparationStage {
             &body_ref,
             &*tokenizer,
             placeholder_tokens.as_ref(),
-            render_contract,
+            media_order,
         ) {
             Ok(msgs) => msgs,
             Err(e) => {
