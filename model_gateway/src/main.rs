@@ -8,7 +8,8 @@ use smg::{
         validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,
         DiscoveryConfig, HealthCheckConfig, HistoryBackend, ManualAssignmentMode, MetricsConfig,
         OracleConfig, PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig,
-        RoutingKeyOverrideConfig, RoutingMode, SchemaConfig, TokenizerCacheConfig, TraceConfig,
+        RoutingKeyOverrideConfig, RoutingMode, SchemaConfig, TenantApiKeyEntry,
+        TokenizerCacheConfig, TraceConfig,
     },
     observability::{
         metrics::PrometheusConfig,
@@ -716,6 +717,12 @@ struct CliArgs {
     #[arg(long, help_heading = "Control Plane Authentication")]
     api_key: Option<String>,
 
+    /// Per-tenant API keys for serving-path auth (format: tenant_id:key,
+    /// repeatable). Layers on top of `--api-key`, each resolving to its own
+    /// tenant identity.
+    #[arg(long = "tenant-api-key", action = ArgAction::Append, help_heading = "Data Plane Authentication")]
+    tenant_api_keys: Vec<String>,
+
     /// JWT issuer URL for OIDC authentication
     #[arg(
         long,
@@ -876,6 +883,27 @@ fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
     };
 
     Some(ApiKeyEntry::new(id, name, key, role))
+}
+
+/// Parse a tenant-scoped data-plane API key from CLI format "tenant_id:key".
+/// Only checks for the ':' separator; non-empty/duplicate checks live in
+/// `ConfigValidator::validate_tenant_api_keys` so they also cover
+/// `TenantApiKeyEntry` values from a config file or language binding. Fails
+/// hard (an empty `AuthConfig` disables auth entirely, not just narrows it)
+/// and never echoes `key_str`, which may be the plaintext credential.
+fn parse_tenant_api_key(key_str: &str) -> ConfigResult<TenantApiKeyEntry> {
+    let Some((tenant_id, key)) = key_str.split_once(':') else {
+        return Err(ConfigError::InvalidValue {
+            field: "tenant-api-key".to_string(),
+            value: "<redacted>".to_string(),
+            reason: "expected 'tenant_id:key' (missing ':' separator)".to_string(),
+        });
+    };
+
+    Ok(TenantApiKeyEntry {
+        tenant_id: tenant_id.trim().to_string(),
+        key: key.to_string(),
+    })
 }
 
 impl CliArgs {
@@ -1335,6 +1363,12 @@ impl CliArgs {
 
         let schema = self.load_schema_config()?;
 
+        let tenant_api_keys = self
+            .tenant_api_keys
+            .iter()
+            .map(|k| parse_tenant_api_key(k))
+            .collect::<ConfigResult<Vec<_>>>()?;
+
         let (oracle, postgres, redis) = match history_backend {
             HistoryBackend::Oracle => (Some(self.build_oracle_config(schema)?), None, None),
             HistoryBackend::Postgres => (None, Some(self.build_postgres_config(schema)?), None),
@@ -1399,6 +1433,7 @@ impl CliArgs {
             .history_backend(history_backend)
             .log_level(&self.log_level)
             .maybe_api_key(self.api_key.as_ref())
+            .tenant_api_keys(tenant_api_keys)
             .maybe_discovery(discovery)
             .maybe_metrics(metrics)
             .maybe_trace(trace_config)

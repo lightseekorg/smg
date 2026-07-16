@@ -8,6 +8,7 @@ use axum::{
     http::{header::CONTENT_TYPE, StatusCode},
 };
 use serde_json::json;
+use smg::config::TenantApiKeyEntry;
 use tower::ServiceExt;
 
 use crate::common::{AppTestContext, TestRouterConfig, TestWorkerConfig};
@@ -200,6 +201,144 @@ mod auth_tests {
             success_count.load(Ordering::SeqCst),
             20,
             "All concurrent authenticated requests should succeed"
+        );
+
+        ctx.shutdown().await;
+    }
+
+    /// A tenant key must authenticate `/generate` but not admin routes.
+    /// Configures a shared key too, so there's a real admin credential to
+    /// test against (with no shared key at all, admin routes are open
+    /// regardless — see `test_tenant_only_deployment_denies_admin_routes`).
+    #[tokio::test]
+    async fn test_tenant_key_cannot_access_admin_routes() {
+        let mut config = TestRouterConfig::round_robin(4306);
+        config.api_key = Some("shared-secret".to_string());
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-red".to_string(),
+            key: "team-red-secret".to_string(),
+        }];
+
+        let ctx =
+            AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20306)]).await;
+
+        let app = ctx.create_app();
+
+        let generate_req = |bearer: &str| {
+            let payload = json!({"text": "hi", "stream": false});
+            Request::builder()
+                .method("POST")
+                .uri("/generate")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTH_HEADER, format!("Bearer {bearer}"))
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap()
+        };
+        let workers_req = |bearer: &str| {
+            Request::builder()
+                .method("GET")
+                .uri("/workers")
+                .header(AUTH_HEADER, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Tenant key: serving route ok, admin route rejected.
+        assert_eq!(
+            app.clone()
+                .oneshot(generate_req("team-red-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "Tenant key should authenticate serving-path requests"
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(workers_req("team-red-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "Tenant key must not authenticate admin/worker-management routes"
+        );
+
+        // Shared key: both serving and admin routes still accept it.
+        assert_eq!(
+            app.clone()
+                .oneshot(generate_req("shared-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "Shared key should still authenticate serving-path requests"
+        );
+        assert_eq!(
+            app.oneshot(workers_req("shared-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "Shared key should still authenticate admin/worker-management routes"
+        );
+
+        ctx.shutdown().await;
+    }
+
+    /// Tenant-only deployment (no shared `--api-key`, no control-plane auth):
+    /// admin routes must be denied outright, not fall back to open.
+    #[tokio::test]
+    async fn test_tenant_only_deployment_denies_admin_routes() {
+        let mut config = TestRouterConfig::round_robin(4307);
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-red".to_string(),
+            key: "team-red-secret".to_string(),
+        }];
+
+        let ctx =
+            AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20307)]).await;
+
+        let app = ctx.create_app();
+
+        let payload = json!({"text": "hi", "stream": false});
+        let generate_req = Request::builder()
+            .method("POST")
+            .uri("/generate")
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTH_HEADER, "Bearer team-red-secret")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(generate_req).await.unwrap().status(),
+            StatusCode::OK,
+            "Tenant key should still authenticate serving-path requests"
+        );
+
+        let workers_with_tenant_key = Request::builder()
+            .method("GET")
+            .uri("/workers")
+            .header(AUTH_HEADER, "Bearer team-red-secret")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(workers_with_tenant_key)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "Tenant-only deployment must deny admin routes even with a valid tenant key"
+        );
+
+        let workers_no_auth = Request::builder()
+            .method("GET")
+            .uri("/workers")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(workers_no_auth).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "Tenant-only deployment must deny admin routes with no credential"
         );
 
         ctx.shutdown().await;

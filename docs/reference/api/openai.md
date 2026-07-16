@@ -33,6 +33,17 @@ Enable authentication with `--api-key`:
 smg --worker-urls http://worker:8000 --api-key "your-api-key"
 ```
 
+For real multi-tenant separation (e.g. per-tenant rate limiting), configure one key per
+tenant instead with `--tenant-api-key tenant_id:key` (repeatable). Each key resolves to
+its own tenant identity; `--api-key` remains available as a single shared fallback key
+whose callers all share one identity.
+
+```bash
+smg --worker-urls http://worker:8000 \
+  --tenant-api-key team-red:red-secret \
+  --tenant-api-key team-blue:blue-secret
+```
+
 ---
 
 ## Endpoints

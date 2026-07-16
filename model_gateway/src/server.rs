@@ -741,9 +741,14 @@ fn with_admission_layer(
     }
 }
 
+/// `serving_auth_config` covers inference-serving routes and may include
+/// per-tenant keys. `admin_auth_config` is the admin/worker-management
+/// fallback (used when `control_plane_auth_state` is `None`) and must
+/// contain only the shared gateway-wide key, never per-tenant keys.
 pub fn build_app(
     app_state: Arc<AppState>,
-    auth_config: AuthConfig,
+    serving_auth_config: AuthConfig,
+    admin_auth_config: AuthConfig,
     control_plane_auth_state: Option<smg_auth::ControlPlaneAuthState>,
     max_payload_size: usize,
     request_id_headers: Vec<String>,
@@ -830,7 +835,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
@@ -853,7 +858,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ));
 
@@ -872,7 +877,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ));
 
@@ -922,16 +927,23 @@ pub fn build_app(
                 .delete(delete_worker),
         );
 
-    // Apply authentication middleware to control plane routes
+    // Fallback (no control-plane auth) normally uses `admin_auth_config`.
+    // If only tenant keys are configured (no shared `--api-key`), there's no
+    // credential that should reach these routes — deny outright instead of
+    // falling back to `auth_middleware`, which would treat the empty config
+    // as "open". Neither config having any key at all is a fully open
+    // dev/test deployment, which keeps its legacy pass-through behavior.
     let apply_control_plane_auth = |routes: Router<Arc<AppState>>| {
         if let Some(ref cp_state) = control_plane_auth_state {
             routes.route_layer(axum::middleware::from_fn_with_state(
                 cp_state.clone(),
                 smg_auth::control_plane_auth_middleware,
             ))
+        } else if !admin_auth_config.is_enabled() && serving_auth_config.is_enabled() {
+            routes.route_layer(axum::middleware::from_fn(middleware::deny_all_middleware))
         } else {
             routes.route_layer(axum::middleware::from_fn_with_state(
-                auth_config.clone(),
+                admin_auth_config.clone(),
                 middleware::auth_middleware,
             ))
         }
@@ -1350,7 +1362,17 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ]
     });
 
-    let auth_config = AuthConfig::new(config.router_config.api_key.clone());
+    // Serving routes accept both the shared key and per-tenant keys, so the
+    // rate limiter (and anything else keyed on tenant identity) can tell
+    // tenants apart. Admin/worker-management routes must NOT accept tenant
+    // keys when falling back to simple API-key auth (no control-plane auth
+    // configured) — a tenant credential must not be able to reach
+    // `/workers`, `/flush_cache`, etc. Only the shared gateway-wide key does.
+    let serving_auth_config = AuthConfig::with_tenant_keys(
+        config.router_config.api_key.clone(),
+        &config.router_config.tenant_api_keys,
+    );
+    let admin_auth_config = AuthConfig::new(config.router_config.api_key.clone());
 
     // Initialize control plane authentication if configured
     let control_plane_auth_state =
@@ -1358,7 +1380,8 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     let app = build_app(
         app_state,
-        auth_config,
+        serving_auth_config,
+        admin_auth_config,
         control_plane_auth_state,
         config.max_payload_size,
         request_id_headers,
