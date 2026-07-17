@@ -186,9 +186,20 @@ def wait_for_workers_ready(
                             )
                         else:
                             readiness_data = {}
+                        healthy_workers = readiness_data.get("healthy_workers", 0)
+                        if not isinstance(healthy_workers, int):
+                            healthy_workers = 0
+                        if (
+                            readiness_data.get("status") == "ready"
+                            and healthy_workers < expected_workers
+                        ):
+                            readiness_reason = (
+                                f"healthy workers {healthy_workers}/{expected_workers}"
+                            )
                         if (
                             readiness_resp.status_code == 200
                             and readiness_data.get("status") == "ready"
+                            and healthy_workers >= expected_workers
                         ):
                             logger.info(
                                 "All %d workers connected and gateway ready after %.1fs",
