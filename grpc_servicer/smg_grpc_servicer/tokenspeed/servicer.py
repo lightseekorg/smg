@@ -2,8 +2,9 @@
 
 Implements ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` on top of
 :class:`tokenspeed.runtime.engine.async_llm.AsyncLLM`. The proto field set
-is intentionally minimal — generative LLM serving, precomputed multimodal, and
-KV-cache-event streaming for cache-aware routing; no Embed / GetTokenizer /
+is intentionally minimal — generative LLM serving, precomputed multimodal,
+KV-cache-event streaming for cache-aware routing, and tokenizer-bundle
+streaming (GetTokenizer) for remote tokenizer construction; no Embed /
 PD-disaggregated / LoRA / hidden states / classifier outputs.
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +20,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import grpc
@@ -40,6 +43,7 @@ from tokenspeed.runtime.pd.kv_events import KVEventBatch
 
 from smg_grpc_servicer.kv_events import endpoint_for_rank, stream_kv_events
 from smg_grpc_servicer.mm_rdma import RdmaPixelPuller
+from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 from smg_grpc_servicer.tokenspeed.kv_events import resolve_kv_events_config
 
@@ -803,6 +807,56 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             return
 
         return common_pb2.ProfileResponse(success=True, message="Stop profiling succeeded")
+
+    async def GetTokenizer(
+        self,
+        _request: common_pb2.GetTokenizerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.GetTokenizerChunk]:
+        """Stream tokenizer artifacts as a ZIP bundle.
+
+        Lets the gateway build the tokenizer remotely when it cannot read the
+        tokenizer path locally (e.g. the model files live only on this host).
+        Resolves the tokenizer directory from server_args, zips the relevant
+        tokenizer files, and streams them as GetTokenizerChunk messages; the
+        final chunk carries the SHA-256 fingerprint of the full archive.
+        """
+        logger.info("Receive GetTokenizer request")
+
+        # Upstream renamed ``tokenizer_path`` → ``tokenizer``; accept either so
+        # the servicer works against both old and new builds (see GetModelInfo).
+        tokenizer_path = getattr(self.server_args, "tokenizer", None) or getattr(
+            self.server_args, "tokenizer_path", ""
+        )
+        if not tokenizer_path:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Tokenizer path is not configured on this server.",
+            )
+            return
+
+        try:
+            zip_buffer = build_tokenizer_zip(Path(tokenizer_path))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Failed to build tokenizer ZIP")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+            return
+
+        zip_data = zip_buffer.getbuffer()
+        sha256 = hashlib.sha256(zip_data).hexdigest()
+        total = len(zip_data)
+        logger.info("Streaming tokenizer bundle: %d bytes, sha256=%s", total, sha256)
+
+        # Stream chunks; SHA-256 rides only on the final chunk.
+        offset = 0
+        while offset < total:
+            end = min(offset + CHUNK_SIZE, total)
+            is_last = end == total
+            yield common_pb2.GetTokenizerChunk(
+                data=bytes(zip_data[offset:end]),
+                sha256=sha256 if is_last else "",
+            )
+            offset = end
 
     # ------------------------------------------------------------------
     # Helpers

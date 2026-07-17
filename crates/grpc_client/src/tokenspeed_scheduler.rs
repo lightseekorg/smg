@@ -172,6 +172,7 @@ impl TokenSpeedSchedulerClient {
         Ok(response.into_inner())
     }
 
+    crate::impl_get_tokenizer!();
     crate::impl_admin_ops!();
     crate::impl_subscribe_kv_events!();
 

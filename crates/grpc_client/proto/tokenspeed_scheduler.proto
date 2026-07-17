@@ -30,6 +30,11 @@ service TokenSpeedScheduler {
   // Stop the profiler and export traces
   rpc StopProfile(smg.grpc.common.StopProfileRequest) returns (smg.grpc.common.ProfileResponse);
 
+  // Stream tokenizer artifacts so the gateway can construct the tokenizer
+  // remotely when it cannot read the tokenizer path locally (e.g. the model
+  // files live only on the scheduler host).
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
+
   // Subscribe to KV cache events (server-streaming). Lets the gateway's
   // cache-aware router track which prefixes this scheduler has cached.
   rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)

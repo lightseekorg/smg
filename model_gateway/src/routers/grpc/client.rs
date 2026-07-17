@@ -379,11 +379,7 @@ impl GrpcClient {
             Self::Vllm(client) => client.get_tokenizer().await,
             Self::Trtllm(client) => client.get_tokenizer().await,
             Self::Mlx(client) => client.get_tokenizer().await,
-            Self::TokenSpeed(_) => {
-                return Err(Box::new(tonic::Status::unimplemented(
-                    "TokenSpeed backend does not support GetTokenizer RPC",
-                )));
-            }
+            Self::TokenSpeed(client) => client.get_tokenizer().await,
         }?;
 
         tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
