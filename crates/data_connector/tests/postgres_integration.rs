@@ -9,8 +9,10 @@
 //! `get_item`) against a real server, since that panic can't be triggered
 //! through a unit test with no database.
 //!
-//! No CI service currently provisions Postgres for this crate's `cargo test`
-//! job, so these are opt-in. Run locally with:
+//! These stay opt-in (`#[ignore]`) rather than running under plain
+//! `cargo test`, since they need a real database. CI provisions a shared
+//! Postgres instance (`postgres-db` in `agentic-services.yaml`) and runs
+//! these with `--ignored` as a dedicated step. To run locally:
 //!
 //!   docker run -d -e POSTGRES_PASSWORD=test -e POSTGRES_DB=smg_test \
 //!       -p 5432:5432 postgres:16
