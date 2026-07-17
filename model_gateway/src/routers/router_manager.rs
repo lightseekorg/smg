@@ -41,7 +41,7 @@ use tracing::{debug, info, warn};
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
-    middleware::TenantRequestMeta,
+    middleware::{AuthConfig, TenantRequestMeta},
     routers::{
         common::header_utils::apply_provider_headers,
         error as route_error,
@@ -55,7 +55,12 @@ use crate::{
 pub struct RouterManager {
     worker_registry: Arc<WorkerRegistry>,
     client: reqwest::Client,
-    gateway_api_key: Option<String>,
+    /// Every credential that authenticates as *this gateway* (shared
+    /// `api_key` plus any per-tenant keys) — not just the shared key. Used
+    /// to keep `/v1/models`' BYOK short-circuit from mistaking a valid
+    /// tenant-scoped key for a foreign upstream-provider credential and
+    /// forwarding it externally.
+    gateway_auth: AuthConfig,
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
     enable_igw: bool,
@@ -66,7 +71,7 @@ impl RouterManager {
         Self {
             worker_registry,
             client,
-            gateway_api_key: None,
+            gateway_auth: AuthConfig::new(None),
             routers: Arc::new(DashMap::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
             enable_igw: false,
@@ -100,9 +105,10 @@ impl RouterManager {
             app_context.client.clone(),
         );
         manager.enable_igw = config.router_config.enable_igw;
-        manager
-            .gateway_api_key
-            .clone_from(&config.router_config.api_key);
+        manager.gateway_auth = AuthConfig::with_tenant_keys(
+            config.router_config.api_key.clone(),
+            &config.router_config.tenant_api_keys,
+        );
         let manager = Arc::new(manager);
 
         if config.router_config.enable_igw {
@@ -491,11 +497,12 @@ impl RouterTrait for RouterManager {
                     .map(String::from)
             });
 
-        // Short-circuit: if the token matches the gateway's own API key, skip
-        // upstream fan-out and return registry models directly.
+        // Short-circuit: if the token matches any of the gateway's own
+        // credentials (shared or per-tenant), skip upstream fan-out and
+        // return registry models directly. A tenant-scoped key must never
+        // reach the BYOK fan-out below — that would forward it externally.
         if let Some(ref token) = bearer_token {
-            let is_gateway_key = self.gateway_api_key.as_ref().is_some_and(|gw| gw == token);
-            if is_gateway_key {
+            if self.gateway_auth.contains_token(token) {
                 return self.registry_models_response();
             }
         }
@@ -887,6 +894,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        config::TenantApiKeyEntry,
         middleware::{RouteRequestMeta, TenantKey},
         routers::factory::router_ids,
         worker::{BasicWorkerBuilder, CircuitBreakerConfig, WorkerRegistry},
@@ -975,6 +983,101 @@ mod tests {
 
     fn test_tenant_meta() -> TenantRequestMeta {
         RouteRequestMeta::new(TenantKey::from("test-tenant"))
+    }
+
+    /// A tenant-scoped credential must never reach `fetch_upstream_models`:
+    /// that would forward the gateway's own secret to an external provider
+    /// as if it were the caller's BYOK token. Verified against a real mock
+    /// upstream that counts hits, since a stubbed HTTP client can't
+    /// distinguish "short-circuited" from "fell through and failed" by
+    /// response alone — both end up returning registry models on failure.
+    #[tokio::test]
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
+    async fn get_models_short_circuits_for_tenant_key_without_forwarding_upstream() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hit_count = Arc::new(AtomicUsize::new(0));
+        let hit_count_clone = hit_count.clone();
+        let mock_app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move || {
+                let hit_count = hit_count_clone.clone();
+                async move {
+                    hit_count.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"object": "list", "data": []}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_app).await;
+        });
+
+        let registry = Arc::new(WorkerRegistry::new());
+        let external_worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new(format!("http://{addr}"))
+                .worker_type(WorkerType::Regular)
+                .runtime_type(RuntimeType::External)
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        registry.register(external_worker);
+        // A non-External worker so registry_models_response() (the
+        // short-circuit path) has something to return besides 503.
+        let internal_worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://internal.invalid:8000")
+                .worker_type(WorkerType::Regular)
+                .models(vec![ModelCard::new("internal-model")])
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        registry.register(internal_worker);
+
+        let mut manager = RouterManager::new(registry, reqwest::Client::new());
+        manager.gateway_auth = AuthConfig::with_tenant_keys(
+            Some("shared-secret".to_string()),
+            &[TenantApiKeyEntry {
+                tenant_id: "team-red".to_string(),
+                key: "team-red-secret".to_string(),
+            }],
+        );
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .header(header::AUTHORIZATION, "Bearer team-red-secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = manager.get_models(req).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            hit_count.load(Ordering::SeqCst),
+            0,
+            "a tenant-scoped key must never trigger upstream BYOK fan-out"
+        );
+
+        // Control: a genuinely unrecognized token should still trigger BYOK
+        // fan-out — confirms the short-circuit is keyed on the gateway's own
+        // credentials, not disabled entirely.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .header(header::AUTHORIZATION, "Bearer not-a-gateway-key")
+            .body(Body::empty())
+            .unwrap();
+        let _ = manager.get_models(req).await;
+        assert_eq!(
+            hit_count.load(Ordering::SeqCst),
+            1,
+            "an unrecognized token should still fan out to upstream providers"
+        );
     }
 
     fn generate_request_without_model() -> GenerateRequest {

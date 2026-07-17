@@ -61,6 +61,16 @@ impl AuthConfig {
     pub fn is_enabled(&self) -> bool {
         !self.keys.is_empty()
     }
+
+    /// Whether `token` matches any configured key (shared or per-tenant).
+    /// For callers outside `auth_middleware` that need to distinguish "this
+    /// is one of our own gateway credentials" from "unrecognized token" —
+    /// e.g. `/v1/models`' BYOK short-circuit, which must not treat a
+    /// tenant-scoped key as a foreign upstream-provider credential and
+    /// forward it externally.
+    pub fn contains_token(&self, token: &str) -> bool {
+        self.keys.contains_key(&hash_key(token))
+    }
 }
 
 fn hash_key(key: &str) -> [u8; 32] {
@@ -263,5 +273,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn contains_token_recognizes_shared_and_tenant_keys() {
+        let auth_config = AuthConfig::with_tenant_keys(
+            Some("shared-secret".to_string()),
+            &[TenantApiKeyEntry {
+                tenant_id: "team-red".to_string(),
+                key: "team-red-secret".to_string(),
+            }],
+        );
+
+        assert!(auth_config.contains_token("shared-secret"));
+        assert!(auth_config.contains_token("team-red-secret"));
+        assert!(!auth_config.contains_token("not-a-configured-key"));
     }
 }

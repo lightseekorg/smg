@@ -152,10 +152,24 @@ impl ConfigValidator {
                     ),
                 });
             }
-            if entry.key.trim().is_empty() {
+            let trimmed_key = entry.key.trim();
+            if trimmed_key.is_empty() {
                 return Err(ConfigError::ValidationFailed {
                     reason: format!(
                         "tenant_api_keys entry for tenant_id '{}' must have a non-empty key",
+                        entry.tenant_id
+                    ),
+                });
+            }
+            // Same asymmetry as tenant_id: the CLI trims the key, but
+            // config-file/binding entries don't go through it. A padded key
+            // would hash differently than the operator likely intended,
+            // silently defeating the duplicate-value check above for that
+            // entry.
+            if trimmed_key != entry.key {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "tenant_api_keys entry for tenant_id '{}' key must not have surrounding whitespace",
                         entry.tenant_id
                     ),
                 });
@@ -1139,6 +1153,29 @@ mod tests {
         let err = ConfigValidator::validate(&config).unwrap_err();
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
         assert!(err.to_string().contains("whitespace"));
+    }
+
+    /// Same asymmetry as the padded-tenant_id case, but for `key`: the CLI
+    /// trims it, config-file/binding entries don't, so an untrimmed key
+    /// would hash differently than intended and silently evade the
+    /// duplicate-value check.
+    #[test]
+    fn test_validate_padded_key_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-a".to_string(),
+            key: " some-secret ".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        let message = err.to_string();
+        assert!(message.contains("team-a"));
+        assert!(message.contains("whitespace"));
+        assert!(
+            !message.contains("some-secret"),
+            "error must not leak the credential value: {message}"
+        );
     }
 
     #[test]
