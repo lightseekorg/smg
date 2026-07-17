@@ -181,9 +181,9 @@ def wait_for_workers_ready(
                         except ValueError:
                             readiness_data = {}
                         if isinstance(readiness_data, dict):
-                            readiness_reason = readiness_data.get(
-                                "reason", readiness_data.get("status", readiness_reason)
-                            )
+                            reason = readiness_data.get("reason") or readiness_data.get("status")
+                            if isinstance(reason, str):
+                                readiness_reason = reason
                         else:
                             readiness_data = {}
                         healthy_workers = readiness_data.get("healthy_workers", 0)
