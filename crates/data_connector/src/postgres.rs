@@ -100,6 +100,19 @@ impl Clone for PostgresStore {
     }
 }
 
+/// Name of a JSON value's type, for error messages that must not echo
+/// caller-supplied content (metadata is arbitrary and may hold secrets/PII).
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 pub(super) struct PostgresConversationStorage {
     store: PostgresStore,
 }
@@ -144,8 +157,12 @@ impl PostgresConversationStorage {
         match metadata {
             None | Some(Value::Null) => Ok(None),
             Some(Value::Object(map)) => Ok(Some(map)),
+            // Don't interpolate the value itself: metadata is arbitrary
+            // caller-supplied JSON, and this error is rendered via Display
+            // into logs/API responses.
             Some(other) => Err(ConversationStorageError::StorageError(format!(
-                "expected JSON object for conversation metadata, got: {other}"
+                "expected JSON object for conversation metadata, got JSON {}",
+                json_type_name(&other)
             ))),
         }
     }
