@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use serde_json::Value;
-use tokio_postgres::{NoTls, Row};
+use tokio_postgres::{types::Json, NoTls, Row};
 
 use crate::{
     common::{build_response_select_base, extra_column_defs, resolve_extra_column_values},
@@ -162,7 +162,7 @@ impl ConversationStorage for PostgresConversationStorage {
         let conversation = Conversation::new(input);
         let id_str = conversation.id.0.as_str();
         let created_at: DateTime<Utc> = conversation.created_at;
-        let metadata_json = conversation.metadata.clone().map(Value::Object);
+        let metadata_json = conversation.metadata.as_ref().map(Json);
 
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
@@ -297,7 +297,7 @@ impl ConversationStorage for PostgresConversationStorage {
             )));
         }
 
-        let metadata_json = metadata.clone().map(Value::Object);
+        let metadata_json = metadata.as_ref().map(Json);
         let col_meta = s.col("metadata");
 
         let (_, created_at) = if s.is_skipped("created_at") {
