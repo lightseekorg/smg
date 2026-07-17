@@ -1,6 +1,11 @@
-//! Bearer-token auth. Every configured key's hash is checked in constant
-//! time with no early return, so timing can't reveal which key, if any, a
-//! token is closest to.
+//! Bearer-token auth, keyed by SHA-256 hash of the presented token rather
+//! than the raw value. Hashing first — not a constant-time comparison — is
+//! what makes lookup safe: SHA-256's avalanche property means a guess that's
+//! "close" to a valid token produces an unrelated hash, so there's no
+//! byte-at-a-time timing signal to recover from a plain hash-keyed lookup,
+//! unlike comparing raw secrets.
+
+use std::collections::HashMap;
 
 use axum::{
     body::Body,
@@ -10,7 +15,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use crate::{
     config::TenantApiKeyEntry,
@@ -18,14 +22,8 @@ use crate::{
 };
 
 #[derive(Clone)]
-struct GatewayApiKey {
-    tenant_key: TenantKey,
-    key_hash: [u8; 32],
-}
-
-#[derive(Clone)]
 pub struct AuthConfig {
-    keys: Vec<GatewayApiKey>,
+    keys: HashMap<[u8; 32], TenantKey>,
 }
 
 impl AuthConfig {
@@ -41,36 +39,21 @@ impl AuthConfig {
         api_key: Option<String>,
         tenant_api_keys: &[TenantApiKeyEntry],
     ) -> Self {
-        let mut keys = Vec::with_capacity(tenant_api_keys.len() + 1);
+        let mut keys = HashMap::with_capacity(tenant_api_keys.len() + 1);
 
         if let Some(key) = api_key {
             let key_hash = hash_key(&key);
-            keys.push(GatewayApiKey {
-                tenant_key: authenticated_tenant_key_from_sha256(key_hash),
-                key_hash,
-            });
+            keys.insert(key_hash, authenticated_tenant_key_from_sha256(key_hash));
         }
 
         for entry in tenant_api_keys {
-            keys.push(GatewayApiKey {
-                tenant_key: TenantIdentity::Authenticated(entry.tenant_id.as_str().into())
-                    .into_key(),
-                key_hash: hash_key(&entry.key),
-            });
+            keys.insert(
+                hash_key(&entry.key),
+                TenantIdentity::Authenticated(entry.tenant_id.as_str().into()).into_key(),
+            );
         }
 
         Self { keys }
-    }
-
-    /// Scans every configured key without early return; see module docs.
-    fn find_tenant_key(&self, token_hash: &[u8; 32]) -> Option<&TenantKey> {
-        let mut found = None;
-        for candidate in &self.keys {
-            if candidate.key_hash.ct_eq(token_hash).unwrap_u8() == 1 {
-                found = Some(&candidate.tenant_key);
-            }
-        }
-        found
     }
 
     /// Whether any key is configured. Empty means [`auth_middleware`]
@@ -101,7 +84,7 @@ pub async fn auth_middleware(
 
         let tenant_key = token_hash
             .as_ref()
-            .and_then(|hash| auth_config.find_tenant_key(hash));
+            .and_then(|hash| auth_config.keys.get(hash));
 
         let Some(tenant_key) = tenant_key else {
             return StatusCode::UNAUTHORIZED.into_response();
