@@ -151,7 +151,7 @@ def wait_for_workers_ready(
     timeout: float = 300,
     api_key: str | None = None,
 ) -> None:
-    """Wait for router to have all workers connected.
+    """Wait for all workers to connect and for the router to become ready.
 
     Args:
         router_url: Base URL of the router
@@ -161,6 +161,8 @@ def wait_for_workers_ready(
     """
     start = time.perf_counter()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    connected_workers = 0
+    readiness_reason = "not checked"
 
     with requests.Session() as session:
         while time.perf_counter() - start < timeout:
@@ -168,20 +170,52 @@ def wait_for_workers_ready(
                 resp = session.get(f"{router_url}/workers", headers=headers, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    total = data.get("total", len(data.get("workers", [])))
-                    if total >= expected_workers:
-                        logger.info(
-                            "All %d workers connected after %.1fs",
-                            expected_workers,
-                            time.perf_counter() - start,
+                    connected_workers = data.get("total", len(data.get("workers", [])))
+                    if connected_workers >= expected_workers:
+                        readiness_resp = session.get(
+                            f"{router_url}/readiness", headers=headers, timeout=5
                         )
-                        return
-            except requests.RequestException:
+                        readiness_reason = f"status {readiness_resp.status_code}"
+                        try:
+                            readiness_data = readiness_resp.json()
+                        except ValueError:
+                            readiness_data = {}
+                        if isinstance(readiness_data, dict):
+                            reason = readiness_data.get("reason") or readiness_data.get("status")
+                            if isinstance(reason, str):
+                                readiness_reason = reason
+                        else:
+                            readiness_data = {}
+                        healthy_workers = readiness_data.get("healthy_workers", 0)
+                        if not isinstance(healthy_workers, int):
+                            healthy_workers = 0
+                        if (
+                            readiness_data.get("status") == "ready"
+                            and healthy_workers < expected_workers
+                        ):
+                            readiness_reason = (
+                                f"healthy workers {healthy_workers}/{expected_workers}"
+                            )
+                        if (
+                            readiness_resp.status_code == 200
+                            and readiness_data.get("status") == "ready"
+                            and healthy_workers >= expected_workers
+                        ):
+                            logger.info(
+                                "All %d workers connected and gateway ready after %.1fs",
+                                expected_workers,
+                                time.perf_counter() - start,
+                            )
+                            return
+                    else:
+                        readiness_reason = "waiting for workers"
+            except (requests.RequestException, ValueError):
                 pass
             time.sleep(2)
 
     raise TimeoutError(
-        f"Router at {router_url} did not get {expected_workers} workers within {timeout}s"
+        f"Router at {router_url} did not become ready within {timeout}s "
+        f"(workers: {connected_workers}/{expected_workers}, readiness: {readiness_reason})"
     )
 
 
