@@ -979,6 +979,16 @@ pub fn build_app(
 }
 
 pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Defense in depth: the CLI and Python bindings both validate via
+    // `RouterConfigBuilder::build()` before reaching here, but `RouterConfig`
+    // is public and `Deserialize`, so a Rust library caller can construct
+    // `ServerConfig` directly (or deserialize it) and call `startup` without
+    // ever going through the builder. Validate here too so `tenant_api_keys`
+    // (and everything else `ConfigValidator` checks) is enforced regardless
+    // of construction path — a bypassed empty/duplicate tenant key would
+    // otherwise silently reach `AuthConfig`.
+    config.router_config.validate()?;
+
     static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
     if let Some(trace_config) = &config.router_config.trace_config {
@@ -1552,4 +1562,57 @@ fn create_cors_layer(allowed_origins: Vec<String>) -> tower_http::cors::CorsLaye
     };
 
     cors.max_age(Duration::from_secs(3600))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TenantApiKeyEntry;
+
+    fn minimal_server_config(router_config: RouterConfig) -> ServerConfig {
+        ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            health_check_port: None,
+            runtime_worker_threads: None,
+            router_config,
+            max_payload_size: 1024,
+            log_dir: None,
+            log_level: None,
+            log_json: false,
+            service_discovery_config: None,
+            prometheus_config: None,
+            request_timeout_secs: 60,
+            request_id_headers: None,
+            shutdown_grace_period_secs: 5,
+            control_plane_auth: None,
+            mesh_server_config: None,
+            webrtc_bind_addr: None,
+            webrtc_stun_server: None,
+        }
+    }
+
+    /// `startup` must reject an invalid config even when `RouterConfig` was
+    /// built directly (struct literal or `Deserialize`), not via
+    /// `RouterConfigBuilder::build()` — a Rust library caller can construct
+    /// `ServerConfig` this way and bypass the builder's validation entirely.
+    /// Regression test for a reviewer-flagged gap: an empty tenant_api_keys
+    /// entry reaching `AuthConfig` unvalidated would make `Authorization:
+    /// Bearer ` (empty token) a valid serving credential.
+    #[tokio::test]
+    async fn startup_validates_directly_constructed_router_config() {
+        let router_config = RouterConfig {
+            tenant_api_keys: vec![TenantApiKeyEntry {
+                tenant_id: "team-a".to_string(),
+                key: String::new(),
+            }],
+            ..Default::default()
+        };
+
+        let result = startup(minimal_server_config(router_config)).await;
+        assert!(
+            result.is_err(),
+            "startup must validate router_config even when constructed directly"
+        );
+    }
 }
