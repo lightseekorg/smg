@@ -315,13 +315,18 @@ jobs:
       - name: Check Postgres shared service
         run: bash scripts/ci_agentic_svc_deps.sh check --postgres postgres-db
 
+      - name: Create isolated Postgres test database
+        run: bash scripts/ci_agentic_svc_deps.sh create-postgres-db postgres-db
+
       - name: Run Postgres data-connector integration tests
         timeout-minutes: 10
-        env:
-          DATA_CONNECTOR_TEST_POSTGRES_URL: postgres://postgres:postgres@postgres-db:5432/smg_ci_test
         run: |
           source "$HOME/.cargo/env"
           cargo test -p data-connector --test postgres_integration -- --ignored --test-threads=1
+
+      - name: Cleanup Postgres test database
+        if: always()
+        run: bash scripts/ci_agentic_svc_deps.sh cleanup-postgres-db postgres-db
 
       - name: Show sccache stats
         if: always()

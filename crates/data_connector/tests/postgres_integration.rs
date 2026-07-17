@@ -168,6 +168,41 @@ async fn conversation_metadata_round_trips_json_column() {
         .expect("get_conversation must not panic on the JSON metadata column")
         .expect("conversation should exist");
     assert_eq!(fetched.metadata, Some(metadata));
+
+    // `update_conversation` has the same String-vs-Value bind bug as
+    // `create_conversation` did — cover both setting new metadata and
+    // clearing it back to SQL NULL.
+    let mut updated_metadata = serde_json::Map::new();
+    updated_metadata.insert("key".to_string(), json!("updated"));
+    updated_metadata.insert("nested".to_string(), json!({"count": 2}));
+
+    let updated = conv
+        .update_conversation(&created.id, Some(updated_metadata.clone()))
+        .await
+        .expect("update_conversation must not fail serializing the JSON metadata column")
+        .expect("conversation should exist");
+    assert_eq!(updated.metadata, Some(updated_metadata.clone()));
+
+    let fetched_after_update = conv
+        .get_conversation(&created.id)
+        .await
+        .expect("get_conversation must not panic after update")
+        .expect("conversation should exist");
+    assert_eq!(fetched_after_update.metadata, Some(updated_metadata));
+
+    let cleared = conv
+        .update_conversation(&created.id, None)
+        .await
+        .expect("update_conversation must not fail clearing the JSON metadata column")
+        .expect("conversation should exist");
+    assert_eq!(cleared.metadata, None);
+
+    let fetched_after_clear = conv
+        .get_conversation(&created.id)
+        .await
+        .expect("get_conversation must not panic after clearing metadata")
+        .expect("conversation should exist");
+    assert_eq!(fetched_after_clear.metadata, None);
 }
 
 #[tokio::test]

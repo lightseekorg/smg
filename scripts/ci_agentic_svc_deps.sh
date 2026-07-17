@@ -7,6 +7,8 @@
 #   bash ci_agentic_svc_deps.sh cleanup-oracle-user <host>
 #   bash ci_agentic_svc_deps.sh create-oracle-flyway-user <host>
 #   bash ci_agentic_svc_deps.sh cleanup-oracle-flyway-user <host>
+#   bash ci_agentic_svc_deps.sh create-postgres-db <host>
+#   bash ci_agentic_svc_deps.sh cleanup-postgres-db <host>
 
 set -uo pipefail
 
@@ -43,6 +45,29 @@ ci_oracle_username() {
     printf "%s_%s\n" "$prefix" "${tag:0:$max_tag_len}"
 }
 
+# Unique-per-run Postgres database name, so concurrent workflow runs sharing
+# the `postgres-db` service don't race on first-time `CREATE TABLE`/migration
+# DDL against the same database (see PR #1935 review discussion).
+ci_postgres_dbname() {
+    local random="${CI_POSTGRES_NAME_RANDOM:-$(openssl rand -hex 3)}"
+    random=$(printf "%s" "$random" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+
+    local tag
+    if [ -n "${GITHUB_RUN_ID:-}" ]; then
+        local run_tail="${GITHUB_RUN_ID: -10}"
+        local attempt="${GITHUB_RUN_ATTEMPT:-0}"
+        tag="${run_tail}_${attempt}_${random}"
+    else
+        # Fallback for local/manual runs: keep the old hostname signal, plus entropy.
+        local raw_name
+        raw_name=$(echo "${HOSTNAME:-runner}" | rev | cut -d'-' -f1,2 | rev | tr '[:upper:]-' '[:lower:]_')
+        tag="${raw_name}_${random}"
+    fi
+
+    tag=$(printf "%s" "$tag" | tr -cd 'a-z0-9_')
+    printf "smg_ci_test_%s\n" "${tag:0:40}"
+}
+
 append_github_env() {
     if [ -n "${GITHUB_ENV:-}" ]; then
         echo "$1" >> "$GITHUB_ENV"
@@ -75,6 +100,37 @@ cmd_check() {
         esac
     done
     return $failed
+}
+
+cmd_create_postgres_db() {
+    set -e
+    local postgres_host="${1:-postgres-db}"
+    local admin_url="postgresql://postgres:postgres@${postgres_host}:5432/postgres"
+
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq postgresql-client
+
+    TEST_DB="$(ci_postgres_dbname)"
+    echo "Creating Postgres test database: $TEST_DB"
+
+    psql "$admin_url" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$TEST_DB\";"
+
+    append_github_env "CI_POSTGRES_TEST_DB=$TEST_DB"
+    append_github_env "DATA_CONNECTOR_TEST_POSTGRES_URL=postgresql://postgres:postgres@${postgres_host}:5432/${TEST_DB}"
+}
+
+cmd_cleanup_postgres_db() {
+    local postgres_host="${1:-postgres-db}"
+    local admin_url="postgresql://postgres:postgres@${postgres_host}:5432/postgres"
+
+    if [ -z "${CI_POSTGRES_TEST_DB:-}" ]; then
+        echo "No Postgres test database to clean up"
+        return 0
+    fi
+
+    echo "Dropping Postgres test database: $CI_POSTGRES_TEST_DB"
+    psql "$admin_url" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$CI_POSTGRES_TEST_DB\" WITH (FORCE);" \
+        || echo "Warning: failed to drop Postgres test database $CI_POSTGRES_TEST_DB"
 }
 
 cmd_setup_oracle_client() {
@@ -283,5 +339,7 @@ case "$COMMAND" in
     cleanup-oracle-user)  cmd_cleanup_oracle_user "$@" ;;
     create-oracle-flyway-user)   cmd_create_oracle_flyway_user "$@" ;;
     cleanup-oracle-flyway-user)  cmd_cleanup_oracle_flyway_user "$@" ;;
+    create-postgres-db)   cmd_create_postgres_db "$@" ;;
+    cleanup-postgres-db)  cmd_cleanup_postgres_db "$@" ;;
     *)                    echo "Unknown command: $COMMAND"; exit 1 ;;
 esac
