@@ -44,6 +44,26 @@ smg --worker-urls http://worker:8000 \
   --tenant-api-key team-blue:blue-secret
 ```
 
+Callers authenticate the same way as with `--api-key` — a `Bearer` token in the
+`Authorization` header — just using their own tenant's key instead of the shared one:
+
+```bash
+curl http://localhost:30000/v1/chat/completions \
+  -H "Authorization: Bearer red-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+This request is attributed to `team-red`, distinct from a request authenticated with
+`blue-secret`. A key that doesn't match any configured `--api-key` or `--tenant-api-key`
+value is rejected with `401 Unauthorized`. Tenant keys authenticate serving endpoints
+only — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, etc. They do not grant
+access to admin/management routes (`/workers`, `/flush_cache`, and similar); that surface
+requires either the shared `--api-key` or control-plane authentication.
+
 ---
 
 ## Endpoints
