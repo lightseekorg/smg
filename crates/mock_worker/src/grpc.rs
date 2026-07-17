@@ -52,11 +52,14 @@ struct MockScheduler {
 
 type GenStream = Pin<Box<dyn Stream<Item = Result<ts::GenerateResponse, Status>> + Send>>;
 type KvEventStream = Pin<Box<dyn Stream<Item = Result<common::KvEventBatch, Status>> + Send>>;
+type TokenizerStream =
+    Pin<Box<dyn Stream<Item = Result<common::GetTokenizerChunk, Status>> + Send>>;
 
 #[tonic::async_trait]
 impl TokenSpeedScheduler for MockScheduler {
     type GenerateStream = GenStream;
     type SubscribeKvEventsStream = KvEventStream;
+    type GetTokenizerStream = TokenizerStream;
 
     async fn generate(
         &self,
@@ -254,6 +257,15 @@ impl TokenSpeedScheduler for MockScheduler {
         &self,
         _request: Request<common::StopProfileRequest>,
     ) -> Result<Response<common::ProfileResponse>, Status> {
+        Err(Status::unimplemented("mock-worker"))
+    }
+
+    async fn get_tokenizer(
+        &self,
+        _request: Request<common::GetTokenizerRequest>,
+    ) -> Result<Response<Self::GetTokenizerStream>, Status> {
+        // The mock has no tokenizer artifacts to serve; the gateway's
+        // remote-tokenizer fallback treats Unimplemented as "not supported".
         Err(Status::unimplemented("mock-worker"))
     }
 }
