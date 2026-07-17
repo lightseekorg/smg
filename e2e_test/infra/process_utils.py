@@ -175,10 +175,17 @@ def wait_for_workers_ready(
                         readiness_resp = session.get(
                             f"{router_url}/readiness", headers=headers, timeout=5
                         )
-                        readiness_data = readiness_resp.json()
-                        readiness_reason = readiness_data.get(
-                            "reason", readiness_data.get("status", "unknown")
-                        )
+                        readiness_reason = f"status {readiness_resp.status_code}"
+                        try:
+                            readiness_data = readiness_resp.json()
+                        except ValueError:
+                            readiness_data = {}
+                        if isinstance(readiness_data, dict):
+                            readiness_reason = readiness_data.get(
+                                "reason", readiness_data.get("status", readiness_reason)
+                            )
+                        else:
+                            readiness_data = {}
                         if (
                             readiness_resp.status_code == 200
                             and readiness_data.get("status") == "ready"
