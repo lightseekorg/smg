@@ -11,8 +11,9 @@
 //!
 //! These stay opt-in (`#[ignore]`) rather than running under plain
 //! `cargo test`, since they need a real database. CI provisions a shared
-//! Postgres instance (`postgres-db` in `agentic-services.yaml`) and runs
-//! these with `--ignored` as a dedicated step. To run locally:
+//! Postgres instance (`postgres-db` in `agentic-services.yaml`), creates a
+//! database unique to the run, and runs these with `--ignored` at the end
+//! of the `Run Rust tests` step. To run locally:
 //!
 //!   docker run -d -e POSTGRES_PASSWORD=test -e POSTGRES_DB=smg_test \
 //!       -p 5432:5432 postgres:16
