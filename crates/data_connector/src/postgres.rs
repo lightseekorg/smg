@@ -9,10 +9,7 @@ use serde_json::Value;
 use tokio_postgres::{NoTls, Row};
 
 use crate::{
-    common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
-        resolve_extra_column_values,
-    },
+    common::{build_response_select_base, extra_column_defs, resolve_extra_column_values},
     config::PostgresConfig,
     context::current_extra_columns,
     core::{
@@ -138,11 +135,19 @@ impl PostgresConversationStorage {
         Ok(Self { store })
     }
 
+    /// Postgres stores metadata as a native `JSON` column, so it round-trips as
+    /// `serde_json::Value` rather than the text that Oracle/Redis persist —
+    /// `tokio-postgres` rejects decoding a `JSON` column as `String`.
     fn parse_metadata(
-        metadata: Option<String>,
+        metadata: Option<Value>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        crate::common::parse_conversation_metadata(metadata)
-            .map_err(ConversationStorageError::StorageError)
+        match metadata {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Object(map)) => Ok(Some(map)),
+            Some(other) => Err(ConversationStorageError::StorageError(format!(
+                "expected JSON object for conversation metadata, got: {other}"
+            ))),
+        }
     }
 }
 
@@ -155,11 +160,11 @@ impl ConversationStorage for PostgresConversationStorage {
         let conversation = Conversation::new(input);
         let id_str = conversation.id.0.as_str();
         let created_at: DateTime<Utc> = conversation.created_at;
-        let metadata_json = conversation
-            .metadata
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
+        // Bind the JSON column as `Value`, not a serialized `String`: Postgres
+        // reports the placeholder's type as `json`/`jsonb` from the target
+        // column, and `tokio-postgres` rejects a `String` value for that
+        // parameter type instead of implicitly casting it.
+        let metadata_value: Option<Value> = conversation.metadata.clone().map(Value::Object);
 
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
@@ -172,7 +177,7 @@ impl ConversationStorage for PostgresConversationStorage {
         }
         if !s.is_skipped("metadata") {
             col_names.push(s.col("metadata"));
-            params.push(&metadata_json);
+            params.push(&metadata_value);
         }
 
         // Append extra columns from hooks or defaults
@@ -246,10 +251,16 @@ impl ConversationStorage for PostgresConversationStorage {
         } else {
             row.get(s.col("created_at"))
         };
-        let metadata_json: Option<String> = if s.is_skipped("metadata") {
+        // Use `try_get` (not `get`) so schema drift or malformed data in the
+        // `JSON` column returns an error instead of panicking the request task.
+        let metadata_json: Option<Value> = if s.is_skipped("metadata") {
             None
         } else {
-            row.get(s.col("metadata"))
+            row.try_get(s.col("metadata")).map_err(|e| {
+                ConversationStorageError::StorageError(format!(
+                    "failed to decode metadata column: {e}"
+                ))
+            })?
         };
         let metadata = Self::parse_metadata(metadata_json)?;
         Ok(Some(Conversation::with_parts(
@@ -293,13 +304,15 @@ impl ConversationStorage for PostgresConversationStorage {
             )));
         }
 
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        // Bind the JSON column as `Value`, not a serialized `String` (see
+        // `create_conversation` for why `tokio-postgres` requires this).
+        let metadata_value: Option<Value> = metadata.clone().map(Value::Object);
         let col_meta = s.col("metadata");
 
         let (_, created_at) = if s.is_skipped("created_at") {
             let sql = format!("UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2");
             let rows_affected = client
-                .execute(&sql, &[&metadata_json, &id.0.as_str()])
+                .execute(&sql, &[&metadata_value, &id.0.as_str()])
                 .await
                 .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
             if rows_affected == 0 {
@@ -312,7 +325,7 @@ impl ConversationStorage for PostgresConversationStorage {
                 "UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2 RETURNING {col_created}"
             );
             let rows = client
-                .query(&sql, &[&metadata_json, &id.0.as_str()])
+                .query(&sql, &[&metadata_value, &id.0.as_str()])
                 .await
                 .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
             if rows.is_empty() {
@@ -432,7 +445,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         } = item;
         let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&content)?;
 
         let si = &self.store.schema.conversation_items;
         let table = si.qualified_table(self.store.schema.owner.as_deref());
@@ -454,7 +466,10 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         }
         if !si.is_skipped("content") {
             col_names.push(si.col("content"));
-            params.push(&content_json);
+            // Bind the JSON column as `Value`, not a serialized `String`
+            // (see `create_conversation` for why `tokio-postgres` requires
+            // this for a `json`/`jsonb`-typed parameter).
+            params.push(&content);
         }
         if !si.is_skipped("status") {
             col_names.push(si.col("status"));
@@ -786,11 +801,16 @@ fn build_item_from_row(
     let content: Value = if si.is_skipped("content") {
         Value::Null
     } else {
-        let content_raw: Option<String> = row.get(si.col("content"));
-        match content_raw {
-            Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
-            None => Value::Null,
-        }
+        // `content` is a native Postgres `JSON` column; it decodes as
+        // `serde_json::Value`, not `String` (see `build_response_from_row`).
+        // Use `try_get` (not `get`) so schema drift or malformed data
+        // returns an error instead of panicking the request task.
+        let content_raw: Option<Value> = row.try_get(si.col("content")).map_err(|e| {
+            ConversationItemStorageError::StorageError(format!(
+                "failed to decode content column: {e}"
+            ))
+        })?;
+        content_raw.unwrap_or(Value::Null)
     };
     let status: Option<String> = if si.is_skipped("status") {
         None
@@ -878,7 +898,7 @@ impl PostgresResponseStorage {
     pub fn build_response_from_row(
         row: &Row,
         schema: &SchemaConfig,
-    ) -> Result<StoredResponse, String> {
+    ) -> Result<StoredResponse, ResponseStorageError> {
         let s = &schema.responses;
 
         let id: String = row.get(s.col("id"));
@@ -892,10 +912,17 @@ impl PostgresResponseStorage {
         } else {
             row.get(s.col("previous_response_id"))
         };
-        let input_json: Option<String> = if s.is_skipped("input") {
+        // `input` and `raw_response` are native Postgres `JSON` columns, so they
+        // decode as `serde_json::Value` — `tokio-postgres` panics if a `JSON`
+        // column is fetched as `String` (see WrongType in issue #1930). Use
+        // `try_get` (not `get`) so schema drift or malformed data returns an
+        // error instead of panicking the request task.
+        let input_json: Option<Value> = if s.is_skipped("input") {
             None
         } else {
-            row.get(s.col("input"))
+            row.try_get(s.col("input")).map_err(|e| {
+                ResponseStorageError::StorageError(format!("failed to decode input column: {e}"))
+            })?
         };
         let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
             Utc::now()
@@ -912,15 +939,19 @@ impl PostgresResponseStorage {
         } else {
             row.get(s.col("model"))
         };
-        let raw_response_json: Option<String> = if s.is_skipped("raw_response") {
+        let raw_response_json: Option<Value> = if s.is_skipped("raw_response") {
             None
         } else {
-            row.get(s.col("raw_response"))
+            row.try_get(s.col("raw_response")).map_err(|e| {
+                ResponseStorageError::StorageError(format!(
+                    "failed to decode raw_response column: {e}"
+                ))
+            })?
         };
 
         let previous_response_id = previous.map(ResponseId);
-        let raw_response = parse_raw_response(raw_response_json)?;
-        let input = parse_json_value(input_json)?;
+        let raw_response = raw_response_json.unwrap_or(Value::Null);
+        let input = input_json.unwrap_or_else(|| Value::Array(Vec::new()));
 
         Ok(StoredResponse {
             id: ResponseId(id),
@@ -1040,9 +1071,7 @@ impl ResponseStorage for PostgresResponseStorage {
         if rows.is_empty() {
             return Ok(None);
         }
-        Self::build_response_from_row(&rows[0], &self.store.schema)
-            .map(Some)
-            .map_err(|err| ResponseStorageError::StorageError(err.to_string()))
+        Self::build_response_from_row(&rows[0], &self.store.schema).map(Some)
     }
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
@@ -1113,9 +1142,7 @@ impl ResponseStorage for PostgresResponseStorage {
         let schema = &self.store.schema;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let resp = Self::build_response_from_row(&row, schema)
-                .map_err(ResponseStorageError::StorageError)?;
-            out.push(resp);
+            out.push(Self::build_response_from_row(&row, schema)?);
         }
 
         Ok(out)
@@ -1145,5 +1172,41 @@ impl ResponseStorage for PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(rows_deleted as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_metadata_none_returns_ok_none() {
+        assert!(PostgresConversationStorage::parse_metadata(None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn parse_metadata_json_null_returns_ok_none() {
+        assert!(
+            PostgresConversationStorage::parse_metadata(Some(Value::Null))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_metadata_object_round_trips() {
+        let obj = json!({"key": "value"}).as_object().unwrap().clone();
+        let parsed =
+            PostgresConversationStorage::parse_metadata(Some(Value::Object(obj.clone()))).unwrap();
+        assert_eq!(parsed, Some(obj));
+    }
+
+    #[test]
+    fn parse_metadata_non_object_is_error() {
+        assert!(PostgresConversationStorage::parse_metadata(Some(json!("not an object"))).is_err());
     }
 }

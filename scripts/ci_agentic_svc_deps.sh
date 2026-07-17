@@ -1,7 +1,7 @@
 #!/bin/bash
-# CI helper for shared services (Oracle DB, Brave Search MCP).
+# CI helper for shared services (Oracle DB, Postgres DB, Brave Search MCP).
 # Usage:
-#   bash ci_agentic_svc_deps.sh check [--oracle <host>] [--brave <host>]
+#   bash ci_agentic_svc_deps.sh check [--oracle <host>] [--postgres <host>] [--brave <host>]
 #   bash ci_agentic_svc_deps.sh setup-oracle-client
 #   bash ci_agentic_svc_deps.sh create-oracle-user <host>
 #   bash ci_agentic_svc_deps.sh cleanup-oracle-user <host>
@@ -58,6 +58,12 @@ cmd_check() {
                     check_port "Oracle DB" "$2" 1521 || failed=1; shift 2
                 else
                     check_port "Oracle DB" "oracle-db" 1521 || failed=1; shift
+                fi ;;
+            --postgres)
+                if [[ -n "${2:-}" && "$2" != --* ]]; then
+                    check_port "Postgres DB" "$2" 5432 || failed=1; shift 2
+                else
+                    check_port "Postgres DB" "postgres-db" 5432 || failed=1; shift
                 fi ;;
             --brave)
                 if [[ -n "${2:-}" && "$2" != --* ]]; then
