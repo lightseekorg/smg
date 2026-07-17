@@ -261,6 +261,20 @@ jobs:
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: smg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d smg_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
 
@@ -311,6 +325,8 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cargo test
+          SMG_TEST_POSTGRES_URL=postgres://postgres:postgres@localhost:5432/smg_test \
+            cargo test -p data-connector --test postgres_json -- --ignored
 
       - name: Show sccache stats
         if: always()

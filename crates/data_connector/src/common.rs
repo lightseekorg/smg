@@ -106,7 +106,7 @@ pub(super) fn resolve_extra_column_values<'a>(
 
 /// Parse raw JSON string into `ConversationMetadata` (`JsonMap<String, Value>`).
 ///
-/// Shared across Postgres, Redis, and Oracle conversation storage backends.
+/// Shared across the Redis and Oracle conversation storage backends.
 /// Returns `Ok(None)` for `None`, empty strings, and the literal `"null"`.
 pub(super) fn parse_conversation_metadata(
     raw: Option<String>,

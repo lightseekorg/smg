@@ -9,10 +9,7 @@ use serde_json::Value;
 use tokio_postgres::{NoTls, Row};
 
 use crate::{
-    common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
-        resolve_extra_column_values,
-    },
+    common::{build_response_select_base, extra_column_defs, resolve_extra_column_values},
     config::PostgresConfig,
     context::current_extra_columns,
     core::{
@@ -25,6 +22,11 @@ use crate::{
     postgres_migrations::POSTGRES_HISTORY_MIGRATIONS,
     schema::SchemaConfig,
 };
+
+fn get_optional_json(row: &Row, column: &str) -> Result<Option<Value>, String> {
+    row.try_get::<_, Option<Value>>(column)
+        .map_err(|err| format!("error retrieving JSON column {column}: {err}"))
+}
 
 // ── Store ────────────────────────────────────────────────────────────────
 
@@ -139,10 +141,15 @@ impl PostgresConversationStorage {
     }
 
     fn parse_metadata(
-        metadata: Option<String>,
+        metadata: Option<Value>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        crate::common::parse_conversation_metadata(metadata)
-            .map_err(ConversationStorageError::StorageError)
+        match metadata {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Object(metadata)) => Ok(Some(metadata)),
+            Some(_) => Err(ConversationStorageError::StorageError(
+                "conversation metadata must be a JSON object or null".to_string(),
+            )),
+        }
     }
 }
 
@@ -155,11 +162,7 @@ impl ConversationStorage for PostgresConversationStorage {
         let conversation = Conversation::new(input);
         let id_str = conversation.id.0.as_str();
         let created_at: DateTime<Utc> = conversation.created_at;
-        let metadata_json = conversation
-            .metadata
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
+        let metadata_json = conversation.metadata.clone().map(Value::Object);
 
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
@@ -246,10 +249,11 @@ impl ConversationStorage for PostgresConversationStorage {
         } else {
             row.get(s.col("created_at"))
         };
-        let metadata_json: Option<String> = if s.is_skipped("metadata") {
+        let metadata_json: Option<Value> = if s.is_skipped("metadata") {
             None
         } else {
-            row.get(s.col("metadata"))
+            get_optional_json(row, s.col("metadata"))
+                .map_err(ConversationStorageError::StorageError)?
         };
         let metadata = Self::parse_metadata(metadata_json)?;
         Ok(Some(Conversation::with_parts(
@@ -293,7 +297,7 @@ impl ConversationStorage for PostgresConversationStorage {
             )));
         }
 
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        let metadata_json = metadata.clone().map(Value::Object);
         let col_meta = s.col("metadata");
 
         let (_, created_at) = if s.is_skipped("created_at") {
@@ -432,8 +436,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         } = item;
         let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&content)?;
-
         let si = &self.store.schema.conversation_items;
         let table = si.qualified_table(self.store.schema.owner.as_deref());
 
@@ -454,7 +456,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         }
         if !si.is_skipped("content") {
             col_names.push(si.col("content"));
-            params.push(&content_json);
+            params.push(&content);
         }
         if !si.is_skipped("status") {
             col_names.push(si.col("status"));
@@ -786,11 +788,9 @@ fn build_item_from_row(
     let content: Value = if si.is_skipped("content") {
         Value::Null
     } else {
-        let content_raw: Option<String> = row.get(si.col("content"));
-        match content_raw {
-            Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
-            None => Value::Null,
-        }
+        get_optional_json(row, si.col("content"))
+            .map_err(ConversationItemStorageError::StorageError)?
+            .unwrap_or(Value::Null)
     };
     let status: Option<String> = if si.is_skipped("status") {
         None
@@ -892,10 +892,10 @@ impl PostgresResponseStorage {
         } else {
             row.get(s.col("previous_response_id"))
         };
-        let input_json: Option<String> = if s.is_skipped("input") {
+        let input_json: Option<Value> = if s.is_skipped("input") {
             None
         } else {
-            row.get(s.col("input"))
+            get_optional_json(row, s.col("input"))?
         };
         let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
             Utc::now()
@@ -912,15 +912,15 @@ impl PostgresResponseStorage {
         } else {
             row.get(s.col("model"))
         };
-        let raw_response_json: Option<String> = if s.is_skipped("raw_response") {
+        let raw_response_json: Option<Value> = if s.is_skipped("raw_response") {
             None
         } else {
-            row.get(s.col("raw_response"))
+            get_optional_json(row, s.col("raw_response"))?
         };
 
         let previous_response_id = previous.map(ResponseId);
-        let raw_response = parse_raw_response(raw_response_json)?;
-        let input = parse_json_value(input_json)?;
+        let raw_response = raw_response_json.unwrap_or(Value::Null);
+        let input = input_json.unwrap_or_else(|| Value::Array(Vec::new()));
 
         Ok(StoredResponse {
             id: ResponseId(id),
@@ -1145,5 +1145,47 @@ impl ResponseStorage for PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(rows_deleted as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_metadata_preserves_json_object() {
+        let value = json!({
+            "nested": {"enabled": true},
+            "count": 2
+        });
+        let expected = value.as_object().cloned();
+
+        let parsed = PostgresConversationStorage::parse_metadata(Some(value)).unwrap();
+
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parse_metadata_maps_sql_and_json_null_to_none() {
+        assert_eq!(
+            PostgresConversationStorage::parse_metadata(None).unwrap(),
+            None
+        );
+        assert_eq!(
+            PostgresConversationStorage::parse_metadata(Some(Value::Null)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_metadata_rejects_non_object_json() {
+        let result = PostgresConversationStorage::parse_metadata(Some(json!(["not", "metadata"])));
+
+        assert!(matches!(
+            result,
+            Err(ConversationStorageError::StorageError(_))
+        ));
     }
 }
