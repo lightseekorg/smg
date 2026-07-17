@@ -307,11 +307,10 @@ jobs:
           python crates/multimodal/scripts/generate_vision_golden.py
 
       - name: Create isolated Postgres test database
-        # Don't let a flaky/restarting shared Postgres service fail the
-        # whole job — the ~100 non-Postgres unit tests below don't need a
-        # database. The Postgres integration tests are skipped (not failed)
-        # if DATA_CONNECTOR_TEST_POSTGRES_URL never gets set.
-        continue-on-error: true
+        # No continue-on-error here: the Postgres regression suite must
+        # actually run in CI, not silently no-op if this step fails (see PR
+        # #1935 review discussion). `check --postgres` retries on its own
+        # for transient pod-restart flakiness.
         run: |
           bash scripts/ci_agentic_svc_deps.sh check --postgres postgres-db
           bash scripts/ci_agentic_svc_deps.sh create-postgres-db postgres-db
@@ -321,11 +320,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cargo test
-          if [ -n "${DATA_CONNECTOR_TEST_POSTGRES_URL:-}" ]; then
-            cargo test -p data-connector --test postgres_integration -- --ignored --test-threads=1
-          else
-            echo "::warning::Skipping Postgres integration tests — DATA_CONNECTOR_TEST_POSTGRES_URL not set (isolated database creation failed or was skipped)"
-          fi
+          cargo test -p data-connector --test postgres_integration -- --ignored --test-threads=1
 
       - name: Cleanup Postgres test database
         if: always()

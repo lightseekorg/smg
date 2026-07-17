@@ -12,15 +12,28 @@
 
 set -uo pipefail
 
+# Retries with a short backoff so a shared service that's mid-restart
+# (pod rollout, transient network blip) doesn't fail CI outright — but
+# still hard-fails (non-zero exit) once attempts are exhausted, so a
+# genuinely-down service still fails the job instead of being silently
+# skipped downstream.
 check_port() {
     local name="$1" host="$2" port="$3"
-    echo -n "Checking $name on $host:$port... "
-    if python3 -c "import socket; s=socket.create_connection(('$host', $port), 5); s.close()" 2>/dev/null; then
-        echo "ok"
-    else
-        echo "FAILED"
-        return 1
-    fi
+    local attempts="${CHECK_PORT_RETRIES:-6}" delay="${CHECK_PORT_RETRY_DELAY:-5}"
+    local i
+    for ((i = 1; i <= attempts; i++)); do
+        echo -n "Checking $name on $host:$port (attempt $i/$attempts)... "
+        if python3 -c "import socket; s=socket.create_connection(('$host', $port), 5); s.close()" 2>/dev/null; then
+            echo "ok"
+            return 0
+        fi
+        echo "not ready"
+        if [ "$i" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+    done
+    echo "FAILED: $name on $host:$port not reachable after $attempts attempts"
+    return 1
 }
 
 ci_oracle_username() {
