@@ -18,6 +18,7 @@ pub mod passthrough;
 pub mod pythonic;
 pub mod qwen;
 pub mod qwen_xml;
+pub mod sarashina;
 pub mod step3;
 
 // Shared helpers and utilities
@@ -39,4 +40,5 @@ pub(crate) use passthrough::PassthroughParser;
 pub use pythonic::PythonicParser;
 pub use qwen::QwenParser;
 pub use qwen_xml::QwenXmlParser;
+pub use sarashina::SarashinaParser;
 pub use step3::Step3Parser;

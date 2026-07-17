@@ -239,7 +239,9 @@ fn find_matching_bracket(buffer: &str, start: usize) -> Option<usize> {
     None // No matching bracket found
 }
 
-fn parse_python_expression(source: &str) -> ParserResult<Expr> {
+// Also used by the Sarashina parser to parse its Python-literal payload;
+// keep the (source -> JSON) behavior stable when editing.
+pub(crate) fn parse_python_expression(source: &str) -> ParserResult<Expr> {
     let module = parse(source, Mode::Expression, "<pythonic_tool_call>")
         .map_err(|err| ParserError::ParsingFailed(err.to_string()))?;
 
@@ -296,7 +298,7 @@ fn build_tool_call(expr: Expr, _index: usize) -> ParserResult<ToolCall> {
     }
 }
 
-fn expression_to_json(expr: &Expr) -> ParserResult<Value> {
+pub(crate) fn expression_to_json(expr: &Expr) -> ParserResult<Value> {
     match expr {
         Expr::Constant(expr_constant) => constant_to_json(&expr_constant.value),
         Expr::List(list_expr) => collect_sequence(&list_expr.elts).map(Value::Array),

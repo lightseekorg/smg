@@ -11,7 +11,7 @@ use crate::{
     parsers::{
         CohereParser, DeepSeek31Parser, DeepSeekDsmlParser, DeepSeekParser, Glm4MoeParser,
         InklingParser, JsonParser, KimiK2Parser, LlamaParser, MinimaxM2Parser, MistralParser,
-        PassthroughParser, PythonicParser, QwenParser, QwenXmlParser, Step3Parser,
+        PassthroughParser, PythonicParser, QwenParser, QwenXmlParser, SarashinaParser, Step3Parser,
     },
     traits::ToolParser,
 };
@@ -326,6 +326,7 @@ impl ParserFactory {
         registry.register_parser("glm45_moe", || Box::new(Glm4MoeParser::glm45()));
         registry.register_parser("glm47_moe", || Box::new(Glm4MoeParser::glm47()));
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
+        registry.register_parser("sarashina", || Box::new(SarashinaParser::new()));
         registry.register_parser_with_structural_tag(
             "kimik2",
             || Box::new(KimiK2Parser::new()),
@@ -402,6 +403,10 @@ impl ParserFactory {
         registry.map_model("glm-4.7*", "glm47_moe");
         registry.map_model("glm-5*", "glm47_moe");
         registry.map_model("glm-*", "json");
+
+        // Sarashina models
+        registry.map_model("sarashina*", "sarashina");
+        registry.map_model("Sarashina*", "sarashina");
 
         // Step3 models
         registry.map_model("step3*", "step3");
