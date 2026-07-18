@@ -741,9 +741,14 @@ fn with_admission_layer(
     }
 }
 
+/// `serving_auth_config` covers inference-serving routes and may include
+/// per-tenant keys. `admin_auth_config` is the admin/worker-management
+/// fallback (used when `control_plane_auth_state` is `None`) and must
+/// contain only the shared gateway-wide key, never per-tenant keys.
 pub fn build_app(
     app_state: Arc<AppState>,
-    auth_config: AuthConfig,
+    serving_auth_config: AuthConfig,
+    admin_auth_config: AuthConfig,
     control_plane_auth_state: Option<smg_auth::ControlPlaneAuthState>,
     max_payload_size: usize,
     request_id_headers: Vec<String>,
@@ -830,7 +835,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
@@ -853,7 +858,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ));
 
@@ -872,7 +877,7 @@ pub fn build_app(
         middleware::route_request_meta_middleware,
     ))
     .route_layer(axum::middleware::from_fn_with_state(
-        auth_config.clone(),
+        serving_auth_config.clone(),
         middleware::auth_middleware,
     ));
 
@@ -922,16 +927,23 @@ pub fn build_app(
                 .delete(delete_worker),
         );
 
-    // Apply authentication middleware to control plane routes
+    // Fallback (no control-plane auth) normally uses `admin_auth_config`.
+    // If only tenant keys are configured (no shared `--api-key`), there's no
+    // credential that should reach these routes — deny outright instead of
+    // falling back to `auth_middleware`, which would treat the empty config
+    // as "open". Neither config having any key at all is a fully open
+    // dev/test deployment, which keeps its legacy pass-through behavior.
     let apply_control_plane_auth = |routes: Router<Arc<AppState>>| {
         if let Some(ref cp_state) = control_plane_auth_state {
             routes.route_layer(axum::middleware::from_fn_with_state(
                 cp_state.clone(),
                 smg_auth::control_plane_auth_middleware,
             ))
+        } else if !admin_auth_config.is_enabled() && serving_auth_config.is_enabled() {
+            routes.route_layer(axum::middleware::from_fn(middleware::deny_all_middleware))
         } else {
             routes.route_layer(axum::middleware::from_fn_with_state(
-                auth_config.clone(),
+                admin_auth_config.clone(),
                 middleware::auth_middleware,
             ))
         }
@@ -967,6 +979,16 @@ pub fn build_app(
 }
 
 pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Defense in depth: the CLI and Python bindings both validate via
+    // `RouterConfigBuilder::build()` before reaching here, but `RouterConfig`
+    // is public and `Deserialize`, so a Rust library caller can construct
+    // `ServerConfig` directly (or deserialize it) and call `startup` without
+    // ever going through the builder. Validate here too so `tenant_api_keys`
+    // (and everything else `ConfigValidator` checks) is enforced regardless
+    // of construction path — a bypassed empty/duplicate tenant key would
+    // otherwise silently reach `AuthConfig`.
+    config.router_config.validate()?;
+
     static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
     if let Some(trace_config) = &config.router_config.trace_config {
@@ -1350,7 +1372,17 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ]
     });
 
-    let auth_config = AuthConfig::new(config.router_config.api_key.clone());
+    // Serving routes accept both the shared key and per-tenant keys, so the
+    // rate limiter (and anything else keyed on tenant identity) can tell
+    // tenants apart. Admin/worker-management routes must NOT accept tenant
+    // keys when falling back to simple API-key auth (no control-plane auth
+    // configured) — a tenant credential must not be able to reach
+    // `/workers`, `/flush_cache`, etc. Only the shared gateway-wide key does.
+    let serving_auth_config = AuthConfig::with_tenant_keys(
+        config.router_config.api_key.clone(),
+        &config.router_config.tenant_api_keys,
+    );
+    let admin_auth_config = AuthConfig::new(config.router_config.api_key.clone());
 
     // Initialize control plane authentication if configured
     let control_plane_auth_state =
@@ -1358,7 +1390,8 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     let app = build_app(
         app_state,
-        auth_config,
+        serving_auth_config,
+        admin_auth_config,
         control_plane_auth_state,
         config.max_payload_size,
         request_id_headers,
@@ -1529,4 +1562,57 @@ fn create_cors_layer(allowed_origins: Vec<String>) -> tower_http::cors::CorsLaye
     };
 
     cors.max_age(Duration::from_secs(3600))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TenantApiKeyEntry;
+
+    fn minimal_server_config(router_config: RouterConfig) -> ServerConfig {
+        ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            health_check_port: None,
+            runtime_worker_threads: None,
+            router_config,
+            max_payload_size: 1024,
+            log_dir: None,
+            log_level: None,
+            log_json: false,
+            service_discovery_config: None,
+            prometheus_config: None,
+            request_timeout_secs: 60,
+            request_id_headers: None,
+            shutdown_grace_period_secs: 5,
+            control_plane_auth: None,
+            mesh_server_config: None,
+            webrtc_bind_addr: None,
+            webrtc_stun_server: None,
+        }
+    }
+
+    /// `startup` must reject an invalid config even when `RouterConfig` was
+    /// built directly (struct literal or `Deserialize`), not via
+    /// `RouterConfigBuilder::build()` — a Rust library caller can construct
+    /// `ServerConfig` this way and bypass the builder's validation entirely.
+    /// Regression test for a reviewer-flagged gap: an empty tenant_api_keys
+    /// entry reaching `AuthConfig` unvalidated would make `Authorization:
+    /// Bearer ` (empty token) a valid serving credential.
+    #[tokio::test]
+    async fn startup_validates_directly_constructed_router_config() {
+        let router_config = RouterConfig {
+            tenant_api_keys: vec![TenantApiKeyEntry {
+                tenant_id: "team-a".to_string(),
+                key: String::new(),
+            }],
+            ..Default::default()
+        };
+
+        let result = startup(minimal_server_config(router_config)).await;
+        assert!(
+            result.is_err(),
+            "startup must validate router_config even when constructed directly"
+        );
+    }
 }

@@ -119,7 +119,11 @@ pub fn create_test_app(
         ]
     });
 
-    let auth_config = AuthConfig::new(router_config.api_key.clone());
+    let serving_auth_config = AuthConfig::with_tenant_keys(
+        router_config.api_key.clone(),
+        &router_config.tenant_api_keys,
+    );
+    let admin_auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
     #[expect(
@@ -128,7 +132,8 @@ pub fn create_test_app(
     )]
     build_app(
         app_state,
-        auth_config,
+        serving_auth_config,
+        admin_auth_config,
         None, // No control plane auth for tests
         router_config.max_payload_size,
         request_id_headers,
@@ -182,7 +187,11 @@ pub fn create_test_app_with_context(
         ]
     });
 
-    let auth_config = AuthConfig::new(router_config.api_key.clone());
+    let serving_auth_config = AuthConfig::with_tenant_keys(
+        router_config.api_key.clone(),
+        &router_config.tenant_api_keys,
+    );
+    let admin_auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
     #[expect(
@@ -191,7 +200,8 @@ pub fn create_test_app_with_context(
     )]
     build_app(
         app_state,
-        auth_config,
+        serving_auth_config,
+        admin_auth_config,
         None, // No control plane auth for tests
         router_config.max_payload_size,
         request_id_headers,

@@ -58,6 +58,10 @@ pub struct RouterConfig {
     #[serde(default)]
     pub dp_minimum_tokens_scheduler: bool,
     pub api_key: Option<String>,
+    /// Per-tenant API keys for serving-path auth, layered on top of
+    /// `api_key` rather than replacing it.
+    #[serde(default)]
+    pub tenant_api_keys: Vec<TenantApiKeyEntry>,
     pub discovery: Option<DiscoveryConfig>,
     pub metrics: Option<MetricsConfig>,
     pub trace_config: Option<TraceConfig>,
@@ -157,6 +161,23 @@ pub struct RouterConfig {
 pub struct TenantResolutionConfig {
     pub trust_tenant_header: bool,
     pub tenant_header_name: String,
+}
+
+/// A single tenant-scoped API key for serving-path authentication.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantApiKeyEntry {
+    /// Resolves to tenant key `auth:<tenant_id>`, e.g. `team-red`.
+    pub tenant_id: String,
+    pub key: String,
+}
+
+impl std::fmt::Debug for TenantApiKeyEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantApiKeyEntry")
+            .field("tenant_id", &self.tenant_id)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Default for TenantResolutionConfig {
@@ -759,6 +780,7 @@ impl Default for RouterConfig {
             dp_aware: false,
             dp_minimum_tokens_scheduler: false,
             api_key: None,
+            tenant_api_keys: Vec::new(),
             discovery: None,
             metrics: None,
             trace_config: None,

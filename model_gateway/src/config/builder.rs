@@ -6,8 +6,8 @@ use smg_mcp::McpConfig;
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingKeyOverrideConfig, RoutingMode, TokenizerCacheConfig,
-    TraceConfig,
+    RetryConfig, RouterConfig, RoutingKeyOverrideConfig, RoutingMode, TenantApiKeyEntry,
+    TokenizerCacheConfig, TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -279,6 +279,11 @@ impl RouterConfigBuilder {
 
     pub fn api_key<S: Into<String>>(mut self, key: S) -> Self {
         self.config.api_key = Some(key.into());
+        self
+    }
+
+    pub fn tenant_api_keys(mut self, keys: Vec<TenantApiKeyEntry>) -> Self {
+        self.config.tenant_api_keys = keys;
         self
     }
 

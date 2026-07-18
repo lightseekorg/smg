@@ -1,4 +1,5 @@
 use axum::http::HeaderName;
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -27,6 +28,7 @@ impl ConfigValidator {
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
         Self::validate_tenant_resolution(config)?;
+        Self::validate_tenant_api_keys(config)?;
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
         }
@@ -108,6 +110,80 @@ impl ConfigValidator {
                 "tenant_resolution.tenant_header_name must be a valid HTTP header name: {e}"
             ),
         })?;
+
+        Ok(())
+    }
+
+    /// Validates `tenant_api_keys`: non-empty `tenant_id`/`key`, and no two
+    /// credentials (including the shared `api_key`) sharing a secret value —
+    /// duplicates would silently attribute one tenant's traffic to another.
+    /// Runs regardless of construction path, since `TenantApiKeyEntry` is a
+    /// public deserializable struct. Compares hashes only; errors never
+    /// include a raw key value.
+    fn validate_tenant_api_keys(config: &RouterConfig) -> ConfigResult<()> {
+        fn hash(key: &str) -> [u8; 32] {
+            Sha256::digest(key.as_bytes()).into()
+        }
+
+        let mut seen: std::collections::HashMap<[u8; 32], String> =
+            std::collections::HashMap::new();
+
+        if let Some(api_key) = &config.api_key {
+            seen.insert(hash(api_key), "the shared api_key".to_string());
+        }
+
+        for entry in &config.tenant_api_keys {
+            let trimmed_tenant_id = entry.tenant_id.trim();
+            if trimmed_tenant_id.is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "tenant_api_keys entries must have a non-empty tenant_id".to_string(),
+                });
+            }
+            // The CLI parser already trims tenant_id, but config-file/binding
+            // entries bypass it — reject padding here instead of silently
+            // normalizing, since `auth:<tenant_id>` embeds it verbatim and a
+            // padded id would resolve to a different, likely-unintended
+            // tenant identity than the canonical one.
+            if trimmed_tenant_id != entry.tenant_id {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "tenant_api_keys tenant_id '{}' must not have surrounding whitespace",
+                        entry.tenant_id
+                    ),
+                });
+            }
+            let trimmed_key = entry.key.trim();
+            if trimmed_key.is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "tenant_api_keys entry for tenant_id '{}' must have a non-empty key",
+                        entry.tenant_id
+                    ),
+                });
+            }
+            // Same asymmetry as tenant_id: the CLI trims the key, but
+            // config-file/binding entries don't go through it. A padded key
+            // would hash differently than the operator likely intended,
+            // silently defeating the duplicate-value check above for that
+            // entry.
+            if trimmed_key != entry.key {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "tenant_api_keys entry for tenant_id '{}' key must not have surrounding whitespace",
+                        entry.tenant_id
+                    ),
+                });
+            }
+
+            let label = format!("tenant_id '{}'", entry.tenant_id);
+            if let Some(existing) = seen.insert(hash(&entry.key), label.clone()) {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "duplicate API key value: {label} uses the same credential as {existing}. Each credential must be unique, or requests authenticate as whichever entry is checked last."
+                    ),
+                });
+            }
+        }
 
         Ok(())
     }
@@ -965,6 +1041,169 @@ mod tests {
         );
 
         assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    fn regular_mode_config() -> RouterConfig {
+        RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        )
+    }
+
+    #[test]
+    fn test_validate_distinct_tenant_api_keys_accepted() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![
+            TenantApiKeyEntry {
+                tenant_id: "team-a".to_string(),
+                key: "secret-a".to_string(),
+            },
+            TenantApiKeyEntry {
+                tenant_id: "team-b".to_string(),
+                key: "secret-b".to_string(),
+            },
+        ];
+
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_duplicate_tenant_api_keys_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![
+            TenantApiKeyEntry {
+                tenant_id: "team-a".to_string(),
+                key: "shared-secret".to_string(),
+            },
+            TenantApiKeyEntry {
+                tenant_id: "team-b".to_string(),
+                key: "shared-secret".to_string(),
+            },
+        ];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        let message = err.to_string();
+        assert!(message.contains("team-a"));
+        assert!(message.contains("team-b"));
+        assert!(
+            !message.contains("shared-secret"),
+            "error must not leak the credential value: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_api_key_matching_shared_api_key_rejected() {
+        let mut config = regular_mode_config();
+        config.api_key = Some("shared-secret".to_string());
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-a".to_string(),
+            key: "shared-secret".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        let message = err.to_string();
+        assert!(message.contains("team-a"));
+        assert!(message.contains("shared api_key"));
+        assert!(
+            !message.contains("shared-secret"),
+            "error must not leak the credential value: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_empty_tenant_id_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: String::new(),
+            key: "some-secret".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn test_validate_whitespace_only_tenant_id_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "   ".to_string(),
+            key: "some-secret".to_string(),
+        }];
+
+        assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    /// A padded-but-otherwise-valid tenant_id (e.g. supplied via a config
+    /// file or binding, bypassing the CLI parser's own trim) must be
+    /// rejected rather than silently resolving to a different `auth:` key
+    /// than the canonical, unpadded tenant_id.
+    #[test]
+    fn test_validate_padded_tenant_id_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: " team-a ".to_string(),
+            key: "some-secret".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        assert!(err.to_string().contains("whitespace"));
+    }
+
+    /// Same asymmetry as the padded-tenant_id case, but for `key`: the CLI
+    /// trims it, config-file/binding entries don't, so an untrimmed key
+    /// would hash differently than intended and silently evade the
+    /// duplicate-value check.
+    #[test]
+    fn test_validate_padded_key_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-a".to_string(),
+            key: " some-secret ".to_string(),
+        }];
+
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        let message = err.to_string();
+        assert!(message.contains("team-a"));
+        assert!(message.contains("whitespace"));
+        assert!(
+            !message.contains("some-secret"),
+            "error must not leak the credential value: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_empty_key_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-a".to_string(),
+            key: String::new(),
+        }];
+
+        // An empty key would make `Authorization: Bearer ` (empty token) a
+        // valid credential for this tenant.
+        let err = ConfigValidator::validate(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        let message = err.to_string();
+        assert!(message.contains("team-a"));
+        assert!(message.contains("key"));
+    }
+
+    #[test]
+    fn test_validate_whitespace_only_key_rejected() {
+        let mut config = regular_mode_config();
+        config.tenant_api_keys = vec![TenantApiKeyEntry {
+            tenant_id: "team-a".to_string(),
+            key: "   ".to_string(),
+        }];
+
+        assert!(ConfigValidator::validate(&config).is_err());
     }
 
     #[test]

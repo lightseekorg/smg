@@ -15,7 +15,7 @@ pub mod tenant_resolution;
 pub mod token_bucket;
 pub mod wasm;
 
-pub use auth::{auth_middleware, AuthConfig};
+pub use auth::{auth_middleware, deny_all_middleware, AuthConfig};
 pub use concurrency::{
     concurrency_limit_middleware, ConcurrencyLimiter, QueueProcessor, QueuedRequest, TokenGuardBody,
 };
