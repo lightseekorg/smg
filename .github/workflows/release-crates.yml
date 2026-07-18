@@ -8,6 +8,8 @@ on:
     branches: [main]
     paths:
       - '**/Cargo.toml'
+      - '.github/workflows/release-crates.yml'
+      - '.github/actions/publish-crate/**'
   workflow_dispatch:
 
 env:
@@ -31,12 +33,12 @@ jobs:
             path: crates/data_connector
           - crate: wfaas
             path: crates/workflow
-          - crate: smg-wasm
-            path: crates/wasm
           - crate: smg-auth
             path: crates/auth
-          - crate: llm-tokenizer
-            path: crates/tokenizer
+          - crate: smg-mcp
+            path: crates/mcp
+          - crate: smg-mm-rdma
+            path: crates/mm_rdma
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/publish-crate
@@ -55,14 +57,16 @@ jobs:
         include:
           - crate: tool-parser
             path: crates/tool_parser
-          - crate: smg-mcp
-            path: crates/mcp
           - crate: smg-grpc-client
             path: crates/grpc_client
-          - crate: llm-multimodal
-            path: crates/multimodal
+          - crate: smg-client
+            path: clients/rust
           - crate: smg-mesh
             path: crates/mesh
+          - crate: smg-wasm
+            path: crates/wasm
+          - crate: llm-tokenizer
+            path: crates/tokenizer
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/publish-crate
@@ -71,9 +75,21 @@ jobs:
           path: ${{ matrix.path }}
           token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # Tier 3: Main crate depending on all others
+  # Tier 3: Crates depending on tier 2
   tier3:
     needs: tier2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: llm-multimodal
+          path: crates/multimodal
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Tier 4: Main crate depending on all others
+  tier4:
+    needs: tier3
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

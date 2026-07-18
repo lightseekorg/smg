@@ -719,7 +719,9 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem::size_of, path::Path, sync::Arc};
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
+    use std::{mem::size_of, sync::Arc};
 
     use llm_multimodal::{
         audio::DecodedAudio, AudioClip, AudioSource, ImageDetail, ImageFrame, VideoClip,
@@ -727,6 +729,7 @@ mod tests {
     use ndarray::{ArrayD, IxDyn};
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::routers::grpc::proto_wrapper::write_tokenspeed_shm_with;
 
     #[cfg(target_os = "linux")]
