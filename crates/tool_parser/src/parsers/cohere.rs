@@ -140,22 +140,59 @@ impl CohereParser {
             .collect()
     }
 
-    /// Extract JSON content between START_ACTION and END_ACTION
+    /// Extract JSON between START_ACTION and END_ACTION (skip markers inside strings).
     fn extract_action_json(text: &str) -> Option<(usize, &str, usize)> {
         let start_idx = text.find(START_ACTION)?;
         let json_start = start_idx + START_ACTION.len();
+        let end_offset = Self::find_end_action_outside_strings(&text[json_start..])?;
+        let json_str = &text[json_start..json_start + end_offset];
+        Some((
+            start_idx,
+            json_str,
+            json_start + end_offset + END_ACTION.len(),
+        ))
+    }
 
-        if let Some(end_offset) = text[json_start..].find(END_ACTION) {
-            let json_str = &text[json_start..json_start + end_offset];
-            Some((
-                start_idx,
-                json_str,
-                json_start + end_offset + END_ACTION.len(),
-            ))
-        } else {
-            // Incomplete - no END_ACTION yet
-            None
+    /// Offset of END_ACTION in `s`, ignoring occurrences inside JSON strings.
+    /// Incomplete / unclosed quotes return None so streaming can wait for more
+    /// input (no find/rfind fallback — that breaks mid-string streams and can
+    /// swallow a following action).
+    fn find_end_action_outside_strings(s: &str) -> Option<usize> {
+        let mut in_string = false;
+        let mut escape = false;
+        let bytes = s.as_bytes();
+        let needle = END_ACTION.as_bytes();
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if escape {
+                escape = false;
+                i += 1;
+                continue;
+            }
+            let b = bytes[i];
+            if in_string {
+                if b == b'\\' {
+                    escape = true;
+                    i += 1;
+                    continue;
+                }
+                if b == b'"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'"' {
+                in_string = true;
+                i += 1;
+                continue;
+            }
+            if Some(&b) == needle.first() && bytes[i..].starts_with(needle) {
+                return Some(i);
+            }
+            i += 1;
         }
+        None
     }
 }
 
@@ -244,7 +281,7 @@ impl ToolParser for CohereParser {
 
             ParseState::InAction => {
                 // Check if we have END_ACTION
-                if let Some(pos) = self.buffer.find(END_ACTION) {
+                if let Some(pos) = Self::find_end_action_outside_strings(&self.buffer) {
                     // We have complete JSON - extract it before modifying buffer
                     let json_content = self.buffer[..pos].to_string();
 
