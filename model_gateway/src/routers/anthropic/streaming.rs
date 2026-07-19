@@ -106,8 +106,14 @@ async fn build_streaming_response(
     let status = response.status();
 
     if !status.is_success() {
-        return build_streaming_error_response(response, model_id, start_time, stream_deadline)
-            .await;
+        return build_streaming_error_response(
+            response,
+            worker.as_ref(),
+            model_id,
+            start_time,
+            stream_deadline,
+        )
+        .await;
     }
 
     debug!(model = %model_id, status = %status, "Starting streaming response");
@@ -174,18 +180,7 @@ fn record_streaming_worker_outcome(worker: Option<&dyn WorkerTrait>, status: Sta
     let Some(worker) = worker else {
         return;
     };
-    worker.record_outcome(status.as_u16());
-    if status.is_server_error() {
-        Metrics::record_worker_error(
-            metrics_labels::WORKER_REGULAR,
-            metrics_labels::CONNECTION_HTTP,
-            if status == StatusCode::GATEWAY_TIMEOUT {
-                metrics_labels::ERROR_TIMEOUT
-            } else {
-                metrics_labels::ERROR_BACKEND
-            },
-        );
-    }
+    worker::record_worker_outcome(worker, status);
 }
 
 fn is_streaming_timeout_message(message: &str) -> bool {
@@ -252,6 +247,7 @@ async fn relay_stream_with_deadline<S>(
 /// Handle a non-success streaming response.
 async fn build_streaming_error_response(
     response: reqwest::Response,
+    selected_worker: &dyn WorkerTrait,
     model_id: &str,
     start_time: Instant,
     stream_deadline: StreamDeadline,
@@ -286,6 +282,7 @@ async fn build_streaming_error_response(
             "messages",
             "streaming_error",
         );
+        worker::record_worker_outcome(selected_worker, status);
 
         let headers = response.headers().clone();
         let upstream_stream = response.bytes_stream();
@@ -311,7 +308,14 @@ async fn build_streaming_error_response(
     }
 
     // Non-SSE error: read the body and return a proper error response
-    worker::handle_streaming_error_response(response, model_id, start_time, stream_deadline).await
+    worker::handle_streaming_error_response(
+        response,
+        selected_worker,
+        model_id,
+        start_time,
+        stream_deadline,
+    )
+    .await
 }
 
 // ============================================================================
