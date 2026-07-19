@@ -348,3 +348,18 @@ async fn test_cohere_end_action_marker_inside_string_param() {
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
     assert_eq!(args["text"], "say <|END_ACTION|> please");
 }
+
+#[tokio::test]
+async fn test_cohere_unclosed_string_prefers_last_end_action() {
+    let parser = CohereParser::new();
+    // Missing closing quote before the real delimiter; first END_ACTION is inside
+    // the unclosed string, the second is the real close.
+    let input = r#"<|START_ACTION|>{"tool_name": "echo", "parameters": {"text": "say <|END_ACTION|> please}<|END_ACTION|>"#;
+    let (normal, tools) = parser.parse_complete(input).await.unwrap();
+    assert!(
+        !normal.contains("<|END_ACTION|>"),
+        "leftover delimiter in normal text: {normal:?}"
+    );
+    // JSON is still malformed so tools may be empty; termination is the contract here.
+    let _ = tools;
+}

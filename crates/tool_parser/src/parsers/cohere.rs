@@ -193,7 +193,9 @@ impl CohereParser {
             i += 1;
         }
         if in_string {
-            return s.find(END_ACTION);
+            // Prefer the last marker: an earlier one may sit inside the
+            // unclosed string before the real closing delimiter.
+            return s.rfind(END_ACTION);
         }
         None
     }
