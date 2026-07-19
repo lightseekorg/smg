@@ -27,9 +27,6 @@ pub struct Glm4MoeParser {
     tool_call_extractor: Regex,
     /// Regex for extracting function details
     func_detail_extractor: Regex,
-    /// Regex for extracting argument key-value pairs
-    arg_extractor: Regex,
-
     /// Buffer for accumulating incomplete patterns across chunks
     buffer: String,
 
@@ -65,13 +62,9 @@ impl Glm4MoeParser {
 
         let func_detail_extractor = Regex::new(func_detail_pattern).expect("Valid regex pattern");
 
-        let arg_pattern = r"(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>";
-        let arg_extractor = Regex::new(arg_pattern).expect("Valid regex pattern");
-
         Self {
             tool_call_extractor,
             func_detail_extractor,
-            arg_extractor,
             buffer: String::new(),
             prev_tool_call_arr: Vec::new(),
             current_tool_id: -1,
@@ -94,24 +87,64 @@ impl Glm4MoeParser {
     /// Parse arguments, coercing each value by its declared schema type and
     /// falling back to [`infer_value`] when the type is unknown.
     fn parse_arguments(
-        &self,
         args_text: &str,
         param_types: &HashMap<String, String>,
     ) -> serde_json::Map<String, Value> {
         let mut arguments = serde_json::Map::new();
-
-        for capture in self.arg_extractor.captures_iter(args_text) {
-            let key = capture.get(1).map_or("", |m| m.as_str()).trim();
-            let value_str = capture.get(2).map_or("", |m| m.as_str()).trim();
-
+        let mut rest = args_text;
+        while let Some(key_rel) = rest.find("<arg_key>") {
+            rest = &rest[key_rel + "<arg_key>".len()..];
+            let Some(key_end) = rest.find("</arg_key>") else {
+                break;
+            };
+            let key = rest[..key_end].trim();
+            rest = &rest[key_end + "</arg_key>".len()..];
+            let trimmed = rest.trim_start();
+            if !trimmed.starts_with("<arg_value>") {
+                continue;
+            }
+            rest = &trimmed["<arg_value>".len()..];
+            let Some(close_rel) = Self::find_arg_value_close(rest) else {
+                break;
+            };
+            let value_str = rest[..close_rel].trim();
             let value =
                 helpers::coerce_by_schema_type(value_str, param_types.get(key).map(String::as_str))
                     .unwrap_or_else(|| infer_value(value_str));
-
             arguments.insert(key.to_string(), value);
+            rest = &rest[close_rel + "</arg_value>".len()..];
         }
 
         arguments
+    }
+
+    /// First `</arg_value>` whose follower is end-of-args or a real next key pair.
+    fn find_arg_value_close(value_and_rest: &str) -> Option<usize> {
+        let needle = "</arg_value>";
+        let mut from = 0;
+        while let Some(rel) = value_and_rest[from..].find(needle) {
+            let abs = from + rel;
+            let after = &value_and_rest[abs + needle.len()..];
+            if after.trim_start().is_empty() || Self::follows_with_real_arg_key(after) {
+                return Some(abs);
+            }
+            from = abs + needle.len();
+        }
+        None
+    }
+
+    fn follows_with_real_arg_key(after: &str) -> bool {
+        let trimmed = after.trim_start();
+        if !trimmed.starts_with("<arg_key>") {
+            return false;
+        }
+        let rest = &trimmed["<arg_key>".len()..];
+        let Some(key_end) = rest.find("</arg_key>") else {
+            return false;
+        };
+        rest[key_end + "</arg_key>".len()..]
+            .trim_start()
+            .starts_with("<arg_value>")
     }
 
     /// Parse a single tool call block
@@ -124,7 +157,7 @@ impl Glm4MoeParser {
             let args_text = captures.get(2).map_or("", |m| m.as_str());
 
             let param_types = helpers::param_types_for_function(tools, func_name);
-            let arguments = self.parse_arguments(args_text, &param_types);
+            let arguments = Self::parse_arguments(args_text, &param_types);
 
             let arguments_str = serde_json::to_string(&arguments)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
