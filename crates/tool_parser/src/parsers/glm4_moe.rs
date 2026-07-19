@@ -125,7 +125,13 @@ impl Glm4MoeParser {
         while let Some(rel) = value_and_rest[from..].find(needle) {
             let abs = from + rel;
             let after = &value_and_rest[abs + needle.len()..];
-            if after.trim_start().is_empty() || Self::follows_with_real_arg_key(after) {
+            // Last close wins when nothing else follows as another close tag
+            // (trailing garbage / incomplete next key), without taking an
+            // earlier literal </arg_value> inside the value.
+            if after.trim_start().is_empty()
+                || Self::follows_with_real_arg_key(after)
+                || !after.contains(needle)
+            {
                 return Some(abs);
             }
             from = abs + needle.len();
