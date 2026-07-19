@@ -154,6 +154,9 @@ impl CohereParser {
     }
 
     /// Offset of END_ACTION in `s`, ignoring occurrences inside JSON strings.
+    ///
+    /// If quotes never close, fall back to a plain search so a later real
+    /// delimiter still ends the action (malformed-JSON recovery).
     fn find_end_action_outside_strings(s: &str) -> Option<usize> {
         let mut in_string = false;
         let mut escape = false;
@@ -184,10 +187,13 @@ impl CohereParser {
                 i += 1;
                 continue;
             }
-            if bytes[i..].starts_with(needle) {
+            if Some(&b) == needle.first() && bytes[i..].starts_with(needle) {
                 return Some(i);
             }
             i += 1;
+        }
+        if in_string {
+            return s.find(END_ACTION);
         }
         None
     }
