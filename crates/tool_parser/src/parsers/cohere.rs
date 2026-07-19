@@ -154,9 +154,9 @@ impl CohereParser {
     }
 
     /// Offset of END_ACTION in `s`, ignoring occurrences inside JSON strings.
-    ///
-    /// If quotes never close, fall back to a plain search so a later real
-    /// delimiter still ends the action (malformed-JSON recovery).
+    /// Incomplete / unclosed quotes return None so streaming can wait for more
+    /// input (no find/rfind fallback — that breaks mid-string streams and can
+    /// swallow a following action).
     fn find_end_action_outside_strings(s: &str) -> Option<usize> {
         let mut in_string = false;
         let mut escape = false;
@@ -191,11 +191,6 @@ impl CohereParser {
                 return Some(i);
             }
             i += 1;
-        }
-        if in_string {
-            // Prefer the last marker: an earlier one may sit inside the
-            // unclosed string before the real closing delimiter.
-            return s.rfind(END_ACTION);
         }
         None
     }
