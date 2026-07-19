@@ -336,3 +336,15 @@ async fn test_cohere_tool_call_id_field() {
     assert_eq!(tools[0].function.name, "search");
     // Note: tool_call_id is currently ignored - this test documents current behavior
 }
+
+#[tokio::test]
+async fn test_cohere_end_action_marker_inside_string_param() {
+    let parser = CohereParser::new();
+    let input = r#"<|START_ACTION|>{"tool_name": "echo", "parameters": {"text": "say <|END_ACTION|> please"}}<|END_ACTION|>"#;
+
+    let (_, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].function.name, "echo");
+    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    assert_eq!(args["text"], "say <|END_ACTION|> please");
+}
