@@ -119,12 +119,11 @@ impl ToolParser for QwenParser {
             return Ok((text.to_string(), vec![]));
         }
 
-        // Find where the first tool call begins
-        // Safe: has_tool_markers() already confirmed the marker exists
-        let idx = text
-            .find("<tool_call>")
-            .ok_or_else(|| ParserError::ParsingFailed("tool_call marker not found".to_string()))?;
-        let normal_text = text[..idx].to_string();
+        // Split on the first complete <tool_call>\n...\n</tool_call>, not a prose mention.
+        let Some(first) = self.extractor.find(text) else {
+            return Ok((text.to_string(), vec![]));
+        };
+        let normal_text = text[..first.start()].to_string();
 
         // Extract tool calls
         let mut tools = Vec::new();
