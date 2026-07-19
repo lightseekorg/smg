@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use axum::{
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use openai_protocol::messages::{CreateMessageRequest, Message};
@@ -179,6 +179,7 @@ pub(crate) async fn handle_error_response(
 /// Handle a non-success streaming response under the active streaming deadline.
 pub(crate) async fn handle_streaming_error_response(
     response: reqwest::Response,
+    worker: &dyn Worker,
     model_id: &str,
     start_time: Instant,
     stream_deadline: StreamDeadline,
@@ -194,6 +195,7 @@ pub(crate) async fn handle_streaming_error_response(
         Ok(body) => body,
         Err(StreamBodyReadError::Timeout(timeout)) => {
             record_error_metrics(model_id, start_time, "streaming_timeout");
+            record_worker_outcome(worker, StatusCode::GATEWAY_TIMEOUT);
             return error::gateway_timeout("streaming_timeout", stream_deadline.message(timeout));
         }
         Err(StreamBodyReadError::TooLarge { .. }) => {
@@ -219,7 +221,23 @@ pub(crate) async fn handle_streaming_error_response(
     );
 
     record_error_metrics(model_id, start_time, metrics_labels::ERROR_BACKEND);
+    record_worker_outcome(worker, status);
     (status, body).into_response()
+}
+
+pub(crate) fn record_worker_outcome(worker: &dyn Worker, status: StatusCode) {
+    worker.record_outcome(status.as_u16());
+    if status.is_server_error() {
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            if status == StatusCode::GATEWAY_TIMEOUT {
+                metrics_labels::ERROR_TIMEOUT
+            } else {
+                metrics_labels::ERROR_BACKEND
+            },
+        );
+    }
 }
 
 fn record_error_metrics(model_id: &str, start_time: Instant, error_type: &'static str) {
