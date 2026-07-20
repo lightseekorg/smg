@@ -22,10 +22,10 @@ fi
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
 # caught up.
-# Bumped to include the EPD encode pipeline (tokenspeed #548, b5c762d): the SMG
-# encode servicer already expects `--disaggregation-mode encode`, which the old
-# pin (5e145af) predated — the EPD e2e's encode worker died on "invalid choice".
-TOKENSPEED_REF="${TOKENSPEED_REF:-69091e10c90c0e0f6e97c2bfdd332d61362ddd55}"
+# This pin includes the EPD package promotion (tokenspeed #743):
+# ``tokenspeed.runtime.pd.epd`` moved to ``tokenspeed.runtime.epd``. Keep the
+# encoder-servicer import in sync when advancing it.
+TOKENSPEED_REF="${TOKENSPEED_REF:-815f50cfb21742f41cc1f9a27ee78a1b8e2b04a5}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 
@@ -124,18 +124,9 @@ export TOKENSPEED_KERNEL_BACKEND="${TOKENSPEED_KERNEL_BACKEND:-cuda}"
 export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
-# The kernel requirements leave ``nvidia-cutlass-dsl`` unpinned, and 4.6.0
-# dropped ``cute.core.ThrMma`` — which quack (pulled via flash-attn's cute
-# backend) uses, breaking ``import tokenspeed``. Pin to the last compatible
-# release. Both UV_CONSTRAINT and PIP_CONSTRAINT are needed: the kernel's
-# setup.py shells out to ``pip install -r requirements/cuda.txt`` during the
-# native build (see _install_backend_build_requirements), and that subprocess
-# pip does not see UV_CONSTRAINT — without PIP_CONSTRAINT it pulls 4.6.0
-# alongside the pinned 4.5.2 and wins on sys.path.
-TOKENSPEED_CONSTRAINTS="$(mktemp)"
-echo "nvidia-cutlass-dsl==4.5.2" > "$TOKENSPEED_CONSTRAINTS"
-export UV_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
-export PIP_CONSTRAINT="$TOKENSPEED_CONSTRAINTS"
+# Keep Cutlass DSL and quack versioning owned by TokenSpeed's requirements.
+# Duplicating those exact pins here makes the install unsatisfiable when
+# TokenSpeed advances the compatible pair together.
 
 # Preseed build-time tooling: ``./python`` and ``tokenspeed-kernel`` use
 # ``setuptools.build_meta`` without declaring ``setuptools`` in
@@ -206,20 +197,18 @@ uv pip uninstall tokenspeed-smg-grpc-proto tokenspeed-smg-grpc-servicer
 uv pip install -e crates/grpc_client/python/
 uv pip install -e grpc_servicer/
 
-# ── cutlass provenance (diagnostic) ─────────────────────────────────────────
-# quack 0.5.0 uses the deprecated ``cute.core.ThrMma`` shim (present in 4.5.2,
-# removed in 4.6.0). Identical pip installs have imported different cutlass
-# builds across runners, so surface exactly what loads and from where.
-echo "=== cutlass provenance ==="
-uv pip show nvidia-cutlass-dsl 2>/dev/null | grep -iE "^(Name|Version|Location):" || true
+# ── Cutlass/quack provenance (diagnostic) ───────────────────────────────────
+# TokenSpeed pins a compatible Cutlass DSL 4.6.0 / quack >=0.6.1 pair. Surface
+# exactly what loads on each runner so future pin bumps remain diagnosable.
+echo "=== Cutlass/quack provenance ==="
+uv pip show nvidia-cutlass-dsl quack-kernels 2>/dev/null \
+    | grep -iE "^(Name|Version|Location):" || true
 python3 -c "
-import sys, cutlass, cutlass.cute.core as core
+import cutlass, quack
 print('import cutlass  ->', cutlass.__file__)
 print('cutlass version ->', getattr(cutlass, '__version__', '?'))
-print('cute.core file  ->', core.__file__)
-print('cute.core ThrMma->', hasattr(core, 'ThrMma'))
-print('sys.path:')
-[print('   ', p) for p in sys.path]
+print('import quack    ->', quack.__file__)
+print('quack version   ->', getattr(quack, '__version__', '?'))
 " || true
 
 # ── Verification ──────────────────────────────────────────────────────────
@@ -228,6 +217,8 @@ python3 -c "from tokenspeed.runtime.engine.async_llm import AsyncLLM; \
     print('AsyncLLM bases:', [b.__name__ for b in AsyncLLM.__bases__])"
 python3 -c "from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer; \
     print('gRPC servicer: importable')"
+python3 -c "from smg_grpc_servicer.tokenspeed.encoder_servicer import _lazy_encode_request; \
+    print('EncodeRequest:', _lazy_encode_request())"
 python3 -c "
 import pathlib
 import smg_grpc_proto

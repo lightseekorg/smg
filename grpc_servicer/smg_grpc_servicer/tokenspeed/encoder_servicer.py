@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def _lazy_encode_request():
-    from tokenspeed.runtime.pd.epd.encode_worker import EncodeRequest
+    from tokenspeed.runtime.epd.encode_worker import EncodeRequest
 
     return EncodeRequest
 
