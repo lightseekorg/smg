@@ -76,6 +76,16 @@ pub struct RouterConfig {
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
     pub queue_timeout_secs: u64,
+    /// Maximum PD requests concurrently occupying the prefill phase.
+    /// A non-positive value disables prefill-specific admission.
+    #[serde(default = "default_disabled_limit")]
+    pub prefill_max_concurrent_requests: i32,
+    /// Maximum number of PD requests waiting for a prefill slot.
+    #[serde(default = "default_prefill_queue_size")]
+    pub prefill_queue_size: usize,
+    /// Maximum time a PD request may wait for a prefill slot.
+    #[serde(default = "default_prefill_queue_timeout_secs")]
+    pub prefill_queue_timeout_secs: u64,
     /// If not set, defaults to max_concurrent_requests
     pub rate_limit_tokens_per_second: Option<i32>,
     /// Enable the priority-aware admission scheduler. When false (default),
@@ -206,6 +216,18 @@ pub struct TokenizerCacheConfig {
 
 fn default_load_monitor_interval_secs() -> u64 {
     10
+}
+
+const fn default_disabled_limit() -> i32 {
+    -1
+}
+
+const fn default_prefill_queue_size() -> usize {
+    100
+}
+
+const fn default_prefill_queue_timeout_secs() -> u64 {
+    60
 }
 
 fn default_enable_l0() -> bool {
@@ -792,6 +814,9 @@ impl Default for RouterConfig {
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,
+            prefill_max_concurrent_requests: default_disabled_limit(),
+            prefill_queue_size: default_prefill_queue_size(),
+            prefill_queue_timeout_secs: default_prefill_queue_timeout_secs(),
             rate_limit_tokens_per_second: None,
             priority_scheduler_enabled: false,
             priority_scheduler_default_max_class: default_priority_scheduler_max_class(),

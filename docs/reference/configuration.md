@@ -177,6 +177,22 @@ Prefill-Decode disaggregated mode separates prefill and decode operations across
 | `--prefill-policy` | Specific policy for prefill nodes | Uses main `--policy` |
 | `--decode-policy` | Specific policy for decode nodes | Uses main `--policy` |
 
+### Prefill Admission Control
+
+Prefill admission limits only the prefill phase. Its slot and prefill worker load
+are released when prefill completes; a streaming decode response does not keep
+them occupied.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--prefill-max-concurrent-requests` | Maximum PD requests concurrently executing prefill; non-positive disables the gate | `-1` |
+| `--prefill-queue-size` | Maximum requests waiting for a prefill slot; `0` rejects immediately when full | `100` |
+| `--prefill-queue-timeout-secs` | Maximum time to wait for a prefill slot | `60` |
+
+When enabled, a full queue returns HTTP `429`, an expired wait returns `408`,
+and an unavailable admission gate returns `503`. The gate is shared by HTTP,
+gRPC, PD, and EPD request paths in one gateway process.
+
 ### Worker Startup Configuration
 
 | Option | Description | Default |

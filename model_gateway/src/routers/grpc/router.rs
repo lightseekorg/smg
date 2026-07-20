@@ -358,13 +358,18 @@ impl GrpcRouter {
         let configured_deps = PipelineDeps::new(
             worker_registry.clone(),
             policy_registry.clone(),
+            ctx.prefill_admission.clone(),
             tool_parser_factory.clone(),
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
         );
         // Deps for the parser-free endpoints (completion/embeddings/classify).
-        let pair_deps = PipelineDeps::pair(worker_registry.clone(), policy_registry.clone());
+        let pair_deps = PipelineDeps::pair(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            ctx.prefill_admission.clone(),
+        );
 
         // Present in every mode: chat/generate, messages, completion.
         let pipeline = RequestPipeline::build(Endpoint::Chat, mode, &configured_deps)

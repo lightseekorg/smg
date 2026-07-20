@@ -52,6 +52,7 @@ pub struct AppContext {
     pub client: Client,
     pub router_config: RouterConfig,
     pub rate_limiter: Option<Arc<TokenBucket>>,
+    pub prefill_admission: Option<Arc<crate::worker::PrefillAdmission>>,
     pub tokenizer_registry: Arc<TokenizerRegistry>,
     pub multimodal_config_registry: Arc<MultimodalConfigRegistry>,
     pub reasoning_parser_factory: Option<ReasoningParserFactory>,
@@ -92,6 +93,7 @@ pub struct AppContextBuilder {
     client: Option<Client>,
     router_config: Option<RouterConfig>,
     rate_limiter: Option<Arc<TokenBucket>>,
+    prefill_admission: Option<Arc<crate::worker::PrefillAdmission>>,
     tokenizer_registry: Option<Arc<TokenizerRegistry>>,
     reasoning_parser_factory: Option<ReasoningParserFactory>,
     tool_parser_factory: Option<ToolParserFactory>,
@@ -145,6 +147,7 @@ impl AppContextBuilder {
             client: None,
             router_config: None,
             rate_limiter: None,
+            prefill_admission: None,
             tokenizer_registry: None,
             reasoning_parser_factory: None,
             tool_parser_factory: None,
@@ -338,6 +341,7 @@ impl AppContextBuilder {
                 .ok_or(AppContextBuildError::MissingField("client"))?,
             router_config,
             rate_limiter: self.rate_limiter,
+            prefill_admission: self.prefill_admission,
             tokenizer_registry: self
                 .tokenizer_registry
                 .ok_or(AppContextBuildError::MissingField("tokenizer_registry"))?,
@@ -390,6 +394,7 @@ impl AppContextBuilder {
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
+            .maybe_prefill_admission(&router_config)
             .with_tokenizer_registry()
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
@@ -489,6 +494,17 @@ impl AppContextBuilder {
                 )))
             }
         };
+        self
+    }
+
+    fn maybe_prefill_admission(mut self, config: &RouterConfig) -> Self {
+        self.prefill_admission = (config.prefill_max_concurrent_requests > 0).then(|| {
+            Arc::new(crate::worker::PrefillAdmission::new(
+                config.prefill_max_concurrent_requests as usize,
+                config.prefill_queue_size,
+                Duration::from_secs(config.prefill_queue_timeout_secs),
+            ))
+        });
         self
     }
 
@@ -736,5 +752,28 @@ mod tests {
             balance_token_usage_threshold: 1.0,
             overload_token_usage_threshold: 1.0,
         }));
+    }
+
+    #[test]
+    fn prefill_admission_is_created_only_for_positive_limit() {
+        for limit in [-1, 0] {
+            let config = RouterConfig {
+                prefill_max_concurrent_requests: limit,
+                ..Default::default()
+            };
+            assert!(AppContextBuilder::new()
+                .maybe_prefill_admission(&config)
+                .prefill_admission
+                .is_none());
+        }
+
+        let config = RouterConfig {
+            prefill_max_concurrent_requests: 1,
+            ..Default::default()
+        };
+        assert!(AppContextBuilder::new()
+            .maybe_prefill_admission(&config)
+            .prefill_admission
+            .is_some());
     }
 }

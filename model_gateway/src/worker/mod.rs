@@ -11,6 +11,7 @@ pub mod kv_event_monitor;
 pub mod manager;
 pub mod metrics_aggregator;
 pub mod monitor;
+pub mod prefill_admission;
 pub mod registry;
 pub mod resilience;
 pub mod sampling_defaults;
@@ -34,6 +35,9 @@ pub use http_client::build_worker_http_client;
 pub use kv_event_monitor::KvEventMonitor;
 pub use manager::WorkerManager;
 pub use monitor::{WorkerLoadManager, WorkerMonitor};
+pub use prefill_admission::{
+    PrefillAdmission, PrefillAdmissionRejection, PrefillPermit, PrefillPhaseGuard,
+};
 // Re-export UNKNOWN_MODEL_ID from protocols
 pub use openai_protocol::UNKNOWN_MODEL_ID;
 pub use openai_protocol::{

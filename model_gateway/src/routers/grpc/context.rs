@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     middleware::TenantRequestMeta,
-    worker::{RuntimeType, Worker, WorkerLoadGuard},
+    worker::{PrefillPermit, PrefillPhaseGuard, RuntimeType, Worker, WorkerLoadGuard},
 };
 
 /// Main request processing context
@@ -333,26 +333,36 @@ pub(crate) enum LoadGuards {
     Single {
         _guard: WorkerLoadGuard,
     },
-    /// Disaggregated guards cover the prefill+decode pair. EPD encode workers are
-    /// assigned per item; their fire-and-supervise RPCs do not hold load guards.
+    /// The prefill guard moves with the prefill stream so it can be released
+    /// before the decode response completes.
     Disaggregated {
-        _prefill: WorkerLoadGuard,
         _decode: WorkerLoadGuard,
     },
 }
 
+pub(crate) type PrefillGuard = PrefillPhaseGuard;
+
 impl LoadGuards {
-    pub fn new(selection: &WorkerSelection, headers: Option<&HeaderMap>) -> Self {
+    pub fn new(
+        selection: &WorkerSelection,
+        headers: Option<&HeaderMap>,
+        prefill_permit: Option<PrefillPermit>,
+    ) -> (Self, Option<PrefillGuard>) {
         match selection {
-            WorkerSelection::Single { worker } => LoadGuards::Single {
-                _guard: WorkerLoadGuard::new(worker.clone(), headers),
-            },
+            WorkerSelection::Single { worker } => (
+                LoadGuards::Single {
+                    _guard: WorkerLoadGuard::new(worker.clone(), headers),
+                },
+                None,
+            ),
             WorkerSelection::Disaggregated {
                 prefill, decode, ..
-            } => LoadGuards::Disaggregated {
-                _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
-                _decode: WorkerLoadGuard::new(decode.clone(), headers),
-            },
+            } => (
+                LoadGuards::Disaggregated {
+                    _decode: WorkerLoadGuard::new(decode.clone(), headers),
+                },
+                Some(PrefillGuard::new(prefill.clone(), headers, prefill_permit)),
+            ),
         }
     }
 }
@@ -818,6 +828,7 @@ pub(crate) enum ExecutionResult {
     PrefillDecode {
         prefill: ProtoStream,
         decode: Box<ProtoStream>,
+        prefill_guard: PrefillGuard,
         /// PD timing context, for honest PD TTFT (prefill start to first decode token).
         pd_timing: PdTiming,
     },

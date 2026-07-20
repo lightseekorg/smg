@@ -39,18 +39,19 @@ pub(crate) async fn collect_responses(
         ExecutionResult::PrefillDecode {
             mut prefill,
             decode,
+            prefill_guard,
             ..
         } => {
-            // Collect prefill for input_logprobs (don't mark completed yet)
+            // Collect prefill and release its phase-specific resources before decode.
             let prefill_responses = collect_stream_responses(&mut prefill, "Prefill").await?;
+            prefill.mark_completed();
+            drop(prefill_guard);
 
-            // Collect decode for actual output (don't mark completed yet)
+            // Collect decode for actual output.
             let mut decode_stream = *decode;
             let mut decode_responses =
                 collect_stream_responses(&mut decode_stream, "Decode").await?;
 
-            // Mark both streams as completed now that both succeeded
-            prefill.mark_completed();
             decode_stream.mark_completed();
 
             // Merge prefill input_logprobs if requested

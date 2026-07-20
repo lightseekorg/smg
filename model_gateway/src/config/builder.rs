@@ -248,6 +248,21 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn prefill_max_concurrent_requests(mut self, max: i32) -> Self {
+        self.config.prefill_max_concurrent_requests = max;
+        self
+    }
+
+    pub fn prefill_queue_size(mut self, size: usize) -> Self {
+        self.config.prefill_queue_size = size;
+        self
+    }
+
+    pub fn prefill_queue_timeout_secs(mut self, timeout: u64) -> Self {
+        self.config.prefill_queue_timeout_secs = timeout;
+        self
+    }
+
     pub fn rate_limit_tokens_per_second(mut self, tokens: i32) -> Self {
         self.config.rate_limit_tokens_per_second = Some(tokens);
         self

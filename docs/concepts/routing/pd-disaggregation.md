@@ -172,6 +172,14 @@ smg \
 | `--decode` | Decode worker URLs |
 | `--prefill-policy` | Routing policy for prefill workers |
 | `--decode-policy` | Routing policy for decode workers |
+| `--prefill-max-concurrent-requests` | Gateway-wide concurrent prefill limit; non-positive disables it (default: `-1`) |
+| `--prefill-queue-size` | Bounded prefill wait queue size (default: `100`) |
+| `--prefill-queue-timeout-secs` | Prefill queue timeout in seconds (default: `60`) |
+
+The prefill gate is independent of the general request concurrency limiter.
+Its permit and prefill worker load are released when the prefill stream
+finishes, not when the decode response finishes. Queue-full requests receive
+`429`; timed-out requests receive `408`.
 
 ### Per-Phase Policies
 
@@ -367,6 +375,10 @@ Decode is **memory-bandwidth-bound**:
 | `smg_worker_selection_total` | Worker selection count (labels: `worker_type`, `connection_mode`, `model`, `policy`) |
 | `smg_router_request_duration_seconds` | End-to-end request duration |
 | `smg_router_ttft_seconds` | Time to first token (gRPC/vLLM only) |
+| `smg_pd_prefill_admission_inflight` | Requests currently occupying a prefill slot |
+| `smg_pd_prefill_admission_queued` | Requests waiting for a prefill slot |
+| `smg_pd_prefill_admission_wait_seconds` | Time spent waiting for a prefill slot |
+| `smg_pd_prefill_admission_rejections_total` | Rejections labeled by `queue_full`, `queue_timeout`, or `closed` |
 
 ### Key Performance Indicators
 

@@ -227,6 +227,22 @@ pub(crate) fn init_metrics() {
         "smg_pd_kv_transfer_failures_total",
         "PD KV-transfer failures (missing connector params at decode handoff)"
     );
+    describe_gauge!(
+        "smg_pd_prefill_admission_inflight",
+        "PD requests currently occupying a gateway prefill admission slot"
+    );
+    describe_gauge!(
+        "smg_pd_prefill_admission_queued",
+        "PD requests waiting for a gateway prefill admission slot"
+    );
+    describe_histogram!(
+        "smg_pd_prefill_admission_wait_seconds",
+        "Time spent waiting for a gateway prefill admission slot"
+    );
+    describe_counter!(
+        "smg_pd_prefill_admission_rejections_total",
+        "PD prefill admission rejections by reason"
+    );
 
     // Layer 3: Worker metrics
     describe_gauge!(
@@ -1017,6 +1033,34 @@ impl Metrics {
     /// Record a PD KV-transfer failure (missing connector params at handoff).
     pub fn record_pd_kv_transfer_failure() {
         counter!("smg_pd_kv_transfer_failures_total").increment(1);
+    }
+
+    pub fn increment_prefill_admission_inflight() {
+        gauge!("smg_pd_prefill_admission_inflight").increment(1.0);
+    }
+
+    pub fn decrement_prefill_admission_inflight() {
+        gauge!("smg_pd_prefill_admission_inflight").decrement(1.0);
+    }
+
+    pub fn increment_prefill_admission_queued() {
+        gauge!("smg_pd_prefill_admission_queued").increment(1.0);
+    }
+
+    pub fn decrement_prefill_admission_queued() {
+        gauge!("smg_pd_prefill_admission_queued").decrement(1.0);
+    }
+
+    pub fn record_prefill_admission_wait(duration: Duration) {
+        histogram!("smg_pd_prefill_admission_wait_seconds").record(duration.as_secs_f64());
+    }
+
+    pub fn record_prefill_admission_rejection(reason: &'static str) {
+        counter!(
+            "smg_pd_prefill_admission_rejections_total",
+            "reason" => reason
+        )
+        .increment(1);
     }
 
     // ========================================================================

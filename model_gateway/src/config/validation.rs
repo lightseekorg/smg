@@ -584,6 +584,17 @@ impl ConfigValidator {
             });
         }
 
+        if config.prefill_max_concurrent_requests > 0
+            && config.prefill_queue_size > 0
+            && config.prefill_queue_timeout_secs == 0
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "prefill_queue_timeout_secs".to_string(),
+                value: config.prefill_queue_timeout_secs.to_string(),
+                reason: "Must be > 0 when prefill admission and queuing are enabled".to_string(),
+            });
+        }
+
         if let Some(tokens_per_second) = config.rate_limit_tokens_per_second {
             // Allow 0 for pure concurrency limiting (semaphore behavior)
             if tokens_per_second < 0 {
@@ -1009,6 +1020,35 @@ impl ConfigValidator {
 mod tests {
     use super::*;
     use crate::worker::ConnectionMode;
+
+    #[test]
+    fn enabled_prefill_queue_requires_nonzero_timeout() {
+        let config = RouterConfig {
+            prefill_max_concurrent_requests: 1,
+            prefill_queue_size: 1,
+            prefill_queue_timeout_secs: 0,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            ConfigValidator::validate_server_settings(&config),
+            Err(ConfigError::InvalidValue { ref field, .. })
+                if field == "prefill_queue_timeout_secs"
+        ));
+    }
+
+    #[test]
+    fn unused_prefill_queue_timeout_may_be_zero() {
+        for (limit, queue_size) in [(-1, 1), (1, 0)] {
+            let config = RouterConfig {
+                prefill_max_concurrent_requests: limit,
+                prefill_queue_size: queue_size,
+                prefill_queue_timeout_secs: 0,
+                ..Default::default()
+            };
+            assert!(ConfigValidator::validate_server_settings(&config).is_ok());
+        }
+    }
 
     #[test]
     fn mesh_server_name_with_colon_is_rejected() {

@@ -53,7 +53,7 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
-    worker::WorkerRegistry,
+    worker::{PrefillAdmission, WorkerRegistry},
 };
 
 /// Which endpoint a pipeline serves. Selects the endpoint-specific stage list
@@ -78,6 +78,7 @@ pub(crate) enum Endpoint {
 pub(crate) struct PipelineDeps {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
+    prefill_admission: Option<Arc<PrefillAdmission>>,
     tool_parser_factory: ToolParserFactory,
     reasoning_parser_factory: ReasoningParserFactory,
     configured_tool_parser: Option<String>,
@@ -90,6 +91,7 @@ impl PipelineDeps {
     pub(crate) fn new(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        prefill_admission: Option<Arc<PrefillAdmission>>,
         tool_parser_factory: ToolParserFactory,
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
@@ -98,6 +100,7 @@ impl PipelineDeps {
         Self {
             worker_registry,
             policy_registry,
+            prefill_admission,
             tool_parser_factory,
             reasoning_parser_factory,
             configured_tool_parser,
@@ -110,10 +113,12 @@ impl PipelineDeps {
     pub(crate) fn pair(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        prefill_admission: Option<Arc<PrefillAdmission>>,
     ) -> Self {
         Self {
             worker_registry,
             policy_registry,
+            prefill_admission,
             tool_parser_factory: ToolParserFactory::default(),
             reasoning_parser_factory: ReasoningParserFactory::default(),
             configured_tool_parser: None,
@@ -176,6 +181,7 @@ impl PipelineDeps {
         Self {
             worker_registry: Arc::new(WorkerRegistry::new()),
             policy_registry: Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin)),
+            prefill_admission: None,
             tool_parser_factory: ToolParserFactory::default(),
             reasoning_parser_factory: ReasoningParserFactory::default(),
             configured_tool_parser: None,
@@ -275,7 +281,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(ChatGenerateResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -303,7 +309,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(MessageResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -332,7 +338,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(CompletionResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -358,7 +364,7 @@ impl RequestPipeline {
                         plan_kind,
                     )),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
                 ]
             }
@@ -377,7 +383,7 @@ impl RequestPipeline {
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(EmbeddingResponseProcessingStage::new()),
                 ]
             }
@@ -396,7 +402,7 @@ impl RequestPipeline {
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage::new(deps.prefill_admission.clone())),
                     Box::new(ClassifyResponseProcessingStage::new()),
                 ]
             }

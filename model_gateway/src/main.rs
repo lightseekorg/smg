@@ -295,6 +295,18 @@ struct CliArgs {
     #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
     decode_policy: Option<String>,
 
+    /// Maximum PD requests concurrently occupying the prefill phase (-1 to disable)
+    #[arg(long, default_value_t = -1, help_heading = "PD Disaggregation")]
+    prefill_max_concurrent_requests: i32,
+
+    /// Queue size for PD requests waiting for a prefill slot
+    #[arg(long, default_value_t = 100, help_heading = "PD Disaggregation")]
+    prefill_queue_size: usize,
+
+    /// Maximum time in seconds a PD request can wait for a prefill slot
+    #[arg(long, default_value_t = 60, help_heading = "PD Disaggregation")]
+    prefill_queue_timeout_secs: u64,
+
     /// Specific policy for encode nodes in EPD mode. Defaults to consistent_hashing.
     #[arg(long, value_parser = ["random", "round_robin", "consistent_hashing"], help_heading = "PD Disaggregation")]
     encode_policy: Option<String>,
@@ -1395,6 +1407,9 @@ impl CliArgs {
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
+            .prefill_max_concurrent_requests(self.prefill_max_concurrent_requests)
+            .prefill_queue_size(self.prefill_queue_size)
+            .prefill_queue_timeout_secs(self.prefill_queue_timeout_secs)
             .priority_scheduler_enabled(self.priority_scheduler_enabled)
             .priority_scheduler_default_max_class(self.priority_scheduler_default_max_class.clone())
             .priority_scheduler_config(self.priority_scheduler_config.clone())

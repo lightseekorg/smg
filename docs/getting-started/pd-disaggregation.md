@@ -58,9 +58,17 @@ smg \
   --pd-disaggregation \
   --prefill http://prefill:8000 9001 \
   --decode http://decode:8001 \
+  --prefill-max-concurrent-requests 32 \
+  --prefill-queue-size 100 \
+  --prefill-queue-timeout-secs 60 \
   --host 0.0.0.0 \
   --port 30000
 ```
+
+The prefill admission options are gateway-wide. They bound work before it
+reaches prefill workers, including SGLang PD deployments where the engine does
+not enforce a bounded request queue. A slot is released as soon as the prefill
+leg completes, while the decode stream may continue.
 
 ### Multiple Workers
 
@@ -124,6 +132,9 @@ smg \
   --prefill grpc://prefill:50051 \
   --decode grpc://decode:50052 \
   --model-path /path/to/model \
+  --prefill-max-concurrent-requests 32 \
+  --prefill-queue-size 100 \
+  --prefill-queue-timeout-secs 60 \
   --host 0.0.0.0 \
   --port 30000
 ```
