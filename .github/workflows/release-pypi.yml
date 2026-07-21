@@ -65,7 +65,7 @@ jobs:
           path: smg-repo
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           architecture: ${{ matrix.python-architecture || 'x64' }}
@@ -133,7 +133,7 @@ jobs:
           path: smg-repo
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -166,7 +166,7 @@ jobs:
       # runner's system packaging can't parse Metadata 2.4 (PEP 639
       # License-Expression/License-File) and rejects the wheels.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
