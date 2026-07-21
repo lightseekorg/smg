@@ -1,12 +1,24 @@
-pub mod consistent_hash;
-pub mod error;
-pub mod extractor;
-pub mod prefix_cache;
+//! Topology‑aware routing module for SMG.
+//!
+//! This module provides a high‑performance, lock‑free routing policy
+//! that uses prefix hashing and weighted Rendezvous hashing.
 
-pub use consistent_hash::{RendezvousRouter, WorkerNode};
-pub use error::TopologyError;
+/// Module for extracting conversation prefixes from JSON.
+
+pub mod extractor;
+/// Weighted Rendezvous (HRW) hashing router.
+pub mod consistent_hash;
+pub mod prefix_cache;
+/// Error types for the topology module.
+pub mod error;
+/// LRU prefix cache with reverse indexing.
+
 pub use extractor::extract_conversation_prefix;
+pub use consistent_hash::{RendezvousRouter, WorkerNode};
 pub use prefix_cache::PrefixCache;
+pub use error::TopologyError;
+
+use std::sync::Arc;
 use xxhash_rust::xxh64::xxh64;
 
 pub struct TopologyRouter {
@@ -28,7 +40,7 @@ impl TopologyRouter {
 
         if let Some(worker_id) = self.prefix_cache.lookup(prefix_hash) {
             for worker in self.hrw_router.workers() {
-                if worker.id == worker_id {
+                if worker.id == *worker_id {
                     return Ok(worker);
                 }
             }
@@ -36,21 +48,22 @@ impl TopologyRouter {
         }
 
         let worker = self.hrw_router.route(prefix_hash)?;
-        self.prefix_cache.insert(prefix_hash, worker.id.clone());
+        self.prefix_cache.insert(prefix_hash, Arc::from(worker.id.as_str()));
         Ok(worker)
     }
 
     pub fn register_worker_cache(&self, prefix: &str, worker_id: &str) {
         let hash = xxh64(prefix.as_bytes(), 0);
-        self.prefix_cache.insert(hash, worker_id.to_string());
+        self.prefix_cache.insert(hash, Arc::from(worker_id));
     }
 
     pub fn remove_worker(&self, worker_id: &str) {
         self.prefix_cache.remove_worker(worker_id);
     }
 
-    pub fn set_worker_load(&mut self, worker_id: &str, load: f32) {
-        for worker in self.hrw_router.workers_mut() {
+    
+    pub fn set_worker_load(&self, worker_id: &str, load: f32) {
+        for worker in self.hrw_router.workers() {
             if worker.id == worker_id {
                 worker.set_load(load);
                 break;
@@ -66,7 +79,9 @@ mod tests {
     #[test]
     fn route_single_turn() {
         let json = br#"{"messages": [{"role": "user", "content": "Hello"}]}"#;
-        let workers = vec![WorkerNode::new("w1".into(), "1".into(), 0.0)];
+        let workers = vec![
+            WorkerNode::new("w1".into(), "1".into(), 0.0),
+        ];
         let router = TopologyRouter::new(workers, 10);
         let result = router.route(json);
         assert!(result.is_ok());
@@ -80,7 +95,9 @@ mod tests {
                 {"role": "user", "content": "Hello"}
             ]
         }"#;
-        let workers = vec![WorkerNode::new("w1".into(), "1".into(), 0.0)];
+        let workers = vec![
+            WorkerNode::new("w1".into(), "1".into(), 0.0),
+        ];
         let router = TopologyRouter::new(workers, 10);
         let result = router.route(json);
         assert!(result.is_ok());

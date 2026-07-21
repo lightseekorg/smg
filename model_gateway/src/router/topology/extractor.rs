@@ -1,7 +1,15 @@
 use serde_json::Value;
 
 use crate::router::topology::error::TopologyError;
-
+/// Extracts the conversation prefix from a JSON request payload.
+///
+/// This function looks for the `"messages"` array and extracts all messages
+/// up to (but excluding) the last user message. If only a single‑turn
+/// request exists, it falls back to the full message content.
+///
+/// # Returns
+/// - `Ok(String)` containing the prefix with role tags (`system:`, `user:`, `assistant:`)
+/// - `Err(TopologyError)` if no valid content is found
 pub fn extract_conversation_prefix(json_bytes: &[u8]) -> Result<String, TopologyError> {
     if json_bytes.is_empty() {
         return Err(TopologyError::MissingContent);

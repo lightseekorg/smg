@@ -1,17 +1,22 @@
+// model_gateway/src/router/topology/consistent_hash.rs
+
 use std::sync::atomic::{AtomicU32, Ordering};
-
 use xxhash_rust::xxh64::Xxh64;
-
 use crate::router::topology::error::TopologyError;
 
+/// A worker node in the Rendezvous hashing ring.
 #[derive(Debug)]
 pub struct WorkerNode {
+    /// Unique identifier for the worker.
     pub id: String,
+    /// Network address of the worker.
     pub address: String,
+    /// Current load of the worker (0.0 to 1.0), stored as atomic bits.
     load_raw: AtomicU32,
 }
 
 impl WorkerNode {
+    /// Creates a new worker node with the given ID, address, and initial load.
     pub fn new(id: String, address: String, load: f32) -> Self {
         Self {
             id,
@@ -20,10 +25,12 @@ impl WorkerNode {
         }
     }
 
+    /// Returns the current load of this worker (0.0 to 1.0).
     pub fn load(&self) -> f32 {
         f32::from_bits(self.load_raw.load(Ordering::Relaxed))
     }
 
+    /// Updates the load of this worker.
     pub fn set_load(&self, load: f32) {
         self.load_raw.store(load.to_bits(), Ordering::Relaxed);
     }
@@ -35,19 +42,23 @@ impl Clone for WorkerNode {
     }
 }
 
+/// A Rendezvous (HRW) hashing router that distributes keys to workers.
 pub struct RendezvousRouter {
     workers: Vec<WorkerNode>,
 }
 
 impl RendezvousRouter {
+    /// Creates a new router with the given list of workers.
     pub fn new(workers: Vec<WorkerNode>) -> Self {
         Self { workers }
     }
 
+    /// Returns a reference to the list of workers.
     pub fn workers(&self) -> &[WorkerNode] {
         &self.workers
     }
 
+    /// Returns a mutable reference to the list of workers.
     pub fn workers_mut(&mut self) -> &mut [WorkerNode] {
         &mut self.workers
     }
@@ -59,6 +70,10 @@ impl RendezvousRouter {
         (normalized + 0.5) / 9007199254740992.0
     }
 
+    /// Selects the worker with the highest weighted Rendezvous score for a given key.
+    ///
+    /// # Errors
+    /// Returns `TopologyError::EmptyRing` if no workers are available.
     pub fn route(&self, primary_hash: u64) -> Result<&WorkerNode, TopologyError> {
         if self.workers.is_empty() {
             return Err(TopologyError::EmptyRing);
@@ -87,6 +102,7 @@ impl RendezvousRouter {
         best_worker.ok_or(TopologyError::EmptyRing)
     }
 
+    /// Replaces the worker list with a new set of workers.
     pub fn update_workers(&mut self, workers: Vec<WorkerNode>) {
         self.workers = workers;
     }
