@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::messages;
 use tracing::error;
-use uuid::Uuid;
 
 use crate::routers::{
     error,
@@ -82,7 +81,13 @@ impl PipelineStage for MessageRequestBuildingStage {
         };
 
         // Build message request
-        let request_id = format!("msg_{}", Uuid::now_v7());
+        let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
+        let request_id = helpers::resolve_request_id(
+            &ctx.input.request_type,
+            ctx.input.tenant_request_meta.as_ref(),
+            "msg_",
+            disaggregated,
+        );
 
         // `encode_outputs` set by EncodeStage selects the pixel-drop assembly path.
         let is_encode_routed = ctx.state.encode_outputs.is_some();

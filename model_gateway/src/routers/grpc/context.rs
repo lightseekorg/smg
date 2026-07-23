@@ -66,6 +66,22 @@ pub(crate) enum RequestType {
     Messages(Arc<CreateMessageRequest>),
 }
 
+impl RequestType {
+    /// Client-supplied backend request id (`rid`), where the protocol carries
+    /// one. Responses ids are storage-owned (`resp_*`) and never client-set.
+    pub fn rid(&self) -> Option<&str> {
+        match self {
+            Self::Chat(r) => r.rid.as_deref(),
+            Self::Generate(r) => r.rid.as_deref(),
+            Self::Completion(r) => r.rid.as_deref(),
+            Self::Embedding(r) => r.rid.as_deref(),
+            Self::Classify(r) => r.rid.as_deref(),
+            Self::Messages(r) => r.rid.as_deref(),
+            Self::Responses(_) => None,
+        }
+    }
+}
+
 impl std::fmt::Display for RequestType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

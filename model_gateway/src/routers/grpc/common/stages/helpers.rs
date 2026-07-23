@@ -11,6 +11,7 @@ use smg_grpc_client::{
 use tracing::{debug, warn};
 
 use crate::{
+    middleware::{RequestId, TenantRequestMeta},
     routers::grpc::{
         context::{RequestType, WorkerSelection},
         proto_wrapper::ProtoGenerateRequest,
@@ -76,6 +77,45 @@ impl SamplingDefaultsMask {
 
     fn any(self) -> bool {
         self.temperature || self.top_p || self.top_k || self.min_p || self.repetition_penalty
+    }
+}
+
+/// The middleware-assigned request id (client-sent via a configured header,
+/// else generated; see `middleware/request_id.rs`), carried on the tenant
+/// request metadata.
+pub(crate) fn middleware_request_id(tenant_meta: Option<&TenantRequestMeta>) -> Option<&str> {
+    tenant_meta
+        .and_then(|meta| meta.extension::<RequestId>())
+        .map(|request_id| request_id.0.as_str())
+}
+
+/// Backend request id for any endpoint.
+///
+/// Priority: the protocol `rid`, else the middleware request id, else a fresh
+/// `{prefix}{uuid}`.
+///
+/// Engine ids must be unique per dispatch — PD retries re-run request
+/// building while a NIXL-tagged prefill keeps the id alive until the KV lease
+/// expires, and responses tool loops re-execute the pipeline per iteration —
+/// so middleware-derived ids always get a per-execution suffix. A bare `rid`
+/// outside PD is used exactly: its value is the caller's contract (matching
+/// /generate's long-standing behavior).
+pub(crate) fn resolve_request_id(
+    request_type: &RequestType,
+    tenant_meta: Option<&TenantRequestMeta>,
+    prefix: &str,
+    disaggregated: bool,
+) -> String {
+    if let Some(rid) = request_type.rid() {
+        return if disaggregated {
+            format!("{rid}-{}", uuid::Uuid::now_v7())
+        } else {
+            rid.to_string()
+        };
+    }
+    match middleware_request_id(tenant_meta) {
+        Some(request_id) => format!("{request_id}-{}", uuid::Uuid::now_v7()),
+        None => format!("{prefix}{}", uuid::Uuid::now_v7()),
     }
 }
 
@@ -332,5 +372,65 @@ pub(crate) fn maybe_inject_pd_rendezvous(
             "Injected PD rendezvous: host={}, port={}, room={}",
             hostname, bootstrap_port, room_id
         );
+    }
+}
+
+#[cfg(test)]
+mod request_id_tests {
+    use std::sync::Arc;
+
+    use openai_protocol::chat::ChatCompletionRequest;
+
+    use super::*;
+    use crate::tenant::TenantKey;
+
+    fn chat_request_type(rid: Option<&str>) -> RequestType {
+        RequestType::Chat(Arc::new(ChatCompletionRequest {
+            rid: rid.map(str::to_string),
+            ..Default::default()
+        }))
+    }
+
+    fn meta_with_request_id(id: &str) -> TenantRequestMeta {
+        TenantRequestMeta::new(TenantKey::new("test-tenant"))
+            .with_extension(RequestId(id.to_string()))
+    }
+
+    #[test]
+    fn rid_is_used_exactly_outside_pd() {
+        let request_type = chat_request_type(Some("client-rid"));
+        let meta = meta_with_request_id("chatcmpl-mw");
+
+        let id = resolve_request_id(&request_type, Some(&meta), "chatcmpl-", false);
+        assert_eq!(id, "client-rid");
+    }
+
+    #[test]
+    fn rid_gets_per_attempt_suffix_in_pd() {
+        let request_type = chat_request_type(Some("client-rid"));
+
+        let id = resolve_request_id(&request_type, None, "chatcmpl-", true);
+        assert!(id.starts_with("client-rid-") && id != "client-rid");
+    }
+
+    #[test]
+    fn middleware_id_is_base_with_per_execution_suffix() {
+        let request_type = chat_request_type(None);
+        let meta = meta_with_request_id("chatcmpl-mw");
+
+        let first = resolve_request_id(&request_type, Some(&meta), "chatcmpl-", false);
+        let second = resolve_request_id(&request_type, Some(&meta), "chatcmpl-", false);
+        assert!(first.starts_with("chatcmpl-mw-"));
+        assert!(second.starts_with("chatcmpl-mw-"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn falls_back_to_prefixed_mint_without_rid_or_middleware_id() {
+        let request_type = chat_request_type(None);
+        let meta = TenantRequestMeta::new(TenantKey::new("test-tenant"));
+
+        let id = resolve_request_id(&request_type, Some(&meta), "chatcmpl-", false);
+        assert!(id.starts_with("chatcmpl-"));
     }
 }

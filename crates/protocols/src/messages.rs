@@ -74,6 +74,9 @@ pub struct CreateMessageRequest {
     /// MCP servers to be utilized in this request (beta).
     pub mcp_servers: Option<Vec<McpServerConfig>>,
 
+    /// Request ID forwarded to the backend for log correlation (SGLang extension)
+    pub rid: Option<String>,
+
     /// Additional fields not explicitly defined above (e.g. beta features like
     /// context_management, output_config). Captured and forwarded to backends.
     #[serde(flatten)]
@@ -2017,6 +2020,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            rid: None,
             other: Map::new(),
         }
     }

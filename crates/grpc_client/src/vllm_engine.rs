@@ -789,6 +789,7 @@ mod tests {
             session_params: None,
             return_hidden_states: false,
             sampling_seed: None,
+            rid: None,
             other: Default::default(),
         }
     }

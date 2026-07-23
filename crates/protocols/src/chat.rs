@@ -324,6 +324,9 @@ pub struct ChatCompletionRequest {
     /// Random seed for sampling for deterministic outputs
     pub sampling_seed: Option<u64>,
 
+    /// Request ID forwarded to the backend for log correlation (SGLang extension)
+    pub rid: Option<String>,
+
     /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
     #[serde(flatten)]
     pub other: Map<String, Value>,

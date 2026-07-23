@@ -138,7 +138,7 @@ impl PipelineStage for CompletionRequestBuildingStage {
             ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
-        let shared_request_id = format!("cmpl_{}", Uuid::now_v7());
+        let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_type = &ctx.input.request_type;
         let workers = ctx.state.workers.as_ref();
 
@@ -153,7 +153,12 @@ impl PipelineStage for CompletionRequestBuildingStage {
                 self.plan_kind,
                 self.build_proto_request(
                     builder_client,
-                    shared_request_id,
+                    helpers::resolve_request_id(
+                        request_type,
+                        ctx.input.tenant_request_meta.as_ref(),
+                        "cmpl_",
+                        disaggregated,
+                    ),
                     item,
                     &completion_request,
                     request_type,
@@ -161,11 +166,29 @@ impl PipelineStage for CompletionRequestBuildingStage {
                 )?,
             ),
             batch_items => {
+                // The shared id (client rid or middleware request id) stays
+                // clean for the response; per-sub engine ids get a uniqueness
+                // suffix in PD mode and whenever the shared id is stable
+                // across pipeline executions (middleware-derived).
+                let middleware_id =
+                    helpers::middleware_request_id(ctx.input.tenant_request_meta.as_ref());
+                let (shared_request_id, always_unique_subs) = match request_type.rid() {
+                    Some(rid) => (rid.to_string(), false),
+                    None => match middleware_id {
+                        Some(request_id) => (request_id.to_string(), true),
+                        None => (format!("cmpl_{}", Uuid::now_v7()), false),
+                    },
+                };
                 let mut requests = Vec::with_capacity(batch_items.len());
                 for (i, item) in batch_items.iter().enumerate() {
+                    let sub_request_id = if disaggregated || always_unique_subs {
+                        format!("{shared_request_id}-p{i}-{}", Uuid::now_v7())
+                    } else {
+                        format!("{shared_request_id}-p{i}")
+                    };
                     requests.push(self.build_proto_request(
                         builder_client,
-                        format!("{shared_request_id}-p{i}"),
+                        sub_request_id,
                         item,
                         &completion_request,
                         request_type,

@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
-use uuid::Uuid;
 
 use crate::routers::{
     error,
@@ -60,15 +59,13 @@ impl PipelineStage for GenerateRequestBuildingStage {
             ClientSelection::Disaggregated { prefill, .. } => prefill,
         };
 
-        // Build generate request. PD retries re-run this stage, and a NIXL-tagged
-        // prefill keeps the request_id alive on the worker until the KV lease
-        // expires, so client rids get a unique per-attempt engine id in PD mode.
         let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
-        let request_id = match generate_request.rid.clone() {
-            Some(rid) if disaggregated => format!("{rid}-{}", Uuid::now_v7()),
-            Some(rid) => rid,
-            None => format!("gen-{}", Uuid::now_v7()),
-        };
+        let request_id = helpers::resolve_request_id(
+            &ctx.input.request_type,
+            ctx.input.tenant_request_meta.as_ref(),
+            "gen-",
+            disaggregated,
+        );
 
         // Build proto request using centralized dispatch
         let mut proto_request = builder_client

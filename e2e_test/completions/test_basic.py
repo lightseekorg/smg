@@ -143,6 +143,19 @@ class TestCompletionBasic:
             response.usage.prompt_tokens + response.usage.completion_tokens
         )
 
+    def test_rid_becomes_response_id(self, model, api_client):
+        """A protocol `rid` is used as the backend request id verbatim."""
+
+        response = api_client.completions.create(
+            model=model,
+            prompt="Hello",
+            max_tokens=5,
+            temperature=0,
+            extra_body={"rid": "cmpl-correlation-1"},
+        )
+
+        assert response.id == "cmpl-correlation-1"
+
     @pytest.mark.skip_for_runtime("vllm", reason="vLLM rejects max_tokens=0")
     def test_non_streaming_echo_max_tokens_zero(self, model, api_client):
         """Test that echo=True with max_tokens=0 returns just the prompt."""
@@ -353,6 +366,20 @@ class TestCompletionBatch:
         assert len(choices) == len(self.PROMPTS)
         for prompt_index, prompt in enumerate(self.PROMPTS):
             assert choices[prompt_index].text.startswith(prompt)
+
+    def test_batch_rid_is_shared_response_id(self, model, api_client):
+        """A protocol `rid` becomes the shared response id for a prompt array."""
+
+        response = api_client.completions.create(
+            model=model,
+            prompt=self.PROMPTS,
+            max_tokens=5,
+            temperature=0,
+            extra_body={"rid": "batch-correlation-1"},
+        )
+
+        assert response.id == "batch-correlation-1"
+        assert sorted(choice.index for choice in response.choices) == [0, 1]
 
     def test_batch_streaming(self, model, api_client):
         """Test streaming with a prompt array and n > 1: global per-choice deltas

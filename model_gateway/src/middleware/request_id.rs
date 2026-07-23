@@ -19,14 +19,18 @@ const REQUEST_ID_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 /// Generate OpenAI-compatible request ID based on endpoint.
 pub(super) fn generate_request_id(path: &str) -> String {
-    let prefix = if path.contains("/chat/completions") {
+    // Suffix compares, not substring scans; `/chat/completions` must precede
+    // `/completions`.
+    let prefix = if path.ends_with("/chat/completions") {
         "chatcmpl-"
-    } else if path.contains("/completions") {
+    } else if path.ends_with("/completions") {
         "cmpl-"
-    } else if path.contains("/generate") {
+    } else if path.ends_with("/generate") {
         "gnt-"
-    } else if path.contains("/responses") {
+    } else if path.ends_with("/responses") {
         "resp-"
+    } else if path.ends_with("/messages") {
+        "msg_"
     } else {
         "req-"
     };
@@ -125,5 +129,27 @@ where
 
             Ok(response)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_ids_use_endpoint_prefixes() {
+        for (path, prefix) in [
+            ("/v1/chat/completions", "chatcmpl-"),
+            ("/v1/completions", "cmpl-"),
+            ("/generate", "gnt-"),
+            ("/v1/responses", "resp-"),
+            ("/v1/messages", "msg_"),
+            ("/v1/embeddings", "req-"),
+        ] {
+            assert!(
+                generate_request_id(path).starts_with(prefix),
+                "path {path} must generate a {prefix} id"
+            );
+        }
     }
 }

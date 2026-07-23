@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
-use uuid::Uuid;
 
 use crate::routers::{
     error,
@@ -80,7 +79,13 @@ impl PipelineStage for ChatRequestBuildingStage {
         };
 
         // Build chat request
-        let request_id = format!("chatcmpl-{}", Uuid::now_v7());
+        let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
+        let request_id = helpers::resolve_request_id(
+            &ctx.input.request_type,
+            ctx.input.tenant_request_meta.as_ref(),
+            "chatcmpl-",
+            disaggregated,
+        );
 
         // `encode_outputs` set by EncodeStage selects the pixel-drop assembly path.
         let is_encode_routed = ctx.state.encode_outputs.is_some();

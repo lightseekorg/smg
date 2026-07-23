@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use axum::response::Response;
 use smg_grpc_client::SglangGenerateRequestOptions;
 use tracing::{debug, error};
-use uuid::Uuid;
 
 use crate::routers::{
     error,
@@ -81,9 +80,20 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         };
 
         // Generate request_id based on request type
+        let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_id = match &ctx.input.request_type {
-            RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
-            RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
+            RequestType::Chat(_) => helpers::resolve_request_id(
+                &ctx.input.request_type,
+                ctx.input.tenant_request_meta.as_ref(),
+                "chatcmpl-",
+                disaggregated,
+            ),
+            RequestType::Responses(_) => helpers::resolve_request_id(
+                &ctx.input.request_type,
+                ctx.input.tenant_request_meta.as_ref(),
+                "responses-",
+                disaggregated,
+            ),
             request_type @ (RequestType::Generate(_)
             | RequestType::Completion(_)
             | RequestType::Embedding(_)

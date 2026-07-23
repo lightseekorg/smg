@@ -140,6 +140,9 @@ pub struct CompletionRequest {
     /// Sampling seed for deterministic outputs
     pub sampling_seed: Option<u64>,
 
+    /// Request ID forwarded to the backend for log correlation (SGLang extension)
+    pub rid: Option<String>,
+
     /// Additional fields including bootstrap info for PD routing
     #[serde(flatten)]
     pub other: Map<String, Value>,

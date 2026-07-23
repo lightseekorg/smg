@@ -197,6 +197,8 @@ type ChatCompletionRequest struct {
 	Logprobs            bool             `json:"logprobs,omitempty"`
 	TopLogprobs         *int             `json:"top_logprobs,omitempty"`
 	User                string           `json:"user,omitempty"`
+	// Rid is forwarded to the backend as the request id for log correlation
+	Rid *string `json:"rid,omitempty"`
 }
 
 // StreamOptions controls streaming behavior options.

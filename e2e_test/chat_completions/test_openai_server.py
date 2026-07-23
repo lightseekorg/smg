@@ -472,3 +472,38 @@ class TestChatCompletionGptOss(TestChatCompletion):
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 class TestChatCompletionGptOss120B(TestChatCompletionGptOss):
     """Tests for chat completions API with Harmony model (GPT-OSS 120B, 4 GPU)."""
+
+
+# =============================================================================
+# Request-id passthrough
+# =============================================================================
+
+
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
+@pytest.mark.gpu(1)
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestRequestIdPassthrough:
+    """Backend request ids derive from client correlation signals."""
+
+    def test_rid_becomes_response_id(self, model, api_client):
+        """A protocol `rid` is used as the backend request id verbatim."""
+        resp = api_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Say hi"}],
+            max_tokens=8,
+            extra_body={"rid": "my-correlation-id-1"},
+        )
+
+        assert resp.id == "my-correlation-id-1"
+
+    def test_x_request_id_header_prefixes_response_id(self, model, api_client):
+        """The middleware request id (client x-request-id) prefixes backend ids."""
+        resp = api_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Say hi"}],
+            max_tokens=8,
+            extra_headers={"x-request-id": "corr-abc"},
+        )
+
+        assert resp.id.startswith("corr-abc-")

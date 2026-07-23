@@ -356,6 +356,13 @@ curl -H "X-Request-ID: my-trace-123" \
   -d '{"model": "llama", "messages": [{"role": "user", "content": "Hi"}]}'
 ```
 
+Backend (engine) request ids derive from the same id, so gateway and worker
+logs correlate: gRPC requests are dispatched as `{request-id}-{uuid}` (the
+suffix keeps retries and tool-loop iterations unique), and the response body
+`id` matches. A protocol-level `rid` field (chat, completions, messages,
+generate, embeddings, classify) overrides this and is used verbatim outside
+PD mode.
+
 ### Trace a Request
 
 ```bash

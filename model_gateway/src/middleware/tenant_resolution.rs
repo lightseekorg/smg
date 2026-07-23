@@ -10,6 +10,7 @@ use axum::{
     response::Response,
 };
 
+use super::request_id::RequestId;
 use crate::{
     config::{RouterConfig, TenantResolutionConfig},
     tenant::{canonical_tenant_key, DataPlaneCaller, RouteRequestMeta, TenantIdentity, TenantKey},
@@ -68,7 +69,13 @@ pub fn resolve_route_request_meta(
     state: &TenantResolutionState,
     request: &Request<Body>,
 ) -> RouteRequestMeta {
-    RouteRequestMeta::new(resolve_raw_tenant_key(state, request))
+    let meta = RouteRequestMeta::new(resolve_raw_tenant_key(state, request));
+    // Carry the middleware request id so backend request ids derive from it
+    // (RequestIdLayer runs outside this middleware).
+    match request.extensions().get::<RequestId>() {
+        Some(request_id) => meta.with_extension(request_id.clone()),
+        None => meta,
+    }
 }
 
 pub async fn route_request_meta_middleware(
@@ -166,6 +173,23 @@ mod tests {
 
         let request_meta = resolve_route_request_meta(&state, &request);
         assert_eq!(request_meta.tenant_key().as_str(), "ip:203.0.113.42");
+    }
+
+    #[tokio::test]
+    async fn request_meta_carries_middleware_request_id() {
+        let state = resolution_state();
+        let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(RequestId("chatcmpl-abc123".to_string()));
+
+        let request_meta = resolve_route_request_meta(&state, &request);
+        assert_eq!(
+            request_meta
+                .extension::<RequestId>()
+                .map(|request_id| request_id.0.as_str()),
+            Some("chatcmpl-abc123")
+        );
     }
 
     #[tokio::test]
