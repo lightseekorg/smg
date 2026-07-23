@@ -311,11 +311,7 @@ impl StreamingProcessor {
         // the template injected `<think>` in the prefill — parsers should start
         // in reasoning mode.
         let thinking_override = utils::should_mark_reasoning_started(
-            utils::resolve_user_thinking(
-                original_request.chat_template_kwargs.as_ref(),
-                original_request.reasoning_effort.as_deref(),
-                tokenizer.as_ref(),
-            ),
+            utils::resolve_user_thinking(&original_request, tokenizer.as_ref()),
             tokenizer.as_ref(),
         );
         let think_in_prefill = tokenizer.think_in_prefill();
