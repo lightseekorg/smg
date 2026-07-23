@@ -34,6 +34,7 @@ use crate::{
             },
         },
         error,
+        openai::responses::utils,
     },
 };
 
@@ -348,8 +349,42 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
     tools_json.extend(session_tools);
 
     if !tools_json.is_empty() {
+        let tool_choice = remap_tool_choice_for_functions(obj.get("tool_choice"), &tools_json);
         obj.insert("tools".to_string(), Value::Array(tools_json));
-        obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+        obj.insert("tool_choice".to_string(), tool_choice);
+    }
+}
+
+/// Remap an explicit `tool_choice` through the MCP/hosted→function rewrite for
+/// the initial request; resume payloads switch to "auto" so the loop can end.
+///
+/// String options pass through. Object choices resolve by name against the
+/// rewritten function tools (hosted types like `image_generation` match the
+/// function of the same name); anything unmappable falls back to "auto", since
+/// the referenced tool no longer exists in `tools`.
+fn remap_tool_choice_for_functions(tool_choice: Option<&Value>, tools: &[Value]) -> Value {
+    let selected = match tool_choice {
+        Some(Value::String(choice)) => return Value::String(choice.clone()),
+        Some(choice) if choice.is_object() => {
+            choice.get("name").and_then(Value::as_str).or_else(|| {
+                choice
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .filter(|choice_type| *choice_type != ItemType::FUNCTION)
+            })
+        }
+        _ => None,
+    };
+
+    match selected {
+        Some(name)
+            if tools
+                .iter()
+                .any(|tool| utils::function_tool_name(tool) == Some(name)) =>
+        {
+            json!({ "type": ItemType::FUNCTION, "name": name })
+        }
+        _ => Value::String("auto".to_string()),
     }
 }
 
@@ -393,6 +428,9 @@ pub(crate) fn build_resume_payload(
     if let Some(tools_arr) = tools_json.as_array() {
         if !tools_arr.is_empty() {
             obj.insert("tools".to_string(), tools_json.clone());
+            // The tool call already happened; "auto" lets the model answer
+            // instead of looping a preserved "required" until the call limit.
+            obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
         }
     }
 
@@ -1898,5 +1936,132 @@ mod tests {
             super::approval_request_item_id_source("raw_id"),
             "mcpr_raw_id"
         );
+    }
+
+    async fn function_tool_session() -> (McpOrchestrator, Vec<McpServerBinding>) {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "wiki-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: false,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "wiki-server",
+                test_tool("ask_wiki"),
+            ));
+        let bindings = vec![McpServerBinding {
+            label: "wiki".to_string(),
+            server_key: "wiki-server".to_string(),
+            allowed_tools: None,
+        }];
+        (orchestrator, bindings)
+    }
+
+    #[tokio::test]
+    async fn prepare_preserves_explicit_tool_choice() {
+        let (orchestrator, bindings) = function_tool_session().await;
+        let session = McpToolSession::new(&orchestrator, bindings, "test-request");
+
+        let mut payload = json!({
+            "model": "m",
+            "input": "q",
+            "tools": [{"type": "mcp", "server_label": "wiki"}],
+            "tool_choice": "required"
+        });
+        super::prepare_mcp_tools_as_functions(&mut payload, &session);
+
+        assert_eq!(payload["tool_choice"], json!("required"));
+        assert_eq!(payload["tools"][0]["type"], json!("function"));
+    }
+
+    #[tokio::test]
+    async fn prepare_remaps_hosted_tool_choice_to_function() {
+        let (orchestrator, bindings) = function_tool_session().await;
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "wiki-server",
+                test_tool("image_generation"),
+            ));
+        let session = McpToolSession::new(&orchestrator, bindings, "test-request");
+
+        let mut payload = json!({
+            "model": "m",
+            "input": "q",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"}
+        });
+        super::prepare_mcp_tools_as_functions(&mut payload, &session);
+
+        assert_eq!(
+            payload["tool_choice"],
+            json!({"type": "function", "name": "image_generation"})
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_downgrades_unmappable_tool_choice_to_auto() {
+        let (orchestrator, bindings) = function_tool_session().await;
+        let session = McpToolSession::new(&orchestrator, bindings, "test-request");
+
+        let mut payload = json!({
+            "model": "m",
+            "input": "q",
+            "tools": [{"type": "mcp", "server_label": "wiki"}],
+            "tool_choice": {"type": "web_search_preview"}
+        });
+        super::prepare_mcp_tools_as_functions(&mut payload, &session);
+
+        assert_eq!(payload["tool_choice"], json!("auto"));
+    }
+
+    #[tokio::test]
+    async fn prepare_defaults_missing_tool_choice_to_auto() {
+        let (orchestrator, bindings) = function_tool_session().await;
+        let session = McpToolSession::new(&orchestrator, bindings, "test-request");
+
+        let mut payload = json!({
+            "model": "m",
+            "input": "q",
+            "tools": [{"type": "mcp", "server_label": "wiki"}]
+        });
+        super::prepare_mcp_tools_as_functions(&mut payload, &session);
+
+        assert_eq!(payload["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn resume_payload_forces_auto_tool_choice() {
+        let base = json!({
+            "model": "m",
+            "input": "q",
+            "tools": [{"type": "function", "name": "ask_wiki"}],
+            "tool_choice": "required"
+        });
+        let resumed = super::build_resume_payload(
+            &base,
+            &[],
+            &ResponseInput::Text("q".to_string()),
+            &json!([{"type": "function", "name": "ask_wiki"}]),
+            false,
+        )
+        .expect("resume payload");
+
+        assert_eq!(resumed["tool_choice"], json!("auto"));
     }
 }

@@ -401,7 +401,7 @@ fn strip_internal_mcp_output_items(
     });
 }
 
-fn function_tool_name(tool: &Value) -> Option<&str> {
+pub(crate) fn function_tool_name(tool: &Value) -> Option<&str> {
     let tool_type = tool.get("type").and_then(|value| value.as_str());
     if tool_type != Some("function") {
         return None;
