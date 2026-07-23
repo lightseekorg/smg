@@ -324,7 +324,7 @@ mod grpc_router_type_tests {
 
     /// Build an `AppContext` for a gRPC `RoutingMode` with the components
     /// `GrpcRouter::new` needs (parser factories always; an initialized MCP
-    /// orchestrator for Regular, which is the only mode that reads it).
+    /// orchestrator for Regular/PD, which build the responses contexts).
     async fn grpc_ctx(mode: RoutingMode) -> Arc<AppContext> {
         let config = RouterConfig::builder()
             .mode(mode)
