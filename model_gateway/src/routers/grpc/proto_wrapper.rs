@@ -2331,4 +2331,21 @@ mod tests {
         let image = vllm_mm_data(common::Modality::Image).into_proto();
         assert_eq!(image.modality, common::Modality::Image as i32);
     }
+
+    #[test]
+    fn vllm_rdma_enabled_without_exporter_stays_inline() {
+        // With rdma_enabled=true but no gateway exporter (never built in the stub
+        // test build), pixel_values must fall back to inline rather than emit an
+        // unfulfillable `remote` payload.
+        let mut data = vllm_mm_data(common::Modality::Image);
+        data.rdma_enabled = true;
+        let proto = data.into_proto();
+        assert!(
+            matches!(
+                proto.pixel_values.unwrap().payload,
+                Some(vllm::tensor_data::Payload::Inline(_))
+            ),
+            "pixel_values must stay inline when the RDMA exporter is absent"
+        );
+    }
 }

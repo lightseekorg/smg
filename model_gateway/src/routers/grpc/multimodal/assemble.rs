@@ -25,7 +25,10 @@ use super::{
         model_specific_to_tensor_bytes, serialize_array_as_tokenspeed_tensor,
         serialize_encoder_input, serialize_model_specific, slice_array_axis0,
     },
-    transport::{mm_encoder_input_dtype, resolve_mm_shm_enabled, resolve_mm_shm_min_bytes},
+    transport::{
+        mm_encoder_input_dtype, resolve_mm_rdma_enabled, resolve_mm_shm_enabled,
+        resolve_mm_shm_min_bytes,
+    },
     MediaBatch, MultimodalIntermediate, PrecomputedMultimodalIntermediate, PromptBinding,
 };
 use crate::routers::grpc::{
@@ -223,8 +226,7 @@ fn assemble_vllm(
         modality,
         shm_enabled: resolve_mm_shm_enabled(workers, false),
         shm_min_bytes: resolve_mm_shm_min_bytes(workers),
-        // vLLM workers cannot pull RDMA payloads yet.
-        rdma_enabled: false,
+        rdma_enabled: resolve_mm_rdma_enabled(workers),
     })
 }
 

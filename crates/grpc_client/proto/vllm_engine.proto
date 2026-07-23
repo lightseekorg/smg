@@ -360,6 +360,11 @@ message GetServerInfoResponse {
   // the router can verify a shared /dev/shm before using the SHM tensor
   // transport under `auto`. Empty when it can't be determined.
   string shm_namespace_id = 10;
+
+  // Whether this worker can pull RDMA (NIXL) multimodal tensor payloads. The
+  // router only emits a `remote` payload when this is true, so an older worker
+  // that cannot consume it stays on the inline/SHM path.
+  bool supports_rdma_pull = 11;
 }
 
 // =====================

@@ -212,6 +212,37 @@ jobs:
           python3 -c "from smg.smg_rs import Router; print('Rust extension: OK')"
           python3 -m smg.launch_router --help > /dev/null && echo "Entry point: OK"
 
+  build-wheel-mm-rdma:
+    # Dedicated mm-rdma wheel for the RDMA e2e, built natively on the bare Ubuntu
+    # runner (GNU libstdc++). The shared wheel is cross-compiled with
+    # `maturin --zig`, which ships LLVM libc++ and can't link nixl-sys's
+    # GNU-libstdc++ C++ stub; building it separately here keeps that off the
+    # shared wheel so it can't break the other e2e lanes. Runs on the same runner
+    # image as the GPU e2e lanes, so the native wheel loads there unchanged.
+    needs: detect-changes
+    if: >-
+      always()
+      && !cancelled()
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+      - name: Build mm-rdma wheel
+        run: bash scripts/ci_build_wheel_mm_rdma.sh
+      - name: Upload mm-rdma wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: smg-wheel-mm-rdma
+          path: bindings/python/dist/*.whl
+          retention-days: 1
+
   python-unit-tests:
     needs: build-wheel
     runs-on: k8s-runner-cpu
@@ -522,6 +553,9 @@ jobs:
           - engine: vllm
             timeout: 24
             test_timeout: 18
+            # The RDMA multimodal test needs the dedicated mm-rdma wheel + a NIXL
+            # runner; it runs in e2e-1gpu-mm-rdma, not this shared-wheel lane.
+            test_filter: "--ignore=e2e_test/chat_completions/test_multimodal_rdma.py"
           - engine: trtllm
             timeout: 32
             test_timeout: 18
@@ -543,6 +577,31 @@ jobs:
       timeout: ${{ matrix.timeout }}
       test_timeout: ${{ matrix.test_timeout }}
       test_dirs: ${{ matrix.test_dirs || 'e2e_test/chat_completions' }}
+      test_filter: ${{ matrix.test_filter || '' }}
+    secrets: inherit
+
+  e2e-1gpu-mm-rdma:
+    # Isolated RDMA multimodal e2e: installs the dedicated mm-rdma wheel and runs
+    # only test_multimodal_rdma.py against a vLLM worker on a NIXL-capable runner.
+    needs: [build-wheel, build-wheel-mm-rdma, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && needs.build-wheel-mm-rdma.result == 'success'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
+    uses: ./.github/workflows/e2e-gpu-job.yml
+    with:
+      engine: vllm
+      gpu_tier: "1"
+      runner: 1-gpu-h100
+      timeout: 24
+      test_timeout: 18
+      test_dirs: e2e_test/chat_completions/test_multimodal_rdma.py
+      wheel_artifact: smg-wheel-mm-rdma
     secrets: inherit
 
   e2e-1gpu-completions:
@@ -1051,7 +1110,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-1gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-4gpu-epd, e2e-vendor, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, build-wheel-mm-rdma, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-mm-rdma, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-1gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-4gpu-epd, e2e-vendor, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -1062,10 +1121,12 @@ jobs:
                 "${{ needs.python-lint.result }}" == "failure" || \
                 "${{ needs.grpc-proto-build-check.result }}" == "failure" || \
                 "${{ needs.build-wheel.result }}" == "failure" || \
+                "${{ needs.build-wheel-mm-rdma.result }}" == "failure" || \
                 "${{ needs.python-unit-tests.result }}" == "failure" || \
                 "${{ needs.unit-tests.result }}" == "failure" || \
                 "${{ needs.benchmarks.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-chat.result }}" == "failure" || \
+                "${{ needs.e2e-1gpu-mm-rdma.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-completions.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-embeddings.result }}" == "failure" || \
                 "${{ needs.e2e-1gpu-gateway.result }}" == "failure" || \

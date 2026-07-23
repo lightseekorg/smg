@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 
 from .constants import DEFAULT_STARTUP_TIMEOUT, ConnectionMode, WorkerType
@@ -33,12 +34,24 @@ from .worker import Worker, start_workers, stop_workers
 logger = logging.getLogger(__name__)
 
 
-# Key is (engine, model_id, mode, worker_type, count, gpus, extra_engine_args).
-# ``count`` is part of the key because a class asking for count=2 after a
-# count=1 class on the same backend would otherwise reuse a 1-worker entry and
-# run with the wrong topology; ``gpus``/``extra_engine_args`` likewise change
-# the launched topology (e.g. --data-parallel-size).
-_PoolKey = tuple[str, str, ConnectionMode, WorkerType, int, int | None, tuple[str, ...] | None]
+# Key is (engine, model_id, mode, worker_type, count, gpus, extra_engine_args,
+# rdma_env). ``count``/``gpus``/``extra_engine_args`` change the launched
+# topology, so a class asking for a different one must not reuse a cached entry.
+# ``rdma_env`` is included because workers inherit the launcher's environment and
+# the RDMA lane is env-gated, so an RDMA-enabled worker must not be reused for an
+# inline test (or vice versa).
+_PoolKey = tuple[
+    str, str, ConnectionMode, WorkerType, int, int | None, tuple[str, ...] | None, tuple[str, ...]
+]
+
+
+def _rdma_env_signature() -> tuple[str, ...]:
+    """RDMA-lane env inherited by workers at launch; part of the pool key."""
+    return (
+        os.environ.get("SMG_MM_TENSOR_TRANSPORT", ""),
+        os.environ.get("SMG_MM_PIXEL_RDMA", ""),
+        os.environ.get("SMG_RDMA_LISTEN_IP", ""),
+    )
 
 
 class WorkerPool:
@@ -123,6 +136,7 @@ class WorkerPool:
                 count,
                 gpus,
                 tuple(extra_engine_args) if extra_engine_args else None,
+                _rdma_env_signature(),
             )
 
             if self._key == key and all(w.is_alive() for w in self._workers):
