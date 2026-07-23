@@ -282,8 +282,8 @@ fn transcription_response(format: TranscriptionResponseFormat, text: String) -> 
     }
 }
 
-/// `501 NOT_IMPLEMENTED`, returned by Regular-only endpoints when this router is
-/// in PD/EPD mode (matching the `RouterTrait` default).
+/// `501 NOT_IMPLEMENTED`, returned by endpoints this router's mode doesn't
+/// serve (matching the `RouterTrait` default).
 fn not_implemented(message: &'static str) -> Response {
     (StatusCode::NOT_IMPLEMENTED, message).into_response()
 }
@@ -293,10 +293,11 @@ fn not_implemented(message: &'static str) -> Response {
 /// A single `Mode`-parameterized router serving Regular, PrefillDecode, and
 /// EncodePrefillDecode. `mode` selects the disaggregation params baked into
 /// every pipeline and drives the per-mode retry-metric labels, `Debug` output,
-/// and `router_type`. The Regular-only members (`harmony_pipeline`,
-/// `embedding_pipeline`, `classify_pipeline`, `responses_context`,
-/// `harmony_responses_context`) are `Some` only in `Mode::Regular`; PD/EPD leave
-/// them `None` and 501 the corresponding endpoints.
+/// and `router_type`. Optional members are `None` when the mode doesn't serve
+/// them and the corresponding endpoints 501: `embedding_pipeline` and
+/// `classify_pipeline` are Regular-only; `harmony_pipeline`,
+/// `responses_context`, and `harmony_responses_context` exist in every mode
+/// but EPD.
 #[derive(Clone)]
 pub struct GrpcRouter {
     worker_registry: Arc<WorkerRegistry>,
@@ -314,9 +315,9 @@ pub struct GrpcRouter {
 }
 
 impl GrpcRouter {
-    /// Only `Mode::Regular` builds the Harmony, embedding, classify, and
-    /// responses members and requires the MCP orchestrator; PD/EPD leave them
-    /// `None` and 501 those endpoints.
+    /// Regular and PD build the Harmony pipeline and responses contexts and
+    /// require the MCP orchestrator; EPD leaves them `None` and 501s those
+    /// endpoints. Embedding/classify pipelines are Regular-only.
     pub fn new(ctx: &Arc<AppContext>, mode: Mode) -> Result<Self, String> {
         // Get tokenizer registry (no longer requires pre-loaded tokenizer)
         let tokenizer_registry = ctx.tokenizer_registry.clone();
@@ -374,14 +375,16 @@ impl GrpcRouter {
         let completion_pipeline = RequestPipeline::build(Endpoint::Completion, mode, &pair_deps)
             .ok_or_else(|| format!("gRPC router: no completion pipeline for mode {mode:?}"))?;
 
-        // Regular-only pipelines; `None` in PD/EPD (which 501 these endpoints).
+        // `None` when the (endpoint, mode) combo is unsupported; those endpoints 501.
         let harmony_pipeline = RequestPipeline::build(Endpoint::Harmony, mode, &configured_deps);
         let embedding_pipeline = RequestPipeline::build(Endpoint::Embeddings, mode, &pair_deps);
         let classify_pipeline = RequestPipeline::build(Endpoint::Classify, mode, &pair_deps);
 
-        // Responses contexts are Regular-only and are the sole consumer of the MCP
-        // orchestrator; PD/EPD skip both (they don't serve /v1/responses).
-        let (responses_context, harmony_responses_context) = if mode == Mode::Regular {
+        // Responses contexts are the sole consumer of the MCP orchestrator; EPD
+        // builds neither (it doesn't serve /v1/responses).
+        let (responses_context, harmony_responses_context) = if mode == Mode::EncodePrefillDecode {
+            (None, None)
+        } else {
             let mcp_orchestrator = ctx
                 .mcp_orchestrator
                 .get()
@@ -410,11 +413,9 @@ impl GrpcRouter {
                 .as_ref()
                 .map(&create_responses_context)
                 .ok_or_else(|| {
-                    "gRPC router: regular mode must build a harmony pipeline".to_string()
+                    format!("gRPC router: mode {mode:?} must build a harmony pipeline")
                 })?;
             (Some(responses_context), Some(harmony_responses_context))
-        } else {
-            (None, None)
         };
 
         Ok(GrpcRouter {
@@ -482,8 +483,8 @@ impl GrpcRouter {
             return *response;
         }
 
-        // Harmony routing is Regular-only: PD/EPD have no Harmony pipeline, so all
-        // chat requests use the single chat/generate pipeline.
+        // EPD has no Harmony pipeline, so its chat requests all use the single
+        // chat/generate pipeline.
         let is_harmony = self.harmony_pipeline.is_some()
             && HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
 
@@ -909,8 +910,7 @@ impl RouterTrait for GrpcRouter {
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
-        // Routes through the regular chat pipeline (`execute_chat_for_responses`),
-        // which PD/EPD do not serve.
+        // Qwen3-ASR transcription is Regular-only.
         if self.mode != Mode::Regular {
             return not_implemented("Audio transcriptions not implemented");
         }
@@ -1194,7 +1194,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pd_retry_tests {
+mod pd_tests {
     use std::sync::{Arc, OnceLock};
 
     use llm_tokenizer::registry::TokenizerRegistry;
@@ -1202,25 +1202,42 @@ mod pd_retry_tests {
     use smg_data_connector::{
         MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
     };
+    use smg_mcp::{McpConfig, McpOrchestrator};
     use tool_parser::ParserFactory as ToolParserFactory;
 
     use super::*;
     use crate::{
         config::{PolicyConfig, RouterConfig, RoutingMode},
         policies::PolicyRegistry,
+        tenant::TenantKey,
         worker::WorkerRegistry,
     };
 
-    /// Minimal `AppContext` for constructing a gRPC PD router. PD/EPD don't read
-    /// the MCP orchestrator, so an empty `OnceLock` suffices.
-    fn pd_ctx() -> Arc<AppContext> {
+    fn pd_routing_mode() -> RoutingMode {
+        RoutingMode::PrefillDecode {
+            prefill_urls: vec![],
+            decode_urls: vec![],
+            prefill_policy: None,
+            decode_policy: None,
+        }
+    }
+
+    fn epd_routing_mode() -> RoutingMode {
+        RoutingMode::EncodePrefillDecode {
+            encode_urls: vec![],
+            prefill_urls: vec![],
+            decode_urls: vec![],
+            encode_policy: None,
+            prefill_policy: None,
+            decode_policy: None,
+        }
+    }
+
+    /// Minimal `AppContext` for constructing a disaggregated gRPC router. PD
+    /// serves /v1/responses, so the MCP orchestrator must be initialized.
+    async fn grpc_ctx(mode: RoutingMode) -> Arc<AppContext> {
         let config = RouterConfig::builder()
-            .mode(RoutingMode::PrefillDecode {
-                prefill_urls: vec![],
-                decode_urls: vec![],
-                prefill_policy: None,
-                decode_policy: None,
-            })
+            .mode(mode)
             .grpc_connection()
             .policy(PolicyConfig::Random)
             .host("127.0.0.1")
@@ -1232,6 +1249,15 @@ mod pd_retry_tests {
             .max_concurrent_requests(64)
             .queue_timeout_secs(60)
             .build_unchecked();
+
+        let mcp_orchestrator = Arc::new(OnceLock::new());
+        mcp_orchestrator
+            .set(Arc::new(
+                McpOrchestrator::new(McpConfig::default())
+                    .await
+                    .expect("mcp orchestrator"),
+            ))
+            .ok();
 
         Arc::new(
             AppContext::builder()
@@ -1247,17 +1273,24 @@ mod pd_retry_tests {
                 .conversation_item_storage(Arc::new(MemoryConversationItemStorage::new()))
                 .worker_job_queue(Arc::new(OnceLock::new()))
                 .workflow_engines(Arc::new(OnceLock::new()))
-                .mcp_orchestrator(Arc::new(OnceLock::new()))
+                .mcp_orchestrator(mcp_orchestrator)
                 .build()
                 .expect("app context"),
         )
     }
 
+    fn responses_request(model: &str) -> ResponsesRequest {
+        serde_json::from_value(json!({"model": model, "input": "hi"})).expect("responses request")
+    }
+
     /// PD-mode completion must honor a per-model retry override, not the router
     /// default.
-    #[test]
-    fn pd_completion_honors_per_model_retry_override() {
-        let ctx = pd_ctx();
+    // Multi-thread runtime: router construction eagerly builds the Harmony
+    // pipeline, whose one-shot encoding load uses `block_in_place` (which
+    // panics on a current-thread runtime).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pd_completion_honors_per_model_retry_override() {
+        let ctx = grpc_ctx(pd_routing_mode()).await;
         let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
 
         // Router default differs from the override so the assertion is meaningful.
@@ -1278,5 +1311,40 @@ mod pd_retry_tests {
 
         let fallback = router.resolve_retry_config("model-without-override");
         assert_eq!(fallback.max_retries, default_retries);
+    }
+
+    /// PD serves /v1/responses: an unknown model is rejected per-request (404),
+    /// not gated behind a blanket 501, and cancel reaches storage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pd_router_serves_responses_and_cancel() {
+        let ctx = grpc_ctx(pd_routing_mode()).await;
+        let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
+        let tenant_meta = TenantRequestMeta::new(TenantKey::new("test-tenant"));
+
+        let request = responses_request("missing-model");
+        let response = router
+            .route_responses(None, &tenant_meta, &request, "missing-model")
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let cancel = router.cancel_response(None, "resp_missing").await;
+        assert_eq!(cancel.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// EPD still 501s /v1/responses and cancel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epd_router_501s_responses_and_cancel() {
+        let ctx = grpc_ctx(epd_routing_mode()).await;
+        let router = GrpcRouter::new(&ctx, Mode::EncodePrefillDecode).expect("epd router");
+        let tenant_meta = TenantRequestMeta::new(TenantKey::new("test-tenant"));
+
+        let request = responses_request("missing-model");
+        let response = router
+            .route_responses(None, &tenant_meta, &request, "missing-model")
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+        let cancel = router.cancel_response(None, "resp_missing").await;
+        assert_eq!(cancel.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }
