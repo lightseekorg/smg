@@ -304,3 +304,16 @@ async fn test_qwen_xml_tag_arrives_in_parts() {
 
     assert!(got_tool_name, "Should have parsed tool name");
 }
+
+#[tokio::test]
+async fn test_qwen_prose_mentions_tool_call_before_real_block() {
+    let parser = QwenParser::new();
+    let input = r#"Explain the <tool_call> XML tag.
+<tool_call>
+{"name": "search", "arguments": {"q": "x"}}
+</tool_call>"#;
+    let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].function.name, "search");
+    assert_eq!(normal_text, "Explain the <tool_call> XML tag.\n");
+}
