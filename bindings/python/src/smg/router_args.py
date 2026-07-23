@@ -200,6 +200,9 @@ class RouterArgs:
     mesh_advertise_host: str | None = None
     mesh_port: int = 39527
     mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
+    # Maximum time a streaming response may go without yielding a chunk.
+    # Appended to preserve positional RouterArgs constructor compatibility.
+    stream_idle_timeout_secs: int = 300
 
     @staticmethod
     def add_cli_args(
@@ -728,6 +731,12 @@ class RouterArgs:
             type=int,
             default=RouterArgs.request_timeout_secs,
             help="Request timeout in seconds",
+        )
+        request_group.add_argument(
+            f"--{prefix}stream-idle-timeout-secs",
+            type=int,
+            default=RouterArgs.stream_idle_timeout_secs,
+            help="Maximum time a streaming response may go without yielding a chunk",
         )
         request_group.add_argument(
             f"--{prefix}shutdown-grace-period-secs",

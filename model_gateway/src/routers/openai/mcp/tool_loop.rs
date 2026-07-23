@@ -32,6 +32,7 @@ use crate::{
                 self, extract_embedded_openai_responses, mcp_response_item_id, FormatRegistry,
                 ResponseFormat, ResponseTransformer,
             },
+            stream_timeout::{StreamDeadline, StreamTimeoutKind},
         },
         error,
     },
@@ -176,7 +177,8 @@ pub(crate) async fn execute_streaming_tool_calls(
     model_id: &str,
     request_tools: &[ResponseTool],
     request_user: Option<&str>,
-) -> bool {
+    stream_deadline: StreamDeadline,
+) -> Result<bool, StreamTimeoutKind> {
     for call in pending_calls {
         if call.name.is_empty() {
             warn!(
@@ -228,7 +230,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                     response_format,
                     sequence_number,
                 ) {
-                    return false;
+                    return Ok(false);
                 }
                 state.record_call(
                     session.is_builtin_tool(&call.name),
@@ -243,7 +245,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         };
 
         if !send_tool_call_intermediate_event(tx, &call, response_format, sequence_number) {
-            return false;
+            return Ok(false);
         }
 
         // Coerce non-object payloads to `{}` before merging overrides — the
@@ -261,13 +263,14 @@ pub(crate) async fn execute_streaming_tool_calls(
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
         debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
-        let tool_output = session
-            .execute_tool(ToolExecutionInput {
+        let tool_output = Box::pin(stream_deadline.until_activity(session.execute_tool(
+            ToolExecutionInput {
                 call_id: call.call_id.clone(),
                 tool_name: call.name.clone(),
                 arguments,
-            })
-            .await;
+            },
+        )))
+        .await?;
 
         Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
         Metrics::record_mcp_tool_call(
@@ -303,7 +306,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             response_format,
             sequence_number,
         ) {
-            return false;
+            return Ok(false);
         }
 
         state.record_call(
@@ -315,7 +318,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             mcp_call_item,
         );
     }
-    true
+    Ok(true)
 }
 
 /// Transform payload to replace MCP/builtin tools with function tools.

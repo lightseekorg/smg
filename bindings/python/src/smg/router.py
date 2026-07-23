@@ -214,6 +214,8 @@ class Router:
         bootstrap_port_annotation: Kubernetes annotation name for bootstrap port (PD
             mode). Default: 'sglang.ai/bootstrap-port'
         request_timeout_secs: Request timeout in seconds. Default: 600
+        stream_idle_timeout_secs: Maximum time a streaming response may go without
+            yielding a chunk. Default: 300
         max_concurrent_requests: Maximum number of concurrent requests allowed for
             rate limiting. Default: 256
         queue_size: Queue size for pending requests when max concurrent limit reached

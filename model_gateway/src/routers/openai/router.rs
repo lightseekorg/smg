@@ -100,6 +100,7 @@ impl OpenAIRouter {
 
         let shared_components = Arc::new(SharedComponents {
             client: ctx.client.clone(),
+            streaming_client: ctx.streaming_client.clone(),
             router_config: Arc::new(ctx.router_config.clone()),
         });
 

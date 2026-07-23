@@ -1,6 +1,6 @@
 //! Request context types for OpenAI router pipeline.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
@@ -40,6 +40,7 @@ pub enum RequestType {
 #[derive(Clone)]
 pub struct SharedComponents {
     pub client: reqwest::Client,
+    pub streaming_client: reqwest::Client,
     pub router_config: Arc<RouterConfig>,
 }
 
@@ -62,6 +63,13 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(s) => &s.client,
             ComponentRefs::Responses(r) => &r.shared.client,
+        }
+    }
+
+    pub fn streaming_client(&self) -> &reqwest::Client {
+        match self {
+            ComponentRefs::Shared(s) => &s.streaming_client,
+            ComponentRefs::Responses(r) => &r.shared.streaming_client,
         }
     }
 
@@ -238,6 +246,8 @@ pub struct OwnedStreamingContext {
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub stream_timeout: Duration,
+    pub stream_idle_timeout: Duration,
     pub storage: StorageHandles,
 }
 
@@ -264,6 +274,10 @@ impl RequestContext {
             .conversation_item_storage()
             .ok_or("Conversation item storage required")?
             .clone();
+        let stream_timeout =
+            Duration::from_secs(self.components.router_config().request_timeout_secs);
+        let stream_idle_timeout =
+            Duration::from_secs(self.components.router_config().stream_idle_timeout_secs);
 
         Ok(OwnedStreamingContext {
             url: payload_state.url,
@@ -271,6 +285,8 @@ impl RequestContext {
             original_body,
             previous_response_id: responses_payload_state.previous_response_id,
             existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
+            stream_timeout,
+            stream_idle_timeout,
             storage: StorageHandles {
                 response,
                 conversation,

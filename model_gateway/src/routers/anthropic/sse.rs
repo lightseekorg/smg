@@ -11,7 +11,6 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures::StreamExt;
 use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -19,7 +18,10 @@ use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
 use crate::routers::{
-    common::sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+    common::{
+        sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+        stream_timeout::StreamDeadline,
+    },
     error::internal_error,
 };
 
@@ -224,6 +226,7 @@ pub(crate) async fn consume_and_forward<F>(
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
+    stream_deadline: StreamDeadline,
     resolve_server_name: F,
 ) -> Result<StreamConsumeResult, String>
 where
@@ -238,8 +241,12 @@ where
         is_first_iteration,
         resolve_server_name,
     );
-
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match stream_deadline.next(&mut stream).await {
+            Ok(Some(chunk_result)) => chunk_result,
+            Ok(None) => break,
+            Err(timeout) => return Err(stream_deadline.message(timeout)),
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         decoder.push(&chunk).map_err(|e| match e {
@@ -253,6 +260,9 @@ where
             let frame = frame.map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
             if let Some((event_type, data)) = resolve_event(frame) {
                 processor.process(&event_type, &data).await?;
+                if processor.terminal_seen() {
+                    return Ok(processor.into_result());
+                }
             }
         }
         decoder.compact();
@@ -448,6 +458,7 @@ struct EventProcessor<'a, F> {
     result: IterationResult,
     usage: Option<MessageDeltaUsage>,
     upstream_blocks: Vec<BlockAccumulator>,
+    terminal_seen: bool,
 }
 
 impl<'a, F> EventProcessor<'a, F>
@@ -476,6 +487,7 @@ where
             },
             usage: None,
             upstream_blocks: Vec::new(),
+            terminal_seen: false,
         }
     }
 
@@ -485,6 +497,10 @@ where
             iteration: self.result,
             usage: self.usage,
         }
+    }
+
+    fn terminal_seen(&self) -> bool {
+        self.terminal_seen
     }
 
     /// Send an SSE event to the client, returning `Err` on disconnect.
@@ -510,7 +526,9 @@ where
             "content_block_delta" => self.handle_block_delta(&mut parsed).await?,
             "content_block_stop" => self.handle_block_stop(&parsed).await?,
             "message_delta" => self.handle_message_delta(&parsed),
-            "message_stop" => { /* Don't forward — we emit our own at the end */ }
+            "message_stop" => {
+                self.terminal_seen = true;
+            }
             "ping" => {
                 self.send("ping", &serde_json::json!({"type": "ping"}))
                     .await?;

@@ -119,7 +119,7 @@ async fn send_one_request(
         &url,
         &req_headers,
         &req_ctx.request,
-        router.request_timeout,
+        Some(router.request_timeout),
     )
     .await?;
 

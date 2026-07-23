@@ -7,15 +7,17 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -37,11 +39,16 @@ use super::{
         rewrite_streaming_block,
     },
 };
-use crate::routers::common::openai_bridge::{self, mcp_response_item_id, ResponseFormat};
+use crate::routers::common::{
+    openai_bridge::{self, mcp_response_item_id, ResponseFormat},
+    stream_timeout::{
+        StreamBodyReadError, StreamDeadline, StreamTimeoutKind, MAX_STREAM_ERROR_BODY_SIZE,
+    },
+};
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::{
-    observability::metrics::Metrics,
+    observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
             header_utils::{
@@ -52,8 +59,9 @@ use crate::{
             sse::SseEncoder,
         },
         error,
+        grpc::utils::error_type_from_status,
         openai::{
-            context::{RequestContext, StreamingEventContext, StreamingRequest},
+            context::{RequestContext, StorageHandles, StreamingEventContext, StreamingRequest},
             mcp::{
                 build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
                 mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
@@ -61,7 +69,41 @@ use crate::{
             },
         },
     },
+    worker::Worker,
 };
+
+fn record_regular_worker_outcome(worker: &dyn Worker, status: StatusCode) {
+    worker.record_outcome(status.as_u16());
+    if status.is_server_error() {
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            error_type_from_status(status),
+        );
+    }
+}
+
+fn record_responses_router_stream_outcome(model_id: &str, start_time: Instant, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_RESPONSES,
+            start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            metrics_labels::ENDPOINT_RESPONSES,
+            error_type_from_status(status),
+        );
+    }
+}
 
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
@@ -526,13 +568,57 @@ pub(super) fn send_final_response_event(
     }
 }
 
+async fn persist_mcp_streaming_response(
+    mut response_json: Value,
+    preserved_response_id: Option<&str>,
+    state: &ToolLoopState,
+    session: &McpToolSession<'_>,
+    original_request: &ResponsesRequest,
+    previous_response_id: Option<&str>,
+    storage: &StorageHandles,
+) {
+    if let Some(id) = preserved_response_id {
+        if let Some(obj) = response_json.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(id.to_string()));
+        }
+    }
+    inject_mcp_metadata_streaming(&mut response_json, state, session);
+
+    restore_original_tools(&mut response_json, original_request, Some(session));
+    patch_response_with_request_metadata(
+        &mut response_json,
+        original_request,
+        previous_response_id,
+    );
+
+    if let Err(err) = persist_conversation_items(
+        storage.conversation.clone(),
+        storage.conversation_item.clone(),
+        storage.response.clone(),
+        &response_json,
+        original_request,
+        storage.request_context.clone(),
+    )
+    .await
+    {
+        warn!(
+            "Failed to persist conversation items (stream + MCP): {}",
+            err
+        );
+    }
+}
+
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
-    worker: &Arc<dyn crate::worker::Worker>,
+    worker: &Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
+    router_start: Instant,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
+    let stream_model_id = req.original_body.model.clone();
     let mut request_builder = client.post(&req.url).json(&req.payload);
     let provider = ApiProvider::from_url(&req.url);
     let auth_header = provider.extract_auth_header(headers, worker.api_key());
@@ -540,13 +626,32 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     request_builder = request_builder.header("Accept", "text/event-stream");
 
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            worker.record_outcome(502);
+    let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
+    let response = match stream_deadline.until_total(request_builder.send()).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(err)) => {
+            record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+            record_responses_router_stream_outcome(
+                &stream_model_id,
+                router_start,
+                StatusCode::BAD_GATEWAY,
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Failed to forward request to OpenAI: {err}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+            record_responses_router_stream_outcome(
+                &stream_model_id,
+                router_start,
+                StatusCode::GATEWAY_TIMEOUT,
+            );
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                stream_deadline.message(StreamTimeoutKind::Total),
             )
                 .into_response();
         }
@@ -556,18 +661,42 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let status_code =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    worker.record_outcome(status.as_u16());
-
     if !status.is_success() {
-        let error_body = response
-            .text()
+        let mut error_stream = response.bytes_stream();
+        let error_body = match stream_deadline
+            .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
             .await
-            .unwrap_or_else(|err| format!("Failed to read upstream error body: {err}"));
+        {
+            Ok(body) => {
+                record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_responses_router_stream_outcome(&stream_model_id, router_start, status_code);
+                body
+            }
+            Err(StreamBodyReadError::Timeout(timeout)) => {
+                record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                record_responses_router_stream_outcome(
+                    &stream_model_id,
+                    router_start,
+                    StatusCode::GATEWAY_TIMEOUT,
+                );
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    stream_deadline.message(timeout),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_responses_router_stream_outcome(&stream_model_id, router_start, status_code);
+                stream_deadline.body_read_error_message(&err)
+            }
+        };
         let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
 
-    let preserved_headers = preserve_response_headers(response.headers());
+    let mut preserved_headers = preserve_response_headers(response.headers());
+    preserved_headers.remove(CONTENT_LENGTH);
     let mut upstream_stream = response.bytes_stream();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -576,6 +705,8 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
+    let worker_for_stream = worker.clone();
+    let stream_model_id_for_relay = stream_model_id.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -583,16 +714,27 @@ pub(super) async fn handle_simple_streaming_passthrough(
     )]
     tokio::spawn(async move {
         let mut accumulator = StreamingResponseAccumulator::new();
-        let mut upstream_failed = false;
+        let mut stream_failure_status = None;
         let mut receiver_connected = true;
         let mut chunk_processor = ChunkProcessor::new();
 
-        while let Some(chunk_result) = upstream_stream.next().await {
+        'stream_loop: loop {
+            let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                Ok(Some(chunk_result)) => chunk_result,
+                Ok(None) => break,
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                    break;
+                }
+            };
             match chunk_result {
                 Ok(chunk) => {
                     chunk_processor.push_chunk(&chunk);
 
                     while let Some(raw_block) = chunk_processor.next_block() {
+                        let (_, raw_data) = parse_sse_block(&raw_block);
+                        let is_done = raw_data.as_ref() == "[DONE]";
                         let block_cow = match rewrite_streaming_block(
                             &raw_block,
                             &original_request,
@@ -602,7 +744,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                             None => Cow::Borrowed(raw_block.as_str()),
                         };
 
-                        if should_store {
+                        if should_store && !is_done {
                             accumulator.ingest_block(&block_cow);
                         }
 
@@ -616,6 +758,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
                         if !receiver_connected && !should_store {
                             break;
                         }
+                        if is_done {
+                            break 'stream_loop;
+                        }
                     }
 
                     if !receiver_connected && !should_store {
@@ -623,7 +768,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     }
                 }
                 Err(err) => {
-                    upstream_failed = true;
+                    stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                     let io_err = io::Error::other(err);
                     let _ = tx.send(Err(io_err));
                     break;
@@ -631,7 +776,15 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
         }
 
-        if should_store && !upstream_failed {
+        let effective_status = stream_failure_status.unwrap_or(status_code);
+        record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+        record_responses_router_stream_outcome(
+            &stream_model_id_for_relay,
+            router_start,
+            effective_status,
+        );
+
+        if should_store && stream_failure_status.is_none() {
             if chunk_processor.has_remaining() {
                 accumulator.ingest_block(&chunk_processor.take_remaining());
             }
@@ -681,20 +834,29 @@ pub(super) async fn handle_simple_streaming_passthrough(
 }
 
 /// Handle streaming WITH MCP tool call interception and execution
+#[expect(
+    clippy::too_many_arguments,
+    reason = "MCP streaming needs client, worker, request context, orchestrator, format registry, and router timing"
+)]
 pub(super) fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
-    worker_api_key: Option<String>,
+    worker: Arc<dyn Worker>,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
+    router_start: Instant,
     orchestrator: &Arc<McpOrchestrator>,
     format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
+    let stream_timeout = req.stream_timeout;
+    let stream_idle_timeout = req.stream_idle_timeout;
     let payload = req.payload;
+    let worker_api_key = worker.api_key().cloned();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
+    let stream_model_id = original_request.model.clone();
     let previous_response_id = req.previous_response_id;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
     let url = req.url;
@@ -712,6 +874,12 @@ pub(super) fn handle_streaming_with_tool_interception(
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
+        macro_rules! record_router_outcome {
+            ($status:expr) => {
+                record_responses_router_stream_outcome(&stream_model_id, router_start, $status);
+            };
+        }
+
         let mut state = ToolLoopState::new(
             original_request.input.clone(),
             existing_mcp_list_tools_labels,
@@ -736,6 +904,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sse_encoder = SseEncoder::new();
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
+        let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
         let list_tools_bindings = mcp_list_tools_bindings_to_emit(
             &state.existing_mcp_list_tools_labels,
             session.mcp_servers(),
@@ -752,14 +921,27 @@ pub(super) fn handle_streaming_with_tool_interception(
             provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
+            if stream_deadline.is_total_elapsed() {
+                let _ = tx.send(Ok(stream_deadline.sse_error_event(StreamTimeoutKind::Total)));
+                record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
+                return;
+            }
+
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
             request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
             request_builder = request_builder.header("Accept", "text/event-stream");
 
-            let response = match request_builder.send().await {
-                Ok(r) => r,
-                Err(e) => {
+            let response_result = if is_first_iteration {
+                stream_deadline.until_total(request_builder.send()).await
+            } else {
+                stream_deadline.until_activity(request_builder.send()).await
+            };
+            let response = match response_result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+                    record_router_outcome!(StatusCode::BAD_GATEWAY);
                     let _ = send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -768,11 +950,34 @@ pub(super) fn handle_streaming_with_tool_interception(
                     );
                     return;
                 }
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                    record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
+                    return;
+                }
             };
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let status_code = StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut error_stream = response.bytes_stream();
+                let body = match stream_deadline
+                    .read_text_limited(&mut error_stream, MAX_STREAM_ERROR_BODY_SIZE)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(StreamBodyReadError::Timeout(timeout)) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
+                        return;
+                    }
+                    Err(err) => stream_deadline.body_read_error_message(&err),
+                };
+                record_regular_worker_outcome(worker.as_ref(), status_code);
+                record_router_outcome!(status_code);
                 let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
@@ -783,6 +988,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                 return;
             }
 
+            let status = StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut upstream_stream = response.bytes_stream();
             let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
             if let Some(ref id) = preserved_response_id {
@@ -792,7 +999,17 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
 
-            while let Some(chunk_result) = upstream_stream.next().await {
+            loop {
+                let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
+                    Ok(Some(chunk_result)) => chunk_result,
+                    Ok(None) => break,
+                    Err(timeout) => {
+                        let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::GATEWAY_TIMEOUT);
+                        record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
+                        return;
+                    }
+                };
                 match chunk_result {
                     Ok(chunk) => {
                         chunk_processor.push_chunk(&chunk);
@@ -803,6 +1020,37 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                             if data.is_empty() {
                                 continue;
+                            }
+
+                            if data.as_ref() == "[DONE]" {
+                                let done_block = format!("{raw_block}\n\n");
+                                let done_sent = tx.send(Ok(Bytes::from(done_block))).is_ok();
+                                let current_response_id = handler
+                                    .original_response_id()
+                                    .map(str::to_string)
+                                    .or_else(|| preserved_response_id.clone());
+                                if should_store {
+                                    if let Some(response_json) =
+                                        handler.accumulator.into_final_response()
+                                    {
+                                        persist_mcp_streaming_response(
+                                            response_json,
+                                            current_response_id.as_deref(),
+                                            &state,
+                                            &session,
+                                            &original_request,
+                                            previous_response_id.as_deref(),
+                                            &storage,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                record_regular_worker_outcome(worker.as_ref(), status);
+                                record_router_outcome!(status);
+                                if !done_sent {
+                                    return;
+                                }
+                                return;
                             }
 
                             // Process through handler
@@ -933,6 +1181,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
+                        record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+                        record_router_outcome!(StatusCode::BAD_GATEWAY);
                         let _ = send_sse_event(
                             &tx,
                             &mut sse_encoder,
@@ -951,6 +1201,8 @@ pub(super) fn handle_streaming_with_tool_interception(
 
             // If no tool calls, we're done - stream is complete
             if !tool_calls_detected {
+                record_regular_worker_outcome(worker.as_ref(), status);
+                record_router_outcome!(status);
                 if !send_final_response_event(
                     &handler,
                     &tx,
@@ -968,42 +1220,24 @@ pub(super) fn handle_streaming_with_tool_interception(
                     None
                 };
 
-                if let Some(mut response_json) = final_response_json {
-                    if let Some(ref id) = preserved_response_id {
-                        if let Some(obj) = response_json.as_object_mut() {
-                            obj.insert("id".to_string(), Value::String(id.clone()));
-                        }
-                    }
-                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
-
-                    restore_original_tools(&mut response_json, &original_request, Some(&session));
-                    patch_response_with_request_metadata(
-                        &mut response_json,
+                if let Some(response_json) = final_response_json {
+                    persist_mcp_streaming_response(
+                        response_json,
+                        preserved_response_id.as_deref(),
+                        &state,
+                        &session,
                         &original_request,
                         previous_response_id.as_deref(),
-                    );
-
-                    // Always persist conversation items and response (even without conversation)
-                    if let Err(err) = persist_conversation_items(
-                        storage.conversation.clone(),
-                        storage.conversation_item.clone(),
-                        storage.response.clone(),
-                        &response_json,
-                        &original_request,
-                        storage.request_context.clone(),
+                        &storage,
                     )
-                    .await
-                    {
-                        warn!(
-                            "Failed to persist conversation items (stream + MCP): {}",
-                            err
-                        );
-                    }
+                    .await;
                 }
 
                 let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
                 return;
             }
+
+            record_regular_worker_outcome(worker.as_ref(), status);
 
             // Execute tools
             let pending_calls = handler.take_pending_calls();
@@ -1025,6 +1259,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     "Reached tool call limit during streaming: {}",
                     effective_limit
                 );
+                record_router_outcome!(StatusCode::BAD_GATEWAY);
                 send_sse_event(
                     &tx,
                     &mut sse_encoder,
@@ -1039,7 +1274,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             // hosted-tool overrides (e.g. image_generation size/quality) are
             // merged into dispatch args before MCP execution. The request-level
             // `user` is also forwarded into hosted-tool dispatch args.
-            if !execute_streaming_tool_calls(
+            let tool_execution_result = Box::pin(execute_streaming_tool_calls(
                 pending_calls,
                 &session,
                 &format_registry,
@@ -1049,9 +1284,21 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &original_request.model,
                 original_request.tools.as_deref().unwrap_or(&[]),
                 original_request.user.as_deref(),
-            )
-            .await
-            {
+                stream_deadline,
+            ))
+            .await;
+
+            let should_continue = match tool_execution_result {
+                Ok(should_continue) => should_continue,
+                Err(timeout) => {
+                    let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
+                    record_router_outcome!(StatusCode::GATEWAY_TIMEOUT);
+                    return;
+                }
+            };
+
+            if !should_continue {
+                record_router_outcome!(status);
                 return;
             }
 
@@ -1068,6 +1315,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     is_first_iteration = false;
                 }
                 Err(e) => {
+                    record_router_outcome!(StatusCode::BAD_GATEWAY);
                     send_sse_event(
                         &tx,
                         &mut sse_encoder,
@@ -1091,7 +1339,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 }
 
 /// Main entry point for streaming responses
-pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
+pub async fn handle_streaming_response(ctx: RequestContext, router_start: Instant) -> Response {
     use crate::routers::common::mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing};
 
     let worker = match ctx.worker() {
@@ -1132,7 +1380,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         _ => None,
     };
 
-    let client = ctx.components.client().clone();
+    let client = ctx.components.streaming_client().clone();
     let req = match ctx.into_streaming_context() {
         Ok(r) => r,
         Err(msg) => {
@@ -1141,14 +1389,22 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing else {
-        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
+        return handle_simple_streaming_passthrough(
+            &client,
+            &worker,
+            headers.as_ref(),
+            req,
+            router_start,
+        )
+        .await;
     };
 
     handle_streaming_with_tool_interception(
         &client,
-        worker.api_key().cloned(),
+        worker.clone(),
         headers.as_ref(),
         req,
+        router_start,
         &mcp_orchestrator,
         mcp_format_registry,
         mcp_servers,

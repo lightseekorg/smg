@@ -185,12 +185,12 @@ pub(in crate::routers::openai) async fn route_responses(
     });
 
     let response = if ctx.is_streaming() {
-        handle_streaming_response(ctx).await
+        handle_streaming_response(ctx, start).await
     } else {
         handle_non_streaming_response(ctx).await
     };
 
-    if response.status().is_success() {
+    if response.status().is_success() && !streaming {
         Metrics::record_router_duration(
             metrics_labels::ROUTER_OPENAI,
             metrics_labels::BACKEND_EXTERNAL,
