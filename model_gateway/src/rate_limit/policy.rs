@@ -133,10 +133,10 @@ impl CompiledPolicySet {
             .tenants
             .iter()
             .filter_map(|spec| {
-                // `yaml.validate()?` above already rejected any `tenants`
-                // entry with a missing `tenant_key`, so `None` here is
-                // unreachable — skip rather than panic if that invariant
-                // is ever violated.
+                // INVARIANT: `yaml.validate()?` above already rejected any
+                // `tenants` entry with a missing `tenant_key`, so `None`
+                // here is unreachable — skip rather than panic if that
+                // invariant is ever violated.
                 spec.tenant_key
                     .clone()
                     .map(|k| (TenantKey::from(k), CompiledTenantPolicy::compile(spec)))

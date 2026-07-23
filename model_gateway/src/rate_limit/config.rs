@@ -169,6 +169,14 @@ impl RateLimitYaml {
             let Some(tenant_key) = spec.tenant_key.as_deref() else {
                 return Err(RateLimitConfigError::MissingTenantKey { index });
             };
+            // Empty/whitespace-only is functionally the same as missing: it
+            // would compile into a `TenantKey` that can never match a real
+            // resolved tenant identity (those are always `auth:`/`header:`/
+            // `ip:`-prefixed or `anonymous`), so the entry would silently
+            // never apply to anything.
+            if tenant_key.trim().is_empty() {
+                return Err(RateLimitConfigError::MissingTenantKey { index });
+            }
             if !seen_tenants.insert(tenant_key) {
                 return Err(RateLimitConfigError::DuplicateTenantKey {
                     tenant_key: tenant_key.to_string(),
@@ -233,6 +241,20 @@ mod tests {
             yaml.validate(),
             Err(RateLimitConfigError::MissingTenantKey { index: 0 })
         );
+    }
+
+    #[test]
+    fn tenant_empty_or_whitespace_key_rejected() {
+        for key in ["", "   "] {
+            let yaml = RateLimitYaml {
+                default_policy: policy(None, 1000, 60),
+                tenants: vec![policy(Some(key), 5000, 300)],
+            };
+            assert_eq!(
+                yaml.validate(),
+                Err(RateLimitConfigError::MissingTenantKey { index: 0 })
+            );
+        }
     }
 
     #[test]
