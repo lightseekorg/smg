@@ -62,6 +62,8 @@ pub enum RateLimitConfigError {
     MissingTenantKey { index: usize },
     #[error("duplicate tenant_key '{tenant_key}'")]
     DuplicateTenantKey { tenant_key: String },
+    #[error("tenant_key '{tenant_key}' must not have surrounding whitespace")]
+    PaddedTenantKey { tenant_key: String },
     #[error("policy '{label}': tokens_per_minute must be > 0")]
     ZeroTokensPerMinute { label: String },
     #[error("policy '{label}': requests_per_minute must be > 0")]
@@ -172,13 +174,25 @@ impl RateLimitYaml {
             let Some(tenant_key) = spec.tenant_key.as_deref() else {
                 return Err(RateLimitConfigError::MissingTenantKey { index });
             };
+            let trimmed = tenant_key.trim();
             // Empty/whitespace-only is functionally the same as missing: it
             // would compile into a `TenantKey` that can never match a real
             // resolved tenant identity (those are always `auth:`/`header:`/
             // `ip:`-prefixed or `anonymous`), so the entry would silently
             // never apply to anything.
-            if tenant_key.trim().is_empty() {
+            if trimmed.is_empty() {
                 return Err(RateLimitConfigError::MissingTenantKey { index });
+            }
+            // A padded key (leading/trailing whitespace, no surrounding
+            // quotes involved) would compile verbatim into `TenantKey` via
+            // `TenantKey::from`, but resolved auth/header tenant keys are
+            // always canonicalized without surrounding whitespace — the
+            // override would silently never be found, and the tenant
+            // falls back to the default policy instead.
+            if trimmed != tenant_key {
+                return Err(RateLimitConfigError::PaddedTenantKey {
+                    tenant_key: tenant_key.to_string(),
+                });
             }
             if !seen_tenants.insert(tenant_key) {
                 return Err(RateLimitConfigError::DuplicateTenantKey {
@@ -258,6 +272,20 @@ mod tests {
                 Err(RateLimitConfigError::MissingTenantKey { index: 0 })
             );
         }
+    }
+
+    #[test]
+    fn tenant_padded_key_rejected() {
+        let yaml = RateLimitYaml {
+            default_policy: policy(None, 1000, 60),
+            tenants: vec![policy(Some("auth:team-red "), 5000, 300)],
+        };
+        assert_eq!(
+            yaml.validate(),
+            Err(RateLimitConfigError::PaddedTenantKey {
+                tenant_key: "auth:team-red ".to_string()
+            })
+        );
     }
 
     #[test]
