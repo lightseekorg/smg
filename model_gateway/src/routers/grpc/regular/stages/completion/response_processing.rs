@@ -112,13 +112,6 @@ impl PipelineStage for CompletionResponseProcessingStage {
             )
         })?;
 
-        let prompt_text = ctx
-            .state
-            .preparation
-            .as_ref()
-            .and_then(|p| p.routing_text())
-            .unwrap_or("");
-
         let response = self
             .processor
             .process_non_streaming_completion_response(
@@ -127,7 +120,6 @@ impl PipelineStage for CompletionResponseProcessingStage {
                 dispatch,
                 tokenizer,
                 stop_decoder,
-                prompt_text,
             )
             .await?;
 

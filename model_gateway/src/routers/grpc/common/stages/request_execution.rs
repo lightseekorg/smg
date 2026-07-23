@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::response::Response;
-use futures::future::join_all;
+use futures::future::{join_all, try_join_all};
 use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
@@ -15,8 +15,8 @@ use crate::{
         grpc::{
             common::stages::encode::EncodeDispatchPlan,
             context::{
-                ClientSelection, ExecutionPlan, ExecutionResult, LoadGuards, PdTiming,
-                RequestContext, WorkerSelection,
+                ClientSelection, ExecutionPlan, ExecutionPlanKind, ExecutionResult, LoadGuards,
+                PdTiming, RequestContext, WorkerSelection,
             },
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
@@ -167,7 +167,15 @@ impl PipelineStage for RequestExecutionStage {
             )
         })?;
 
-        ctx.state.load_guards = Some(LoadGuards::new(workers, ctx.input.headers.as_ref()));
+        let sub_requests = match &execution_plan {
+            ExecutionPlan::Batch { requests, .. } => requests.len(),
+            _ => 1,
+        };
+        ctx.state.load_guards = Some(LoadGuards::scaled(
+            workers,
+            ctx.input.headers.as_ref(),
+            sub_requests,
+        ));
 
         // Extract dispatch metadata for tracing span
         let dispatch = ctx.state.dispatch.as_ref();
@@ -202,6 +210,10 @@ impl PipelineStage for RequestExecutionStage {
                     // request building; dispatch the encode jobs with the
                     // prefill+decode leg.
                     self.execute_epd_dispatch(request, clients, workers, model, encode_dispatch)
+                        .await
+                }
+                ExecutionPlan::Batch { kind, requests, .. } => {
+                    self.execute_batch_dispatch(kind, requests, clients, workers, model)
                         .await
                 }
             }
@@ -327,6 +339,37 @@ impl RequestExecutionStage {
                 }
             }
         });
+    }
+
+    /// Dispatch one backend request per batched prompt concurrently, preserving
+    /// prompt order. Fail-fast: the first failed dispatch fails the batch and
+    /// drops the remaining streams (abort-on-drop reclaims them backend-side).
+    async fn execute_batch_dispatch(
+        &self,
+        kind: ExecutionPlanKind,
+        requests: Vec<ProtoGenerateRequest>,
+        clients: &ClientSelection,
+        workers: &WorkerSelection,
+        model: &str,
+    ) -> Result<ExecutionResult, Response> {
+        let dispatches = requests.into_iter().map(|request| {
+            let mut clients = clients.clone();
+            async move {
+                match kind {
+                    ExecutionPlanKind::Single => {
+                        self.execute_single(request, &mut clients, workers).await
+                    }
+                    // Completion EPD carries no encode jobs; sub-requests dispatch as PD.
+                    ExecutionPlanKind::PrefillDecode | ExecutionPlanKind::EncodePrefillDecode => {
+                        self.execute_pd_dispatch(request, &mut clients, workers, model)
+                            .await
+                    }
+                }
+            }
+        });
+
+        let results = try_join_all(dispatches).await?;
+        Ok(ExecutionResult::Batch { results })
     }
 
     async fn execute_single(

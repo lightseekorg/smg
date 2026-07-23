@@ -5,13 +5,16 @@
 
 use std::{sync::Arc, time::Instant};
 
+use futures::future::try_join_all;
 use llm_tokenizer::{
     stop::{SequenceDecoderOutput, StopSequenceDecoder},
     traits::Tokenizer,
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, Tool, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{
+        FunctionCallResponse, StringOrArray, Tool, ToolCall, ToolChoice, ToolChoiceValue, Usage,
+    },
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -771,9 +774,10 @@ impl ResponseProcessor {
 
     /// Process non-streaming completion response
     ///
-    /// Collects all responses (supports n>1), decodes tokens through stop decoder,
-    /// applies `echo` and `suffix`, and builds `CompletionResponse` with legacy
-    /// `LogProbs` format.
+    /// Collects all responses (supports n>1 and batched prompts), decodes tokens
+    /// through the stop decoder, applies `echo` and `suffix`, and builds one
+    /// `CompletionResponse` with prompt-major global choice indices
+    /// (`prompt_index * n + choice_index`).
     pub async fn process_non_streaming_completion_response(
         &self,
         execution_result: ExecutionResult,
@@ -781,90 +785,116 @@ impl ResponseProcessor {
         dispatch: DispatchMetadata,
         _tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
-        prompt_text: &str,
     ) -> Result<CompletionResponse, axum::response::Response> {
         let request_logprobs = completion_req.logprobs.is_some();
-        let all_responses =
-            response_collection::collect_responses(execution_result, request_logprobs).await?;
+        let per_prompt_results = match execution_result {
+            ExecutionResult::Batch { results } => results,
+            other => vec![other],
+        };
+        let choices_per_prompt = completion_req.n.unwrap_or(1).max(1);
+        let prompt_texts: Vec<&str> = match &completion_req.prompt {
+            StringOrArray::String(text) => vec![text.as_str()],
+            StringOrArray::Array(texts) => texts.iter().map(String::as_str).collect(),
+        };
+
+        // Drain all sub-streams concurrently; decoding below stays sequential
+        // (shared stop decoder).
+        let collected = try_join_all(
+            per_prompt_results
+                .into_iter()
+                .map(|result| response_collection::collect_responses(result, request_logprobs)),
+        )
+        .await?;
 
         let mut total_prompt = 0u32;
         let mut total_completion = 0u32;
         let mut choices = Vec::new();
 
-        for (i, complete) in all_responses.into_iter().enumerate() {
-            stop_decoder.reset();
+        for (prompt_index, all_responses) in collected.into_iter().enumerate() {
+            let prompt_text = prompt_texts.get(prompt_index).copied().unwrap_or_default();
+            let index_offset = prompt_index as u32 * choices_per_prompt;
+            // n>1 choices share one prompt: max within a prompt, summed across prompts.
+            let mut prompt_tokens = 0u32;
 
-            let outputs = match stop_decoder.process_tokens(complete.output_ids()) {
-                Ok(outputs) => outputs,
-                Err(e) => {
-                    return Err(error::internal_error(
-                        "process_tokens_failed",
-                        format!("Failed to process tokens: {e}"),
-                    ))
-                }
-            };
+            // Arrival order, not `complete.index()`: SGLang non-streaming
+            // Complete frames carry index 0 for every choice.
+            for (i, complete) in all_responses.into_iter().enumerate() {
+                stop_decoder.reset();
 
-            let mut decoded_text = String::new();
-            for output in outputs {
-                match output {
-                    SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
-                    SequenceDecoderOutput::StoppedWithText(t) => {
-                        decoded_text.push_str(&t);
-                        break;
+                let outputs = match stop_decoder.process_tokens(complete.output_ids()) {
+                    Ok(outputs) => outputs,
+                    Err(e) => {
+                        return Err(error::internal_error(
+                            "process_tokens_failed",
+                            format!("Failed to process tokens: {e}"),
+                        ))
                     }
-                    SequenceDecoderOutput::Stopped => break,
-                    SequenceDecoderOutput::Held => {}
+                };
+
+                let mut decoded_text = String::new();
+                for output in outputs {
+                    match output {
+                        SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
+                        SequenceDecoderOutput::StoppedWithText(t) => {
+                            decoded_text.push_str(&t);
+                            break;
+                        }
+                        SequenceDecoderOutput::Stopped => break,
+                        SequenceDecoderOutput::Held => {}
+                    }
                 }
-            }
 
-            if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
-                decoded_text.push_str(&t);
-            }
+                if let SequenceDecoderOutput::Text(t) = stop_decoder.flush() {
+                    decoded_text.push_str(&t);
+                }
 
-            total_prompt = total_prompt.max(complete.prompt_tokens());
-            total_completion += complete.completion_tokens();
+                prompt_tokens = prompt_tokens.max(complete.prompt_tokens());
+                total_completion += complete.completion_tokens();
 
-            let finish_reason = {
-                let reason = complete.finish_reason();
-                if reason.is_empty() {
-                    None
-                } else if reason == "stop" || reason == "length" {
-                    Some(reason.to_string())
-                } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(reason) {
-                    json.get("type").and_then(|v| v.as_str()).map(|s| match s {
-                        "length" => "length".to_string(),
-                        "stop" => "stop".to_string(),
-                        other => other.to_string(),
-                    })
+                let finish_reason = {
+                    let reason = complete.finish_reason();
+                    if reason.is_empty() {
+                        None
+                    } else if reason == "stop" || reason == "length" {
+                        Some(reason.to_string())
+                    } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(reason) {
+                        json.get("type").and_then(|v| v.as_str()).map(|s| match s {
+                            "length" => "length".to_string(),
+                            "stop" => "stop".to_string(),
+                            other => other.to_string(),
+                        })
+                    } else {
+                        Some(reason.to_string())
+                    }
+                };
+
+                let matched_stop = complete.matched_stop_json();
+
+                let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
+                let echo_len = if completion_req.echo {
+                    prompt_text.len()
                 } else {
-                    Some(reason.to_string())
+                    0
+                };
+                let mut text = String::with_capacity(echo_len + decoded_text.len() + suffix_len);
+                if completion_req.echo {
+                    text.push_str(prompt_text);
                 }
-            };
+                text.push_str(&decoded_text);
+                if let Some(ref sfx) = completion_req.suffix {
+                    text.push_str(sfx);
+                }
 
-            let matched_stop = complete.matched_stop_json();
-
-            let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
-            let echo_len = if completion_req.echo {
-                prompt_text.len()
-            } else {
-                0
-            };
-            let mut text = String::with_capacity(echo_len + decoded_text.len() + suffix_len);
-            if completion_req.echo {
-                text.push_str(prompt_text);
-            }
-            text.push_str(&decoded_text);
-            if let Some(ref sfx) = completion_req.suffix {
-                text.push_str(sfx);
+                choices.push(CompletionChoice {
+                    text,
+                    index: index_offset + i as u32,
+                    logprobs: None, // TODO: wire legacy LogProbs from backend token_logprobs
+                    finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
+                    matched_stop,
+                });
             }
 
-            choices.push(CompletionChoice {
-                text,
-                index: i as u32,
-                logprobs: None, // TODO: wire legacy LogProbs from backend token_logprobs
-                finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
-                matched_stop,
-            });
+            total_prompt += prompt_tokens;
         }
 
         Ok(CompletionResponse {

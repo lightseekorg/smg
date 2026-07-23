@@ -155,6 +155,16 @@ impl HarmonyStreamingProcessor {
                 );
                 let _ = tx.send(Ok(SseEncoder::done()));
             }
+            // Batch results exist only on the completions pipeline.
+            context::ExecutionResult::Batch { .. } => {
+                error!("Harmony streaming not supported for batched results");
+                utils::send_error_sse(
+                    &tx,
+                    "Batched results not supported in Harmony streaming",
+                    "invalid_request_error",
+                );
+                let _ = tx.send(Ok(SseEncoder::done()));
+            }
         }
 
         // Return SSE response
@@ -548,6 +558,10 @@ impl HarmonyStreamingProcessor {
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
+            }
+            // Batch results exist only on the completions pipeline.
+            context::ExecutionResult::Batch { .. } => {
+                Err("Batched results not supported in Responses API streaming".to_string())
             }
         }
     }

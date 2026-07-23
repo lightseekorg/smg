@@ -163,7 +163,18 @@ pub(crate) struct EncodeOutputs {
 pub(crate) enum ExecutionPlan {
     Single(ProtoRequest),
     PrefillDecode(ProtoGenerateRequest),
-    EncodePrefillDecode { request: ProtoGenerateRequest },
+    EncodePrefillDecode {
+        request: ProtoGenerateRequest,
+    },
+    /// Batched completion fan-out: one backend request per prompt, all
+    /// dispatched with the disaggregation shape given by `kind`. Sub-request
+    /// ids are `{shared_request_id}-p{i}`; the client-visible response id is
+    /// `shared_request_id`.
+    Batch {
+        kind: ExecutionPlanKind,
+        shared_request_id: String,
+        requests: Vec<ProtoGenerateRequest>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +203,9 @@ impl ExecutionPlan {
             Self::PrefillDecode(request) | Self::EncodePrefillDecode { request, .. } => {
                 request.request_id()
             }
+            Self::Batch {
+                shared_request_id, ..
+            } => shared_request_id,
         }
     }
 
@@ -199,7 +213,8 @@ impl ExecutionPlan {
         match self {
             Self::Single(ProtoRequest::Generate(_))
             | Self::PrefillDecode(_)
-            | Self::EncodePrefillDecode { .. } => "generate",
+            | Self::EncodePrefillDecode { .. }
+            | Self::Batch { .. } => "generate",
             Self::Single(ProtoRequest::Embed(_)) => "embed",
         }
     }
@@ -209,6 +224,11 @@ impl ExecutionPlan {
             Self::Single(_) => "single",
             Self::PrefillDecode(_) => "prefill_decode",
             Self::EncodePrefillDecode { .. } => "encode_prefill_decode",
+            Self::Batch { kind, .. } => match kind {
+                ExecutionPlanKind::Single => "single",
+                ExecutionPlanKind::PrefillDecode => "prefill_decode",
+                ExecutionPlanKind::EncodePrefillDecode => "encode_prefill_decode",
+            },
         }
     }
 }
@@ -229,8 +249,11 @@ pub(crate) enum PreparationOutput {
         tool_constraints: Option<(String, String)>,
     },
     Completion {
-        original_text: String,
-        token_ids: Vec<u32>,
+        /// One entry per prompt; scalar requests carry exactly one.
+        items: Vec<CompletionItem>,
+        /// `Some` iff multiple prompts: their texts joined for routing,
+        /// mirroring the HTTP router's `extract_text_for_routing`.
+        joined_routing_text: Option<String>,
     },
     Generate {
         original_text: Option<String>,
@@ -252,16 +275,25 @@ pub(crate) enum PreparationOutput {
     },
 }
 
+/// One tokenized completion prompt.
+pub(crate) struct CompletionItem {
+    pub text: String,
+    pub token_ids: Vec<u32>,
+}
+
 impl PreparationOutput {
-    /// Token IDs (common to all variants)
+    /// Token IDs (common to all variants). Batched completions expose the
+    /// first prompt's tokens as the routing-affinity proxy.
     pub fn token_ids(&self) -> &[u32] {
         match self {
             Self::Chat { token_ids, .. }
             | Self::Messages { token_ids, .. }
-            | Self::Completion { token_ids, .. }
             | Self::Generate { token_ids, .. }
             | Self::Embedding { token_ids, .. }
             | Self::Harmony { token_ids, .. } => token_ids,
+            Self::Completion { items, .. } => {
+                items.first().map_or(&[], |item| item.token_ids.as_slice())
+            }
         }
     }
 
@@ -275,9 +307,13 @@ impl PreparationOutput {
             | Self::Messages {
                 processed_messages, ..
             } => Some(&processed_messages.text),
-            Self::Completion { original_text, .. } | Self::Embedding { original_text, .. } => {
-                Some(original_text)
-            }
+            Self::Completion {
+                items,
+                joined_routing_text,
+            } => joined_routing_text
+                .as_deref()
+                .or_else(|| items.first().map(|item| item.text.as_str())),
+            Self::Embedding { original_text, .. } => Some(original_text),
             Self::Generate { original_text, .. } => original_text.as_deref(),
             Self::Harmony { selection_text, .. } => Some(selection_text),
         }
@@ -306,6 +342,7 @@ pub(crate) enum WorkerSelection {
 }
 
 /// Client selection (Step 3)
+#[derive(Clone)]
 pub(crate) enum ClientSelection {
     Single {
         client: GrpcClient,
@@ -339,6 +376,11 @@ pub(crate) enum LoadGuards {
         _prefill: WorkerLoadGuard,
         _decode: WorkerLoadGuard,
     },
+    /// Batched completion fan-out: one guard set per sub-request so load-aware
+    /// policies see the real backend concurrency.
+    Batch {
+        _guards: Vec<LoadGuards>,
+    },
 }
 
 impl LoadGuards {
@@ -353,6 +395,17 @@ impl LoadGuards {
                 _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
                 _decode: WorkerLoadGuard::new(decode.clone(), headers),
             },
+        }
+    }
+
+    /// One guard set per concurrent sub-request.
+    pub fn scaled(selection: &WorkerSelection, headers: Option<&HeaderMap>, count: usize) -> Self {
+        if count <= 1 {
+            Self::new(selection, headers)
+        } else {
+            Self::Batch {
+                _guards: (0..count).map(|_| Self::new(selection, headers)).collect(),
+            }
         }
     }
 }
@@ -825,6 +878,10 @@ pub(crate) enum ExecutionResult {
     Embedding {
         response: ProtoEmbedComplete,
     },
+    /// Batched completion fan-out: one result per prompt, in prompt order.
+    Batch {
+        results: Vec<ExecutionResult>,
+    },
 }
 
 /// Timing context threaded from PD execution into the streaming layer so the
@@ -851,4 +908,46 @@ pub(crate) enum FinalResponse {
     Classify(ClassifyResponse),
     /// Messages API response
     Messages(Message),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completion_prep(texts: &[&str], joined: Option<&str>) -> PreparationOutput {
+        PreparationOutput::Completion {
+            items: texts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| CompletionItem {
+                    text: (*text).to_string(),
+                    token_ids: vec![i as u32],
+                })
+                .collect(),
+            joined_routing_text: joined.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn completion_preparation_routes_by_first_item_or_joined_text() {
+        let scalar = completion_prep(&["hello"], None);
+        assert_eq!(scalar.routing_text(), Some("hello"));
+        assert_eq!(scalar.token_ids(), &[0]);
+
+        let batch = completion_prep(&["a", "b"], Some("a b"));
+        assert_eq!(batch.routing_text(), Some("a b"));
+        assert_eq!(batch.token_ids(), &[0]);
+    }
+
+    #[test]
+    fn batch_execution_plan_reports_shared_id_and_kind_label() {
+        let plan = ExecutionPlan::Batch {
+            kind: ExecutionPlanKind::PrefillDecode,
+            shared_request_id: "cmpl_shared".to_string(),
+            requests: vec![],
+        };
+        assert_eq!(plan.request_id(), "cmpl_shared");
+        assert_eq!(plan.request_type(), "generate");
+        assert_eq!(plan.mode_label(), "prefill_decode");
+    }
 }

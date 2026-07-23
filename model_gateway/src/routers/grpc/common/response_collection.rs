@@ -67,6 +67,14 @@ pub(crate) async fn collect_responses(
                 "Embedding result encountered in response collection",
             ));
         }
+        // Batches are split into per-prompt results by the completion processor
+        // before collection.
+        ExecutionResult::Batch { .. } => {
+            return Err(error::internal_error(
+                "invalid_execution_mode",
+                "Batch result encountered in response collection",
+            ));
+        }
     };
 
     if all_responses.is_empty() {
