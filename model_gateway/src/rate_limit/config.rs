@@ -78,6 +78,12 @@ pub enum RateLimitConfigError {
     ZeroRuleRequestsPerMinute { label: String, rule_id: String },
     #[error("policy '{label}': rule '{rule_id}' matcher value must not be empty")]
     EmptyMatcherValue { label: String, rule_id: String },
+    #[error("policy '{label}': rule '{rule_id}' matcher value '{value}' must not have surrounding whitespace")]
+    PaddedMatcherValue {
+        label: String,
+        rule_id: String,
+        value: String,
+    },
     #[error("policy '{label}': rule '{rule_id}' matcher duplicates rule '{other_rule_id}'")]
     DuplicateMatcher {
         label: String,
@@ -141,10 +147,23 @@ fn validate_policy(label: &str, spec: &TenantPolicySpec) -> Result<(), RateLimit
             ModelMatcherSpec::Exact { value } => (value.as_str(), &mut seen_exact),
             ModelMatcherSpec::Prefix { value } => (value.as_str(), &mut seen_prefix),
         };
-        if value.is_empty() {
+        let trimmed_value = value.trim();
+        if trimmed_value.is_empty() {
             return Err(RateLimitConfigError::EmptyMatcherValue {
                 label: label.to_string(),
                 rule_id: rule.rule_id.clone(),
+            });
+        }
+        // A padded value (e.g. `"gpt-4 "`) would compile verbatim and never
+        // match a real request's model id — `matching_rule` does raw
+        // `HashMap::get`/`starts_with` checks against the model id as
+        // reported by the request, which is never padded — so the rule
+        // would silently never apply.
+        if trimmed_value != value {
+            return Err(RateLimitConfigError::PaddedMatcherValue {
+                label: label.to_string(),
+                rule_id: rule.rule_id.clone(),
+                value: value.to_string(),
             });
         }
         if let Some(other_rule_id) = table.insert(value.to_string(), rule.rule_id.clone()) {
@@ -276,16 +295,18 @@ mod tests {
 
     #[test]
     fn tenant_padded_key_rejected() {
-        let yaml = RateLimitYaml {
-            default_policy: policy(None, 1000, 60),
-            tenants: vec![policy(Some("auth:team-red "), 5000, 300)],
-        };
-        assert_eq!(
-            yaml.validate(),
-            Err(RateLimitConfigError::PaddedTenantKey {
-                tenant_key: "auth:team-red ".to_string()
-            })
-        );
+        for tenant_key in [" auth:team-red", "auth:team-red "] {
+            let yaml = RateLimitYaml {
+                default_policy: policy(None, 1000, 60),
+                tenants: vec![policy(Some(tenant_key), 5000, 300)],
+            };
+            assert_eq!(
+                yaml.validate(),
+                Err(RateLimitConfigError::PaddedTenantKey {
+                    tenant_key: tenant_key.to_string()
+                })
+            );
+        }
     }
 
     #[test]
@@ -435,6 +456,33 @@ mod tests {
                 rule_id: "catchall".to_string()
             })
         );
+    }
+
+    #[test]
+    fn padded_matcher_value_rejected() {
+        for value in [" gpt-4", "gpt-4 "] {
+            let mut default_policy = policy(None, 1000, 60);
+            default_policy.model_rules.push(rule(
+                "gpt4",
+                ModelMatcherSpec::Exact {
+                    value: value.to_string(),
+                },
+                100,
+                10,
+            ));
+            let yaml = RateLimitYaml {
+                default_policy,
+                tenants: vec![],
+            };
+            assert_eq!(
+                yaml.validate(),
+                Err(RateLimitConfigError::PaddedMatcherValue {
+                    label: "default".to_string(),
+                    rule_id: "gpt4".to_string(),
+                    value: value.to_string(),
+                })
+            );
+        }
     }
 
     #[test]
