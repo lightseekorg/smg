@@ -33,7 +33,7 @@ use crate::{
         metrics_aggregator::{self, MetricPack},
         monitor::WorkerMonitor,
         registry::{WorkerDescriptor, WorkerId},
-        worker::WorkerTypeExt,
+        worker::{ConnectionModeExt, WorkerTypeExt},
         ConnectionMode, Worker, WorkerOrigin, WorkerRegistry, WorkerResult, WorkerType,
     },
     workflow::{Job, JobQueue},
@@ -43,40 +43,76 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT: usize = 32;
 const MAX_CONCURRENT_HEALTH_PROBES: usize = 128;
 
-/// Result of a fan-out request to a single worker
-struct WorkerResponse {
+/// Result of an engine-metrics scrape against a single worker.
+struct ScrapeResponse {
+    /// Worker identity label (rank-stripped `worker.base_url()`), kept distinct
+    /// from the scrape endpoint so gRPC workers are labelled by their gRPC
+    /// address and DP ranks sharing an endpoint collapse to one label.
     url: String,
-    result: Result<reqwest::Response, reqwest::Error>,
+    connection_mode: &'static str,
+    /// Outer `None`: no known scrape endpoint (skipped). `Some(None)`: the
+    /// fetch or body read failed, or the response was non-2xx. `Some(Some(_))`:
+    /// the response body. The body is read inside the per-worker future so
+    /// downloads run concurrently rather than serialized in the consumer.
+    result: Option<Option<String>>,
 }
 
-/// Fan out requests to workers in parallel
-async fn fan_out(
+/// Fan out engine `/metrics` scrapes in parallel.
+///
+/// The scrape endpoint is resolved per worker via [`Worker::metrics_url`]: HTTP
+/// workers scrape their base `/metrics`, gRPC workers scrape the HTTP endpoint
+/// discovered during metadata discovery. Workers with no known endpoint are
+/// returned with `result: None` so the caller can count them as skipped instead
+/// of dropping them silently.
+///
+/// DP-aware backends register one worker per rank that all share a single engine
+/// `/metrics` endpoint (same host + `prometheus_port`). Scraping every rank would
+/// fetch identical bodies and inflate each summed series by `dp_size`, so workers
+/// are collapsed by scrape endpoint (falling back to the rank-stripped `base_url`
+/// when no endpoint is known) and each is fetched once.
+async fn scrape_engine_metrics(
     workers: &[Arc<dyn Worker>],
     client: &reqwest::Client,
-    endpoint: &str,
-    method: reqwest::Method,
-) -> Vec<WorkerResponse> {
-    let futures: Vec<_> = workers
-        .iter()
-        .map(|worker| {
-            let client = client.clone();
-            let url = worker.url().to_string();
-            let full_url = format!("{url}/{endpoint}");
-            let api_key = worker.api_key().cloned();
-            let method = method.clone();
-
-            async move {
-                let mut req = client.request(method, &full_url).timeout(REQUEST_TIMEOUT);
-                if let Some(key) = api_key {
-                    req = req.bearer_auth(key);
-                }
-                WorkerResponse {
+) -> Vec<ScrapeResponse> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut futures = Vec::new();
+    for worker in workers {
+        let metrics_url = worker.metrics_url();
+        let dedupe_key = metrics_url
+            .clone()
+            .unwrap_or_else(|| worker.base_url().to_string());
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+        let client = client.clone();
+        // Label by the rank-stripped base URL: the scrape represents the whole
+        // engine, not the arbitrary rank that won deduplication.
+        let url = worker.base_url().to_string();
+        let connection_mode = worker.connection_mode().as_metric_label();
+        let api_key = worker.api_key().cloned();
+        futures.push(async move {
+            let Some(metrics_url) = metrics_url else {
+                return ScrapeResponse {
                     url,
-                    result: req.send().await,
-                }
+                    connection_mode,
+                    result: None,
+                };
+            };
+            let mut req = client.get(&metrics_url).timeout(REQUEST_TIMEOUT);
+            if let Some(key) = api_key {
+                req = req.bearer_auth(key);
             }
-        })
-        .collect();
+            let body = match req.send().await {
+                Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
+                _ => None,
+            };
+            ScrapeResponse {
+                url,
+                connection_mode,
+                result: Some(body),
+            }
+        });
+    }
 
     stream::iter(futures)
         .buffer_unordered(MAX_CONCURRENT)
@@ -989,24 +1025,51 @@ impl WorkerManager {
             return EngineMetricsResult::Err("No available workers".to_string());
         }
 
-        let responses = fan_out(&workers, client, "metrics", reqwest::Method::GET).await;
+        let responses = scrape_engine_metrics(&workers, client).await;
+        // Targets are deduplicated (DP ranks sharing an endpoint collapse to
+        // one), so the skipped/attempted accounting is per endpoint, not per
+        // worker.
+        let total_targets = responses.len();
 
         let mut metric_packs = Vec::new();
+        let mut skipped = 0usize;
         for resp in responses {
-            if let Ok(r) = resp.result {
-                if r.status().is_success() {
-                    if let Ok(text) = r.text().await {
-                        metric_packs.push(MetricPack {
-                            labels: vec![("worker_addr".into(), resp.url)],
-                            metrics_text: text,
-                        });
-                    }
+            let Some(text) = resp.result else {
+                skipped += 1;
+                Metrics::record_engine_metrics_scrape(
+                    resp.connection_mode,
+                    metrics_labels::RESULT_SKIPPED,
+                );
+                continue;
+            };
+            match text {
+                Some(text) => {
+                    Metrics::record_engine_metrics_scrape(
+                        resp.connection_mode,
+                        metrics_labels::RESULT_SUCCESS,
+                    );
+                    metric_packs.push(MetricPack {
+                        labels: vec![("worker_addr".into(), resp.url)],
+                        metrics_text: text,
+                    });
                 }
+                None => Metrics::record_engine_metrics_scrape(
+                    resp.connection_mode,
+                    metrics_labels::RESULT_FAILURE,
+                ),
             }
         }
 
         if metric_packs.is_empty() {
-            return EngineMetricsResult::Err("All backend requests failed".to_string());
+            let msg = if skipped == total_targets {
+                "No workers expose a metrics endpoint".to_string()
+            } else {
+                let attempted = total_targets - skipped;
+                format!(
+                    "All {attempted} scrape request(s) failed ({skipped} endpoint(s) skipped — no metrics endpoint)"
+                )
+            };
+            return EngineMetricsResult::Err(msg);
         }
 
         match metrics_aggregator::aggregate_metrics(metric_packs) {
@@ -1476,5 +1539,56 @@ mod tests {
         assert!(result.successful.is_empty());
         assert!(result.failed.is_empty());
         assert!(result.message.contains("No worker matching"));
+    }
+
+    // ── Engine-metrics scrape URL selection per connection mode ──────
+
+    fn grpc_worker_with_labels(url: &str, labels: &[(&str, &str)]) -> Arc<dyn Worker> {
+        let labels = labels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        Arc::new(
+            BasicWorkerBuilder::new(url)
+                .connection_mode(ConnectionMode::Grpc)
+                .labels(labels)
+                .build(),
+        )
+    }
+
+    #[test]
+    fn metrics_url_http_appends_metrics_path() {
+        let worker = make_worker("http://w:8080", 1, 1);
+        assert_eq!(
+            worker.metrics_url().as_deref(),
+            Some("http://w:8080/metrics")
+        );
+    }
+
+    #[test]
+    fn metrics_url_grpc_prefers_explicit_label() {
+        let worker = grpc_worker_with_labels(
+            "grpc://w:30001",
+            &[("metrics_url", "http://sidecar:9000/metrics")],
+        );
+        assert_eq!(
+            worker.metrics_url().as_deref(),
+            Some("http://sidecar:9000/metrics")
+        );
+    }
+
+    #[test]
+    fn metrics_url_grpc_derives_from_prometheus_port() {
+        let worker = grpc_worker_with_labels("grpc://w:30001", &[("prometheus_port", "9100")]);
+        assert_eq!(
+            worker.metrics_url().as_deref(),
+            Some("http://w:9100/metrics")
+        );
+    }
+
+    #[test]
+    fn metrics_url_grpc_none_when_unknown() {
+        let worker = grpc_worker_with_labels("grpc://w:30001", &[]);
+        assert_eq!(worker.metrics_url(), None);
     }
 }
