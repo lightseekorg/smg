@@ -28,6 +28,7 @@ use tracing::{debug, error, warn};
 
 use super::token_bucket::TokenBucket;
 use crate::{
+    mesh::global_rate_limit::unix_now_secs,
     observability::metrics::{metrics_labels, Metrics},
     server::AppState,
 };
@@ -202,16 +203,34 @@ pub async fn concurrency_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Cluster-wide rate limiting was previously enforced via the
-    // v1 `MeshSyncManager::check_global_rate_limit` path. That hook
-    // is removed in this PR. Local per-node token-bucket rate
-    // limiting below still applies; cluster aggregation will return
-    // through the v2 `RateLimitSyncAdapter` in a follow-up PR.
+    // Cluster-wide rate limiting: each node's admitted-request
+    // count gossips as an `rl:` shard; the limiter compares the
+    // epoch-pinned cluster aggregate against `config:rate_limit`.
+    // Absent mesh or config, this is a no-op. The check consumes no
+    // budget — only requests that ALSO clear local admission are
+    // recorded below, so a saturated node's locally-rejected flood
+    // never burns the cluster's budget.
+    let global_limiter = app_state
+        .mesh_adapters
+        .as_ref()
+        .map(|adapters| adapters.global_rate_limit().clone());
+    if let Some(limiter) = &global_limiter {
+        if !limiter.check(unix_now_secs()) {
+            debug!("Cluster-wide rate limit exceeded, returning 429");
+            // Distinct from the local token-bucket's RATE_LIMIT_REJECTED so a
+            // 429 spike is attributable to the cluster limiter vs this node.
+            Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_GLOBAL_REJECTED);
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
 
     let token_bucket = match &app_state.context.rate_limiter {
         Some(bucket) => bucket.clone(),
         None => {
-            // Rate limiting disabled, pass through immediately
+            // No local limiter: the global check above was the admission.
+            if let Some(limiter) = &global_limiter {
+                limiter.record_admit(unix_now_secs());
+            }
             return next.run(request).await;
         }
     };
@@ -219,6 +238,9 @@ pub async fn concurrency_limit_middleware(
     // Try to acquire token immediately
     if token_bucket.try_acquire(1.0).is_ok() {
         debug!("Acquired token immediately");
+        if let Some(limiter) = &global_limiter {
+            limiter.record_admit(unix_now_secs());
+        }
         Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
         let response = next.run(request).await;
 
@@ -248,6 +270,9 @@ pub async fn concurrency_limit_middleware(
                     match permit_rx.await {
                         Ok(Ok(())) => {
                             debug!("Acquired token from queue");
+                            if let Some(limiter) = &global_limiter {
+                                limiter.record_admit(unix_now_secs());
+                            }
                             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
                             let response = next.run(request).await;
 

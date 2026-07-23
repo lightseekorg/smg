@@ -196,6 +196,29 @@ impl RateLimitSyncAdapter {
             .try_fold(0i64, |acc, s| acc.checked_add(s.count))
             .unwrap_or(i64::MAX)
     }
+
+    /// Cluster-wide aggregate for a counter at exactly `epoch`. Shards from
+    /// other epochs contribute nothing: the caller pins the window instead
+    /// of trusting the highest observed epoch, which after a window roll is
+    /// a stale window nothing has published past yet.
+    pub fn get_aggregate_at(&self, counter_name: &str, epoch: u64) -> i64 {
+        debug_assert!(
+            !counter_name.contains(':'),
+            "counter_name must not contain ':' (got {counter_name:?})",
+        );
+        let sub_prefix = format!("{counter_name}:");
+        let mut total = 0i64;
+        for key in self.rate_limits.keys(&sub_prefix) {
+            if let Some(bytes) = self.rate_limits.get(&key) {
+                if let Some(value) = decode_epoch_count(&bytes) {
+                    if value.epoch == epoch {
+                        total = total.checked_add(value.count).unwrap_or(i64::MAX);
+                    }
+                }
+            }
+        }
+        total
+    }
 }
 
 #[cfg(test)]

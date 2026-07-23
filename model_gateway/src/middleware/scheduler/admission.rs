@@ -29,6 +29,7 @@ use super::{
     SchedulerError, SchedulerGuardBody, HEADER_X_SMG_PREEMPTED, PRIORITY_HEADER,
 };
 use crate::{
+    mesh::global_rate_limit::unix_now_secs,
     middleware::RouteRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     tenant::TenantKey,
@@ -112,6 +113,18 @@ pub async fn priority_admission_middleware(
         sched_metrics::record_clamp(resolved.requested, class, tenant.as_str());
     }
 
+    // Cluster-wide rate limit, checked before the local RPS bucket and
+    // scheduler so a cluster-rejected request consumes neither. Mirrors the
+    // legacy concurrency path; the check consumes no budget (recorded only
+    // once the request is actually admitted below), so a rejection here
+    // never burns the cluster's budget.
+    if let Some(limiter) = &state.global_rate_limit {
+        if !limiter.check(unix_now_secs()) {
+            Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_GLOBAL_REJECTED);
+            return SchedulerError::QueueFull.into_response();
+        }
+    }
+
     // RPS sibling check (only set when an explicit per-second limit is
     // configured). Checked before admission so a rejected request never
     // consumes a slot. Tokens are not returned — refill is time-based.
@@ -134,6 +147,12 @@ pub async fn priority_admission_middleware(
 
     match state.scheduler.admit(class, request_id, cancel).await {
         AdmitOutcome::Admitted(permit) => {
+            // Cleared the cluster gate, the RPS bucket, and the scheduler:
+            // count this admission toward the cluster window now (only
+            // admitted requests consume cluster budget).
+            if let Some(limiter) = &state.global_rate_limit {
+                limiter.record_admit(unix_now_secs());
+            }
             // Hand the handler the cancel token (for preemption select!).
             req.extensions_mut().insert(permit.cancel_token());
             let response = next.run(req).await;
