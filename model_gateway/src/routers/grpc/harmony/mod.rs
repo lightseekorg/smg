@@ -39,7 +39,7 @@ pub(crate) mod streaming;
 pub(crate) mod types;
 
 // Re-export types that are accessed via harmony::TypeName
-pub(crate) use builder::HarmonyBuilder;
+pub(crate) use builder::{try_harmony_encoding, HarmonyBuilder};
 pub(crate) use detector::HarmonyDetector;
 pub(crate) use parser::HarmonyParserAdapter;
 pub(crate) use processor::{HarmonyResponseProcessor, ResponsesIterationResult};

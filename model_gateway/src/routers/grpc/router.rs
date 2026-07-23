@@ -1285,10 +1285,7 @@ mod pd_tests {
 
     /// PD-mode completion must honor a per-model retry override, not the router
     /// default.
-    // Multi-thread runtime: router construction eagerly builds the Harmony
-    // pipeline, whose one-shot encoding load uses `block_in_place` (which
-    // panics on a current-thread runtime).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn pd_completion_honors_per_model_retry_override() {
         let ctx = grpc_ctx(pd_routing_mode()).await;
         let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
@@ -1315,7 +1312,7 @@ mod pd_tests {
 
     /// PD serves /v1/responses: an unknown model is rejected per-request (404),
     /// not gated behind a blanket 501, and cancel reaches storage.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn pd_router_serves_responses_and_cancel() {
         let ctx = grpc_ctx(pd_routing_mode()).await;
         let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
@@ -1332,7 +1329,7 @@ mod pd_tests {
     }
 
     /// EPD still 501s /v1/responses and cancel.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn epd_router_501s_responses_and_cancel() {
         let ctx = grpc_ctx(epd_routing_mode()).await;
         let router = GrpcRouter::new(&ctx, Mode::EncodePrefillDecode).expect("epd router");

@@ -371,10 +371,7 @@ mod grpc_router_type_tests {
         )
     }
 
-    // Multi-thread runtime: building the Regular router eagerly constructs the
-    // Harmony pipeline, whose one-shot encoding load uses `block_in_place`
-    // (which panics on a current-thread runtime).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn grpc_router_type_reflects_disaggregation_mode() {
         let cases = [
             (

@@ -19,7 +19,10 @@ pub use local::{
     RemoveFromWorkerRegistryStep, UpdatePoliciesForWorkerStep, UpdateRemainingPoliciesStep,
     UpdateWorkerPropertiesStep, WorkerRemovalRequest,
 };
-use local::{DetectBackendStep, DiscoverDPInfoStep as DPStep, SubmitTokenizerJobStep};
+use local::{
+    DetectBackendStep, DiscoverDPInfoStep as DPStep, EnsureHarmonyEncodingStep,
+    SubmitTokenizerJobStep,
+};
 use openai_protocol::worker::WorkerSpec;
 pub use shared::{ActivateWorkersStep, RegisterWorkersStep, UpdatePoliciesStep, WorkerList};
 use wfaas::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition};
@@ -45,6 +48,8 @@ use crate::{app_context::AppContext, config::RouterConfig, workflow::data::Worke
 ///       |                               |
 ///  create_local_worker           create_external_workers
 ///       |                               |
+///  ensure_harmony_encoding              |
+///  (gRPC gpt-oss only)                  |
 ///       +---------------+---------------+
 ///                        |
 ///                 register_workers  (shared)
@@ -165,6 +170,26 @@ pub fn create_worker_registration_workflow(
             .with_failure_action(FailureAction::FailWorkflow)
             .depends_on(&["discover_dp_info"]),
         )
+        // Step 3b (local): gRPC gpt-oss workers need the Harmony encoding; load
+        // it before registration so an unavailable vocab fails this worker
+        // instead of panicking the gateway or erroring at first request.
+        .add_step(
+            StepDefinition::new(
+                "ensure_harmony_encoding",
+                "Ensure Harmony Encoding",
+                Arc::new(EnsureHarmonyEncodingStep),
+            )
+            .with_retry(RetryPolicy {
+                max_attempts,
+                backoff: BackoffStrategy::Exponential {
+                    base: Duration::from_secs(1),
+                    max: Duration::from_secs(10),
+                },
+            })
+            .with_timeout(Duration::from_secs(30))
+            .with_failure_action(FailureAction::FailWorkflow)
+            .depends_on(&["create_local_worker"]),
+        )
         // === EXTERNAL BRANCH ===
         // Step 1 (external): Discover models from /v1/models
         .add_step(
@@ -205,7 +230,11 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["create_local_worker", "create_external_workers"]),
+            .depends_on(&[
+                "create_local_worker",
+                "ensure_harmony_encoding",
+                "create_external_workers",
+            ]),
         )
         // Step 5a: Submit tokenizer job (local only)
         .add_step(

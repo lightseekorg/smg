@@ -214,6 +214,23 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 
 ---
 
+## gpt-oss (Harmony) Vocab
+
+Serving gpt-oss models over gRPC uses the Harmony encoding, whose vocab
+(`o200k_base.tiktoken`) is fetched when a gpt-oss worker registers — from a
+local directory if `TIKTOKEN_ENCODINGS_BASE` is set, otherwise downloaded and
+cached (`TIKTOKEN_RS_CACHE_DIR`, default `$TMPDIR/tiktoken-rs-cache`). If the
+vocab can't be loaded, that worker's registration fails and retries; other
+models are unaffected.
+
+For air-gapped deployments, pre-seed the file and point SMG at it:
+
+```bash
+export TIKTOKEN_ENCODINGS_BASE=/opt/tiktoken   # contains o200k_base.tiktoken
+```
+
+---
+
 ## HTTP vs gRPC: When to Use Which
 
 | Use Case | Recommended Mode |
