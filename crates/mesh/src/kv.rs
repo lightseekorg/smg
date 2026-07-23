@@ -6,7 +6,7 @@
 //!
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -20,13 +20,28 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use crate::{
-    crdt_kv::{CrdtOrMap, MergeStrategy, Operation, OperationLog},
+    crdt_kv::{CrdtOrMap, MergeStrategy, Operation, OperationLog, ReplicaId},
     transport::chunk_assembler::ChunkAssembler,
 };
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
+
+/// Key prefix of the gossiped replica registry: `replica:{replica_id}` →
+/// node name. One entry per node incarnation (replica ids are minted per
+/// boot); a dead node's entries retire with the rest of its keys.
+pub const REPLICA_PREFIX: &str = "replica:";
+
+/// How a dead node's keys are attributed during sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadKeyAttribution {
+    /// The key's winning op was authored by one of the dead node's replica
+    /// ids (single-writer namespaces, e.g. `worker:`).
+    AuthorReplica,
+    /// The key's last `:`-segment is the node name (e.g. `rl:{counter}:{node}`).
+    NodeNameSuffix,
+}
 
 /// Routing mode for stream namespaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +490,9 @@ pub struct MeshKV {
     server_name: String,
     /// Replica ID: hash(server_name) as u64.
     replica_id: u64,
+    /// Prefixes registered for dead-node key sweeping, with their
+    /// attribution rule.
+    dead_node_sweeps: RwLock<Vec<(String, DeadKeyAttribution)>>,
 }
 
 impl MeshKV {
@@ -494,6 +512,19 @@ impl MeshKV {
                 merge_strategy: MergeStrategy::LastWriterWins,
             },
         );
+        // Replica registry: publish this incarnation's op-author id so
+        // survivors can attribute single-writer keys after this node dies.
+        store.register_merge_strategy(REPLICA_PREFIX.to_string(), MergeStrategy::LastWriterWins);
+        configured_prefixes.insert(
+            REPLICA_PREFIX.to_string(),
+            StoreMode::Crdt {
+                merge_strategy: MergeStrategy::LastWriterWins,
+            },
+        );
+        store.insert(
+            format!("{REPLICA_PREFIX}{}", store.replica_id()),
+            server_name.clone().into_bytes(),
+        );
         let configs = Arc::new(CrdtNamespace {
             prefix: "config:".to_string(),
             store: store.clone(),
@@ -510,6 +541,7 @@ impl MeshKV {
             configs,
             server_name,
             replica_id,
+            dead_node_sweeps: RwLock::new(Vec::new()),
         }
     }
 
@@ -540,6 +572,182 @@ impl MeshKV {
     /// declared dead — so the caller must be the dead-node cleanup layer.
     pub fn gc_tombstones(&self) -> usize {
         self.store.gc_tombstones()
+    }
+
+    /// Register a prefix for dead-node key sweeping: when
+    /// [`handle_node_removed`](Self::handle_node_removed) fires, live keys
+    /// under `prefix` attributed to the dead node are tombstoned.
+    pub fn configure_dead_node_sweep(&self, prefix: &str, attribution: DeadKeyAttribution) {
+        self.dead_node_sweeps
+            .write()
+            .push((prefix.to_string(), attribution));
+    }
+
+    /// Dead-node cleanup: tombstone the node's keys in every sweep-registered
+    /// namespace, then retire its replica-registry entries. Every survivor
+    /// runs this; concurrent tombstones converge, and a live (partitioned)
+    /// owner's reconcile re-assert overrules a premature sweep. Returns the
+    /// number of keys tombstoned.
+    pub fn handle_node_removed(&self, node: &str) -> usize {
+        let replica_keys = self.replica_keys_of(node);
+        let dead_replicas: HashSet<ReplicaId> = replica_keys
+            .iter()
+            .filter_map(|key| key.strip_prefix(REPLICA_PREFIX))
+            .filter_map(|id| ReplicaId::from_string(id).ok())
+            .collect();
+        let mut swept = 0;
+        let sweeps = self.dead_node_sweeps.read().clone();
+        if dead_replicas.is_empty()
+            && sweeps
+                .iter()
+                .any(|(_, attribution)| *attribution == DeadKeyAttribution::AuthorReplica)
+        {
+            tracing::warn!(
+                node,
+                "no replica-registry entries for removed node; author-attributed sweeps skipped"
+            );
+        }
+        for (prefix, attribution) in &sweeps {
+            swept += match attribution {
+                DeadKeyAttribution::AuthorReplica => self.sweep_authored_by(prefix, &dead_replicas),
+                DeadKeyAttribution::NodeNameSuffix => self.sweep_node_suffix(prefix, node),
+            };
+        }
+        // Last so a concurrent sweep on another survivor can still attribute.
+        for key in &replica_keys {
+            self.delete_with_notify(key);
+        }
+        swept
+    }
+
+    /// Owner-side replica-registry maintenance: re-assert this incarnation's
+    /// entry (healing a premature sweep, which would otherwise permanently
+    /// disarm author attribution for this node's real death) and retire
+    /// entries left by prior incarnations (bounding the registry at ~one
+    /// entry per live node across restarts). Driven at boot and on the
+    /// gossip loop's housekeeping cadence; only the owner touches entries
+    /// valued with its own name.
+    pub fn reconcile_replica_registry(&self) {
+        let own_key = format!("{REPLICA_PREFIX}{}", self.store.replica_id());
+        // A prior incarnation's entry retires only once nothing live is
+        // attributed to it (a crash-restart can leave keys whose winning op
+        // it authored): retiring earlier would orphan those keys at this
+        // node's real death, since attribution rebuilds from live entries.
+        let still_authoring = self.live_key_authors();
+        for key in self.replica_keys_of(&self.server_name) {
+            if key == own_key {
+                continue;
+            }
+            let authoring = key
+                .strip_prefix(REPLICA_PREFIX)
+                .and_then(|id| ReplicaId::from_string(id).ok())
+                .is_some_and(|replica| still_authoring.contains(&replica));
+            if !authoring {
+                self.delete_with_notify(&key);
+            }
+        }
+        if self
+            .store
+            .get(&own_key)
+            .is_none_or(|value| value != self.server_name.as_bytes())
+        {
+            self.store
+                .insert(own_key, self.server_name.clone().into_bytes());
+        }
+    }
+
+    /// Replica ids authoring the winning op of some live key in an
+    /// author-attributed namespace.
+    fn live_key_authors(&self) -> HashSet<ReplicaId> {
+        let prefixes: Vec<String> = self
+            .dead_node_sweeps
+            .read()
+            .iter()
+            .filter(|(_, attribution)| *attribution == DeadKeyAttribution::AuthorReplica)
+            .map(|(prefix, _)| prefix.clone())
+            .collect();
+        if prefixes.is_empty() {
+            return HashSet::new();
+        }
+        let ops = self.store.operation_log_snapshot();
+        let mut winners: HashMap<&str, (u64, ReplicaId)> = HashMap::new();
+        for op in ops.operations() {
+            if !prefixes.iter().any(|p| op.key().starts_with(p.as_str())) {
+                continue;
+            }
+            let version = (op.timestamp(), op.replica_id());
+            winners
+                .entry(op.key())
+                .and_modify(|winner| *winner = version.max(*winner))
+                .or_insert(version);
+        }
+        winners
+            .into_iter()
+            .filter(|(key, _)| self.store.contains_key(key))
+            .map(|(_, (_, replica))| replica)
+            .collect()
+    }
+
+    /// Replica-registry keys mapping to `node` (one per incarnation).
+    pub(crate) fn replica_keys_of(&self, node: &str) -> Vec<String> {
+        self.store
+            .keys()
+            .into_iter()
+            .filter(|key| {
+                key.starts_with(REPLICA_PREFIX)
+                    && self.store.get(key).is_some_and(|v| v == node.as_bytes())
+            })
+            .collect()
+    }
+
+    /// Tombstone live `prefix` keys whose last `:`-segment is `node`.
+    fn sweep_node_suffix(&self, prefix: &str, node: &str) -> usize {
+        let mut swept = 0;
+        for key in self.store.keys() {
+            if key.starts_with(prefix) && key.rsplit(':').next() == Some(node) {
+                self.delete_with_notify(&key);
+                swept += 1;
+            }
+        }
+        swept
+    }
+
+    /// Tombstone live `prefix` keys whose winning op was authored by one of
+    /// `dead_replicas`. Winners come from the op-log snapshot; a live key
+    /// whose ops were shed by the out-of-spec truncation backstop is skipped
+    /// (never falsely swept).
+    fn sweep_authored_by(&self, prefix: &str, dead_replicas: &HashSet<ReplicaId>) -> usize {
+        if dead_replicas.is_empty() {
+            return 0;
+        }
+        let ops = self.store.operation_log_snapshot();
+        let mut winners: HashMap<&str, (u64, ReplicaId)> = HashMap::new();
+        for op in ops.operations() {
+            if !op.key().starts_with(prefix) {
+                continue;
+            }
+            let version = (op.timestamp(), op.replica_id());
+            winners
+                .entry(op.key())
+                .and_modify(|winner| *winner = version.max(*winner))
+                .or_insert(version);
+        }
+        let mut swept = 0;
+        for (key, (_, replica)) in winners {
+            if dead_replicas.contains(&replica) && self.store.contains_key(key) {
+                self.delete_with_notify(key);
+                swept += 1;
+            }
+        }
+        swept
+    }
+
+    /// Tombstone a key and fire subscribers with `None`, matching
+    /// [`CrdtNamespace::delete`] semantics so inbound adapters react to
+    /// sweeps like any other deletion.
+    fn delete_with_notify(&self, key: &str) {
+        self.store.remove(key);
+        self.subscriber_registry.notify(key, None);
     }
 
     /// Fire subscribers whose prefix matches `key`. Used by the gossip
