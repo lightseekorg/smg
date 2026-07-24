@@ -29,6 +29,10 @@ pub(crate) fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: 
         return;
     };
 
+    // Normalize to the official levels. `none`/`minimal` are not levels the
+    // V4 worker understands — they are only the gateway's thinking-off
+    // signal, so consume them and drop the field from the forwarded JSON.
+    let mut effort_thinking = None;
     if let Some(Value::String(effort)) = request.get_mut("reasoning_effort") {
         match effort.as_str() {
             "low" | "medium" => {
@@ -39,8 +43,14 @@ pub(crate) fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: 
                 effort.clear();
                 effort.push_str("max");
             }
+            "none" | "minimal" => {
+                effort_thinking = Some(false);
+            }
             _ => {}
         }
+    }
+    if effort_thinking.is_some() {
+        request.remove("reasoning_effort");
     }
 
     let template_thinking = request
@@ -60,13 +70,6 @@ pub(crate) fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: 
         .and_then(|kind| match kind {
             "enabled" => Some(true),
             "disabled" => Some(false),
-            _ => None,
-        });
-    let effort_thinking = request
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .and_then(|effort| match effort {
-            "none" | "minimal" => Some(false),
             _ => None,
         });
     let enabled = explicit_thinking.or(effort_thinking).unwrap_or(true);
@@ -92,10 +95,25 @@ mod tests {
             (json!({"thinking": {"type": "enabled"}}), true),
             (json!({"thinking": {"type": "disabled"}}), false),
             (json!({"reasoning_effort": "none"}), false),
+            (json!({"reasoning_effort": "minimal"}), false),
         ] {
             apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
             assert_eq!(request["chat_template_kwargs"]["thinking"], expected);
+            // Off-signal efforts are not official levels; the worker must
+            // never see them.
+            assert!(request.get("reasoning_effort").is_none());
         }
+    }
+
+    #[test]
+    fn deepseek_v4_http_compat_drops_off_signal_effort_even_with_kwarg_override() {
+        let mut request = json!({
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"thinking": true},
+        });
+        apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
+        assert_eq!(request["chat_template_kwargs"]["thinking"], true);
+        assert!(request.get("reasoning_effort").is_none());
     }
 
     #[test]
