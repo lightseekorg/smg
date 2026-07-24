@@ -53,6 +53,19 @@ pub(crate) fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: 
         request.remove("reasoning_effort");
     }
 
+    // Consume the public `thinking` object unconditionally: the worker only
+    // gets the translated kwarg, so it can never contradict the translation.
+    let explicit_thinking = request.remove("thinking").and_then(|thinking| {
+        thinking
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(|kind| match kind {
+                "enabled" => Some(true),
+                "disabled" => Some(false),
+                _ => None,
+            })
+    });
+
     let template_thinking = request
         .get("chat_template_kwargs")
         .and_then(Value::as_object)
@@ -62,16 +75,6 @@ pub(crate) fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: 
         return;
     }
 
-    let explicit_thinking = request
-        .get("thinking")
-        .and_then(Value::as_object)
-        .and_then(|thinking| thinking.get("type"))
-        .and_then(Value::as_str)
-        .and_then(|kind| match kind {
-            "enabled" => Some(true),
-            "disabled" => Some(false),
-            _ => None,
-        });
     let enabled = explicit_thinking.or(effort_thinking).unwrap_or(true);
 
     let template_kwargs = request
@@ -99,21 +102,27 @@ mod tests {
         ] {
             apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
             assert_eq!(request["chat_template_kwargs"]["thinking"], expected);
-            // Off-signal efforts are not official levels; the worker must
-            // never see them.
+            // Translated public controls must not reach the worker: off-signal
+            // efforts are not official levels, and the `thinking` object could
+            // contradict the injected kwarg on workers that understand it.
             assert!(request.get("reasoning_effort").is_none());
+            assert!(request.get("thinking").is_none());
         }
     }
 
     #[test]
-    fn deepseek_v4_http_compat_drops_off_signal_effort_even_with_kwarg_override() {
+    fn deepseek_v4_http_compat_drops_public_controls_even_with_kwarg_override() {
         let mut request = json!({
+            "thinking": {"type": "disabled"},
             "reasoning_effort": "none",
             "chat_template_kwargs": {"thinking": true},
         });
         apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
+        // The explicit kwarg wins, and a worker that natively understands the
+        // official fields must not see the contradicting originals.
         assert_eq!(request["chat_template_kwargs"]["thinking"], true);
         assert!(request.get("reasoning_effort").is_none());
+        assert!(request.get("thinking").is_none());
     }
 
     #[test]
