@@ -377,6 +377,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 rid=rid,
                 input_text="",
                 input_ids=to_token_id_array([0]),
+                input_embeds=None,
+                token_type_ids=None,
                 sampling_params=sampling_params,
                 return_logprob=False,
                 logprob_start_len=-1,
@@ -974,7 +976,9 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             rid=grpc_req.request_id,
             input_text=input_text,
             input_ids=input_ids,
+            input_embeds=None,
             mm_inputs=mm_inputs,
+            token_type_ids=None,
             sampling_params=sampling_params,
             return_logprob=grpc_req.return_logprob,
             logprob_start_len=(
