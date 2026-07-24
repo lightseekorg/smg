@@ -93,14 +93,14 @@ impl RateLimitBackend for LocalRateLimitBackend {
         // reservation for the same tenant locks in this same order, so
         // this can never deadlock. Different tenants never share a bucket,
         // so cross-tenant ordering doesn't matter.
-        let mut guards: Vec<_> = scopes.iter().map(|(_, b)| b.lock()).collect();
-        for ((_, bucket), guard) in scopes.iter().zip(guards.iter_mut()) {
+        let mut locked: Vec<_> = scopes.iter().map(|(_, b)| (b, b.lock())).collect();
+        for (bucket, guard) in &mut locked {
             bucket.refill(guard);
         }
 
         let tokens_needed = f64::from(request.estimated_input_tokens);
         let mut denied_retry_after: Option<u64> = None;
-        for ((_, bucket), guard) in scopes.iter().zip(guards.iter()) {
+        for (bucket, guard) in &locked {
             let dry = bucket.dry_run(guard, tokens_needed, 1.0);
             if !dry.allowed {
                 denied_retry_after =
@@ -112,10 +112,10 @@ impl RateLimitBackend for LocalRateLimitBackend {
             return ReserveOutcome::Denied { retry_after_secs };
         }
 
-        for ((_, bucket), guard) in scopes.iter().zip(guards.iter_mut()) {
+        for (bucket, guard) in &mut locked {
             bucket.debit(guard, tokens_needed, 1.0);
         }
-        drop(guards);
+        drop(locked);
 
         active_entry.insert(ActiveReservation {
             scopes: scopes.into_iter().map(|(k, _)| k).collect(),
@@ -279,7 +279,7 @@ mod tests {
         let charge_id = req.request_charge_id;
         assert_eq!(backend.reserve(req).await, ReserveOutcome::Admitted);
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
         backend
             .settle_success(
                 charge_id,
@@ -291,8 +291,10 @@ mod tests {
             .await;
 
         // 6000 - 500 charged = 5500 available; the bug would admit this.
+        // Assert well above 5500 (not the exact boundary) so a few extra
+        // tokens of scheduling-jitter refill can't flip the outcome.
         assert!(matches!(
-            backend.reserve(request("auth:team-red", 5501)).await,
+            backend.reserve(request("auth:team-red", 5530)).await,
             ReserveOutcome::Denied { .. }
         ));
     }

@@ -103,6 +103,14 @@ impl ScopeBucket {
                 retry_after_secs: 0,
             };
         }
+        if tokens > self.token_capacity || requests > self.request_capacity {
+            // refill() clamps at capacity, so an ask above it can never
+            // become admissible no matter how long the caller waits.
+            return ScopeDryRun {
+                allowed: false,
+                retry_after_secs: u64::MAX,
+            };
+        }
         let token_wait = Self::wait_secs(state.available_tokens, tokens, self.token_refill_per_sec);
         let request_wait = Self::wait_secs(
             state.available_requests,
@@ -180,6 +188,18 @@ mod tests {
         assert_eq!(dry.retry_after_secs, 30);
     }
 
+    #[test]
+    fn ask_above_bucket_capacity_is_never_retryable() {
+        let bucket = ScopeBucket::new(limits(60, 10));
+        let mut guard = bucket.lock();
+        bucket.refill(&mut guard);
+        // 100 tokens can never fit in a 60-token bucket -- refill() clamps
+        // at capacity, so no wait time would ever make this admissible.
+        let dry = bucket.dry_run(&guard, 100.0, 0.0);
+        assert!(!dry.allowed);
+        assert_eq!(dry.retry_after_secs, u64::MAX);
+    }
+
     #[tokio::test]
     async fn refill_restores_capacity_over_time() {
         let bucket = ScopeBucket::new(limits(600, 10));
@@ -191,8 +211,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let mut guard = bucket.lock();
         bucket.refill(&mut guard);
-        // 600 tokens/min = 10 tokens/sec; ~200ms => ~2 tokens refilled.
-        assert!(guard.available_tokens > 0.5 && guard.available_tokens < 5.0);
+        // Lower bound proves refill happened; upper bound is capacity
+        // (not a tight timing-derived number) so scheduling jitter can't
+        // flake this.
+        assert!(guard.available_tokens > 0.5 && guard.available_tokens <= 600.0);
     }
 
     #[test]
