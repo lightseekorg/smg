@@ -204,6 +204,81 @@ impl PDRouter {
         None
     }
 
+    #[inline]
+    fn is_deepseek_v4_model(model: &str) -> bool {
+        const DEEPSEEK_V4: &[u8] = b"deepseek-v4";
+        model
+            .as_bytes()
+            .windows(DEEPSEEK_V4.len())
+            .any(|candidate| candidate.eq_ignore_ascii_case(DEEPSEEK_V4))
+    }
+
+    /// Translate the public DeepSeek V4 controls to the SGLang HTTP worker
+    /// controls. HTTP workers render the prompt themselves, so the gateway's
+    /// native tokenizer path cannot apply these settings for them.
+    fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: &str) {
+        let Some(request) = json_request.as_object_mut() else {
+            return;
+        };
+
+        let is_deepseek_v4 = Self::is_deepseek_v4_model(model_id);
+        if is_deepseek_v4 {
+            if let Some(Value::String(effort)) = request.get_mut("reasoning_effort") {
+                match effort.as_str() {
+                    "low" | "medium" => {
+                        effort.clear();
+                        effort.push_str("high");
+                    }
+                    "xhigh" => {
+                        effort.clear();
+                        effort.push_str("max");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let template_thinking = request
+            .get("chat_template_kwargs")
+            .and_then(Value::as_object)
+            .and_then(|kwargs| kwargs.get("thinking"))
+            .and_then(Value::as_bool);
+        if template_thinking.is_some() {
+            return;
+        }
+
+        let explicit_thinking = request
+            .get("thinking")
+            .and_then(Value::as_object)
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            .and_then(|kind| match kind {
+                "enabled" => Some(true),
+                "disabled" => Some(false),
+                _ => None,
+            });
+        let effort_thinking = request
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .and_then(|effort| match effort {
+                "none" | "minimal" => Some(false),
+                _ => None,
+            });
+        let Some(enabled) = explicit_thinking
+            .or(effort_thinking)
+            .or(is_deepseek_v4.then_some(true))
+        else {
+            return;
+        };
+
+        let template_kwargs = request
+            .entry("chat_template_kwargs")
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let Some(template_kwargs) = template_kwargs.as_object_mut() {
+            template_kwargs.insert("thinking".to_string(), Value::Bool(enabled));
+        }
+    }
+
     fn get_completion_batch_size(req: &CompletionRequest) -> Option<usize> {
         if let StringOrArray::Array(arr) = &req.prompt {
             if !arr.is_empty() {
@@ -346,6 +421,13 @@ impl PDRouter {
                             Ok(v) => v,
                             Err(e) => return Self::handle_serialization_error(e),
                         };
+
+                        if context.route == "/v1/chat/completions" {
+                            Self::apply_deepseek_v4_http_compat(
+                                &mut json_request,
+                                context.model_id,
+                            );
+                        }
 
                         json_request = match Self::inject_bootstrap_into_value(
                             json_request,
@@ -1549,6 +1631,35 @@ mod tests {
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
         }
+    }
+
+    #[test]
+    fn deepseek_v4_http_compat_translates_official_controls() {
+        for (mut request, expected) in [
+            (json!({}), true),
+            (json!({"thinking": {"type": "enabled"}}), true),
+            (json!({"thinking": {"type": "disabled"}}), false),
+            (json!({"reasoning_effort": "none"}), false),
+        ] {
+            PDRouter::apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
+            assert_eq!(request["chat_template_kwargs"]["thinking"], expected);
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_http_compat_preserves_internal_override_and_maps_effort() {
+        let mut request = json!({
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "xhigh",
+            "chat_template_kwargs": {"thinking": false},
+        });
+        PDRouter::apply_deepseek_v4_http_compat(&mut request, "DeepSeek-V4-Pro");
+        assert_eq!(request["chat_template_kwargs"]["thinking"], false);
+        assert_eq!(request["reasoning_effort"], "max");
+
+        let mut other_model = json!({"reasoning_effort": "high"});
+        PDRouter::apply_deepseek_v4_http_compat(&mut other_model, "other-model");
+        assert!(other_model.get("chat_template_kwargs").is_none());
     }
 
     fn create_test_worker(url: String, worker_type: WorkerType, healthy: bool) -> Box<dyn Worker> {
