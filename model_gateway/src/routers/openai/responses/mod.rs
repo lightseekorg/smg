@@ -15,7 +15,7 @@ pub(crate) mod history;
 mod non_streaming;
 pub(crate) mod route;
 mod streaming;
-mod utils;
+pub(crate) mod utils;
 
 // Re-exported for openai::mcp::tool_handler (cross-module dependency)
 pub(crate) use accumulator::StreamingResponseAccumulator;
