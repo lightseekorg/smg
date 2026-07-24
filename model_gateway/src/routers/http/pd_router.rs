@@ -347,6 +347,13 @@ impl PDRouter {
                             Err(e) => return Self::handle_serialization_error(e),
                         };
 
+                        if context.route == "/v1/chat/completions" {
+                            super::deepseek_compat::apply_deepseek_v4_http_compat(
+                                &mut json_request,
+                                context.model_id,
+                            );
+                        }
+
                         json_request = match Self::inject_bootstrap_into_value(
                             json_request,
                             prefill.as_ref(),
