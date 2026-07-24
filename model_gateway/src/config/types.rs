@@ -95,6 +95,16 @@ pub struct RouterConfig {
     /// by inflight; the remainder bucket under `tenant="other"`).
     #[serde(default = "default_priority_scheduler_tenant_metric_top_n")]
     pub priority_scheduler_tenant_metric_top_n: u32,
+    /// Enable per-tenant LLM token/request rate limiting. When false
+    /// (default), no rate limiter is constructed — zero behavior change
+    /// for existing deployments.
+    #[serde(default)]
+    pub tenant_rate_limit_enabled: bool,
+    /// Path to the tenant-rate-limit YAML (default + per-tenant policies,
+    /// optionally further restricted per-model). Required when
+    /// `tenant_rate_limit_enabled` is true.
+    #[serde(default)]
+    pub tenant_rate_limit_config: Option<String>,
     pub cors_allowed_origins: Vec<String>,
     pub retry: RetryConfig,
     pub circuit_breaker: CircuitBreakerConfig,
@@ -798,6 +808,8 @@ impl Default for RouterConfig {
             priority_scheduler_config: None,
             priority_scheduler_tenant_metric_top_n: default_priority_scheduler_tenant_metric_top_n(
             ),
+            tenant_rate_limit_enabled: false,
+            tenant_rate_limit_config: None,
             cors_allowed_origins: vec![],
             retry: RetryConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),

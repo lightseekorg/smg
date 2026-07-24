@@ -11,11 +11,14 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tenant::is_canonical_serving_tenant_key;
+
 /// A single tenant's (or the default) token/request-per-minute policy,
 /// plus optional per-model rules layered on top. At most one model rule
 /// matches per request — rules never stack with each other, only with
 /// the tenant-global limits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TenantPolicySpec {
     /// Canonical tenant key (e.g. `auth:team-red`). Must be `None` on
     /// [`RateLimitYaml::default_policy`] and `Some` on every entry in
@@ -30,6 +33,7 @@ pub struct TenantPolicySpec {
 
 /// A per-model rate-limit rule layered on top of the tenant-global limits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRuleSpec {
     /// Stable identifier, unique within the tenant. `[A-Za-z0-9._-]+`.
     pub rule_id: String,
@@ -39,7 +43,7 @@ pub struct ModelRuleSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelMatcherSpec {
     Exact { value: String },
     Prefix { value: String },
@@ -48,6 +52,7 @@ pub enum ModelMatcherSpec {
 /// Optional YAML config, intended to be loaded via a
 /// `--tenant-rate-limit-config <path>` CLI flag added in a follow-up PR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitYaml {
     pub default_policy: TenantPolicySpec,
     #[serde(default)]
@@ -64,6 +69,10 @@ pub enum RateLimitConfigError {
     DuplicateTenantKey { tenant_key: String },
     #[error("tenant_key '{tenant_key}' must not have surrounding whitespace")]
     PaddedTenantKey { tenant_key: String },
+    #[error(
+        "tenant_key '{tenant_key}' is not a canonical serving-path tenant key (expected auth:<id>, header:<id>, ip:<address>, or anonymous)"
+    )]
+    NonCanonicalTenantKey { tenant_key: String },
     #[error("policy '{label}': tokens_per_minute must be > 0")]
     ZeroTokensPerMinute { label: String },
     #[error("policy '{label}': requests_per_minute must be > 0")]
@@ -213,6 +222,13 @@ impl RateLimitYaml {
                     tenant_key: tenant_key.to_string(),
                 });
             }
+            // E.g. a bare tenant_id copy-pasted from tenant_api_keys,
+            // missing its auth: prefix — can never match a real tenant.
+            if !is_canonical_serving_tenant_key(tenant_key) {
+                return Err(RateLimitConfigError::NonCanonicalTenantKey {
+                    tenant_key: tenant_key.to_string(),
+                });
+            }
             if !seen_tenants.insert(tenant_key) {
                 return Err(RateLimitConfigError::DuplicateTenantKey {
                     tenant_key: tenant_key.to_string(),
@@ -253,6 +269,14 @@ mod tests {
             tenants: vec![policy(Some("auth:team-red"), 5000, 300)],
         };
         assert!(yaml.validate().is_ok());
+    }
+
+    #[test]
+    fn misspelled_field_is_rejected_not_silently_ignored() {
+        // `tenant:` typo'd for `tenants:` -- without deny_unknown_fields
+        // this silently falls back to an empty tenants list.
+        let raw = "default_policy:\n  tokens_per_minute: 1000\n  requests_per_minute: 60\ntenant:\n  - tenant_key: auth:team-red\n    tokens_per_minute: 5000\n    requests_per_minute: 300\n";
+        assert!(serde_yaml::from_str::<RateLimitYaml>(raw).is_err());
     }
 
     #[test]
@@ -303,6 +327,24 @@ mod tests {
             assert_eq!(
                 yaml.validate(),
                 Err(RateLimitConfigError::PaddedTenantKey {
+                    tenant_key: tenant_key.to_string()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn tenant_non_canonical_key_rejected() {
+        // Bare tenant_id, missing the auth:/header:/ip: prefix a real
+        // resolved key always has.
+        for tenant_key in ["team-red", "auth:", "ip:not-an-ip", "tenant:team-red"] {
+            let yaml = RateLimitYaml {
+                default_policy: policy(None, 1000, 60),
+                tenants: vec![policy(Some(tenant_key), 5000, 300)],
+            };
+            assert_eq!(
+                yaml.validate(),
+                Err(RateLimitConfigError::NonCanonicalTenantKey {
                     tenant_key: tenant_key.to_string()
                 })
             );

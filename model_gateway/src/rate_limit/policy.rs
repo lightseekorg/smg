@@ -13,19 +13,8 @@ pub struct ScopeLimits {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the reserve/settle engine landing in a follow-up change; exercised by this module's own tests today"
-    )
-)]
 pub(crate) struct CompiledModelRule {
     pub rule_id: String,
-    #[expect(
-        dead_code,
-        reason = "consumed by the reserve/settle engine landing in a follow-up change; not read by this module's own tests"
-    )]
     pub limits: ScopeLimits,
 }
 
@@ -39,13 +28,6 @@ pub(crate) struct CompiledPrefixRule {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the reserve/settle engine landing in a follow-up change; exercised by this module's own tests today"
-    )
-)]
 pub(crate) struct CompiledTenantPolicy {
     pub limits: ScopeLimits,
     /// O(1) lookup — exact matches never need to scan.
@@ -57,17 +39,8 @@ pub(crate) struct CompiledTenantPolicy {
 }
 
 impl CompiledTenantPolicy {
-    /// The single model rule (if any) that matches `model_id`: exact wins
-    /// over prefix; among prefixes, the longest wins (guaranteed by
-    /// `prefix_model_rules`'s compile-time sort). Rules never stack — at
-    /// most one is returned.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the reserve/settle engine landing in a follow-up change; exercised by this module's own tests today"
-        )
-    )]
+    /// The single matching rule, if any: exact wins over prefix, longest
+    /// wins among prefixes. Rules never stack.
     pub(crate) fn matching_rule(&self, model_id: &str) -> Option<&CompiledModelRule> {
         if let Some(exact) = self.exact_model_rules.get(model_id) {
             return Some(exact);
@@ -145,13 +118,6 @@ impl CompiledPolicySet {
         Ok(Self { default, tenants })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the reserve/settle engine landing in a follow-up change; exercised by this module's own tests today"
-        )
-    )]
     pub(crate) fn policy_for(&self, tenant: &TenantKey) -> &CompiledTenantPolicy {
         self.tenants.get(tenant).unwrap_or(&self.default)
     }

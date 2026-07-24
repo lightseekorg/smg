@@ -275,6 +275,18 @@ impl RouterConfigBuilder {
         self
     }
 
+    // ==================== Tenant Rate Limit ====================
+
+    pub fn tenant_rate_limit_enabled(mut self, enabled: bool) -> Self {
+        self.config.tenant_rate_limit_enabled = enabled;
+        self
+    }
+
+    pub fn tenant_rate_limit_config(mut self, path: Option<String>) -> Self {
+        self.config.tenant_rate_limit_config = path;
+        self
+    }
+
     // ==================== Security & CORS ====================
 
     pub fn api_key<S: Into<String>>(mut self, key: S) -> Self {

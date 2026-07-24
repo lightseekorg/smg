@@ -40,6 +40,10 @@ pub fn service_unavailable(code: impl Into<String>, message: impl Into<String>) 
     create_error(StatusCode::SERVICE_UNAVAILABLE, code, message)
 }
 
+pub fn too_many_requests(code: impl Into<String>, message: impl Into<String>) -> Response {
+    create_error(StatusCode::TOO_MANY_REQUESTS, code, message)
+}
+
 pub fn failed_dependency(code: impl Into<String>, message: impl Into<String>) -> Response {
     create_error(StatusCode::FAILED_DEPENDENCY, code, message)
 }

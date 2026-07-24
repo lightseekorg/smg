@@ -1,16 +1,23 @@
 //! Per-tenant LLM token/request rate limiting.
 //!
-//! This is the policy layer only: config schema, validation, and
-//! compilation into an immutable, cheap-to-look-up `CompiledPolicySet`.
-//! Nothing here does any rate-limit accounting or enforcement yet — the
-//! reserve/settle engine, in-memory backend, and CLI/startup wiring land in
-//! a follow-up change. This module is not yet reachable from any request
-//! path.
+//! Config schema, policy compilation, the reserve/settle engine, and an
+//! in-memory backend. Nothing in the request path calls `reserve()` yet
+//! — that's wired in per protocol in a later phase.
 
+mod backend;
+mod bucket;
 mod config;
+mod local_backend;
+mod manager;
 mod policy;
+mod rejection;
+mod reservation;
 
+pub use backend::{RateLimitBackend, ReserveOutcome, ReserveRequest, UsageSettlement};
 pub use config::{
     ModelMatcherSpec, ModelRuleSpec, RateLimitConfigError, RateLimitYaml, TenantPolicySpec,
 };
+pub use manager::{RateLimitManager, Reservation};
 pub use policy::{CompiledPolicySet, ScopeLimits};
+pub use rejection::{rejection_response, RATE_LIMIT_ERROR_CODE};
+pub use reservation::{ReservationAttachment, SharedReservationHandle};
