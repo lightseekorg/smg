@@ -217,24 +217,24 @@ impl PDRouter {
     /// controls. HTTP workers render the prompt themselves, so the gateway's
     /// native tokenizer path cannot apply these settings for them.
     fn apply_deepseek_v4_http_compat(json_request: &mut Value, model_id: &str) {
+        if !Self::is_deepseek_v4_model(model_id) {
+            return;
+        }
         let Some(request) = json_request.as_object_mut() else {
             return;
         };
 
-        let is_deepseek_v4 = Self::is_deepseek_v4_model(model_id);
-        if is_deepseek_v4 {
-            if let Some(Value::String(effort)) = request.get_mut("reasoning_effort") {
-                match effort.as_str() {
-                    "low" | "medium" => {
-                        effort.clear();
-                        effort.push_str("high");
-                    }
-                    "xhigh" => {
-                        effort.clear();
-                        effort.push_str("max");
-                    }
-                    _ => {}
+        if let Some(Value::String(effort)) = request.get_mut("reasoning_effort") {
+            match effort.as_str() {
+                "low" | "medium" => {
+                    effort.clear();
+                    effort.push_str("high");
                 }
+                "xhigh" => {
+                    effort.clear();
+                    effort.push_str("max");
+                }
+                _ => {}
             }
         }
 
@@ -264,12 +264,7 @@ impl PDRouter {
                 "none" | "minimal" => Some(false),
                 _ => None,
             });
-        let Some(enabled) = explicit_thinking
-            .or(effort_thinking)
-            .or(is_deepseek_v4.then_some(true))
-        else {
-            return;
-        };
+        let enabled = explicit_thinking.or(effort_thinking).unwrap_or(true);
 
         let template_kwargs = request
             .entry("chat_template_kwargs")
@@ -1660,6 +1655,25 @@ mod tests {
         let mut other_model = json!({"reasoning_effort": "high"});
         PDRouter::apply_deepseek_v4_http_compat(&mut other_model, "other-model");
         assert!(other_model.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn deepseek_v4_http_compat_leaves_other_models_untouched() {
+        // The `thinking` kwarg name is only meaningful to DeepSeek's renderer;
+        // other models (e.g. Qwen `enable_thinking`) must not receive it, and
+        // their reasoning_effort must pass through verbatim.
+        let original = json!({
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "none",
+        });
+        let mut request = original.clone();
+        PDRouter::apply_deepseek_v4_http_compat(&mut request, "qwen3-30b");
+        assert_eq!(request, original);
+
+        let original = json!({"reasoning_effort": "xhigh"});
+        let mut request = original.clone();
+        PDRouter::apply_deepseek_v4_http_compat(&mut request, "other-model");
+        assert_eq!(request, original);
     }
 
     fn create_test_worker(url: String, worker_type: WorkerType, healthy: bool) -> Box<dyn Worker> {

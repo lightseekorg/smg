@@ -1737,29 +1737,15 @@ impl StreamingProcessor {
         let mut finish_reason_str = String::new();
         let mut matched_stop: Option<Value> = None;
 
-        // Check parser availability once upfront. Run parser when the user explicitly
-        // enabled thinking, or when the selected parser needs structural special tokens.
+        // Check parser availability once upfront. Run parser when thinking is
+        // effectively ON — explicitly enabled, or left to a template default of
+        // on (DeepSeek V4) — or when the selected parser needs structural
+        // special tokens.
         let reasoning_requires_special_tokens = utils::reasoning_parser_requires_special_tokens(
             &self.reasoning_parser_factory,
             self.configured_reasoning_parser.as_deref(),
             model,
         );
-        let separate_reasoning = reasoning_requires_special_tokens
-            || matches!(
-                &original_request.thinking,
-                Some(
-                    messages::ThinkingConfig::Enabled { .. }
-                        | messages::ThinkingConfig::Adaptive { .. }
-                )
-            );
-        let reasoning_parser_available = separate_reasoning
-            && utils::check_reasoning_parser_availability(
-                &self.reasoning_parser_factory,
-                self.configured_reasoning_parser.as_deref(),
-                model,
-            );
-
-        // Determine if thinking is effectively ON (for mark_reasoning_started).
         let user_thinking = match &original_request.thinking {
             Some(
                 messages::ThinkingConfig::Enabled { .. }
@@ -1770,6 +1756,14 @@ impl StreamingProcessor {
         };
         let thinking_override =
             utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref());
+        let separate_reasoning =
+            reasoning_requires_special_tokens || user_thinking == Some(true) || thinking_override;
+        let reasoning_parser_available = separate_reasoning
+            && utils::check_reasoning_parser_availability(
+                &self.reasoning_parser_factory,
+                self.configured_reasoning_parser.as_deref(),
+                model,
+            );
         let think_in_prefill = tokenizer.think_in_prefill();
 
         let tool_choice_enabled = !matches!(
