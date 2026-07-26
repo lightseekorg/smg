@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         CohereParser, DeepSeek31Parser, DeepSeekDsmlParser, DeepSeekParser, Glm4MoeParser,
-        InklingParser, JsonParser, KimiK2Parser, LlamaParser, MinimaxM2Parser, MistralParser,
-        PassthroughParser, PythonicParser, QwenParser, QwenXmlParser, SarashinaParser, Step3Parser,
+        InklingParser, JsonParser, KimiK2Parser, KimiK3Parser, LlamaParser, MinimaxM2Parser,
+        MistralParser, PassthroughParser, PythonicParser, QwenParser, QwenXmlParser,
+        SarashinaParser, Step3Parser,
     },
     traits::ToolParser,
 };
@@ -332,6 +333,7 @@ impl ParserFactory {
             || Box::new(KimiK2Parser::new()),
             KimiK2Parser::build_structural_tag,
         );
+        registry.register_parser("kimi_k3", || Box::new(KimiK3Parser::new()));
         registry.register_parser_with_structural_tag(
             "inkling",
             || Box::new(InklingParser::new()),
@@ -416,6 +418,9 @@ impl ParserFactory {
         registry.map_model("kimi-k2*", "kimik2");
         registry.map_model("Kimi-K2*", "kimik2");
         registry.map_model("moonshot*/Kimi-K2*", "kimik2");
+        registry.map_model("kimi-k3*", "kimi_k3");
+        registry.map_model("Kimi-K3*", "kimi_k3");
+        registry.map_model("moonshot*/Kimi-K3*", "kimi_k3");
 
         // Inkling models use TML JSON tool calls.
         registry.map_model("inkling*", "inkling");

@@ -1,0 +1,1349 @@
+{
+  "plain_user_thinking": {
+    "text": "<|open|>message role=\"user\"<|sep|>Hi<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hi",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "system_user_thinking": {
+    "text": "<|open|>message role=\"system\"<|sep|>You are helpful<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Hi<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "system",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "You are helpful",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hi",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "plain_user_no_thinking": {
+    "text": "<|open|>message role=\"user\"<|sep|>Hi<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hi",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "response",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "assistant_prior_turn": {
+    "text": "<|open|>message role=\"user\"<|sep|>Hi<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|><|close|>think<|sep|><|open|>response<|sep|>Hello!<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Bye<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hi",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "response",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hello!",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "response",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Bye",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "with_tools": {
+    "text": "<|open|>message role=\"system\" type=\"tool-declare\"<|sep|># Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>weather in Paris?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "system",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " type",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "tool-declare",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "# Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]\n```",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "weather in Paris?",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "assistant_tool_call_then_result": {
+    "text": "<|open|>message role=\"system\" type=\"tool-declare\"<|sep|># Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>weather?<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|><|close|>think<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool=\"get_weather\" index=\"1\"<|sep|><|open|>argument key=\"city\" type=\"string\"<|sep|>Paris<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role=\"tool\" tool=\"get_weather\" index=\"1\"<|sep|>sunny<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "system",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " type",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "tool-declare",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "# Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n[{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]\n```",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "weather?",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "response",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "response",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "tools",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "call",
+        "allow_special": false
+      },
+      {
+        "text": " tool",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "get_weather",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " index",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "1",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "argument",
+        "allow_special": false
+      },
+      {
+        "text": " key",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "city",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " type",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "string",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Paris",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "argument",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "call",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "tools",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "tool",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " tool",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "get_weather",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " index",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "1",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "sunny",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  },
+  "thinking_effort_low": {
+    "text": "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=low`.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"user\"<|sep|>Hi<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>",
+    "segments": [
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "system",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": " type",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "thinking-effort",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=low`.",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "user",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "Hi",
+        "allow_special": false
+      },
+      {
+        "text": "<|close|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|end_of_msg|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "message",
+        "allow_special": false
+      },
+      {
+        "text": " role",
+        "allow_special": false
+      },
+      {
+        "text": "=\"",
+        "allow_special": false
+      },
+      {
+        "text": "assistant",
+        "allow_special": false
+      },
+      {
+        "text": "\"",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      },
+      {
+        "text": "<|open|>",
+        "allow_special": true
+      },
+      {
+        "text": "think",
+        "allow_special": false
+      },
+      {
+        "text": "<|sep|>",
+        "allow_special": true
+      }
+    ]
+  }
+}

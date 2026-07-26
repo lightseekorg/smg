@@ -18,8 +18,8 @@ mod tests;
 pub use factory::{ParserFactory, PooledParser, ToolConstraint};
 pub use parsers::{
     CohereParser, DeepSeek31Parser, DeepSeekDsmlParser, DeepSeekParser, Glm4MoeParser,
-    InklingParser, JsonParser, KimiK2Parser, LlamaParser, MinimaxM2Parser, MistralParser,
-    PythonicParser, QwenParser, Step3Parser,
+    InklingParser, JsonParser, KimiK2Parser, KimiK3Parser, LlamaParser, MinimaxM2Parser,
+    MistralParser, PythonicParser, QwenParser, Step3Parser,
 };
 pub use traits::ToolParser;
 pub use types::{FunctionCall, StreamingParseResult, ToolCall};

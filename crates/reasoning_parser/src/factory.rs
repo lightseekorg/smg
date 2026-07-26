@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, InklingParser,
-        KimiParser, MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser,
+        KimiK3Parser, KimiParser, MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser,
         QwenThinkingParser, Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
@@ -184,6 +184,9 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(config).with_model_type("kimi_thinking".to_string()))
         });
 
+        // Kimi K3 XTML think channel (structural <|open|>/<|close|>/<|sep|> tokens).
+        registry.register_parser("kimi_k3", || Box::new(KimiK3Parser::new()));
+
         registry.register_pattern("deepseek-r1", "deepseek_r1");
         registry.register_pattern("deepseek-v3.1", "deepseek_v31");
         registry.register_pattern("deepseek-v3-1", "deepseek_v31");
@@ -196,6 +199,10 @@ impl ParserFactory {
         registry.register_pattern("glm-5", "glm45"); // GLM-5.x reuse glm45 reasoning format
         registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
         registry.register_pattern("kimi-k2.5", "kimi_k25");
+        // K3 patterns must precede the generic "kimi" pattern below, since
+        // "kimi-k3".contains("kimi") and first-substring-match wins.
+        registry.register_pattern("kimi-k3", "kimi_k3");
+        registry.register_pattern("kimi_k3", "kimi_k3");
         registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
         registry.register_pattern("step3", "step3");
         registry.register_pattern("minimax", "minimax");
@@ -278,6 +285,17 @@ mod tests {
         let factory = ParserFactory::new();
         let parser = factory.create("kimi-chat");
         assert_eq!(parser.model_type(), "kimi");
+    }
+
+    #[test]
+    fn test_factory_creates_kimi_k3() {
+        let factory = ParserFactory::new();
+        // Kimi-K3 ids must resolve to the dedicated kimi_k3 parser, not the
+        // legacy "kimi" parser (whose pattern is a substring of "kimi-k3").
+        assert_eq!(factory.create("moonshotai/Kimi-K3").model_type(), "kimi_k3");
+        assert_eq!(factory.create("Kimi_K3").model_type(), "kimi_k3");
+        // The legacy kimi pattern still resolves plain Kimi-K2 ids.
+        assert_eq!(factory.create("kimi-chat").model_type(), "kimi");
     }
 
     #[test]

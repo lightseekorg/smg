@@ -31,7 +31,7 @@ pub(crate) const KIMI_K2_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\
 /// `tokenization_kimi` (via `auto_map`, `tokenizer_class`, etc.). Callers pass
 /// the parsed JSON so we don't re-read the file the tiktoken loader already
 /// parsed. Fallback: read sibling `config.json` and check `model_type` ∈
-/// `{kimi_k2, kimi_k25}`.
+/// `{kimi_k2, kimi_k25, kimi_k3}`.
 pub(crate) fn matches(tokenizer_config: Option<&Value>, dir: &Path) -> bool {
     if tokenizer_config.is_some_and(value_mentions_kimi_tokenizer) {
         return true;
@@ -77,7 +77,10 @@ fn read_json(path: &Path) -> Option<Value> {
 
 fn model_config_is_kimi(config: &Value) -> bool {
     let model_type = config.get("model_type").and_then(Value::as_str);
-    matches!(model_type, Some("kimi_k2") | Some("kimi_k25"))
+    matches!(
+        model_type,
+        Some("kimi_k2") | Some("kimi_k25") | Some("kimi_k3")
+    )
 }
 
 fn value_mentions_kimi_tokenizer(value: &Value) -> bool {
@@ -213,6 +216,24 @@ mod tests {
         std::fs::write(
             dir.path().join("config.json"),
             r#"{ "model_type": "kimi_k25" }"#,
+        )
+        .unwrap();
+
+        assert!(matches(tokenizer_config(dir.path()).as_ref(), dir.path()));
+    }
+
+    #[test]
+    fn matches_via_model_type_kimi_k3() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiktoken.model"), MINIMAL_TIKTOKEN_MODEL).unwrap();
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{ "added_tokens_decoder": {} }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{ "model_type": "kimi_k3" }"#,
         )
         .unwrap();
 

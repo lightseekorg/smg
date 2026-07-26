@@ -181,18 +181,32 @@ pub(crate) fn process_content_format(
 }
 
 const REASONING_EFFORT_KEY: &str = "reasoning_effort";
+const TOOL_CHOICE_KEY: &str = "tool_choice";
+const RESPONSE_FORMAT_KEY: &str = "response_format";
 
-/// Merge the top-level `reasoning_effort` with any request `chat_template_kwargs`,
-/// forwarding the effort verbatim. The chat template owns level→value mapping,
-/// defaulting, and validation; an explicit `chat_template_kwargs` entry wins.
+/// Merge request-level reasoning, tool, and output-format controls with any
+/// request `chat_template_kwargs`, forwarding each verbatim. The chat template
+/// owns interpretation (level→value mapping, `tool_choice`/`response_format`
+/// rendering, defaulting, and validation); an explicit `chat_template_kwargs`
+/// entry wins.
 fn build_chat_template_kwargs(request: &ChatCompletionRequest) -> HashMap<String, Value> {
-    let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
+    let kwargs_capacity = 3 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
     let mut combined = HashMap::with_capacity(kwargs_capacity);
     if let Some(reasoning_effort) = &request.reasoning_effort {
         combined.insert(
             REASONING_EFFORT_KEY.to_string(),
             Value::String(reasoning_effort.clone()),
         );
+    }
+    if let Some(tool_choice) = &request.tool_choice {
+        if let Ok(value) = serde_json::to_value(tool_choice) {
+            combined.insert(TOOL_CHOICE_KEY.to_string(), value);
+        }
+    }
+    if let Some(response_format) = &request.response_format {
+        if let Ok(value) = serde_json::to_value(response_format) {
+            combined.insert(RESPONSE_FORMAT_KEY.to_string(), value);
+        }
     }
     if let Some(template_kwargs) = &request.chat_template_kwargs {
         combined.extend(template_kwargs.clone());
@@ -688,25 +702,42 @@ pub(crate) fn get_history_tool_calls_count(request: &ChatCompletionRequest) -> u
 /// * `history_count` - Number of tool calls in previous messages
 ///
 /// # Returns
-/// A unique ID string. KimiK2 uses `functions.{name}:{global_index}`, others use `call_{uuid}`
+/// A unique ID string:
+/// - Kimi-K3 (XTML): `{name}:{tool_index}` — an opaque, per-message zero-based
+///   ordinal. K3 never renders the id into the prompt and matches tool results
+///   back to calls by opaque id equality scoped to the most recent assistant
+///   message, so the id carries no `functions.` prefix and no history offset.
+///   Mirrors the K3 reference decode parser (`{tool_name}:{xtml_index - 1}`).
+/// - Kimi-K2: `functions.{name}:{history_count + tool_index}` (globally unique).
+/// - others: `call_{24-char-uuid}`.
 pub(crate) fn generate_tool_call_id(
     model: &str,
     tool_name: &str,
     tool_index: usize,
     history_count: usize,
 ) -> String {
-    // Case-insensitive check without allocation (search for "kimi" substring)
+    // Case-insensitive substring checks without allocation.
     let is_kimi = model
         .as_bytes()
         .windows(4) // "kimi".len()
         .any(|window| window.eq_ignore_ascii_case(b"kimi"));
 
-    if is_kimi {
-        // KimiK2 format: functions.{name}:{global_index}
-        format!("functions.{}:{}", tool_name, history_count + tool_index)
-    } else {
+    if !is_kimi {
         // Standard OpenAI format: call_{24-char-uuid}
-        format!("call_{}", &Uuid::now_v7().simple().to_string()[..24])
+        return format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
+    }
+
+    let is_k3 = model
+        .as_bytes()
+        .windows(2) // "k3".len()
+        .any(|window| window.eq_ignore_ascii_case(b"k3"));
+
+    if is_k3 {
+        // Kimi-K3 (XTML) opaque format: {name}:{per-message zero-based ordinal}.
+        format!("{tool_name}:{tool_index}")
+    } else {
+        // Kimi-K2 format: functions.{name}:{global_index}.
+        format!("functions.{}:{}", tool_name, history_count + tool_index)
     }
 }
 
@@ -1327,6 +1358,33 @@ mod tests {
         assert_eq!(kwargs.get("custom"), Some(&Value::Bool(true)));
     }
 
+    #[test]
+    fn tool_and_output_controls_are_forwarded_to_renderer() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "kimi-k3",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"}
+        }))
+        .unwrap();
+        let kwargs = build_chat_template_kwargs(&request);
+        assert_eq!(kwargs.get(TOOL_CHOICE_KEY), Some(&json!("required")));
+        assert_eq!(
+            kwargs.get(RESPONSE_FORMAT_KEY),
+            Some(&json!({"type": "json_object"}))
+        );
+
+        // Absent both, neither key is forwarded.
+        let bare: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "kimi-k3",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        let kwargs = build_chat_template_kwargs(&bare);
+        assert!(!kwargs.contains_key(TOOL_CHOICE_KEY));
+        assert!(!kwargs.contains_key(RESPONSE_FORMAT_KEY));
+    }
+
     /// End-to-end: run a real MMBench-shaped `[text, image]` message through the
     /// full SMG pipeline (`process_content_format` + the actual model chat
     /// template) and assert the rendered prompt places the image BEFORE the
@@ -1389,5 +1447,39 @@ mod tests {
             vstart < qpos,
             "image must precede the question (vstart={vstart}, qpos={qpos}).\n--- rendered ---\n{rendered}"
         );
+    }
+
+    #[test]
+    fn test_generate_tool_call_id_kimi_k3_opaque_format() {
+        // K3: `{name}:{per-message zero-based ordinal}` — no `functions.` prefix,
+        // no history offset (matches the K3 reference decode parser).
+        assert_eq!(
+            generate_tool_call_id("moonshotai/Kimi-K3", "get_weather", 0, 0),
+            "get_weather:0"
+        );
+        assert_eq!(
+            generate_tool_call_id("kimi_k3", "get_weather", 1, 5),
+            "get_weather:1"
+        );
+    }
+
+    #[test]
+    fn test_generate_tool_call_id_kimi_k2_unchanged() {
+        // K2 keeps the globally unique `functions.{name}:{history + index}` form.
+        assert_eq!(
+            generate_tool_call_id("moonshotai/Kimi-K2-Instruct", "get_weather", 0, 0),
+            "functions.get_weather:0"
+        );
+        assert_eq!(
+            generate_tool_call_id("Kimi-K2", "get_weather", 1, 2),
+            "functions.get_weather:3"
+        );
+    }
+
+    #[test]
+    fn test_generate_tool_call_id_non_kimi_uses_uuid() {
+        let id = generate_tool_call_id("gpt-4o", "get_weather", 0, 0);
+        assert!(id.starts_with("call_"), "got: {id}");
+        assert!(!id.contains("get_weather"), "got: {id}");
     }
 }

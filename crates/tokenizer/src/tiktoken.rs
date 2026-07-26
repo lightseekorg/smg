@@ -17,7 +17,7 @@ use crate::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
-    encoders::kimi_k25_tools::apply_kimi_k25_tools,
+    encoders::{kimi_k25_tools::apply_kimi_k25_tools, kimi_k3_xtml::apply_kimi_k3_xtml},
     factory::discover_chat_template_in_dir,
     kimi_k2_tokenizer,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
@@ -27,6 +27,9 @@ use crate::{
 enum Renderer {
     Jinja,
     KimiK25Tools,
+    /// Kimi-K3 renders its prompt entirely in the native XTML encoder (no Jinja
+    /// chat template). See [`crate::encoders::kimi_k3_xtml`].
+    KimiK3Xtml,
 }
 
 /// Regex pattern for cl100k_base tokenization.
@@ -551,6 +554,7 @@ impl TokenizerTrait for TiktokenTokenizer {
         match self.renderer {
             Renderer::Jinja => self.chat_template.apply(messages, params),
             Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
+            Renderer::KimiK3Xtml => apply_kimi_k3_xtml(messages, &params),
         }
     }
 
@@ -559,18 +563,31 @@ impl TokenizerTrait for TiktokenTokenizer {
     }
 
     fn thinking_toggle(&self) -> ThinkingToggle {
-        self.chat_template.thinking_toggle()
+        match self.renderer {
+            // K3 has no Jinja template; its native renderer defaults thinking
+            // ON (Python `build_chat_segments(thinking=True)`).
+            Renderer::KimiK3Xtml => ThinkingToggle::DefaultOn,
+            _ => self.chat_template.thinking_toggle(),
+        }
     }
 
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
-        self.chat_template.thinking_key_name()
+        match self.renderer {
+            Renderer::KimiK3Xtml => Some(ThinkingKeyName::Thinking),
+            _ => self.chat_template.thinking_key_name(),
+        }
     }
     fn eos_token_ids(&self) -> &[TokenIdType] {
         &self.eos_token_ids
     }
 
     fn think_in_prefill(&self) -> bool {
-        self.chat_template.think_in_prefill()
+        match self.renderer {
+            // K3's generation-prompt tail opens `<think>` when thinking is on
+            // (the default), so completions start mid-reasoning.
+            Renderer::KimiK3Xtml => true,
+            _ => self.chat_template.think_in_prefill(),
+        }
     }
 
     fn set_chat_template(&mut self, template: String) -> Result<()> {
@@ -603,14 +620,16 @@ fn detect_renderer_from_config(dir: &Path) -> Renderer {
             return Renderer::Jinja;
         }
     };
-    let is_kimi = value
+    let arch_strs: Vec<&str> = value
         .get("architectures")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| {
-            a.iter()
-                .any(|v| v.as_str() == Some("KimiK25ForConditionalGeneration"))
-        });
-    if is_kimi {
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if arch_strs.contains(&"KimiK3ForConditionalGeneration") {
+        tracing::debug!(?path, "selected KimiK3Xtml chat-template renderer");
+        return Renderer::KimiK3Xtml;
+    }
+    if arch_strs.contains(&"KimiK25ForConditionalGeneration") {
         tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
         return Renderer::KimiK25Tools;
     }
@@ -635,6 +654,40 @@ mod tests {
             std::fs::write(dir.path().join("config.json"), model_config).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn test_detect_renderer_from_config() {
+        let k3 = write_minimal_tiktoken_dir(
+            "{}",
+            Some(r#"{"architectures": ["KimiK3ForConditionalGeneration"]}"#),
+        );
+        assert!(matches!(
+            detect_renderer_from_config(k3.path()),
+            Renderer::KimiK3Xtml
+        ));
+
+        let k25 = write_minimal_tiktoken_dir(
+            "{}",
+            Some(r#"{"architectures": ["KimiK25ForConditionalGeneration"]}"#),
+        );
+        assert!(matches!(
+            detect_renderer_from_config(k25.path()),
+            Renderer::KimiK25Tools
+        ));
+
+        let other =
+            write_minimal_tiktoken_dir("{}", Some(r#"{"architectures": ["LlamaForCausalLM"]}"#));
+        assert!(matches!(
+            detect_renderer_from_config(other.path()),
+            Renderer::Jinja
+        ));
+
+        let missing = write_minimal_tiktoken_dir("{}", None);
+        assert!(matches!(
+            detect_renderer_from_config(missing.path()),
+            Renderer::Jinja
+        ));
     }
 
     #[test]
