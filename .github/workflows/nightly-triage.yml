@@ -1,0 +1,161 @@
+name: Nightly Triage
+
+# Daily: collect recent nightly benchmark/eval failures and have Claude
+# triage them — classify each (regression vs infra/upstream flake vs
+# config), rerun clear one-off flakes once, and keep one rolling issue per
+# workflow so failures stop landing in a void. Runs after the ~7h bfcl/tau2
+# windows finish.
+
+on:
+  schedule:
+    - cron: '30 15 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-triage
+  cancel-in-progress: false
+
+env:
+  WATCHED_WORKFLOWS: nightly-bfcl.yml nightly-tau2.yml nightly-benchmark.yml nightly-docker.yml nightly-engine-docker.yml nightly-mlx-bench.yml
+
+jobs:
+  collect:
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    outputs:
+      failures: ${{ steps.gather.outputs.failures }}
+      has_failures: ${{ steps.gather.outputs.has_failures }}
+    steps:
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            GH_VERSION="2.74.0"
+            GH_SHA256="e55c9d49dc49c0b0fef0a9acd3510482fd9e27ff52ae80f8a6e838cd25b4cd89"
+            curl -fsSL --connect-timeout 10 --max-time 120 -o /tmp/gh.tgz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum --check --quiet
+            tar xzf /tmp/gh.tgz --strip-components=2 -C "$HOME/.local/bin" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Gather failed nightly runs
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 48h lookback: a run still in progress at collection time (e.g.
+          # nightly-benchmark allows 24h) is picked up the next day; Claude
+          # dedups already-triaged run ids against the rolling issue.
+          since=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          failures='[]'
+          for wf in $WATCHED_WORKFLOWS; do
+            rows=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
+              --created ">=$since" --limit 10 \
+              --json databaseId,conclusion,status,url,attempt,workflowName \
+              --jq '[.[] | select(.status == "completed" and (.conclusion | IN("success", "cancelled", "skipped") | not))
+                     | {workflow: .workflowName, run_id: .databaseId, attempt: .attempt, conclusion: .conclusion, url: .url}]')
+            failures=$(jq -c --argjson r "$rows" '. + $r' <<<"$failures")
+          done
+          echo "failures=$failures" >> "$GITHUB_OUTPUT"
+          echo "has_failures=$(jq 'length > 0' <<<"$failures")" >> "$GITHUB_OUTPUT"
+          jq . <<<"$failures"
+
+  triage:
+    needs: collect
+    if: needs.collect.outputs.has_failures == 'true'
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Export API key from pod env
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not present in the runner pod environment"
+            exit 1
+          fi
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            GH_VERSION="2.74.0"
+            GH_SHA256="e55c9d49dc49c0b0fef0a9acd3510482fd9e27ff52ae80f8a6e838cd25b4cd89"
+            curl -fsSL --connect-timeout 10 --max-time 120 -o /tmp/gh.tgz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum --check --quiet
+            tar xzf /tmp/gh.tgz --strip-components=2 -C "$HOME/.local/bin" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Ensure label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create nightly-triage --repo "$GITHUB_REPOSITORY" \
+            --description "Automated nightly failure triage" --color d93f0b --force
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            FAILED NIGHTLY RUNS (last 48h, JSON): ${{ needs.collect.outputs.failures }}
+
+            Triage every run listed. For each:
+            1. Find the rolling issue first:
+               gh issue list --repo ${{ github.repository }} --state open
+                 --label nightly-triage --json number,title
+               and pick the exact title "[nightly-triage] <workflow name>".
+               If that issue already mentions this run_id in its body or
+               comments, the run was triaged on a previous day — skip it.
+            2. Fetch evidence:
+               `gh run view <run_id> --repo ${{ github.repository }} --log-failed | tail -300`
+               (fall back to `gh api .../jobs` for job names/conclusions if
+               logs are unavailable). Read the workflow file and the scripts
+               it calls when the failure points into them.
+            3. Classify with the log lines as evidence:
+               - infra/flake: runner lost, OOM-killed runner, network timeout,
+                 registry/HF download failure, upstream API 5xx
+               - regression: assertion/score threshold failures (bfcl/tau2
+                 score drops, benchmark deltas), build breaks in our code
+               - config/env: version conflicts, missing secrets, disk full
+            4. Rerun policy (conservative): if AND ONLY IF the failure is a
+               clear infra/flake and the run's attempt == 1, rerun it once:
+               `gh run rerun <run_id> --repo ${{ github.repository }} --failed`.
+               Never rerun regressions or second attempts.
+            5. Report per workflow in the rolling issue:
+               - If it exists, add a comment titled with today's date holding
+                 the day's triage (classification, key log lines, action
+                 taken, run links — always include the run_id). If the same
+                 failure signature already appears in recent comments, say
+                 so — recurring failures are the signal these issues exist
+                 to surface.
+               - Else create it:
+                 gh issue create --label nightly-triage
+                   --title "[nightly-triage] <workflow name>"
+                   --body <first day's triage>
+            Keep each day's entry short: verdict first, then evidence.
+            Do NOT edit repository files or open pull requests.
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 60
+            --allowedTools "Read,Glob,Grep,Bash,WebFetch,WebSearch,TaskCreate,TaskUpdate,TaskGet"
+        env:
+          GH_TOKEN: ${{ github.token }}

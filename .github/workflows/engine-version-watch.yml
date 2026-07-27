@@ -1,0 +1,166 @@
+name: Engine Version Watch
+
+# Every 3 days: detect newer engine releases and have Claude file one
+# researched upgrade issue per engine (deduped against open issues, so a
+# version is only reported once).
+
+on:
+  schedule:
+    - cron: '23 8 */3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-version-watch
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      pending: ${{ steps.dedup.outputs.pending }}
+      has_pending: ${{ steps.dedup.outputs.has_pending }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            GH_VERSION="2.74.0"
+            GH_SHA256="e55c9d49dc49c0b0fef0a9acd3510482fd9e27ff52ae80f8a6e838cd25b4cd89"
+            curl -fsSL --connect-timeout 10 --max-time 120 -o /tmp/gh.tgz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum --check --quiet
+            tar xzf /tmp/gh.tgz --strip-components=2 -C "$HOME/.local/bin" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Check versions
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/check_engine_versions.sh | tee versions.jsonl
+          jq -cs '[.[] | select(.update)]' versions.jsonl > updates.json
+          echo "updates=$(cat updates.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Drop engines that already have an open issue
+        id: dedup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create engine-watch --repo "$GITHUB_REPOSITORY" \
+            --description "Automated engine release tracking" --color 0e8a16 --force
+          gh label create enhancement --repo "$GITHUB_REPOSITORY" \
+            --description "New feature or request" --color a2eeef --force
+          # Exact substring match on fetched titles: GitHub's in:title search
+          # normalizes dots/hyphens, so "sglang 0.5.16" can match unrelated
+          # issues (or miss).
+          titles=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label engine-watch --limit 200 --json title --jq '[.[].title]')
+          pending='[]'
+          while IFS= read -r row; do
+            engine=$(jq -r .engine <<<"$row")
+            latest=$(jq -r .latest <<<"$row")
+            existing=$(jq --arg t "$engine $latest" '[.[] | select(contains($t))] | length' <<<"$titles")
+            if [ "$existing" = "0" ]; then
+              pending=$(jq -c --argjson r "$row" '. + [$r]' <<<"$pending")
+            else
+              echo "Skipping $engine $latest: open issue exists"
+            fi
+          done < <(jq -c '.[]' updates.json)
+          echo "pending=$pending" >> "$GITHUB_OUTPUT"
+          echo "has_pending=$(jq 'length > 0' <<<"$pending")" >> "$GITHUB_OUTPUT"
+
+  research-and-file:
+    needs: detect
+    if: needs.detect.outputs.has_pending == 'true'
+    runs-on: k8s-runner-cpu
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Export API key from pod env
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not present in the runner pod environment"
+            exit 1
+          fi
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$GITHUB_ENV"
+
+      - name: Install gh CLI
+        run: |
+          if ! command -v gh &>/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            GH_VERSION="2.74.0"
+            GH_SHA256="e55c9d49dc49c0b0fef0a9acd3510482fd9e27ff52ae80f8a6e838cd25b4cd89"
+            curl -fsSL --connect-timeout 10 --max-time 120 -o /tmp/gh.tgz \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"
+            echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum --check --quiet
+            tar xzf /tmp/gh.tgz --strip-components=2 -C "$HOME/.local/bin" "gh_${GH_VERSION}_linux_amd64/bin/gh"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PENDING ENGINE UPDATES (JSON): ${{ needs.detect.outputs.pending }}
+
+            For EACH entry, research the upgrade and create ONE GitHub issue.
+
+            Research per engine:
+            1. Locate every pin of the current version in this repo
+               (scripts/ci_install_<engine>.sh, .github/workflows/release-*-docker.yml,
+               grpc_servicer/pyproject.toml, docker/engine.Dockerfile).
+            2. Check whether nearby workaround comments are tied to the pinned
+               version (e.g. dependency band pins, forced reinstalls) and
+               whether the new release's dependency metadata makes them
+               obsolete — for PyPI packages fetch
+               https://pypi.org/pypi/<pkg>/<version>/json and inspect
+               requires_dist. For tensorrt-llm use https://pypi.nvidia.com.
+               For tokenspeed, `current`/`latest` are commit SHAs — summarize
+               `gh api repos/lightseekorg/tokenspeed/compare/<current>...<latest>`
+               (commit subjects only) and note that the torch pin in
+               ci_install_tokenspeed.sh must be re-checked against upstream.
+            3. Verify the release image/wheel actually exists (Docker Hub tag,
+               NGC wheel listing) before recommending it.
+
+            Then create the issue:
+              gh issue create --repo ${{ github.repository }} \
+                --label engine-watch --label enhancement \
+                --title "[engine-watch] <engine> <latest> available (pinned: <current>)" \
+                --body <researched body>
+            Body sections: current pin locations (file:line), what the new
+            release changes for us (workarounds now obsolete / new pins
+            required, with evidence), an upgrade checklist mirroring the
+            files above, and which e2e legs validate the bump. Keep it
+            factual and short; no speculation beyond the metadata checked.
+
+            Do NOT open pull requests. Do NOT edit repository files.
+            One issue per engine, nothing else.
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 40
+            --allowedTools "Read,Glob,Grep,Bash,WebFetch,WebSearch,TaskCreate,TaskUpdate,TaskGet"
+        env:
+          GH_TOKEN: ${{ github.token }}
