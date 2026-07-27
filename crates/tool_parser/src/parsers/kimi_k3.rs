@@ -47,12 +47,12 @@
 //! `<|close|>argument<|sep|>` or `<|close|>response<|sep|>` is
 //! indistinguishable from a real closing marker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use openai_protocol::common::Tool;
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     errors::ParserResult,
@@ -61,8 +61,14 @@ use crate::{
 };
 
 const TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
+const TOOLS_CLOSE: &str = "<|close|>tools<|sep|>";
 const RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
 const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
+
+/// Bare XTML control markers, used to assemble structural-tag literals.
+const OPEN: &str = "<|open|>";
+const CLOSE: &str = "<|close|>";
+const SEP: &str = "<|sep|>";
 
 /// A decoded `<|open|>call ...<|sep|>...<|close|>call<|sep|>` block.
 ///
@@ -111,6 +117,63 @@ pub struct KimiK3Parser {
 }
 
 impl KimiK3Parser {
+    /// Build an xgrammar structural tag that constrains Kimi-K3 XTML tool
+    /// calls to the declared `tools`.
+    ///
+    /// The grammar mirrors the encoder (`kimi_k3_xtml.rs`): a tool call is
+    ///
+    /// ```text
+    /// <|open|>tools<|sep|>
+    ///   <|open|>call tool="NAME" index="N"<|sep|>
+    ///     <|open|>argument key="K" type="T"<|sep|>VALUE<|close|>argument<|sep|>
+    ///   <|close|>call<|sep|>
+    /// <|close|>tools<|sep|>
+    /// ```
+    ///
+    /// A `triggered_tags` format dispatches to the tools section once
+    /// `<|open|>tools<|sep|>` appears, then forces the framing above. All K3
+    /// tool calls live in a single section, so its `content` is a `plus` of
+    /// call blocks (native parallel calls) and a lone section suffices — unlike
+    /// K2, which repeats a tag per call. Within a call, arguments are
+    /// constrained per the JSON schema (Strict mode): every `required` property
+    /// must appear, in the schema's declared order, followed by any optional
+    /// properties; each `type=` attribute and each value is pinned to the
+    /// property's type. Schemas without usable `properties` fall back to a
+    /// permissive skeleton so the grammar is never infeasible.
+    ///
+    /// `at_least_one` is wired to `tool_choice`: `true` for `"required"` (a
+    /// tool call must be emitted), `false` for `"auto"`. Mirroring K2,
+    /// `stop_after_first` is left unset so trailing tokens after the section
+    /// (`<|close|>message<|sep|><|end_of_msg|>`) remain valid.
+    pub fn build_structural_tag(tools: &[Tool], at_least_one: bool) -> Value {
+        let call_formats: Vec<Value> = tools
+            .iter()
+            .filter(|tool| !tool.function.name.is_empty())
+            .map(|tool| build_call_format(&tool.function.name, &tool.function.parameters))
+            .collect();
+
+        let call_choice = if call_formats.is_empty() {
+            permissive_call_format()
+        } else {
+            json!({ "type": "or", "elements": call_formats })
+        };
+
+        let tools_section = json!({
+            "begin": TOOLS_OPEN,
+            "content": { "type": "plus", "content": call_choice },
+            "end": TOOLS_CLOSE,
+        });
+
+        json!({
+            "format": {
+                "type": "triggered_tags",
+                "triggers": [TOOLS_OPEN],
+                "tags": [tools_section],
+                "at_least_one": at_least_one,
+            }
+        })
+    }
+
     /// Create a new Kimi-K3 parser.
     #[expect(
         clippy::expect_used,
@@ -309,6 +372,191 @@ impl KimiK3Parser {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Structural-tag construction (guided decoding)
+// ---------------------------------------------------------------------------
+
+/// How one argument value is constrained in the structural tag.
+enum ArgShape {
+    /// The `type=` attribute and value grammar are pinned from the schema.
+    Fixed {
+        type_attr: &'static str,
+        value: Value,
+    },
+    /// The schema is ambiguous (union / missing / `anyOf`); allow any
+    /// well-formed `type=` attribute and any raw value up to the marker.
+    Permissive,
+}
+
+/// Escape an attribute value the same way the encoder does (`&` -> `&amp;`,
+/// then `"` -> `&quot;`), so grammar literals match the emitted bytes.
+fn escape_attr(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;")
+}
+
+/// Build the `sequence` grammar for a single `<|open|>call ...<|close|>call`
+/// block for the tool `name` with the given JSON-schema `params`.
+fn build_call_format(name: &str, params: &Value) -> Value {
+    let esc_name = escape_attr(name);
+    json!({
+        "type": "sequence",
+        "elements": [
+            { "type": "const_string", "value": format!("{OPEN}call tool=\"{esc_name}\" index=\"") },
+            { "type": "regex", "pattern": "[1-9][0-9]*" },
+            { "type": "const_string", "value": format!("\"{SEP}") },
+            build_args_format(params),
+            { "type": "const_string", "value": format!("{CLOSE}call{SEP}") },
+        ]
+    })
+}
+
+/// Build the argument-region grammar for a tool's parameter schema (Strict
+/// mode): required properties in declared order, then optional properties.
+/// Falls back to a permissive skeleton when the schema has no usable
+/// `properties`.
+fn build_args_format(params: &Value) -> Value {
+    let Some(properties) = params.get("properties").and_then(Value::as_object) else {
+        return permissive_args_format();
+    };
+    if properties.is_empty() {
+        return permissive_args_format();
+    }
+
+    let required: HashSet<&str> = params
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let elements: Vec<Value> = properties
+        .iter()
+        .map(|(key, subschema)| {
+            let argument = build_argument_format(key, subschema);
+            if required.contains(key.as_str()) {
+                argument
+            } else {
+                json!({ "type": "optional", "content": argument })
+            }
+        })
+        .collect();
+
+    json!({ "type": "sequence", "elements": elements })
+}
+
+/// Build the grammar for one `<|open|>argument ...<|close|>argument` block,
+/// pinning `key=`, `type=`, and the value grammar from the property schema.
+fn build_argument_format(key: &str, subschema: &Value) -> Value {
+    let esc_key = escape_attr(key);
+    match classify_arg(subschema) {
+        ArgShape::Fixed { type_attr, value } => json!({
+            "type": "sequence",
+            "elements": [
+                { "type": "const_string", "value": format!("{OPEN}argument key=\"{esc_key}\" type=\"{type_attr}\"{SEP}") },
+                value,
+                { "type": "const_string", "value": format!("{CLOSE}argument{SEP}") },
+            ]
+        }),
+        ArgShape::Permissive => json!({
+            "type": "sequence",
+            "elements": [
+                { "type": "const_string", "value": format!("{OPEN}argument key=\"{esc_key}\" type=\"") },
+                { "type": "any_text", "excludes": ["\"", "<|"] },
+                { "type": "const_string", "value": format!("\"{SEP}") },
+                { "type": "any_text", "excludes": [CLOSE, OPEN, SEP] },
+                { "type": "const_string", "value": format!("{CLOSE}argument{SEP}") },
+            ]
+        }),
+    }
+}
+
+/// Map a property schema to its XTML `type=` attribute and value grammar.
+/// K3 emits string bodies verbatim (no JSON quoting) while every other type is
+/// compact JSON, and it derives `type=` from the *value*, so `integer` becomes
+/// `number`.
+fn classify_arg(subschema: &Value) -> ArgShape {
+    // A string `enum` constrains the raw body to one of the literals.
+    if let Some(values) = subschema.get("enum").and_then(Value::as_array) {
+        if !values.is_empty() && values.iter().all(Value::is_string) {
+            let options: Vec<Value> = values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|v| json!({ "type": "const_string", "value": v }))
+                .collect();
+            return ArgShape::Fixed {
+                type_attr: "string",
+                value: json!({ "type": "or", "elements": options }),
+            };
+        }
+    }
+
+    match subschema.get("type").and_then(Value::as_str) {
+        // Verbatim body -> json_schema (which expects quotes) cannot be used.
+        Some("string") => ArgShape::Fixed {
+            type_attr: "string",
+            value: json!({ "type": "any_text", "excludes": [CLOSE, OPEN, SEP] }),
+        },
+        Some("integer") | Some("number") => ArgShape::Fixed {
+            type_attr: "number",
+            value: json!({ "type": "json_schema", "json_schema": subschema }),
+        },
+        Some("boolean") => ArgShape::Fixed {
+            type_attr: "boolean",
+            value: json!({ "type": "json_schema", "json_schema": { "type": "boolean" } }),
+        },
+        Some("object") => ArgShape::Fixed {
+            type_attr: "object",
+            value: json!({ "type": "json_schema", "json_schema": subschema }),
+        },
+        Some("array") => ArgShape::Fixed {
+            type_attr: "array",
+            value: json!({ "type": "json_schema", "json_schema": subschema }),
+        },
+        Some("null") => ArgShape::Fixed {
+            type_attr: "null",
+            value: json!({ "type": "const_string", "value": "null" }),
+        },
+        _ => ArgShape::Permissive,
+    }
+}
+
+/// Permissive argument region: zero or more structurally-valid argument blocks
+/// with unconstrained keys/types/values. Used when the schema is unusable.
+fn permissive_args_format() -> Value {
+    json!({ "type": "star", "content": permissive_argument_format() })
+}
+
+/// One structurally-valid argument block with unconstrained key/type/value.
+fn permissive_argument_format() -> Value {
+    json!({
+        "type": "sequence",
+        "elements": [
+            { "type": "const_string", "value": format!("{OPEN}argument key=\"") },
+            { "type": "any_text", "excludes": ["\"", "<|"] },
+            { "type": "const_string", "value": "\" type=\"" },
+            { "type": "any_text", "excludes": ["\"", "<|"] },
+            { "type": "const_string", "value": format!("\"{SEP}") },
+            { "type": "any_text", "excludes": [CLOSE, OPEN, SEP] },
+            { "type": "const_string", "value": format!("{CLOSE}argument{SEP}") },
+        ]
+    })
+}
+
+/// Permissive call block used only when no declared tool name is usable.
+fn permissive_call_format() -> Value {
+    json!({
+        "type": "sequence",
+        "elements": [
+            { "type": "const_string", "value": format!("{OPEN}call tool=\"") },
+            { "type": "any_text", "excludes": ["\"", "<|"] },
+            { "type": "const_string", "value": "\" index=\"" },
+            { "type": "regex", "pattern": "[1-9][0-9]*" },
+            { "type": "const_string", "value": format!("\"{SEP}") },
+            permissive_args_format(),
+            { "type": "const_string", "value": format!("{CLOSE}call{SEP}") },
+        ]
+    })
+}
+
 /// Length of the longest prefix of `tag` that `text` ends with (up to
 /// `tag.len() - 1`, since a full match would have been caught by the marker
 /// regexes already). Used to hold back a possibly-still-growing partial
@@ -423,10 +671,6 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-
-    const OPEN: &str = "<|open|>";
-    const CLOSE: &str = "<|close|>";
-    const SEP: &str = "<|sep|>";
 
     fn _arg(key: &str, typ: &str, value: &str) -> String {
         format!(r#"{OPEN}argument key="{key}" type="{typ}"{SEP}{value}{CLOSE}argument{SEP}"#)
@@ -693,5 +937,141 @@ mod tests {
                 "expected `{id}` to resolve to the kimi_k3 parser"
             );
         }
+    }
+
+    #[test]
+    fn test_factory_registers_kimi_k3_structural_tag() {
+        let factory = crate::factory::ParserFactory::new();
+        assert!(factory.registry().has_structural_tag("kimi_k3"));
+    }
+
+    fn sample_tools() -> Vec<Tool> {
+        serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "days": {"type": "integer"},
+                        "units": {"type": "string", "enum": ["c", "f"]}
+                    },
+                    "required": ["city", "days"]
+                }
+            }
+        }]))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_build_structural_tag_frames_tools_section() {
+        let tag = KimiK3Parser::build_structural_tag(&sample_tools(), true);
+        let format = &tag["format"];
+        assert_eq!(format["type"], "triggered_tags");
+        assert_eq!(format["triggers"][0], TOOLS_OPEN);
+        assert_eq!(format["at_least_one"], true);
+        // `stop_after_first` is intentionally unset (mirrors K2) so trailing
+        // `<|close|>message<|sep|><|end_of_msg|>` tokens stay valid.
+        assert!(format.get("stop_after_first").is_none());
+
+        let section = &format["tags"][0];
+        assert_eq!(section["begin"], TOOLS_OPEN);
+        assert_eq!(section["end"], TOOLS_CLOSE);
+        // A tools section is one or more call blocks.
+        assert_eq!(section["content"]["type"], "plus");
+    }
+
+    #[test]
+    fn test_build_structural_tag_pins_call_framing_and_tool_name() {
+        let tag = KimiK3Parser::build_structural_tag(&sample_tools(), true);
+        let call = &tag["format"]["tags"][0]["content"]["content"]["elements"][0];
+        assert_eq!(call["type"], "sequence");
+        let elems = call["elements"].as_array().unwrap();
+        assert_eq!(
+            elems[0]["value"],
+            "<|open|>call tool=\"get_weather\" index=\""
+        );
+        assert_eq!(elems[1]["type"], "regex");
+        assert_eq!(elems[2]["value"], "\"<|sep|>");
+        assert_eq!(elems[4]["value"], "<|close|>call<|sep|>");
+    }
+
+    #[test]
+    fn test_build_structural_tag_strict_arguments_by_type() {
+        let tag = KimiK3Parser::build_structural_tag(&sample_tools(), true);
+        let call = &tag["format"]["tags"][0]["content"]["content"]["elements"][0];
+        let args = &call["elements"][3];
+        assert_eq!(args["type"], "sequence");
+        let arg_elems = args["elements"].as_array().unwrap();
+        // city (required, string), days (required, number), units (optional, enum).
+        assert_eq!(arg_elems.len(), 3);
+
+        // Required string: bare sequence, verbatim body via any_text.
+        assert_eq!(arg_elems[0]["type"], "sequence");
+        assert_eq!(
+            arg_elems[0]["elements"][0]["value"],
+            "<|open|>argument key=\"city\" type=\"string\"<|sep|>"
+        );
+        assert_eq!(arg_elems[0]["elements"][1]["type"], "any_text");
+
+        // Required integer: rendered as type="number", JSON-schema-constrained value.
+        assert_eq!(
+            arg_elems[1]["elements"][0]["value"],
+            "<|open|>argument key=\"days\" type=\"number\"<|sep|>"
+        );
+        assert_eq!(arg_elems[1]["elements"][1]["type"], "json_schema");
+
+        // Optional string enum: wrapped in `optional`, value is an `or` of literals.
+        assert_eq!(arg_elems[2]["type"], "optional");
+        let units = &arg_elems[2]["content"];
+        assert_eq!(
+            units["elements"][0]["value"],
+            "<|open|>argument key=\"units\" type=\"string\"<|sep|>"
+        );
+        assert_eq!(units["elements"][1]["type"], "or");
+        assert_eq!(units["elements"][1]["elements"][0]["value"], "c");
+        assert_eq!(units["elements"][1]["elements"][1]["value"], "f");
+    }
+
+    #[test]
+    fn test_build_structural_tag_escapes_attribute_values() {
+        let tools: Vec<Tool> = serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "a&b\"c",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"k\"q": {"type": "string"}},
+                    "required": ["k\"q"]
+                }
+            }
+        }]))
+        .unwrap();
+        let tag = KimiK3Parser::build_structural_tag(&tools, true);
+        let call = &tag["format"]["tags"][0]["content"]["content"]["elements"][0];
+        assert_eq!(
+            call["elements"][0]["value"],
+            "<|open|>call tool=\"a&amp;b&quot;c\" index=\""
+        );
+        let arg = &call["elements"][3]["elements"][0];
+        assert_eq!(
+            arg["elements"][0]["value"],
+            "<|open|>argument key=\"k&quot;q\" type=\"string\"<|sep|>"
+        );
+    }
+
+    #[test]
+    fn test_build_structural_tag_falls_back_when_no_properties() {
+        let tools: Vec<Tool> = serde_json::from_value(serde_json::json!([{
+            "type": "function",
+            "function": {"name": "ping", "parameters": {"type": "object"}}
+        }]))
+        .unwrap();
+        let tag = KimiK3Parser::build_structural_tag(&tools, false);
+        assert_eq!(tag["format"]["at_least_one"], false);
+        let call = &tag["format"]["tags"][0]["content"]["content"]["elements"][0];
+        // Argument region degrades to a permissive `star` of argument blocks.
+        assert_eq!(call["elements"][3]["type"], "star");
     }
 }

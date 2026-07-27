@@ -333,7 +333,11 @@ impl ParserFactory {
             || Box::new(KimiK2Parser::new()),
             KimiK2Parser::build_structural_tag,
         );
-        registry.register_parser("kimi_k3", || Box::new(KimiK3Parser::new()));
+        registry.register_parser_with_structural_tag(
+            "kimi_k3",
+            || Box::new(KimiK3Parser::new()),
+            KimiK3Parser::build_structural_tag,
+        );
         registry.register_parser_with_structural_tag(
             "inkling",
             || Box::new(InklingParser::new()),
