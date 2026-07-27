@@ -199,6 +199,7 @@ pub(super) async fn route_chat(
     } else {
         ctx.components.client().clone()
     };
+    let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
 
     let response = RetryExecutor::execute_response_with_retry(
         deps.retry_config,
@@ -220,7 +221,6 @@ pub(super) async fn route_chat(
                     req = req.header("Accept", "text/event-stream");
                 }
 
-                let stream_deadline = StreamDeadline::new(stream_timeout, stream_idle_timeout);
                 let resp = if is_streaming {
                     match stream_deadline.until_total(req.send()).await {
                         Ok(Ok(r)) => r,

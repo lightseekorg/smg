@@ -429,10 +429,10 @@ async fn run_tool_loop(
         .await?;
 
         if !response.status().is_success() {
-            return Err(format!(
-                "Worker returned error status: {}",
-                response.status()
-            ));
+            let status = response.status();
+            record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
+            record_streaming_router_outcome(&req_ctx.model_id, iteration_start, status);
+            return Err(format!("Worker returned error status: {status}"));
         }
 
         // Consume the upstream SSE stream

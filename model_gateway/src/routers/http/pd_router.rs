@@ -377,6 +377,7 @@ impl PDRouter {
         let retry_config = per_model_retry_config
             .as_ref()
             .unwrap_or(&self.retry_config);
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
 
         let response = RetryExecutor::execute_response_with_retry(
             retry_config,
@@ -496,6 +497,7 @@ impl PDRouter {
                                 Arc::clone(&prefill),
                                 Arc::clone(&decode),
                                 start_time,
+                                stream_deadline,
                             )
                             .await;
 
@@ -688,6 +690,7 @@ impl PDRouter {
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
         router_start: Instant,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let load_guards = vec![
             WorkerLoadGuard::new(prefill.clone(), headers),
@@ -745,7 +748,6 @@ impl PDRouter {
         // decode head. Recorded on the success path only.
         let runtime = prefill.metadata().spec.runtime_type.as_str();
         let dispatch_start = Instant::now();
-        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
         let prefill_fut = async {
             let send_result = if context.is_stream {
                 stream_deadline
