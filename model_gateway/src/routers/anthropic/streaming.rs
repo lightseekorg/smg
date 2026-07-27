@@ -506,6 +506,7 @@ async fn run_tool_loop(
                     stream_deadline,
                 )
                 .await?;
+                record_streaming_router_outcome(&req_ctx.model_id, iteration_start, StatusCode::OK);
                 return Ok(());
             }
             mcp::ToolLoopAction::Error(msg) => {
