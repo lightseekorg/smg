@@ -135,11 +135,16 @@ impl KimiK3Parser {
     /// tool calls live in a single section, so its `content` is a `plus` of
     /// call blocks (native parallel calls) and a lone section suffices — unlike
     /// K2, which repeats a tag per call. Within a call, arguments are
-    /// constrained per the JSON schema (Strict mode): every `required` property
-    /// must appear, in the schema's declared order, followed by any optional
-    /// properties; each `type=` attribute and each value is pinned to the
-    /// property's type. Schemas without usable `properties` fall back to a
-    /// permissive skeleton so the grammar is never infeasible.
+    /// constrained per the JSON schema (Strict mode): properties are pinned in
+    /// the schema's declared order (the crate enables `serde_json`'s
+    /// `preserve_order`), each `required` property mandatory and each optional
+    /// property individually skippable in its declared slot; every `type=`
+    /// attribute and value is pinned to the property's type. This declared
+    /// order is a *generation* constraint only — `decode_call` parses arguments
+    /// order-insensitively, so a model constrained here still round-trips even
+    /// though the grammar admits just one ordering. Schemas without usable
+    /// `properties` fall back to a permissive skeleton so the grammar is never
+    /// infeasible.
     ///
     /// `at_least_one` is wired to `tool_choice`: `true` for `"required"` (a
     /// tool call must be emitted), `false` for `"auto"`. Mirroring K2,
@@ -411,9 +416,10 @@ fn build_call_format(name: &str, params: &Value) -> Value {
 }
 
 /// Build the argument-region grammar for a tool's parameter schema (Strict
-/// mode): required properties in declared order, then optional properties.
-/// Falls back to a permissive skeleton when the schema has no usable
-/// `properties`.
+/// mode): one slot per property in the schema's declared order, `required`
+/// properties mandatory and the rest wrapped in `optional` (individually
+/// skippable, in place). Falls back to a permissive skeleton when the schema
+/// has no usable `properties`.
 fn build_args_format(params: &Value) -> Value {
     let Some(properties) = params.get("properties").and_then(Value::as_object) else {
         return permissive_args_format();
@@ -526,6 +532,13 @@ fn permissive_args_format() -> Value {
 }
 
 /// One structurally-valid argument block with unconstrained key/type/value.
+///
+/// The two exclusion conventions below are deliberate, not an oversight:
+/// quote-delimited attribute tokens (`key=`, `type=`) exclude the `<|` marker
+/// *prefix*, which blocks any partial or full control marker inside a short
+/// identifier; the free-text value is marker-delimited and may legitimately
+/// contain a lone `<` or `|`, so it excludes only the complete `OPEN`/`CLOSE`/
+/// `SEP` markers to avoid over-restricting real content.
 fn permissive_argument_format() -> Value {
     json!({
         "type": "sequence",
