@@ -362,7 +362,10 @@ impl Router {
                 res
             },
             // should_retry predicate
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| {
+                is_retryable_status(res.status())
+                    && (!is_stream || !stream_deadline.is_total_elapsed())
+            },
             // on_backoff hook
             |delay, attempt| {
                 // Layer 3 worker metrics
@@ -1157,6 +1160,8 @@ impl Router {
             let worker_for_stream = worker.clone();
             let stream_router_metrics = router_metrics.clone();
             let terminal_observers = typed_stream_terminal_observers(route);
+            let response_error_observer = (route == "/v1/responses")
+                .then(|| sse::SseTerminalObserver::event_type("response.error"));
 
             // Spawn task to forward stream
             #[expect(
@@ -1171,6 +1176,7 @@ impl Router {
                 let mut at_event_boundary = true;
                 let requires_terminal = !terminal_observers.is_empty();
                 let mut terminal_observers = terminal_observers;
+                let mut response_error_observer = response_error_observer;
                 let mut terminal_seen = false;
                 loop {
                     let chunk = match stream_deadline.next(&mut stream).await {
@@ -1196,6 +1202,12 @@ impl Router {
                     };
                     match chunk {
                         Ok(bytes) => {
+                            if response_error_observer
+                                .as_mut()
+                                .is_some_and(|observer| observer.observe(bytes.as_ref()))
+                            {
+                                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            }
                             let stream_done = terminal_observers
                                 .iter_mut()
                                 .any(|observer| observer.observe(bytes.as_ref()));

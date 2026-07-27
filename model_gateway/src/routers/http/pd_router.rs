@@ -510,7 +510,10 @@ impl PDRouter {
                     }
                 }
             },
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| {
+                is_retryable_status(res.status())
+                    && (!route_is_stream || !stream_deadline.is_total_elapsed())
+            },
             |delay, attempt| {
                 // Layer 3 worker metrics (PD mode uses both prefill and decode workers)
                 Metrics::record_worker_retry(metrics_labels::WORKER_PREFILL, endpoint);

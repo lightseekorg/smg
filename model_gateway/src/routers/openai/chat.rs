@@ -351,7 +351,10 @@ pub(super) async fn route_chat(
                 }
             }
         },
-        |res, _attempt| is_retryable_status(res.status()),
+        |res, _attempt| {
+            is_retryable_status(res.status())
+                && (!is_streaming || !stream_deadline.is_total_elapsed())
+        },
         |delay, attempt| {
             Metrics::record_worker_retry(
                 metrics_labels::BACKEND_EXTERNAL,
