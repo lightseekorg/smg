@@ -336,6 +336,7 @@ async fn build_streaming_error_response(
 /// Spawn the MCP tool loop in a background task and return an SSE response.
 fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
+    let stream_deadline = StreamDeadline::new(router.request_timeout, router.stream_idle_timeout);
 
     let router = router.clone();
 
@@ -344,14 +345,18 @@ fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Res
         reason = "fire-and-forget streaming task; gateway shutdown need not wait for individual MCP tool loops"
     )]
     tokio::spawn(async move {
-        if let Err(e) = Box::pin(run_tool_loop(tx.clone(), router, req_ctx)).await {
+        if let Err(e) = Box::pin(run_tool_loop(tx.clone(), router, req_ctx, stream_deadline)).await
+        {
             if e == sse::CLIENT_DISCONNECTED_ERROR {
                 debug!(error = %e, "Streaming tool loop ended: client disconnected");
                 return;
             }
             warn!(error = %e, "Streaming tool loop failed");
             let mut enc = SseEncoder::new();
-            let _ = sse::send_error(&tx, &mut enc, &e).await;
+            let error_event = sse::encode_error(&mut enc, &e);
+            let _ = stream_deadline
+                .send_before_total(&tx, Ok(error_event))
+                .await;
         }
     });
 
@@ -375,6 +380,7 @@ async fn run_tool_loop(
     tx: mpsc::Sender<Result<Bytes, io::Error>>,
     router: RouterContext,
     mut req_ctx: RequestContext,
+    stream_deadline: StreamDeadline,
 ) -> Result<(), String> {
     let session_id = format!("msg_{}", uuid::Uuid::now_v7());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
@@ -389,7 +395,6 @@ async fn run_tool_loop(
     let mut is_first_iteration = true;
     // Reusable SSE encoder shared across every event emitted for this stream.
     let mut encoder = SseEncoder::new();
-    let stream_deadline = StreamDeadline::new(router.request_timeout, router.stream_idle_timeout);
 
     for _iteration in 0..DEFAULT_MAX_ITERATIONS {
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
@@ -473,8 +478,9 @@ async fn run_tool_loop(
                     consumed.iteration.stop_reason.as_ref(),
                     total_input_tokens,
                     total_output_tokens,
+                    stream_deadline,
                 )
-                .await;
+                .await?;
                 return Ok(());
             }
             mcp::ToolLoopAction::Error(msg) => {
@@ -483,10 +489,14 @@ async fn run_tool_loop(
             mcp::ToolLoopAction::Continue(cont) => {
                 // Emit mcp_tool_result events for each completed tool call
                 for call in &cont.mcp_calls {
-                    if !sse::emit_mcp_tool_result(&tx, &mut encoder, call, &mut global_index).await
-                    {
-                        return Ok(());
-                    }
+                    sse::emit_mcp_tool_result(
+                        &tx,
+                        &mut encoder,
+                        call,
+                        &mut global_index,
+                        stream_deadline,
+                    )
+                    .await?;
                 }
 
                 // Append assistant + tool_result messages for next iteration
@@ -508,7 +518,10 @@ async fn run_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
     let error_msg = format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})");
-    let _ = sse::send_error(&tx, &mut encoder, &error_msg).await;
+    let error_event = sse::encode_error(&mut encoder, &error_msg);
+    let _ = stream_deadline
+        .send_before_total(&tx, Ok(error_event))
+        .await;
     Ok(())
 }
 

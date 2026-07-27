@@ -94,17 +94,21 @@ pub(crate) fn build_sse_response(
 // SSE event formatting and sending
 // ============================================================================
 
-/// Format and send an SSE event through the channel.
-///
-/// Returns `true` if the send succeeded, `false` if the receiver was dropped.
-pub(crate) async fn send_event(
+/// Format and send an SSE event without allowing downstream backpressure to
+/// outlive the configured total stream deadline.
+async fn send_event(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     enc: &mut SseEncoder,
     event_type: &str,
     data: &Value,
-) -> bool {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let bytes = format_sse_event(enc, event_type, data);
-    tx.send(Ok(bytes)).await.is_ok()
+    match stream_deadline.send_before_total(tx, Ok(bytes)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(CLIENT_DISCONNECTED_ERROR.into()),
+        Err(timeout) => Err(stream_deadline.message(timeout)),
+    }
 }
 
 /// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
@@ -128,15 +132,6 @@ pub(crate) fn encode_error(enc: &mut SseEncoder, message: &str) -> Bytes {
     format_sse_event(enc, "error", &data)
 }
 
-/// Send an SSE error event.
-pub(crate) async fn send_error(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    enc: &mut SseEncoder,
-    message: &str,
-) -> bool {
-    tx.send(Ok(encode_error(enc, message))).await.is_ok()
-}
-
 /// Emit `content_block_start` + `content_block_stop` events for an
 /// `mcp_tool_result` block.
 pub(crate) async fn emit_mcp_tool_result(
@@ -144,7 +139,8 @@ pub(crate) async fn emit_mcp_tool_result(
     enc: &mut SseEncoder,
     call: &McpToolCall,
     global_index: &mut u32,
-) -> bool {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let index = *global_index;
 
     // content_block_start with mcp_tool_result
@@ -162,9 +158,14 @@ pub(crate) async fn emit_mcp_tool_result(
         }
     });
 
-    if !send_event(tx, enc, "content_block_start", &block_start).await {
-        return false;
-    }
+    send_event(
+        tx,
+        enc,
+        "content_block_start",
+        &block_start,
+        stream_deadline,
+    )
+    .await?;
 
     // content_block_stop
     let block_stop = serde_json::json!({
@@ -172,12 +173,10 @@ pub(crate) async fn emit_mcp_tool_result(
         "index": index
     });
 
-    if !send_event(tx, enc, "content_block_stop", &block_stop).await {
-        return false;
-    }
+    send_event(tx, enc, "content_block_stop", &block_stop, stream_deadline).await?;
 
     *global_index += 1;
-    true
+    Ok(())
 }
 
 /// Emit the final `message_delta` and `message_stop` events.
@@ -187,7 +186,8 @@ pub(crate) async fn emit_final(
     stop_reason: Option<&StopReason>,
     total_input_tokens: u32,
     total_output_tokens: u32,
-) {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let stop_reason_val = stop_reason
         .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
@@ -204,16 +204,12 @@ pub(crate) async fn emit_final(
         }
     });
 
-    if !send_event(tx, enc, "message_delta", &message_delta).await {
-        debug!("Failed to send final message_delta — channel closed");
-    }
+    send_event(tx, enc, "message_delta", &message_delta, stream_deadline).await?;
 
     let message_stop = serde_json::json!({
         "type": "message_stop"
     });
-    if !send_event(tx, enc, "message_stop", &message_stop).await {
-        debug!("Failed to send message_stop — channel closed");
-    }
+    send_event(tx, enc, "message_stop", &message_stop, stream_deadline).await
 }
 
 // ============================================================================
@@ -244,6 +240,7 @@ where
         enc,
         global_index,
         is_first_iteration,
+        stream_deadline,
         resolve_server_name,
     );
     loop {
@@ -464,6 +461,7 @@ struct EventProcessor<'a, F> {
     usage: Option<MessageDeltaUsage>,
     upstream_blocks: Vec<BlockAccumulator>,
     terminal_seen: bool,
+    stream_deadline: StreamDeadline,
 }
 
 impl<'a, F> EventProcessor<'a, F>
@@ -475,6 +473,7 @@ where
         enc: &'a mut SseEncoder,
         global_index: &'a mut u32,
         is_first_iteration: bool,
+        stream_deadline: StreamDeadline,
         resolve_server_name: F,
     ) -> Self {
         let index_base = *global_index;
@@ -493,6 +492,7 @@ where
             usage: None,
             upstream_blocks: Vec::new(),
             terminal_seen: false,
+            stream_deadline,
         }
     }
 
@@ -510,10 +510,7 @@ where
 
     /// Send an SSE event to the client, returning `Err` on disconnect.
     async fn send(&mut self, event_type: &str, data: &Value) -> Result<(), String> {
-        if !send_event(self.tx, self.enc, event_type, data).await {
-            return Err(CLIENT_DISCONNECTED_ERROR.into());
-        }
-        Ok(())
+        send_event(self.tx, self.enc, event_type, data, self.stream_deadline).await
     }
 
     /// Process a single SSE event from the upstream worker.
@@ -813,6 +810,26 @@ mod tests {
         let payload: Value = serde_json::from_str(&events[0].1).unwrap();
         assert_eq!(payload["type"], "error");
         assert_eq!(payload["error"]["message"], "deadline elapsed");
+    }
+
+    #[tokio::test]
+    async fn test_send_event_respects_total_deadline_when_channel_is_full() {
+        let deadline = StreamDeadline::new(
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_secs(1),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let mut enc = SseEncoder::new();
+        let data = serde_json::json!({"type": "ping"});
+
+        send_event(&tx, &mut enc, "ping", &data, deadline)
+            .await
+            .unwrap();
+        let result = send_event(&tx, &mut enc, "ping", &data, deadline).await;
+
+        assert!(result.is_err_and(
+            |error| error.starts_with("Streaming request exceeded configured total timeout")
+        ));
     }
 
     #[test]
