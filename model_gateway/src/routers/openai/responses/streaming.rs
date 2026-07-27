@@ -47,6 +47,15 @@ use crate::routers::common::{
 };
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
+fn stream_event_matches(event_name: Option<&str>, raw_data: &str, expected: &str) -> bool {
+    event_name == Some(expected)
+        || serde_json::from_str::<Value>(raw_data)
+            .ok()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+            .as_deref()
+            == Some(expected)
+}
+
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -717,11 +726,17 @@ pub(super) async fn handle_simple_streaming_passthrough(
         let mut stream_failure_status = None;
         let mut receiver_connected = true;
         let mut chunk_processor = ChunkProcessor::new();
+        let mut terminal_seen = false;
 
         'stream_loop: loop {
             let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
                 Ok(Some(chunk_result)) => chunk_result,
-                Ok(None) => break,
+                Ok(None) => {
+                    if !terminal_seen {
+                        stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                    }
+                    break;
+                }
                 Err(timeout) => {
                     let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout)));
                     stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
@@ -733,8 +748,18 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     chunk_processor.push_chunk(&chunk);
 
                     while let Some(raw_block) = chunk_processor.next_block() {
-                        let (_, raw_data) = parse_sse_block(&raw_block);
+                        let (event_name, raw_data) = parse_sse_block(&raw_block);
                         let is_done = raw_data.as_ref() == "[DONE]";
+                        let is_completed = stream_event_matches(
+                            event_name,
+                            raw_data.as_ref(),
+                            ResponseEvent::COMPLETED,
+                        );
+                        if stream_event_matches(event_name, raw_data.as_ref(), "response.error") {
+                            stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                        }
+                        let is_terminal = is_done || is_completed;
+                        terminal_seen |= is_terminal;
                         let block_cow = match rewrite_streaming_block(
                             &raw_block,
                             &original_request,
@@ -758,7 +783,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                         if !receiver_connected && !should_store {
                             break;
                         }
-                        if is_done {
+                        if is_terminal {
                             break 'stream_loop;
                         }
                     }
@@ -1409,4 +1434,28 @@ pub async fn handle_streaming_response(ctx: RequestContext, router_start: Instan
         mcp_format_registry,
         mcp_servers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_event_matches;
+
+    #[test]
+    fn stream_event_matches_event_field_or_payload_type() {
+        assert!(stream_event_matches(
+            Some("response.completed"),
+            "{}",
+            "response.completed"
+        ));
+        assert!(stream_event_matches(
+            None,
+            r#"{"type":"response.error"}"#,
+            "response.error"
+        ));
+        assert!(!stream_event_matches(
+            Some("response.output_text.delta"),
+            r#"{"type":"response.output_text.delta"}"#,
+            "response.completed"
+        ));
+    }
 }

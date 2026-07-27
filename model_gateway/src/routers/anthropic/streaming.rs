@@ -70,7 +70,12 @@ async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -
     {
         Ok(result) => match result {
             Ok(r) => r,
-            Err(resp) => return resp,
+            Err(resp) => {
+                let status = resp.status();
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
+                record_streaming_router_outcome(model_id, start_time, status);
+                return resp;
+            }
         },
         Err(_) => {
             record_streaming_timeout_metrics(model_id, start_time);

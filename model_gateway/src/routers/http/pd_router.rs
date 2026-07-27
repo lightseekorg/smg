@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use futures_util::{stream, StreamExt};
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{GenerationRequest, InputIds, StringOrArray},
@@ -112,6 +113,12 @@ enum PDDispatchError {
 
 enum PrefillBodyReadError {
     Read(String),
+    Timeout(StreamTimeoutKind),
+}
+
+enum FirstDecodeChunkError {
+    Read(String),
+    PrematureEof,
     Timeout(StreamTimeoutKind),
 }
 
@@ -526,7 +533,7 @@ impl PDRouter {
                 endpoint,
                 duration,
             );
-        } else if !response.status().is_success() && !is_retryable_status(response.status()) {
+        } else if !response.status().is_success() {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_PD,
@@ -822,31 +829,64 @@ impl PDRouter {
             decode_head_elapsed,
         );
 
-        // Process prefill response
-        let prefill_drain_start = Instant::now();
-        let prefill_body = match self
-            .process_prefill_response(
-                prefill_response,
-                prefill.url(),
-                context.return_logprob,
-                context.is_stream.then_some(stream_deadline),
-            )
-            .await
-        {
-            Ok((_, body)) => body,
-            Err(error_response) => return error_response,
-        };
-
-        // Prefill RPC duration: prefill-head elapsed + body drain, independent
-        // of decode so a slower decode head never inflates it.
-        Metrics::record_pd_prefill_duration(
-            metrics_labels::BACKEND_PD,
-            context.model_id,
-            runtime,
-            prefill_head_elapsed + prefill_drain_start.elapsed(),
-        );
-
         if context.is_stream {
+            let response_headers =
+                header_utils::preserve_response_headers(decode_response.headers());
+            let mut decode_stream = decode_response.bytes_stream();
+            let prefill_drain_start = Instant::now();
+            let (prefill_body, first_decode_chunk) = {
+                let prefill_future = self.process_prefill_response(
+                    prefill_response,
+                    prefill.url(),
+                    context.return_logprob,
+                    Some(stream_deadline),
+                );
+                let first_decode_future = stream_deadline.next(&mut decode_stream);
+                tokio::pin!(prefill_future);
+                tokio::pin!(first_decode_future);
+
+                // Poll decode immediately so prefill activity cannot reset the
+                // decode stream's initial idle window.
+                tokio::select! {
+                    first_result = &mut first_decode_future => {
+                        let first_chunk =
+                            match Self::first_decode_chunk(first_result) {
+                                Ok(chunk) => chunk,
+                                Err(error) => {
+                                    return Self::first_decode_error_response(error, stream_deadline);
+                                }
+                            };
+                        let prefill_body = match prefill_future.await {
+                            Ok((_, body)) => body,
+                            Err(error_response) => return error_response,
+                        };
+                        (prefill_body, first_chunk)
+                    }
+                    prefill_result = &mut prefill_future => {
+                        let prefill_body = match prefill_result {
+                            Ok((_, body)) => body,
+                            Err(error_response) => return error_response,
+                        };
+                        let first_chunk = match Self::first_decode_chunk(first_decode_future.await) {
+                            Ok(chunk) => chunk,
+                            Err(error) => {
+                                return Self::first_decode_error_response(error, stream_deadline);
+                            }
+                        };
+                        (prefill_body, first_chunk)
+                    }
+                }
+            };
+
+            // Prefill RPC duration: prefill-head elapsed + body drain, independent
+            // of decode so a slower decode head never inflates it.
+            Metrics::record_pd_prefill_duration(
+                metrics_labels::BACKEND_PD,
+                context.model_id,
+                runtime,
+                prefill_head_elapsed + prefill_drain_start.elapsed(),
+            );
+
             // Streaming response
             let prefill_logprobs = if context.return_logprob {
                 prefill_body
@@ -857,11 +897,12 @@ impl PDRouter {
                 None
             };
 
-            let response_headers =
-                header_utils::preserve_response_headers(decode_response.headers());
+            let stream =
+                stream::once(async move { Ok::<Bytes, reqwest::Error>(first_decode_chunk) })
+                    .chain(decode_stream);
 
             Self::create_streaming_response(
-                decode_response.bytes_stream(),
+                stream,
                 status,
                 prefill_logprobs,
                 context.return_logprob,
@@ -877,6 +918,28 @@ impl PDRouter {
                 }),
             )
         } else {
+            // Process prefill response
+            let prefill_drain_start = Instant::now();
+            let prefill_body = match self
+                .process_prefill_response(
+                    prefill_response,
+                    prefill.url(),
+                    context.return_logprob,
+                    None,
+                )
+                .await
+            {
+                Ok((_, body)) => body,
+                Err(error_response) => return error_response,
+            };
+
+            Metrics::record_pd_prefill_duration(
+                metrics_labels::BACKEND_PD,
+                context.model_id,
+                runtime,
+                prefill_head_elapsed + prefill_drain_start.elapsed(),
+            );
+
             // Non-streaming response
             if context.return_logprob {
                 self.process_non_streaming_response(
@@ -1090,10 +1153,16 @@ impl PDRouter {
             let mut at_event_boundary = true;
             let mut stream_failure_status = None;
             let mut relay_send_timed_out = false;
+            let mut terminal_seen = false;
             loop {
                 let chunk_result = match stream_deadline.next(&mut stream).await {
                     Ok(Some(chunk_result)) => chunk_result,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        if status.is_success() && !terminal_seen {
+                            stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                        }
+                        break;
+                    }
                     Err(timeout) => {
                         stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                         let timeout_item = if at_event_boundary {
@@ -1110,6 +1179,7 @@ impl PDRouter {
                 match chunk_result {
                     Ok(chunk) => {
                         let is_done = done_observer.observe(chunk.as_ref());
+                        terminal_seen |= is_done;
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(
@@ -1178,6 +1248,35 @@ impl PDRouter {
         *response.headers_mut() = response_headers;
 
         AttachedBody::wrap_response(response, load_guards)
+    }
+
+    fn first_decode_chunk(
+        result: Result<Option<Result<Bytes, reqwest::Error>>, StreamTimeoutKind>,
+    ) -> Result<Bytes, FirstDecodeChunkError> {
+        match result {
+            Ok(Some(Ok(chunk))) => Ok(chunk),
+            Ok(Some(Err(error))) => Err(FirstDecodeChunkError::Read(error.to_string())),
+            Ok(None) => Err(FirstDecodeChunkError::PrematureEof),
+            Err(timeout) => Err(FirstDecodeChunkError::Timeout(timeout)),
+        }
+    }
+
+    fn first_decode_error_response(
+        error: FirstDecodeChunkError,
+        stream_deadline: StreamDeadline,
+    ) -> Response {
+        match error {
+            FirstDecodeChunkError::Read(error) => error::bad_gateway(
+                "decode_stream_failed",
+                format!("Decode stream error: {error}"),
+            ),
+            FirstDecodeChunkError::PrematureEof => {
+                error::bad_gateway("premature_stream_eof", "Decode stream ended before [DONE]")
+            }
+            FirstDecodeChunkError::Timeout(timeout) => {
+                error::gateway_timeout("streaming_timeout", stream_deadline.message(timeout))
+            }
+        }
     }
 
     /// Build a non-streaming PD response with `Content-Type: application/json`.
@@ -2032,5 +2131,17 @@ mod tests {
         // Guards dropped when response dropped
         assert_eq!(prefill_ref.load(), 0);
         assert_eq!(decode_ref.load(), 0);
+    }
+
+    #[test]
+    fn test_first_decode_chunk_rejects_timeout_and_premature_eof() {
+        assert!(matches!(
+            PDRouter::first_decode_chunk(Ok(None)),
+            Err(FirstDecodeChunkError::PrematureEof)
+        ));
+        assert!(matches!(
+            PDRouter::first_decode_chunk(Err(StreamTimeoutKind::Idle)),
+            Err(FirstDecodeChunkError::Timeout(StreamTimeoutKind::Idle))
+        ));
     }
 }

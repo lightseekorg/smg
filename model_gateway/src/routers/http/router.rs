@@ -93,6 +93,20 @@ struct RouterStreamMetrics {
     start_time: Instant,
 }
 
+fn typed_stream_terminal_observers(route: &str) -> Vec<sse::SseTerminalObserver> {
+    match route {
+        "/generate" | "/v1/chat/completions" | "/v1/completions" => {
+            vec![sse::SseTerminalObserver::done()]
+        }
+        "/v1/messages" => vec![sse::SseTerminalObserver::event_type("message_stop")],
+        "/v1/responses" => vec![
+            sse::SseTerminalObserver::done(),
+            sse::SseTerminalObserver::event_type("response.completed"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn record_regular_router_stream_outcome(metrics: &RouterStreamMetrics, status: StatusCode) {
     if status.is_success() {
         Metrics::record_router_duration(
@@ -318,6 +332,7 @@ impl Router {
         let retry_config = per_model_retry_config
             .as_ref()
             .unwrap_or(&self.retry_config);
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
 
         let response = RetryExecutor::execute_response_with_retry(
             retry_config,
@@ -333,6 +348,7 @@ impl Router {
                         is_stream,
                         &text,
                         start,
+                        stream_deadline,
                     )
                     .await;
 
@@ -398,6 +414,7 @@ impl Router {
         is_stream: bool,
         text: &str,
         start_time: Instant,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
             Some(w) => w,
@@ -452,6 +469,7 @@ impl Router {
                     endpoint: route_to_endpoint(route),
                     start_time,
                 },
+                stream_deadline,
             )
             .await;
 
@@ -1033,6 +1051,7 @@ impl Router {
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
         router_metrics: RouterStreamMetrics,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let api_key = worker.api_key().cloned();
         let endpoint_url = worker.endpoint_url(route);
@@ -1085,7 +1104,6 @@ impl Router {
             }
         }
 
-        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
         let send_result = if is_stream {
             match stream_deadline.until_total(request_builder.send()).await {
                 Ok(result) => result,
@@ -1138,6 +1156,7 @@ impl Router {
             let (tx, rx) = mpsc::channel(STREAM_RELAY_BUFFER);
             let worker_for_stream = worker.clone();
             let stream_router_metrics = router_metrics.clone();
+            let terminal_observers = typed_stream_terminal_observers(route);
 
             // Spawn task to forward stream
             #[expect(
@@ -1150,11 +1169,18 @@ impl Router {
                 let mut relay_send_timed_out = false;
                 let mut boundary_tail = Vec::new();
                 let mut at_event_boundary = true;
-                let mut done_observer = sse::SseTerminalObserver::done();
+                let requires_terminal = !terminal_observers.is_empty();
+                let mut terminal_observers = terminal_observers;
+                let mut terminal_seen = false;
                 loop {
                     let chunk = match stream_deadline.next(&mut stream).await {
                         Ok(Some(chunk)) => chunk,
-                        Ok(None) => break,
+                        Ok(None) => {
+                            if requires_terminal && !terminal_seen {
+                                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            }
+                            break;
+                        }
                         Err(timeout) => {
                             stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                             let timeout_item = if at_event_boundary {
@@ -1170,7 +1196,10 @@ impl Router {
                     };
                     match chunk {
                         Ok(bytes) => {
-                            let stream_done = done_observer.observe(bytes.as_ref());
+                            let stream_done = terminal_observers
+                                .iter_mut()
+                                .any(|observer| observer.observe(bytes.as_ref()));
+                            terminal_seen |= stream_done;
                             at_event_boundary =
                                 sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                             match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
@@ -1765,5 +1794,21 @@ mod tests {
 
         let worker = router.worker_registry.get_by_url(&url).unwrap();
         assert!(worker.is_healthy());
+    }
+
+    #[test]
+    fn typed_stream_routes_require_protocol_specific_terminal_events() {
+        let mut chat = typed_stream_terminal_observers("/v1/chat/completions");
+        assert!(chat[0].observe(b"data: [DONE]\n\n"));
+
+        let mut messages = typed_stream_terminal_observers("/v1/messages");
+        assert!(messages[0].observe(b"event: message_stop\ndata: {}\n\n"));
+
+        let mut responses = typed_stream_terminal_observers("/v1/responses");
+        assert!(responses
+            .iter_mut()
+            .any(|observer| observer.observe(b"event: response.completed\ndata: {}\n\n")));
+
+        assert!(typed_stream_terminal_observers("/v1/embeddings").is_empty());
     }
 }
