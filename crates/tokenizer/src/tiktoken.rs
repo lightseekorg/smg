@@ -633,7 +633,21 @@ fn detect_renderer_from_config(dir: &Path) -> Renderer {
         tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
         return Renderer::KimiK25Tools;
     }
-    Renderer::Jinja
+    // Fall back to `model_type` when `architectures` is absent or unrecognized.
+    // Some Kimi checkpoints omit the architecture entry but still carry a
+    // `model_type`, and `is_kimi_tokenizer` already keys off it — keep the
+    // renderer selection consistent with that tokenizer detection.
+    match value.get("model_type").and_then(|v| v.as_str()) {
+        Some("kimi_k3") => {
+            tracing::debug!(?path, "selected KimiK3Xtml renderer via model_type");
+            Renderer::KimiK3Xtml
+        }
+        Some("kimi_k25") => {
+            tracing::debug!(?path, "selected KimiK25Tools renderer via model_type");
+            Renderer::KimiK25Tools
+        }
+        _ => Renderer::Jinja,
+    }
 }
 
 #[cfg(test)]
@@ -687,6 +701,22 @@ mod tests {
         assert!(matches!(
             detect_renderer_from_config(missing.path()),
             Renderer::Jinja
+        ));
+
+        // `model_type` fallback: checkpoints without a recognized architecture
+        // entry are still detected by their `model_type`, matching
+        // `is_kimi_tokenizer`'s detection.
+        let k3_model_type = write_minimal_tiktoken_dir("{}", Some(r#"{"model_type": "kimi_k3"}"#));
+        assert!(matches!(
+            detect_renderer_from_config(k3_model_type.path()),
+            Renderer::KimiK3Xtml
+        ));
+
+        let k25_model_type =
+            write_minimal_tiktoken_dir("{}", Some(r#"{"model_type": "kimi_k25"}"#));
+        assert!(matches!(
+            detect_renderer_from_config(k25_model_type.path()),
+            Renderer::KimiK25Tools
         ));
     }
 

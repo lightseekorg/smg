@@ -119,8 +119,22 @@ impl KimiK3Parser {
     ///
     /// Strips the response-open prefix, removes complete response-close and
     /// message-close markers, then holds back any partial marker suffix.
+    ///
+    /// The held-back partial-marker suffix is intentionally never force-flushed:
+    /// the [`ReasoningParser`] trait has no finalize/end-of-stream hook, and the
+    /// only bytes ever withheld are a proper prefix of a control marker (e.g.
+    /// `<|clo`). A complete generation always ends on a whole marker, so nothing
+    /// is lost in practice; a stream truncated mid-marker-prefix is already
+    /// incomplete output, and dropping that dangling fragment is preferable to
+    /// leaking a partial control token as content.
     fn content_ready_to_emit(&self, text: &str) -> String {
-        // Strip response-open prefix (first occurrence)
+        // Strip the response-open marker as a prefix (first occurrence only).
+        // In the K3 grammar the response channel opens exactly once and its
+        // opening marker is a prefix of the content tail, so a slice from its
+        // end is correct and a second occurrence cannot legitimately appear.
+        // The response-close / message-open / message-close markers, by
+        // contrast, are terminators that may sit anywhere in the tail, so they
+        // are removed globally below. This asymmetry is deliberate.
         let text = if let Some(m) = self.response_open_re.find(text) {
             &text[m.end()..]
         } else {
@@ -132,7 +146,8 @@ impl KimiK3Parser {
         let text = self.message_open_re.replace_all(&text, "");
         let text = self.message_close_re.replace_all(&text, "");
 
-        // Hold back any partial marker suffix
+        // Hold back any partial marker suffix (see the fn-level note above:
+        // withheld only while it could still complete into a control marker).
         let text_str: &str = &text;
         let overlap = Self::compute_overlap(
             text_str,

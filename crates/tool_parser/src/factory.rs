@@ -421,6 +421,12 @@ impl ParserFactory {
         registry.map_model("kimi-k3*", "kimi_k3");
         registry.map_model("Kimi-K3*", "kimi_k3");
         registry.map_model("moonshot*/Kimi-K3*", "kimi_k3");
+        // Underscore spellings (e.g. `kimi_k3`, `Kimi_K3`) as used by some
+        // checkpoint ids; mirrors the reasoning-parser factory, whose glob
+        // matching is case-insensitive but still enumerates both separators.
+        registry.map_model("kimi_k3*", "kimi_k3");
+        registry.map_model("Kimi_K3*", "kimi_k3");
+        registry.map_model("moonshot*/Kimi_K3*", "kimi_k3");
 
         // Inkling models use TML JSON tool calls.
         registry.map_model("inkling*", "inkling");

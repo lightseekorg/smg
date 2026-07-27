@@ -19,6 +19,15 @@
 //! sibling renderers (`kimi_k25_tools`, `deepseek_v32`) is intentional here;
 //! segment-aware encoding is out of scope.
 //!
+//! HTML-escaping the control tokens in user/tool text is **not** the fix: the
+//! reference emits that text as ordinary BPE without escaping, so the model was
+//! trained on the raw bytes; rewriting `<|open|>` to `&lt;|open|&gt;` (or
+//! similar) would both feed the model text it never saw and corrupt legitimate
+//! content. The correct fix is to carry the reference's per-segment
+//! `allow_special` flag through to the tokenizer so structural markers keep
+//! their special-token ids while surrounding text is encoded as ordinary BPE —
+//! a cross-cutting change across this renderer family, tracked as future work.
+//!
 //! # Deferred (TODO)
 //!
 //! The following `build_chat_segments` branches are intentionally not ported yet

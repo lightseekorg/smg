@@ -34,9 +34,13 @@
 //! # Tool-call id
 //! SMG's [`ToolCall`] has no `id` field (one is assigned later by
 //! `model_gateway`), so this parser only produces `name` + `arguments` (+
-//! content). The XTML `index` attribute is still parsed to drive
-//! [`ToolCallItem::tool_index`] (`index - 1`, falling back to an ordinal
-//! counter when the attribute is missing or unparsable).
+//! content). Streaming [`ToolCallItem::tool_index`] is a per-message
+//! zero-based ordinal assigned in emission order, independent of the XTML
+//! `index` attribute. Deriving it from the ordinal — rather than trusting the
+//! model-supplied `index` — keeps streamed indices (and the ids later built
+//! from them) unique and monotonic even when a model emits duplicate, sparse,
+//! or out-of-order `index` values, and matches the non-streaming path, which
+//! also indexes tool calls by their emission order.
 //!
 //! Known limitation (inherited from the reference): because string argument
 //! and response bodies are emitted raw, a value that literally contains
@@ -61,14 +65,14 @@ const RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
 const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
 
 /// A decoded `<|open|>call ...<|sep|>...<|close|>call<|sep|>` block.
+///
+/// The XTML `index` attribute is deliberately not captured: streamed tool
+/// indices are assigned by emission order (see the module-level `Tool-call id`
+/// docs), so a model-supplied `index` never influences the parser output.
 struct DecodedCall {
     name: String,
     /// Compact JSON object string.
     arguments: String,
-    /// Zero-based ordinal derived from the XTML `index` attribute
-    /// (`index - 1`); `None` when the attribute is missing or unparsable,
-    /// in which case the caller falls back to an ordinal counter.
-    tool_index: Option<usize>,
 }
 
 /// Kimi-K3 XTML tool-call parser.
@@ -171,11 +175,6 @@ impl KimiK3Parser {
         if tool_name.is_empty() {
             return None;
         }
-        let tool_index = call_attrs
-            .get("index")
-            .and_then(|s| s.parse::<i64>().ok())
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|n| usize::try_from(n).ok());
 
         let mut arguments = serde_json::Map::new();
         for arg_match in self.arg_re.captures_iter(body) {
@@ -199,7 +198,6 @@ impl KimiK3Parser {
         Some(DecodedCall {
             name: tool_name,
             arguments: arguments_str,
-            tool_index,
         })
     }
 
@@ -394,7 +392,9 @@ impl ToolParser for KimiK3Parser {
             .skip(self.sent_tool_call_count)
             .enumerate()
             .map(|(i, decoded)| ToolCallItem {
-                tool_index: decoded.tool_index.unwrap_or(self.sent_tool_call_count + i),
+                // Per-message zero-based ordinal in emission order; the XTML
+                // `index` attribute is deliberately ignored (see module docs).
+                tool_index: self.sent_tool_call_count + i,
                 name: Some(decoded.name.clone()),
                 parameters: decoded.arguments.clone(),
             })
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_decode_call_missing_index_falls_back_to_ordinal() {
+    async fn test_decode_call_without_index_attribute() {
         let parser = KimiK3Parser::new();
         let input = format!(
             r#"{OPEN}tools{SEP}{OPEN}call tool="calc"{SEP}{CLOSE}call{SEP}{CLOSE}tools{SEP}"#
@@ -633,6 +633,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_streaming_duplicate_xtml_index_uses_ordinal() {
+        // A model that emits colliding, sparse, or out-of-order `index`
+        // attributes must still yield unique, monotonic streamed indices: the
+        // parser assigns them by emission order and ignores the attribute.
+        let mut parser = KimiK3Parser::new();
+        let input = _tools(&[
+            _call("first", 7, &[_arg("a", "number", "1")]),
+            _call("second", 7, &[_arg("b", "number", "2")]),
+            _call("third", 3, &[_arg("c", "number", "3")]),
+        ]);
+
+        let result = parser.parse_incremental(&input, &[]).await.unwrap();
+        assert_eq!(result.calls.len(), 3);
+        assert_eq!(result.calls[0].tool_index, 0);
+        assert_eq!(result.calls[1].tool_index, 1);
+        assert_eq!(result.calls[2].tool_index, 2);
+    }
+
+    #[tokio::test]
     async fn test_reset_clears_streaming_state() {
         let mut parser = KimiK3Parser::new();
 
@@ -662,5 +681,17 @@ mod tests {
                 .resolve_model_to_parser("moonshotai/Kimi-K3"),
             Some("kimi_k3".to_string())
         );
+    }
+
+    #[test]
+    fn test_factory_resolves_underscore_kimi_k3() {
+        let factory = crate::factory::ParserFactory::new();
+        for id in ["kimi_k3", "Kimi_K3", "moonshotai/Kimi_K3"] {
+            assert_eq!(
+                factory.registry().resolve_model_to_parser(id),
+                Some("kimi_k3".to_string()),
+                "expected `{id}` to resolve to the kimi_k3 parser"
+            );
+        }
     }
 }
