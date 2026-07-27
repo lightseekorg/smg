@@ -116,12 +116,8 @@ fn format_sse_event(enc: &mut SseEncoder, event_type: &str, data: &Value) -> Byt
         })
 }
 
-/// Send an SSE error event.
-pub(crate) async fn send_error(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    enc: &mut SseEncoder,
-    message: &str,
-) -> bool {
+/// Format an SSE error event.
+pub(crate) fn encode_error(enc: &mut SseEncoder, message: &str) -> Bytes {
     let data = serde_json::json!({
         "type": "error",
         "error": {
@@ -129,7 +125,16 @@ pub(crate) async fn send_error(
             "message": message
         }
     });
-    send_event(tx, enc, "error", &data).await
+    format_sse_event(enc, "error", &data)
+}
+
+/// Send an SSE error event.
+pub(crate) async fn send_error(
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
+    message: &str,
+) -> bool {
+    tx.send(Ok(encode_error(enc, message))).await.is_ok()
 }
 
 /// Emit `content_block_start` + `content_block_stop` events for an
@@ -795,6 +800,19 @@ mod tests {
         assert!(text.starts_with("event: ping\n"));
         assert!(text.contains("data: "));
         assert!(text.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn test_encode_error() {
+        let mut enc = SseEncoder::new();
+        let bytes = encode_error(&mut enc, "deadline elapsed");
+        let events = decode_events(&bytes);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "error");
+        let payload: Value = serde_json::from_str(&events[0].1).unwrap();
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["error"]["message"], "deadline elapsed");
     }
 
     #[test]

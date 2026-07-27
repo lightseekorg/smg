@@ -211,8 +211,9 @@ async fn relay_stream_with_deadline<S>(
                 let message = stream_deadline.message(timeout);
                 stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                 if at_event_boundary {
+                    let error_event = sse::encode_error(&mut encoder, &message);
                     let _ = stream_deadline
-                        .until_total(sse::send_error(&tx, &mut encoder, &message))
+                        .send_before_total(&tx, Ok(error_event))
                         .await;
                 } else {
                     let _ = stream_deadline
@@ -456,7 +457,11 @@ async fn run_tool_loop(
             Ok(action) => action,
             Err(timeout) => {
                 record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);
-                let _ = sse::send_error(&tx, &mut encoder, &stream_deadline.message(timeout)).await;
+                let error_event =
+                    sse::encode_error(&mut encoder, &stream_deadline.message(timeout));
+                let _ = stream_deadline
+                    .send_before_total(&tx, Ok(error_event))
+                    .await;
                 return Ok(());
             }
         };
