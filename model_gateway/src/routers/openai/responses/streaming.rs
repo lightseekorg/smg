@@ -56,6 +56,10 @@ fn stream_event_matches(event_name: Option<&str>, raw_data: &str, expected: &str
             == Some(expected)
 }
 
+fn mcp_iteration_can_advance(tool_calls_detected: bool, terminal_seen: bool) -> bool {
+    tool_calls_detected || terminal_seen
+}
+
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -1023,6 +1027,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut chunk_processor = ChunkProcessor::new();
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
+            let mut terminal_seen = false;
 
             loop {
                 let chunk_result = match stream_deadline.next(&mut upstream_stream).await {
@@ -1076,6 +1081,22 @@ pub(super) fn handle_streaming_with_tool_interception(
                                     return;
                                 }
                                 return;
+                            }
+
+                            let is_completed = stream_event_matches(
+                                event_name,
+                                data.as_ref(),
+                                ResponseEvent::COMPLETED,
+                            );
+                            let is_response_error =
+                                stream_event_matches(event_name, data.as_ref(), "response.error");
+                            terminal_seen |= is_completed;
+                            if is_response_error {
+                                record_regular_worker_outcome(
+                                    worker.as_ref(),
+                                    StatusCode::BAD_GATEWAY,
+                                );
+                                record_router_outcome!(StatusCode::BAD_GATEWAY);
                             }
 
                             // Process through handler
@@ -1199,9 +1220,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                                     break; // Exit stream processing to execute tools
                                 }
                             }
+
+                            if is_response_error {
+                                return;
+                            }
                         }
 
-                        if tool_calls_detected {
+                        if tool_calls_detected || terminal_seen {
                             break;
                         }
                     }
@@ -1217,6 +1242,22 @@ pub(super) fn handle_streaming_with_tool_interception(
                         return;
                     }
                 }
+            }
+
+            if !mcp_iteration_can_advance(tool_calls_detected, terminal_seen) {
+                record_regular_worker_outcome(worker.as_ref(), StatusCode::BAD_GATEWAY);
+                record_router_outcome!(StatusCode::BAD_GATEWAY);
+                let _ = send_sse_event(
+                    &tx,
+                    &mut sse_encoder,
+                    "error",
+                    &json!({
+                        "error": {
+                            "message": "Upstream stream ended before response.completed or [DONE]"
+                        }
+                    }),
+                );
+                return;
             }
 
             next_output_index = handler.next_output_index();
@@ -1438,7 +1479,7 @@ pub async fn handle_streaming_response(ctx: RequestContext, router_start: Instan
 
 #[cfg(test)]
 mod tests {
-    use super::stream_event_matches;
+    use super::{mcp_iteration_can_advance, stream_event_matches};
 
     #[test]
     fn stream_event_matches_event_field_or_payload_type() {
@@ -1457,5 +1498,12 @@ mod tests {
             r#"{"type":"response.output_text.delta"}"#,
             "response.completed"
         ));
+    }
+
+    #[test]
+    fn mcp_iteration_requires_tool_dispatch_or_terminal_event() {
+        assert!(mcp_iteration_can_advance(true, false));
+        assert!(mcp_iteration_can_advance(false, true));
+        assert!(!mcp_iteration_can_advance(false, false));
     }
 }
