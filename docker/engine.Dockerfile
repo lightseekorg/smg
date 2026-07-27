@@ -56,7 +56,7 @@ COPY --from=sources /opt/engine-src   /opt/engine-src
 COPY --from=sources /tmp/smg-src      /opt/smg-src
 COPY --from=sources /tmp/scripts/     /tmp/scripts/
 
-# NGC TRT-LLM bases (1.3.0rc18) ship a debian-owned PyYAML with no pip RECORD
+# NGC TRT-LLM 1.3.0rc bases ship a debian-owned PyYAML with no pip RECORD
 # file, which pip refuses to uninstall when install-smg.sh resolves smg's
 # pyyaml dependency ("uninstall-no-record-file"). Shadow it with a pip-managed
 # copy (--ignore-installed leaves the distro files alone); the smg install can
