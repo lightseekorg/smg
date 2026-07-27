@@ -272,7 +272,7 @@ pub(super) async fn route_chat(
                         let mut stream_failure_status = None;
                         let mut boundary_tail = Vec::new();
                         let mut at_event_boundary = true;
-                        let mut done_decoder = sse::SseDecoder::new();
+                        let mut done_observer = sse::SseTerminalObserver::done();
                         loop {
                             let chunk = match stream_deadline.next(&mut s).await {
                                 Ok(Some(chunk)) => chunk,
@@ -289,8 +289,7 @@ pub(super) async fn route_chat(
                             };
                             match chunk {
                                 Ok(bytes) => {
-                                    let stream_done =
-                                        sse::observe_done_event(&mut done_decoder, bytes.as_ref());
+                                    let stream_done = done_observer.observe(bytes.as_ref());
                                     at_event_boundary =
                                         sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                                     if tx.send(Ok(bytes)).is_err() {

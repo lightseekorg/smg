@@ -875,7 +875,7 @@ impl Router {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stream_failure_status = None;
-                let mut done_decoder = sse::SseDecoder::new();
+                let mut done_observer = sse::SseTerminalObserver::done();
                 let mut boundary_tail = Vec::new();
                 let mut at_event_boundary = true;
                 loop {
@@ -895,8 +895,8 @@ impl Router {
                     };
                     match chunk {
                         Ok(bytes) => {
-                            let stream_done = stream_is_sse
-                                && sse::observe_done_event(&mut done_decoder, bytes.as_ref());
+                            let stream_done =
+                                stream_is_sse && done_observer.observe(bytes.as_ref());
                             at_event_boundary =
                                 sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                             match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
@@ -1140,7 +1140,7 @@ impl Router {
                 let mut stream_failure_status = None;
                 let mut boundary_tail = Vec::new();
                 let mut at_event_boundary = true;
-                let mut done_decoder = sse::SseDecoder::new();
+                let mut done_observer = sse::SseTerminalObserver::done();
                 loop {
                     let chunk = match stream_deadline.next(&mut stream).await {
                         Ok(Some(chunk)) => chunk,
@@ -1158,8 +1158,7 @@ impl Router {
                     };
                     match chunk {
                         Ok(bytes) => {
-                            let stream_done =
-                                sse::observe_done_event(&mut done_decoder, bytes.as_ref());
+                            let stream_done = done_observer.observe(bytes.as_ref());
                             at_event_boundary =
                                 sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                             match stream_deadline.send_before_total(&tx, Ok(bytes)).await {

@@ -1085,7 +1085,7 @@ impl PDRouter {
             futures_util::pin_mut!(stream);
             // Reusable SSE encoder for the logprob-merge re-encode path.
             let mut encoder = SseEncoder::new();
-            let mut done_decoder = sse::SseDecoder::new();
+            let mut done_observer = sse::SseTerminalObserver::done();
             let mut boundary_tail = Vec::new();
             let mut at_event_boundary = true;
             let mut stream_failure_status = None;
@@ -1106,7 +1106,7 @@ impl PDRouter {
                 };
                 match chunk_result {
                     Ok(chunk) => {
-                        let is_done = sse::observe_done_event(&mut done_decoder, chunk.as_ref());
+                        let is_done = done_observer.observe(chunk.as_ref());
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
                             Self::merge_streaming_logprobs(

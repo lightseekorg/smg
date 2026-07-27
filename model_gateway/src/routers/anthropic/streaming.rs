@@ -26,7 +26,7 @@ use crate::{
     routers::{
         common::{
             mcp_utils::DEFAULT_MAX_ITERATIONS,
-            sse::{observe_event_type, update_event_boundary, SseDecoder, SseEncoder},
+            sse::{update_event_boundary, SseEncoder, SseTerminalObserver},
             stream_timeout::{StreamDeadline, StreamTimeoutKind},
         },
         error::{self as router_error, extract_error_code_from_response},
@@ -201,7 +201,7 @@ async fn relay_stream_with_deadline<S>(
     let mut encoder = SseEncoder::new();
     let mut boundary_tail = Vec::new();
     let mut at_event_boundary = true;
-    let mut terminal_decoder = SseDecoder::new();
+    let mut terminal_observer = SseTerminalObserver::event_type("message_stop");
     let mut stream_failure_status = None;
     loop {
         let chunk = match stream_deadline.next(&mut upstream_stream).await {
@@ -224,8 +224,7 @@ async fn relay_stream_with_deadline<S>(
         };
         match chunk {
             Ok(bytes) => {
-                let stream_done =
-                    observe_event_type(&mut terminal_decoder, bytes.as_ref(), "message_stop");
+                let stream_done = terminal_observer.observe(bytes.as_ref());
                 at_event_boundary = update_event_boundary(&mut boundary_tail, bytes.as_ref());
                 match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
                     Ok(true) => {}
