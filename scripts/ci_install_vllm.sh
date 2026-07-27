@@ -19,14 +19,12 @@ fi
 
 echo "Using uv version: $(uv --version)"
 
-# Floor 0.25.0: older vllm releases do not guarantee torchcodec, while the
-# import canary below deliberately validates it. This line also admits only
-# transformers >= 5.5.3, preserving e5-mistral last-token pooling.
-# FastAPI 0.137 makes vLLM's prometheus-fastapi-instrumentator health route
-# crash on _IncludedRouter entries; keep the last known-good FastAPI line.
+# Floor 0.26.0: older vllm releases do not guarantee torchcodec, while the
+# import canary below deliberately validates it, and 0.26 caps
+# fastapi<0.137 (0.137 breaks the prometheus-fastapi-instrumentator health route).
 # --torch-backend=auto matches the torch CUDA variant to the pod's driver.
 echo "Installing vLLM..."
-uv pip install "vllm>=0.25.0" "fastapi<0.137" --torch-backend=auto
+uv pip install "vllm>=0.26.0" --torch-backend=auto
 
 # vLLM >=0.25 eagerly imports torchcodec, which dlopens the FFmpeg shared
 # libraries (libavutil/libavcodec/libavformat/...) at import time. The runner
