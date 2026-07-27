@@ -203,21 +203,28 @@ async fn relay_stream_with_deadline<S>(
     let mut at_event_boundary = true;
     let mut terminal_observer = SseTerminalObserver::event_type("message_stop");
     let mut stream_failure_status = None;
+    let mut relay_send_timed_out = false;
+    let mut terminal_seen = false;
     loop {
         let chunk = match stream_deadline.next(&mut upstream_stream).await {
             Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
+            Ok(None) => {
+                if record_router_outcome && !terminal_seen {
+                    stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                }
+                break;
+            }
             Err(timeout) => {
                 let message = stream_deadline.message(timeout);
                 stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                 if at_event_boundary {
                     let error_event = sse::encode_error(&mut encoder, &message);
                     let _ = stream_deadline
-                        .send_before_total(&tx, Ok(error_event))
+                        .send_terminal_before_total(&tx, Ok(error_event))
                         .await;
                 } else {
                     let _ = stream_deadline
-                        .send_before_total(&tx, Err(io::Error::other(message)))
+                        .send_terminal_before_total(&tx, Err(io::Error::other(message)))
                         .await;
                 }
                 break;
@@ -226,11 +233,13 @@ async fn relay_stream_with_deadline<S>(
         match chunk {
             Ok(bytes) => {
                 let stream_done = terminal_observer.observe(bytes.as_ref());
+                terminal_seen |= stream_done;
                 at_event_boundary = update_event_boundary(&mut boundary_tail, bytes.as_ref());
                 match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(_) => {
+                        relay_send_timed_out = true;
                         stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                         break;
                     }
@@ -242,14 +251,19 @@ async fn relay_stream_with_deadline<S>(
             Err(e) => {
                 stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                 let _ = stream_deadline
-                    .send_before_total(&tx, Err(io::Error::other(e)))
+                    .send_terminal_before_total(&tx, Err(io::Error::other(e)))
                     .await;
                 break;
             }
         }
     }
     let effective_status = stream_failure_status.unwrap_or(StatusCode::OK);
-    record_streaming_worker_outcome(worker.as_deref(), effective_status);
+    let worker_status = if relay_send_timed_out {
+        StatusCode::OK
+    } else {
+        effective_status
+    };
+    record_streaming_worker_outcome(worker.as_deref(), worker_status);
     if record_router_outcome {
         record_streaming_router_outcome(&model_id, start_time, effective_status);
     }
@@ -355,7 +369,7 @@ fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Res
             let mut enc = SseEncoder::new();
             let error_event = sse::encode_error(&mut enc, &e);
             let _ = stream_deadline
-                .send_before_total(&tx, Ok(error_event))
+                .send_terminal_before_total(&tx, Ok(error_event))
                 .await;
         }
     });
@@ -465,7 +479,7 @@ async fn run_tool_loop(
                 let error_event =
                     sse::encode_error(&mut encoder, &stream_deadline.message(timeout));
                 let _ = stream_deadline
-                    .send_before_total(&tx, Ok(error_event))
+                    .send_terminal_before_total(&tx, Ok(error_event))
                     .await;
                 return Ok(());
             }
@@ -520,7 +534,7 @@ async fn run_tool_loop(
     let error_msg = format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})");
     let error_event = sse::encode_error(&mut encoder, &error_msg);
     let _ = stream_deadline
-        .send_before_total(&tx, Ok(error_event))
+        .send_terminal_before_total(&tx, Ok(error_event))
         .await;
     Ok(())
 }

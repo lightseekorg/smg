@@ -1089,6 +1089,7 @@ impl PDRouter {
             let mut boundary_tail = Vec::new();
             let mut at_event_boundary = true;
             let mut stream_failure_status = None;
+            let mut relay_send_timed_out = false;
             loop {
                 let chunk_result = match stream_deadline.next(&mut stream).await {
                     Ok(Some(chunk_result)) => chunk_result,
@@ -1100,7 +1101,9 @@ impl PDRouter {
                         } else {
                             Err(stream_deadline.message(timeout))
                         };
-                        let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
+                        let _ = stream_deadline
+                            .send_terminal_before_total(&tx, timeout_item)
+                            .await;
                         break;
                     }
                 };
@@ -1125,6 +1128,7 @@ impl PDRouter {
                             Ok(true) => {}
                             Ok(false) => break,
                             Err(_) => {
+                                relay_send_timed_out = true;
                                 stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                                 break;
                             }
@@ -1140,7 +1144,7 @@ impl PDRouter {
                         }
                         stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                         let _ = stream_deadline
-                            .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                            .send_terminal_before_total(&tx, Err(format!("Stream error: {e}")))
                             .await;
                         break;
                     }
@@ -1148,7 +1152,12 @@ impl PDRouter {
             }
             if let Some((prefill, decode)) = outcome_workers {
                 let effective_status = stream_failure_status.unwrap_or(status);
-                record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), effective_status);
+                let worker_status = if relay_send_timed_out {
+                    status
+                } else {
+                    effective_status
+                };
+                record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), worker_status);
                 if status.is_success() {
                     if let Some(metrics) = router_metrics.as_ref() {
                         record_pd_router_stream_outcome(metrics, effective_status);

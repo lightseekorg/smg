@@ -875,6 +875,7 @@ impl Router {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stream_failure_status = None;
+                let mut relay_send_timed_out = false;
                 let mut done_observer = sse::SseTerminalObserver::done();
                 let mut boundary_tail = Vec::new();
                 let mut at_event_boundary = true;
@@ -889,7 +890,9 @@ impl Router {
                             } else {
                                 Err(stream_deadline.message(timeout))
                             };
-                            let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, timeout_item)
+                                .await;
                             break;
                         }
                     };
@@ -903,6 +906,7 @@ impl Router {
                                 Ok(true) => {}
                                 Ok(false) => break,
                                 Err(_) => {
+                                    relay_send_timed_out = true;
                                     stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                                     break;
                                 }
@@ -914,7 +918,7 @@ impl Router {
                         Err(e) => {
                             stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                             let _ = stream_deadline
-                                .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .send_terminal_before_total(&tx, Err(format!("Stream error: {e}")))
                                 .await;
                             break;
                         }
@@ -927,7 +931,12 @@ impl Router {
                 // the failed worker immediately.
                 let effective_status = stream_failure_status.unwrap_or(stream_header_status);
                 if stream_header_status.is_success() {
-                    record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+                    let worker_status = if relay_send_timed_out {
+                        stream_header_status
+                    } else {
+                        effective_status
+                    };
+                    record_regular_worker_outcome(worker_for_stream.as_ref(), worker_status);
                 }
                 if effective_status.is_success() {
                     Metrics::record_router_duration(
@@ -1138,6 +1147,7 @@ impl Router {
             tokio::spawn(async move {
                 let mut stream = stream;
                 let mut stream_failure_status = None;
+                let mut relay_send_timed_out = false;
                 let mut boundary_tail = Vec::new();
                 let mut at_event_boundary = true;
                 let mut done_observer = sse::SseTerminalObserver::done();
@@ -1152,7 +1162,9 @@ impl Router {
                             } else {
                                 Err(stream_deadline.message(timeout))
                             };
-                            let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, timeout_item)
+                                .await;
                             break;
                         }
                     };
@@ -1165,6 +1177,7 @@ impl Router {
                                 Ok(true) => {}
                                 Ok(false) => break,
                                 Err(_) => {
+                                    relay_send_timed_out = true;
                                     stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                                     break;
                                 }
@@ -1176,7 +1189,7 @@ impl Router {
                         Err(e) => {
                             stream_failure_status = Some(StatusCode::BAD_GATEWAY);
                             let _ = stream_deadline
-                                .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .send_terminal_before_total(&tx, Err(format!("Stream error: {e}")))
                                 .await;
                             break;
                         }
@@ -1184,7 +1197,12 @@ impl Router {
                 }
                 let effective_status = stream_failure_status.unwrap_or(status);
                 if status.is_success() {
-                    record_regular_worker_outcome(worker_for_stream.as_ref(), effective_status);
+                    let worker_status = if relay_send_timed_out {
+                        status
+                    } else {
+                        effective_status
+                    };
+                    record_regular_worker_outcome(worker_for_stream.as_ref(), worker_status);
                     record_regular_router_stream_outcome(&stream_router_metrics, effective_status);
                 }
             });

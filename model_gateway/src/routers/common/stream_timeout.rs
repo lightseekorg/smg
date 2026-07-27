@@ -78,12 +78,32 @@ impl StreamDeadline {
     /// Send a relay item without allowing downstream backpressure to outlive
     /// the configured total stream deadline.
     ///
-    /// A ready send is attempted first so a terminal timeout item can still be
-    /// delivered after the deadline has elapsed. Returns `Ok(true)` when the
-    /// item was delivered, `Ok(false)` when the downstream receiver was
-    /// dropped, and `Err(Total)` when a full channel remained blocked until the
-    /// total deadline.
+    /// Returns `Ok(true)` when the item was delivered, `Ok(false)` when the
+    /// downstream receiver was dropped, and `Err(Total)` when the deadline
+    /// elapsed before delivery.
     pub async fn send_before_total<T>(
+        &self,
+        sender: &mpsc::Sender<T>,
+        item: T,
+    ) -> Result<bool, StreamTimeoutKind> {
+        if self.is_total_elapsed() {
+            return Err(StreamTimeoutKind::Total);
+        }
+
+        match sender.try_send(item) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Closed(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Full(item)) => self
+                .until_total(sender.send(item))
+                .await
+                .map(|result| result.is_ok()),
+        }
+    }
+
+    /// Send a terminal relay item, allowing one ready nonblocking send after
+    /// the deadline so clients can receive the timeout reason. A full channel
+    /// is never awaited beyond the configured total deadline.
+    pub async fn send_terminal_before_total<T>(
         &self,
         sender: &mpsc::Sender<T>,
         item: T,
@@ -257,11 +277,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_before_total_delivers_ready_item_after_deadline() {
+    async fn send_before_total_rejects_ready_item_after_deadline() {
+        let deadline = StreamDeadline::new(Duration::ZERO, Duration::from_secs(1));
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert!(matches!(
+            deadline.send_before_total(&tx, "ordinary").await,
+            Err(StreamTimeoutKind::Total)
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_terminal_before_total_delivers_ready_item_after_deadline() {
         let deadline = StreamDeadline::new(Duration::ZERO, Duration::from_secs(1));
         let (tx, mut rx) = mpsc::channel(1);
 
-        assert!(deadline.send_before_total(&tx, "terminal").await.unwrap());
+        assert!(deadline
+            .send_terminal_before_total(&tx, "terminal")
+            .await
+            .unwrap());
         assert_eq!(rx.recv().await, Some("terminal"));
     }
 
