@@ -1095,11 +1095,12 @@ impl PDRouter {
                     Ok(None) => break,
                     Err(timeout) => {
                         stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
-                        if at_event_boundary {
-                            let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
+                        let timeout_item = if at_event_boundary {
+                            Ok(stream_deadline.sse_error_event(timeout))
                         } else {
-                            let _ = tx.send(Err(stream_deadline.message(timeout))).await;
-                        }
+                            Err(stream_deadline.message(timeout))
+                        };
+                        let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
                         break;
                     }
                 };
@@ -1120,8 +1121,13 @@ impl PDRouter {
 
                         at_event_boundary =
                             sse::update_event_boundary(&mut boundary_tail, result.as_ref());
-                        if tx.send(Ok(result)).await.is_err() {
-                            break;
+                        match stream_deadline.send_before_total(&tx, Ok(result)).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(_) => {
+                                stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                                break;
+                            }
                         }
 
                         if is_done {
@@ -1133,7 +1139,9 @@ impl PDRouter {
                             error!("Stream error from decode server {}: {}", url, e);
                         }
                         stream_failure_status = Some(StatusCode::BAD_GATEWAY);
-                        let _ = tx.send(Err(format!("Stream error: {e}"))).await;
+                        let _ = stream_deadline
+                            .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                            .await;
                         break;
                     }
                 }

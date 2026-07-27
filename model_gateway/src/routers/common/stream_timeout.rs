@@ -4,7 +4,10 @@ use std::{fmt, future::Future, time::Duration};
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use tokio::time::{self, Instant};
+use tokio::{
+    sync::mpsc,
+    time::{self, Instant},
+};
 
 pub const MAX_STREAM_ERROR_BODY_SIZE: usize = 1024 * 1024;
 
@@ -70,6 +73,22 @@ impl StreamDeadline {
         time::timeout_at(deadline, future)
             .await
             .map_err(|_| timeout)
+    }
+
+    /// Send a relay item without allowing downstream backpressure to outlive
+    /// the configured total stream deadline.
+    ///
+    /// Returns `Ok(true)` when the item was delivered, `Ok(false)` when the
+    /// downstream receiver was dropped, and `Err(Total)` when a full channel
+    /// remained blocked until the total deadline.
+    pub async fn send_before_total<T>(
+        &self,
+        sender: &mpsc::Sender<T>,
+        item: T,
+    ) -> Result<bool, StreamTimeoutKind> {
+        self.until_total(sender.send(item))
+            .await
+            .map(|result| result.is_ok())
     }
 
     pub async fn next<S>(&self, stream: &mut S) -> Result<Option<S::Item>, StreamTimeoutKind>
@@ -217,5 +236,25 @@ mod tests {
             result,
             Err(StreamBodyReadError::TooLarge { max_size: 4 })
         ));
+    }
+
+    #[tokio::test]
+    async fn send_before_total_times_out_when_channel_stays_full() {
+        let deadline = StreamDeadline::new(Duration::from_millis(10), Duration::from_secs(1));
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert!(deadline.send_before_total(&tx, "first").await.unwrap());
+        let result = deadline.send_before_total(&tx, "blocked").await;
+
+        assert!(matches!(result, Err(StreamTimeoutKind::Total)));
+    }
+
+    #[tokio::test]
+    async fn send_before_total_reports_closed_receiver() {
+        let deadline = StreamDeadline::new(Duration::from_secs(1), Duration::from_secs(1));
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        assert!(!deadline.send_before_total(&tx, "item").await.unwrap());
     }
 }

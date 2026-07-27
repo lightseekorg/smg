@@ -884,11 +884,12 @@ impl Router {
                         Ok(None) => break,
                         Err(timeout) => {
                             stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
-                            if stream_is_sse && at_event_boundary {
-                                let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
+                            let timeout_item = if stream_is_sse && at_event_boundary {
+                                Ok(stream_deadline.sse_error_event(timeout))
                             } else {
-                                let _ = tx.send(Err(stream_deadline.message(timeout))).await;
-                            }
+                                Err(stream_deadline.message(timeout))
+                            };
+                            let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
                             break;
                         }
                     };
@@ -898,8 +899,13 @@ impl Router {
                                 && sse::observe_done_event(&mut done_decoder, bytes.as_ref());
                             at_event_boundary =
                                 sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
-                            if tx.send(Ok(bytes)).await.is_err() {
-                                break;
+                            match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(_) => {
+                                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                                    break;
+                                }
                             }
                             if stream_done {
                                 break;
@@ -907,7 +913,9 @@ impl Router {
                         }
                         Err(e) => {
                             stream_failure_status = Some(StatusCode::BAD_GATEWAY);
-                            let _ = tx.send(Err(format!("Stream error: {e}"))).await;
+                            let _ = stream_deadline
+                                .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .await;
                             break;
                         }
                     }
@@ -1139,11 +1147,12 @@ impl Router {
                         Ok(None) => break,
                         Err(timeout) => {
                             stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
-                            if at_event_boundary {
-                                let _ = tx.send(Ok(stream_deadline.sse_error_event(timeout))).await;
+                            let timeout_item = if at_event_boundary {
+                                Ok(stream_deadline.sse_error_event(timeout))
                             } else {
-                                let _ = tx.send(Err(stream_deadline.message(timeout))).await;
-                            }
+                                Err(stream_deadline.message(timeout))
+                            };
+                            let _ = stream_deadline.send_before_total(&tx, timeout_item).await;
                             break;
                         }
                     };
@@ -1153,8 +1162,13 @@ impl Router {
                                 sse::observe_done_event(&mut done_decoder, bytes.as_ref());
                             at_event_boundary =
                                 sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
-                            if tx.send(Ok(bytes)).await.is_err() {
-                                break;
+                            match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(_) => {
+                                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                                    break;
+                                }
                             }
                             if stream_done {
                                 break;
@@ -1162,7 +1176,9 @@ impl Router {
                         }
                         Err(e) => {
                             stream_failure_status = Some(StatusCode::BAD_GATEWAY);
-                            let _ = tx.send(Err(format!("Stream error: {e}"))).await;
+                            let _ = stream_deadline
+                                .send_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .await;
                             break;
                         }
                     }

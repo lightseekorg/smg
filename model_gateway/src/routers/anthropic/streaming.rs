@@ -211,9 +211,13 @@ async fn relay_stream_with_deadline<S>(
                 let message = stream_deadline.message(timeout);
                 stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                 if at_event_boundary {
-                    let _ = sse::send_error(&tx, &mut encoder, &message).await;
+                    let _ = stream_deadline
+                        .until_total(sse::send_error(&tx, &mut encoder, &message))
+                        .await;
                 } else {
-                    let _ = tx.send(Err(io::Error::other(message))).await;
+                    let _ = stream_deadline
+                        .send_before_total(&tx, Err(io::Error::other(message)))
+                        .await;
                 }
                 break;
             }
@@ -223,8 +227,13 @@ async fn relay_stream_with_deadline<S>(
                 let stream_done =
                     observe_event_type(&mut terminal_decoder, bytes.as_ref(), "message_stop");
                 at_event_boundary = update_event_boundary(&mut boundary_tail, bytes.as_ref());
-                if tx.send(Ok(bytes)).await.is_err() {
-                    break;
+                match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => {
+                        stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                        break;
+                    }
                 }
                 if stream_done {
                     break;
@@ -232,7 +241,9 @@ async fn relay_stream_with_deadline<S>(
             }
             Err(e) => {
                 stream_failure_status = Some(StatusCode::BAD_GATEWAY);
-                let _ = tx.send(Err(io::Error::other(e))).await;
+                let _ = stream_deadline
+                    .send_before_total(&tx, Err(io::Error::other(e)))
+                    .await;
                 break;
             }
         }
