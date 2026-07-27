@@ -504,7 +504,7 @@ mod tests {
             "<|sep|>",
             "<|open|>tools",
             "<|sep|>",
-            r#"<|open|>call tool="kvv_walle_case" index="1""#,
+            r#"<|open|>call tool="get_weather" index="1""#,
             "<|sep|>",
             "<|close|>call",
             "<|sep|>",
@@ -525,7 +525,7 @@ mod tests {
             normal,
             concat!(
                 "<|open|>tools<|sep|>",
-                r#"<|open|>call tool="kvv_walle_case" index="1"<|sep|>"#,
+                r#"<|open|>call tool="get_weather" index="1"<|sep|>"#,
                 "<|close|>call<|sep|><|close|>tools<|sep|>"
             )
         );
