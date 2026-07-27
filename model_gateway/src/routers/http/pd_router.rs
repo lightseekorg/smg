@@ -861,7 +861,19 @@ impl PDRouter {
                                     return Self::first_decode_error_response(error, stream_deadline);
                                 }
                             };
-                        let prefill_body = match prefill_future.await {
+                        let prefill_result = match stream_deadline
+                            .until_activity(&mut prefill_future)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(timeout) => {
+                                return Self::first_decode_error_response(
+                                    FirstDecodeChunkError::Timeout(timeout),
+                                    stream_deadline,
+                                );
+                            }
+                        };
+                        let prefill_body = match prefill_result {
                             Ok((_, body)) => body,
                             Err(error_response) => return error_response,
                         };
@@ -1227,12 +1239,21 @@ impl PDRouter {
             }
             if let Some((prefill, decode)) = outcome_workers {
                 let effective_status = stream_failure_status.unwrap_or(status);
-                let worker_status = if relay_send_timed_out {
+                let decode_status = if relay_send_timed_out {
                     status
                 } else {
                     effective_status
                 };
-                record_pd_worker_outcome(prefill.as_ref(), decode.as_ref(), worker_status);
+                record_pd_worker_outcome_for(
+                    prefill.as_ref(),
+                    metrics_labels::WORKER_PREFILL,
+                    status,
+                );
+                record_pd_worker_outcome_for(
+                    decode.as_ref(),
+                    metrics_labels::WORKER_DECODE,
+                    decode_status,
+                );
                 if status.is_success() {
                     if let Some(metrics) = router_metrics.as_ref() {
                         record_pd_router_stream_outcome(metrics, effective_status);
@@ -1575,21 +1596,20 @@ impl PDRouter {
 }
 
 fn record_pd_worker_outcome(prefill: &dyn Worker, decode: &dyn Worker, status: StatusCode) {
-    prefill.record_outcome(status.as_u16());
-    decode.record_outcome(status.as_u16());
+    record_pd_worker_outcome_for(prefill, metrics_labels::WORKER_PREFILL, status);
+    record_pd_worker_outcome_for(decode, metrics_labels::WORKER_DECODE, status);
+}
+
+fn record_pd_worker_outcome_for(
+    worker: &dyn Worker,
+    worker_type: &'static str,
+    status: StatusCode,
+) {
+    worker.record_outcome(status.as_u16());
 
     if status.is_server_error() {
         let error_type = error_type_from_status(status);
-        Metrics::record_worker_error(
-            metrics_labels::WORKER_PREFILL,
-            metrics_labels::CONNECTION_HTTP,
-            error_type,
-        );
-        Metrics::record_worker_error(
-            metrics_labels::WORKER_DECODE,
-            metrics_labels::CONNECTION_HTTP,
-            error_type,
-        );
+        Metrics::record_worker_error(worker_type, metrics_labels::CONNECTION_HTTP, error_type);
     }
 }
 

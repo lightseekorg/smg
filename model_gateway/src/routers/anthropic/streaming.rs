@@ -453,13 +453,16 @@ async fn run_tool_loop(
                 consumed
             }
             Err(err) => {
-                if is_streaming_timeout_message(&err) {
-                    record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);
-                    record_streaming_worker_outcome(
-                        Some(req_ctx.worker.as_ref()),
-                        StatusCode::GATEWAY_TIMEOUT,
-                    );
+                if err == sse::CLIENT_DISCONNECTED_ERROR {
+                    return Err(err);
                 }
+                let status = if is_streaming_timeout_message(&err) {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                record_streaming_router_outcome(&req_ctx.model_id, iteration_start, status);
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
                 return Err(err);
             }
         };

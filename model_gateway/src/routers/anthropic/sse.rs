@@ -281,7 +281,11 @@ where
         }
     }
 
-    Ok(processor.into_result())
+    if processor.terminal_seen() {
+        Ok(processor.into_result())
+    } else {
+        Err("Upstream stream ended before message_stop".to_string())
+    }
 }
 
 // ============================================================================
@@ -829,6 +833,38 @@ mod tests {
 
         assert!(result.is_err_and(
             |error| error.starts_with("Streaming request exceeded configured total timeout")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_consume_and_forward_rejects_eof_before_message_stop() {
+        let upstream = http::Response::builder()
+            .status(StatusCode::OK)
+            .body("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+            .unwrap();
+        let response = reqwest::Response::from(upstream);
+        let (tx, _rx) = mpsc::channel(2);
+        let mut encoder = SseEncoder::new();
+        let mut global_index = 0;
+        let deadline = StreamDeadline::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+
+        let result = consume_and_forward(
+            &tx,
+            &mut encoder,
+            response,
+            &mut global_index,
+            true,
+            deadline,
+            str::to_owned,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "Upstream stream ended before message_stop"
         ));
     }
 
