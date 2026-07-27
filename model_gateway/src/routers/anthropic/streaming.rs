@@ -443,7 +443,10 @@ async fn run_tool_loop(
         .await;
 
         let consumed = match result {
-            Ok(consumed) => consumed,
+            Ok(consumed) => {
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), StatusCode::OK);
+                consumed
+            }
             Err(err) => {
                 if is_streaming_timeout_message(&err) {
                     record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);

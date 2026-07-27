@@ -273,10 +273,16 @@ pub(super) async fn route_chat(
                         let mut boundary_tail = Vec::new();
                         let mut at_event_boundary = true;
                         let mut done_observer = sse::SseTerminalObserver::done();
+                        let mut terminal_seen = false;
                         loop {
                             let chunk = match stream_deadline.next(&mut s).await {
                                 Ok(Some(chunk)) => chunk,
-                                Ok(None) => break,
+                                Ok(None) => {
+                                    if status.is_success() && !terminal_seen {
+                                        stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                                    }
+                                    break;
+                                }
                                 Err(timeout) => {
                                     stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
                                     if at_event_boundary {
@@ -290,6 +296,7 @@ pub(super) async fn route_chat(
                             match chunk {
                                 Ok(bytes) => {
                                     let stream_done = done_observer.observe(bytes.as_ref());
+                                    terminal_seen |= stream_done;
                                     at_event_boundary =
                                         sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
                                     if tx.send(Ok(bytes)).is_err() {

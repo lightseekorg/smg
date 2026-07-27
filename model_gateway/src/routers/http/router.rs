@@ -370,7 +370,7 @@ impl Router {
                 endpoint,
                 duration,
             );
-        } else if !response.status().is_success() && !is_retryable_status(response.status()) {
+        } else if !response.status().is_success() {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_REGULAR,
