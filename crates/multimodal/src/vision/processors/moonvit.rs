@@ -127,8 +127,13 @@ pub struct ResizeConfig {
 /// `"after_resize"`, and that ordering is load-bearing: a chessboard background
 /// is generated at the resolution of whatever it is painted onto, so the
 /// squares come out a different size relative to the content if it is applied
-/// to the source image instead. Models with no `transparent_bg_config` pass
-/// `None` and simply drop alpha, matching `PIL.Image.convert("RGB")`.
+/// to the source image instead.
+///
+/// Models with no `transparent_bg_config` pass `None` and drop alpha *before*
+/// the resize. That ordering matters too: the reference converts at load time
+/// (`_to_pil` -> `.convert("RGB")`), so it convolves the RGB stored underneath
+/// transparent pixels, whereas resizing RGBA first would premultiply and
+/// exclude it.
 fn resize_pad_and_normalize(
     image: &DynamicImage,
     cfg: &ResizeConfig,
@@ -142,22 +147,23 @@ fn resize_pad_and_normalize(
     // Nothing to composite over if the image has no alpha to begin with.
     let bg = transparent_bg.filter(|_| image.color().has_alpha());
 
-    // `before_resize`: flatten the source, then resize plain RGB.
-    let pre_filled = bg
-        .filter(|b| b.stage == TransparentBgFillStage::BeforeResize)
-        .map(|b| DynamicImage::ImageRgb8(transforms::fill_transparent_bg(image, b.config)));
-    let source = pre_filled.as_ref().unwrap_or(image);
-
-    // Resize using SIMD-accelerated BICUBIC (fast_image_resize). When the alpha
-    // channel still has to survive the resize, skip premultiplication so the
-    // convolution matches PIL, which is what the reference resizes with.
-    let after_resize = bg.is_some_and(|b| b.stage == TransparentBgFillStage::AfterResize);
-    let resize_fn = if after_resize {
-        transforms::resize_straight_alpha
-    } else {
-        transforms::resize
+    // Reduce to RGB up front unless the background is painted after the resize,
+    // in which case alpha has to survive the convolution.
+    let pre_flattened = match bg {
+        Some(b) if b.stage == TransparentBgFillStage::BeforeResize => Some(
+            DynamicImage::ImageRgb8(transforms::fill_transparent_bg(image, b.config)),
+        ),
+        Some(_) => None,
+        None if image.color().has_alpha() => Some(DynamicImage::ImageRgb8(image.to_rgb8())),
+        None => None,
     };
-    let resized = resize_fn(
+    let source = pre_flattened.as_ref().unwrap_or(image);
+
+    // Resize using SIMD-accelerated BICUBIC (fast_image_resize). Where alpha
+    // survives to here it is premultiplied for the convolution, which is what
+    // `PIL.Image.resize` does for RGBA — the reference's resizer.
+    let after_resize = bg.is_some_and(|b| b.stage == TransparentBgFillStage::AfterResize);
+    let resized = transforms::resize(
         source,
         cfg.new_width as u32,
         cfg.new_height as u32,

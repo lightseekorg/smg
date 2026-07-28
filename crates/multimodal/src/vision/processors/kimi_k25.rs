@@ -321,6 +321,43 @@ mod tests {
     }
 
     #[test]
+    fn test_k25_drops_alpha_before_resizing() {
+        // `.convert("RGB")` ignores alpha and keeps the stored RGB, and the
+        // reference does it at load time — before any resize. Resizing the RGBA
+        // image first would premultiply (both `fast_image_resize` and PIL do),
+        // discarding the colour underneath transparent pixels instead of
+        // convolving it. Fully transparent red must therefore survive as red.
+        let p = KimiK25Processor::new();
+        let config = PreProcessorConfig {
+            image_mean: Some(KIMI_K25_MEAN.to_vec()),
+            image_std: Some(KIMI_K25_STD.to_vec()),
+            extra: [(
+                "patch_limit_on_one_side".to_string(),
+                serde_json::json!(2), // caps the long side at 2 * 14 px
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let hidden_red = DynamicImage::from(image::RgbaImage::from_pixel(
+            112,
+            112,
+            image::Rgba([255, 0, 0, 0]),
+        ));
+
+        let result = p.preprocess(&[hidden_red], &config).unwrap();
+        let planes = result.encoder_input.shape()[1] / 3;
+        assert!(planes > 0);
+        // Patch layout is channel-first, so the first third of each patch is R.
+        let flat = result.encoder_input_flat();
+        assert!(
+            flat[..planes].iter().all(|&v| (v - 1.0).abs() < 1e-3),
+            "red stored under alpha=0 must survive the resize, got {:?}",
+            &flat[..planes.min(4)]
+        );
+    }
+
+    #[test]
     fn test_in_patch_limit_resolved_from_config() {
         // A model shipping a larger budget must not be capped by the K2.5 default.
         let p = KimiK25Processor::new();

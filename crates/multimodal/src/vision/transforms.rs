@@ -359,40 +359,18 @@ thread_local! {
 /// * `width` - Target width
 /// * `height` - Target height
 /// * `filter` - Interpolation filter (Nearest, Triangle/Bilinear, CatmullRom/Bicubic, Lanczos3)
-pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType) -> DynamicImage {
-    resize_inner(image, width, height, filter, true)
-}
-
-/// Resize without premultiplying by alpha, matching `PIL.Image.resize`.
 ///
-/// Pillow convolves every channel independently, alpha included. Our SIMD
-/// resizer premultiplies by default (`ResizeOptions::mul_div_alpha`), which
-/// changes RGB wherever alpha is partial and would diverge from any reference
-/// pipeline that composites *after* the resize.
-pub fn resize_straight_alpha(
-    image: &DynamicImage,
-    width: u32,
-    height: u32,
-    filter: FilterType,
-) -> DynamicImage {
-    resize_inner(image, width, height, filter, false)
-}
-
-fn resize_inner(
-    image: &DynamicImage,
-    width: u32,
-    height: u32,
-    filter: FilterType,
-    premultiply_alpha: bool,
-) -> DynamicImage {
+/// Alpha-carrying input is premultiplied for the convolution and un-multiplied
+/// afterwards (`fast_image_resize` defaults `mul_div_alpha` to `true`). That is
+/// also what `PIL.Image.resize` does for `RGBA`, so RGB under transparent
+/// pixels does not bleed into its neighbours on either side.
+pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType) -> DynamicImage {
     let pixel_type = match image.pixel_type() {
         Some(pt) => pt,
         None => return image.resize_exact(width, height, filter),
     };
     let mut dst = FirImage::new(width, height, pixel_type);
-    let options = ResizeOptions::new()
-        .resize_alg(to_fir_algorithm(filter))
-        .use_alpha(premultiply_alpha);
+    let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
     let ok = RESIZER.with(|r| r.borrow_mut().resize(image, &mut dst, &options).is_ok());
     if !ok {
         return image.resize_exact(width, height, filter);
@@ -1591,21 +1569,40 @@ mod tests {
     }
 
     #[test]
-    fn straight_alpha_resize_keeps_rgba_and_ignores_premultiply() {
-        // Compositing after the resize needs the alpha channel intact, and RGB
-        // under transparent pixels must not be scaled toward zero.
+    fn rgba_resize_premultiplies_like_pil_and_interpolates_alpha() {
+        // Two opaque red rows over two fully transparent green rows. Verified
+        // against Pillow 11.2.1: `Image.resize` on RGBA matches
+        // `convert("RGBa").resize(...).convert("RGBA")` exactly and differs
+        // from convolving the bands independently, so the transparent green
+        // must contribute no colour at all.
         let mut img = image::RgbaImage::new(4, 4);
         for y in 0..4 {
+            let px = if y < 2 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 255, 0, 0])
+            };
             for x in 0..4 {
-                img.put_pixel(x, y, Rgba([255, 128, 0, 0]));
+                img.put_pixel(x, y, px);
             }
         }
-        let out = resize_straight_alpha(&DynamicImage::from(img), 2, 2, FilterType::CatmullRom);
+
+        let out = resize(&DynamicImage::from(img), 2, 2, FilterType::CatmullRom);
         assert!(out.color().has_alpha(), "alpha must survive the resize");
         let rgba = out.to_rgba8();
+
         for px in rgba.pixels() {
-            assert_eq!(px[0], 255, "premultiplication would zero this out");
-            assert_eq!(px[3], 0);
+            assert!(
+                px[0] > px[1],
+                "green under alpha=0 must not bleed into RGB, got {px:?}"
+            );
         }
+        // Alpha itself is still convolved: the two output rows straddle the
+        // opaque/transparent boundary, so they cannot come out equal.
+        assert_ne!(
+            rgba.get_pixel(0, 0)[3],
+            rgba.get_pixel(0, 1)[3],
+            "alpha channel must be resized, not carried through untouched"
+        );
     }
 }

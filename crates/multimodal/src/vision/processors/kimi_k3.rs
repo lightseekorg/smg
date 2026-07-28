@@ -17,6 +17,7 @@
 //! model's own `preprocessor_config.json` wins at call time.
 
 use image::DynamicImage;
+use serde_json::Value;
 
 use super::moonvit::{self, MoonVitParams};
 use crate::vision::{
@@ -38,7 +39,13 @@ pub const DEFAULT_IN_PATCH_LIMIT: usize = 65536;
 /// Maximum patches along one spatial dimension
 pub const DEFAULT_PATCH_LIMIT_ON_ONE_SIDE: usize = 512;
 
-/// The `transparent_bg_config` shipped with `moonshotai/Kimi-K3`.
+/// The `transparent_bg_config` shipped with `moonshotai/Kimi-K3`, verbatim from
+/// the checkpoint's `preprocessor_config.json`.
+///
+/// Note the stage. The reference falls back to `"before_resize"` when the key is
+/// absent, but K3 ships `"after_resize"`; these defaults describe K3, not the
+/// reference's generic fallback, so another MoonViT checkpoint must declare its
+/// own stage rather than inherit this one.
 fn default_transparent_bg() -> TransparentBg {
     TransparentBg {
         config: TransparentBgConfig {
@@ -55,7 +62,7 @@ fn default_transparent_bg() -> TransparentBg {
 #[derive(Debug, Clone)]
 pub struct KimiK3Processor {
     params: MoonVitParams,
-    transparent_bg: TransparentBg,
+    transparent_bg: Option<TransparentBg>,
 }
 
 impl Default for KimiK3Processor {
@@ -73,7 +80,7 @@ impl KimiK3Processor {
                 in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
                 patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
             },
-            transparent_bg: default_transparent_bg(),
+            transparent_bg: Some(default_transparent_bg()),
         }
     }
 
@@ -97,18 +104,33 @@ impl KimiK3Processor {
     ///
     /// The registry hands out one shared instance built from the defaults
     /// above, so this is the only point at which a checkpoint's real config can
-    /// take effect. A malformed `transparent_bg_config` deserializes to `None`
-    /// and leaves the shipped defaults in place rather than silently disabling
-    /// compositing.
-    fn resolved_transparent_bg(&self, config: &PreProcessorConfig) -> TransparentBg {
-        TransparentBg {
+    /// take effect. An absent or malformed `transparent_bg_config` keeps K3's
+    /// shipped board rather than silently disabling compositing:
+    /// `preprocessor_config.json` is optional in this runtime and each
+    /// processor is expected to carry its own model's defaults (see
+    /// `grpc::multimodal::config`).
+    ///
+    /// That does diverge from the reference, which reads a missing
+    /// `transparent_bg_config` as "drop alpha". A checkpoint that genuinely
+    /// wants the alpha-dropping path has to say so explicitly with
+    /// `"transparent_bg_config": null`.
+    fn resolved_transparent_bg(&self, config: &PreProcessorConfig) -> Option<TransparentBg> {
+        if config
+            .extra
+            .get("transparent_bg_config")
+            .is_some_and(Value::is_null)
+        {
+            return None;
+        }
+        let default = self.transparent_bg?;
+        Some(TransparentBg {
             config: config
                 .get_extra::<TransparentBgConfig>("transparent_bg_config")
-                .unwrap_or(self.transparent_bg.config),
+                .unwrap_or(default.config),
             stage: config
                 .get_extra::<TransparentBgFillStage>("transparent_bg_fill_stage")
-                .unwrap_or(self.transparent_bg.stage),
-        }
+                .unwrap_or(default.stage),
+        })
     }
 }
 
@@ -130,7 +152,7 @@ impl VisionPreProcessor for KimiK3Processor {
             self.params.resolved(config),
             images,
             config,
-            Some(self.resolved_transparent_bg(config)),
+            self.resolved_transparent_bg(config),
         )
     }
 
@@ -369,6 +391,62 @@ mod tests {
         let p = KimiK3Processor::from_preprocessor_config(&config);
         assert_eq!(p.params.in_patch_limit, 1024);
         assert_eq!(p.params.patch_limit_on_one_side, 64);
+    }
+
+    #[test]
+    fn test_explicit_null_config_disables_compositing() {
+        // Absence keeps K3's shipped board, so a checkpoint that really wants
+        // the reference's alpha-dropping path needs an explicit null. Without
+        // this escape hatch the compiled-in default could not be turned off.
+        let mut config = norm_config();
+        config
+            .extra
+            .insert("transparent_bg_config".to_string(), Value::Null);
+
+        let p = KimiK3Processor::new();
+        assert_eq!(p.resolved_transparent_bg(&config), None);
+
+        let image = DynamicImage::from(RgbaImage::from_pixel(56, 56, Rgba([0, 0, 0, 0])));
+        let result = p.preprocess(&[image], &config).unwrap();
+        assert!(
+            result
+                .encoder_input_flat()
+                .iter()
+                .all(|&v| (v + 1.0).abs() < 1e-6),
+            "an explicit null must fall back to dropping alpha"
+        );
+    }
+
+    #[test]
+    fn test_after_resize_ignores_colour_hidden_under_alpha() {
+        // The reference resizes the RGBA image with PIL before compositing, and
+        // PIL premultiplies for RGBA (verified against Pillow 11.2.1). Colour
+        // stored underneath fully transparent pixels therefore cannot bleed
+        // into their neighbours, so swapping it must not change the tensor.
+        let p = KimiK3Processor::new();
+        let mut config = norm_config();
+        // Cap the long side at 2 * 14 px so a real downscale happens.
+        config
+            .extra
+            .insert("patch_limit_on_one_side".to_string(), json!(2));
+
+        let outputs = [[0, 0, 0], [255, 0, 255]].map(|hidden| {
+            let mut img = RgbaImage::new(112, 112);
+            for (_, y, px) in img.enumerate_pixels_mut() {
+                *px = if y < 56 {
+                    Rgba([255, 255, 255, 255])
+                } else {
+                    Rgba([hidden[0], hidden[1], hidden[2], 0])
+                };
+            }
+            p.preprocess(&[DynamicImage::from(img)], &config).unwrap()
+        });
+
+        assert_eq!(
+            outputs[0].encoder_input_flat(),
+            outputs[1].encoder_input_flat(),
+            "a straight-alpha resize would let the hidden magenta bleed through"
+        );
     }
 
     #[test]
