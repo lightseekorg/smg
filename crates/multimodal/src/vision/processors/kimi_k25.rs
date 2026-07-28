@@ -322,15 +322,24 @@ mod tests {
         ));
 
         let result = p.preprocess(&[hidden_red], &config).unwrap();
-        let planes = result.encoder_input.shape()[1] / 3;
-        assert!(planes > 0);
-        // Patch layout is channel-first, so the first third of each patch is R.
-        let flat = result.encoder_input_flat();
-        assert!(
-            flat[..planes].iter().all(|&v| (v - 1.0).abs() < 1e-3),
-            "red stored under alpha=0 must survive the resize, got {:?}",
-            &flat[..planes.min(4)]
-        );
+        // [patches, 3, patch_size, patch_size]. 112px caps to 2 * 14 per side,
+        // so every patch is content and none of it is padding.
+        let &[patches, 3, ph, pw] = result.encoder_input.shape() else {
+            panic!("unexpected shape {:?}", result.encoder_input.shape());
+        };
+        assert_eq!(patches, 4);
+        for p in 0..patches {
+            for y in 0..ph {
+                for x in 0..pw {
+                    let px = [0, 1, 2].map(|c| result.encoder_input[[p, c, y, x]]);
+                    // mean = std = 0.5, so 255 -> +1.0 and 0 -> -1.0.
+                    assert!(
+                        (px[0] - 1.0).abs() < 1e-3 && px[1] < -0.99 && px[2] < -0.99,
+                        "red under alpha=0 must survive as red at patch {p} ({x},{y}), got {px:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
