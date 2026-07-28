@@ -51,6 +51,9 @@ impl KimiK25Processor {
                 patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
                 mean: KIMI_K25_MEAN,
                 std: KIMI_K25_STD,
+                // The reference K2.5 processor has no transparency handling:
+                // alpha is dropped, not composited.
+                transparent_bg: None,
                 model_name: "kimi-k2.5",
             }),
         }
@@ -69,6 +72,9 @@ impl KimiK25Processor {
                     .unwrap_or(DEFAULT_PATCH_LIMIT_ON_ONE_SIDE),
                 mean: KIMI_K25_MEAN,
                 std: KIMI_K25_STD,
+                // The reference K2.5 processor has no transparency handling:
+                // alpha is dropped, not composited.
+                transparent_bg: None,
                 model_name: "kimi-k2.5",
             }),
         }

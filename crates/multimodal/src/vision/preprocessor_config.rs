@@ -278,9 +278,14 @@ impl PreProcessorConfig {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
-        // Also extract Kimi-specific limits into the extra map
-        // so processors can read them via get_extra()
-        for key in ["in_patch_limit", "patch_limit_on_one_side"] {
+        // Also extract Kimi-specific limits and the transparency settings into
+        // the extra map so processors can read them via get_extra()
+        for key in [
+            "in_patch_limit",
+            "patch_limit_on_one_side",
+            "transparent_bg_config",
+            "transparent_bg_fill_stage",
+        ] {
             if !config.extra.contains_key(key) {
                 if let Some(v) = media_cfg.get(key) {
                     config.extra.insert(key.to_string(), v.clone());
@@ -432,6 +437,20 @@ impl PreProcessorConfig {
         self.extra
             .get(key)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// The checkpoint's alpha-flattening behavior, if it declares any.
+    ///
+    /// `None` means the checkpoint asks for no compositing, matching the
+    /// reference's behavior when `transparent_bg_config` is absent. The fill
+    /// stage is only meaningful alongside a config, so it is read here rather
+    /// than exposed on its own.
+    pub fn transparent_bg(&self) -> Option<transforms::TransparentBg> {
+        let config = self.get_extra::<transforms::TransparentBgConfig>("transparent_bg_config")?;
+        let stage = self
+            .get_extra::<transforms::TransparentBgFillStage>("transparent_bg_fill_stage")
+            .unwrap_or_default();
+        Some(transforms::TransparentBg { config, stage })
     }
 
     // Common default values
@@ -601,5 +620,67 @@ mod tests {
 
         assert_eq!(config.get_patch_size(0), 14);
         assert_eq!(config.merge_size, Some(2));
+
+        // K2.5 declares no transparency handling.
+        assert_eq!(config.transparent_bg(), None);
+    }
+
+    #[test]
+    fn test_parse_kimi_k3_transparency_settings() {
+        // Excerpt from moonshotai/Kimi-K3's preprocessor_config.json.
+        let json = r#"{
+            "media_proc_cfg": {
+                "in_patch_limit": 65536,
+                "patch_size": 14,
+                "merge_kernel_size": 2,
+                "patch_limit_on_one_side": 512,
+                "transparent_bg_config": {
+                    "pattern": "chessboard",
+                    "chessboard_square_size": 16,
+                    "chessboard_square_on_top_left": true,
+                    "chessboard_white_value": 255,
+                    "chessboard_gray_value": 200
+                },
+                "transparent_bg_fill_stage": "after_resize"
+            }
+        }"#;
+
+        let config = PreProcessorConfig::from_json(json).unwrap();
+
+        assert_eq!(config.get_extra::<usize>("in_patch_limit"), Some(65536));
+        assert_eq!(
+            config.get_extra::<usize>("patch_limit_on_one_side"),
+            Some(512)
+        );
+
+        let bg = config
+            .transparent_bg()
+            .expect("transparent_bg_config lifted out of media_proc_cfg");
+        assert_eq!(
+            bg.config.pattern,
+            transforms::TransparentBgPattern::Chessboard
+        );
+        assert_eq!(bg.config.chessboard_square_size, 16);
+        assert!(bg.config.chessboard_square_on_top_left);
+        assert_eq!(bg.config.chessboard_white_value, 255);
+        assert_eq!(bg.config.chessboard_gray_value, 200);
+        assert_eq!(bg.stage, transforms::TransparentBgFillStage::AfterResize);
+    }
+
+    #[test]
+    fn test_transparency_fill_stage_defaults_without_explicit_key() {
+        // The reference falls back to "before_resize" when the key is absent.
+        let json = r#"{
+            "media_proc_cfg": {
+                "transparent_bg_config": { "pattern": "white" }
+            }
+        }"#;
+
+        let bg = PreProcessorConfig::from_json(json)
+            .unwrap()
+            .transparent_bg()
+            .expect("config present");
+        assert_eq!(bg.config.pattern, transforms::TransparentBgPattern::White);
+        assert_eq!(bg.stage, transforms::TransparentBgFillStage::BeforeResize);
     }
 }

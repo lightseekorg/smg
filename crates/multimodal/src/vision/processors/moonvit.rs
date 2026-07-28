@@ -25,7 +25,7 @@ use crate::vision::{
     preprocessor_config::PreProcessorConfig,
     processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     scratch,
-    transforms::{self, TransformError},
+    transforms::{self, TransformError, TransparentBg, TransparentBgFillStage},
 };
 
 /// Parameters distinguishing one MoonViT processor variant from another.
@@ -43,6 +43,10 @@ pub struct MoonVitConfig {
     pub mean: [f64; 3],
     /// Default normalization std, used when the checkpoint declares none.
     pub std: [f64; 3],
+    /// How to flatten alpha-carrying images, when the model honors a
+    /// background at all. `None` drops alpha, which is what MoonViT variants
+    /// without transparency handling do.
+    pub transparent_bg: Option<TransparentBg>,
     /// Model name for identification.
     pub model_name: &'static str,
 }
@@ -89,6 +93,23 @@ impl MoonVitProcessorBase {
         self.config.patch_size * self.config.merge_size
     }
 
+    pub fn transparent_bg(&self) -> Option<TransparentBg> {
+        self.config.transparent_bg
+    }
+
+    /// Clone with a different alpha-flattening behavior.
+    ///
+    /// Transparency settings arrive with the checkpoint rather than at
+    /// construction, so the per-model wrapper applies them per request.
+    pub fn with_transparent_bg(&self, transparent_bg: Option<TransparentBg>) -> Self {
+        Self {
+            config: MoonVitConfig {
+                transparent_bg,
+                ..self.config.clone()
+            },
+        }
+    }
+
     /// Compute resize dimensions and padding, matching HF `navit_resize_image`.
     ///
     /// Never upscales (scale capped at 1.0). Pads with zeros to align to factor.
@@ -124,6 +145,41 @@ impl MoonVitProcessorBase {
         }
     }
 
+    /// Resize to `cfg`'s dimensions, flattening alpha along the way.
+    ///
+    /// Opaque images take the plain resize path unchanged. When the checkpoint
+    /// declares a background and the image actually carries alpha, the fill
+    /// stage decides which side of the resize composites, because a chessboard
+    /// is generated at the resolution of the image it lands on.
+    fn resize_and_flatten_alpha(
+        image: &DynamicImage,
+        cfg: &ResizeConfig,
+        transparent_bg: Option<TransparentBg>,
+    ) -> DynamicImage {
+        let width = cfg.new_width as u32;
+        let height = cfg.new_height as u32;
+        let filter = image::imageops::FilterType::CatmullRom;
+
+        // Resize using SIMD-accelerated BICUBIC (fast_image_resize)
+        let Some(bg) = transparent_bg.filter(|_| image.color().has_alpha()) else {
+            return transforms::resize(image, width, height, filter);
+        };
+
+        match bg.stage {
+            TransparentBgFillStage::BeforeResize => {
+                let flattened =
+                    DynamicImage::from(transforms::fill_transparent_bg(image, bg.config));
+                transforms::resize(&flattened, width, height, filter)
+            }
+            TransparentBgFillStage::AfterResize => {
+                // Straight (non-premultiplied) alpha: RGB under transparent
+                // pixels must survive the resize for compositing to see it.
+                let resized = transforms::resize_straight_alpha(image, width, height, filter);
+                DynamicImage::from(transforms::fill_transparent_bg(&resized, bg.config))
+            }
+        }
+    }
+
     /// Fused resize + zero-pad + normalize into a single [C, H_padded, W_padded] tensor.
     ///
     /// Avoids intermediate allocations by:
@@ -135,17 +191,12 @@ impl MoonVitProcessorBase {
         cfg: &ResizeConfig,
         mean: &[f64; 3],
         std: &[f64; 3],
+        transparent_bg: Option<TransparentBg>,
     ) -> Array3<f32> {
         let canvas_h = cfg.new_height + cfg.pad_height;
         let canvas_w = cfg.new_width + cfg.pad_width;
 
-        // Resize using SIMD-accelerated BICUBIC (fast_image_resize)
-        let resized = transforms::resize(
-            image,
-            cfg.new_width as u32,
-            cfg.new_height as u32,
-            image::imageops::FilterType::CatmullRom,
-        );
+        let resized = Self::resize_and_flatten_alpha(image, cfg, transparent_bg);
 
         let (img_w, img_h, raw) = transforms::rgb_bytes(&resized);
         let canvas_pixels = canvas_h * canvas_w;
@@ -274,7 +325,8 @@ impl VisionPreProcessor for MoonVitProcessorBase {
             let cfg = self.compute_resize_config(w as usize, h as usize);
 
             // Fused resize + pad + normalize in one pass (avoids 2 extra allocations)
-            let tensor = Self::resize_pad_and_normalize(image, &cfg, &mean, &std);
+            let tensor =
+                Self::resize_pad_and_normalize(image, &cfg, &mean, &std, self.transparent_bg());
 
             let padded_h = cfg.new_height + cfg.pad_height;
             let padded_w = cfg.new_width + cfg.pad_width;
