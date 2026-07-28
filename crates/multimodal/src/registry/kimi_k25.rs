@@ -28,9 +28,11 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
-        // Kimi-K3 reuses K2.5's MoonViT vision stack and `<|media_pad|>`
-        // placeholder (media_placeholder_token_id 163605), so it shares this
-        // spec.
+        // Kimi-K3 uses the same `<|media_pad|>` placeholder
+        // (media_placeholder_token_id 163605), patchification layout and
+        // prompt-replacement shape, so it shares this spec. Note that the two
+        // do *not* share a pixel pipeline — see `vision::processors::kimi_k3`
+        // for the patch budget and alpha-compositing differences.
         let id = metadata.model_id.to_ascii_lowercase();
         id.contains("kimi") && (id.contains("k2") || id.contains("k3"))
             || metadata

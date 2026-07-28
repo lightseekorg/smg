@@ -278,9 +278,14 @@ impl PreProcessorConfig {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
-        // Also extract Kimi-specific limits into the extra map
-        // so processors can read them via get_extra()
-        for key in ["in_patch_limit", "patch_limit_on_one_side"] {
+        // Also extract Kimi-specific limits and the K3 transparency settings
+        // into the extra map so processors can read them via get_extra()
+        for key in [
+            "in_patch_limit",
+            "patch_limit_on_one_side",
+            "transparent_bg_config",
+            "transparent_bg_fill_stage",
+        ] {
             if !config.extra.contains_key(key) {
                 if let Some(v) = media_cfg.get(key) {
                     config.extra.insert(key.to_string(), v.clone());
@@ -448,6 +453,9 @@ impl PreProcessorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vision::transforms::{
+        TransparentBgConfig, TransparentBgFillStage, TransparentBgPattern,
+    };
 
     #[test]
     fn test_parse_clip_config() {
@@ -601,5 +609,48 @@ mod tests {
 
         assert_eq!(config.get_patch_size(0), 14);
         assert_eq!(config.merge_size, Some(2));
+    }
+
+    #[test]
+    fn test_parse_kimi_k3_transparency_settings() {
+        // Verbatim excerpt from moonshotai/Kimi-K3's preprocessor_config.json.
+        let json = r#"{
+            "media_proc_cfg": {
+                "in_patch_limit": 65536,
+                "patch_size": 14,
+                "merge_kernel_size": 2,
+                "patch_limit_on_one_side": 512,
+                "transparent_bg_config": {
+                    "pattern": "chessboard",
+                    "chessboard_square_size": 8,
+                    "chessboard_square_on_top_left": true,
+                    "chessboard_white_value": 255,
+                    "chessboard_gray_value": 180
+                },
+                "transparent_bg_fill_stage": "after_resize"
+            }
+        }"#;
+
+        let config = PreProcessorConfig::from_json(json).unwrap();
+
+        assert_eq!(config.get_extra::<usize>("in_patch_limit"), Some(65536));
+        assert_eq!(
+            config.get_extra::<usize>("patch_limit_on_one_side"),
+            Some(512)
+        );
+
+        let bg = config
+            .get_extra::<TransparentBgConfig>("transparent_bg_config")
+            .expect("transparent_bg_config lifted out of media_proc_cfg");
+        assert_eq!(bg.pattern, TransparentBgPattern::Chessboard);
+        assert_eq!(bg.chessboard_square_size, 8);
+        assert!(bg.chessboard_square_on_top_left);
+        assert_eq!(bg.chessboard_white_value, 255);
+        assert_eq!(bg.chessboard_gray_value, 180);
+
+        assert_eq!(
+            config.get_extra::<TransparentBgFillStage>("transparent_bg_fill_stage"),
+            Some(TransparentBgFillStage::AfterResize)
+        );
     }
 }

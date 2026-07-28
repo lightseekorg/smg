@@ -325,7 +325,9 @@ impl VisionProcessorRegistry {
             Box::new(super::processors::Llama4VisionProcessor::new()),
         );
 
-        // Register Kimi-K2.5 Vision (also used by Kimi-K3, same MoonViT stack)
+        // Register the Kimi MoonViT family. K3 shares the stack but ships a
+        // larger patch budget and chessboard alpha compositing, so it gets its
+        // own processor rather than reusing K2.5's.
         registry.register(
             "kimi-k2",
             Box::new(super::processors::KimiK25Processor::new()),
@@ -336,11 +338,11 @@ impl VisionProcessorRegistry {
         );
         registry.register(
             "kimi-k3",
-            Box::new(super::processors::KimiK25Processor::new()),
+            Box::new(super::processors::KimiK3Processor::new()),
         );
         registry.register(
             "kimi_k3",
-            Box::new(super::processors::KimiK25Processor::new()),
+            Box::new(super::processors::KimiK3Processor::new()),
         );
 
         registry
@@ -392,6 +394,38 @@ mod tests {
             .find("org/inkling-chat", None)
             .expect("Inkling model family");
         assert_eq!(processor.model_name(), "inkling");
+    }
+
+    #[test]
+    fn test_registry_separates_kimi_k25_and_k3() {
+        // K3's pixel pipeline differs from K2.5's (larger patch budget, alpha
+        // compositing), so resolving a K3 id to the K2.5 processor is a bug.
+        let registry = VisionProcessorRegistry::with_defaults();
+
+        for id in ["moonshotai/Kimi-K3", "moonshotai/Kimi_K3-Instruct"] {
+            let processor = registry.find(id, None).expect("K3 vision processor");
+            assert_eq!(processor.model_name(), "kimi-k3", "{id}");
+        }
+        for id in ["moonshotai/Kimi-K2.5", "moonshotai/Kimi_K2-VL"] {
+            let processor = registry.find(id, None).expect("K2.5 vision processor");
+            assert_eq!(processor.model_name(), "kimi-k2.5", "{id}");
+        }
+
+        // model_type fallback must split the same way.
+        assert_eq!(
+            registry
+                .find("internal/checkpoint-final", Some("kimi_k3"))
+                .expect("K3 by model_type")
+                .model_name(),
+            "kimi-k3"
+        );
+        assert_eq!(
+            registry
+                .find("internal/checkpoint-final", Some("kimi_k2"))
+                .expect("K2.5 by model_type")
+                .model_name(),
+            "kimi-k2.5"
+        );
     }
 
     #[test]

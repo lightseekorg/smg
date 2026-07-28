@@ -38,6 +38,123 @@ pub fn rgb_bytes(image: &DynamicImage) -> (usize, usize, std::borrow::Cow<'_, [u
     }
 }
 
+/// Background pattern composited underneath a transparent image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransparentBgPattern {
+    White,
+    Black,
+    Gray,
+    /// Alternating light/dark squares — the familiar image-editor rendering of
+    /// transparency, which some vision models are trained to read as such.
+    Chessboard,
+}
+
+/// How to flatten an image that carries an alpha channel.
+///
+/// Field names and defaults mirror the reference `TransparentBgConfig` so a
+/// model's `preprocessor_config.json` deserializes straight into this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct TransparentBgConfig {
+    pub pattern: TransparentBgPattern,
+    pub chessboard_square_size: u32,
+    pub chessboard_square_on_top_left: bool,
+    pub chessboard_white_value: u8,
+    pub chessboard_gray_value: u8,
+}
+
+impl Default for TransparentBgConfig {
+    fn default() -> Self {
+        Self {
+            pattern: TransparentBgPattern::Black,
+            chessboard_square_size: 16,
+            chessboard_square_on_top_left: true,
+            chessboard_white_value: 255,
+            chessboard_gray_value: 200,
+        }
+    }
+}
+
+impl TransparentBgConfig {
+    /// Background grey level for pixel `(x, y)`.
+    fn background_at(self, x: u32, y: u32) -> u8 {
+        match self.pattern {
+            TransparentBgPattern::White => 255,
+            TransparentBgPattern::Black => 0,
+            TransparentBgPattern::Gray => 128,
+            TransparentBgPattern::Chessboard => {
+                // A square size of 0 would divide by zero here; the reference
+                // raises on the same input, so clamp instead of panicking.
+                let size = self.chessboard_square_size.max(1);
+                let gray_cell = u32::from(self.chessboard_square_on_top_left);
+                if (y / size + x / size) % 2 == gray_cell {
+                    self.chessboard_gray_value
+                } else {
+                    self.chessboard_white_value
+                }
+            }
+        }
+    }
+}
+
+/// Where in the pipeline an alpha-carrying image gets flattened.
+///
+/// The distinction is load-bearing for [`TransparentBgPattern::Chessboard`]:
+/// the board is generated at the resolution of the image it is composited
+/// onto, so flattening before vs. after the resize yields different square
+/// sizes relative to the content. `BeforeResize` is the default only because
+/// that is the reference's fallback when the key is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransparentBgFillStage {
+    #[default]
+    BeforeResize,
+    AfterResize,
+}
+
+/// A model's complete alpha-flattening behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransparentBg {
+    pub config: TransparentBgConfig,
+    pub stage: TransparentBgFillStage,
+}
+
+/// Alpha-composite `image` over the configured background and return RGB.
+///
+/// Images with no alpha channel convert straight to RGB, matching the
+/// reference's early return. Note that dropping alpha (what `to_rgb8` does on
+/// its own) is *not* equivalent: a fully transparent pixel usually stores RGB
+/// `(0,0,0)`, so it would read as solid black instead of as background.
+pub fn fill_transparent_bg(image: &DynamicImage, config: TransparentBgConfig) -> RgbImage {
+    if !image.color().has_alpha() {
+        return image.to_rgb8();
+    }
+
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut out = Vec::with_capacity(width as usize * height as usize * 3);
+
+    for (y, row) in rgba.as_raw().chunks_exact(width as usize * 4).enumerate() {
+        for (x, px) in row.chunks_exact(4).enumerate() {
+            let bg = f32::from(config.background_at(x as u32, y as u32));
+            let alpha = f32::from(px[3]) / 255.0;
+            let inv = 1.0 - alpha;
+            // numpy's `.astype(np.uint8)` truncates rather than rounds, and so
+            // does an `as` cast; keep them consistent.
+            out.push((alpha * f32::from(px[0]) + inv * bg) as u8);
+            out.push((alpha * f32::from(px[1]) + inv * bg) as u8);
+            out.push((alpha * f32::from(px[2]) + inv * bg) as u8);
+        }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "out holds exactly width*height*3 bytes by construction"
+    )]
+    RgbImage::from_raw(width, height, out).expect("buffer matches image dimensions")
+}
+
 /// Deinterleave interleaved RGB bytes into separate R, G, B f32 planes with
 /// per-channel `scale` and `bias`: `plane[c][i] = rgb[i*3 + c] * scale[c] + bias[c]`.
 ///
@@ -243,12 +360,39 @@ thread_local! {
 /// * `height` - Target height
 /// * `filter` - Interpolation filter (Nearest, Triangle/Bilinear, CatmullRom/Bicubic, Lanczos3)
 pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType) -> DynamicImage {
+    resize_inner(image, width, height, filter, true)
+}
+
+/// Resize without premultiplying by alpha, matching `PIL.Image.resize`.
+///
+/// Pillow convolves every channel independently, alpha included. Our SIMD
+/// resizer premultiplies by default (`ResizeOptions::mul_div_alpha`), which
+/// changes RGB wherever alpha is partial and would diverge from any reference
+/// pipeline that composites *after* the resize.
+pub fn resize_straight_alpha(
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+    filter: FilterType,
+) -> DynamicImage {
+    resize_inner(image, width, height, filter, false)
+}
+
+fn resize_inner(
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+    filter: FilterType,
+    premultiply_alpha: bool,
+) -> DynamicImage {
     let pixel_type = match image.pixel_type() {
         Some(pt) => pt,
         None => return image.resize_exact(width, height, filter),
     };
     let mut dst = FirImage::new(width, height, pixel_type);
-    let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
+    let options = ResizeOptions::new()
+        .resize_alg(to_fir_algorithm(filter))
+        .use_alpha(premultiply_alpha);
     let ok = RESIZER.with(|r| r.borrow_mut().resize(image, &mut dst, &options).is_ok());
     if !ok {
         return image.resize_exact(width, height, filter);
@@ -1115,6 +1259,8 @@ pub fn bicubic_resize(tensor: &Array3<f32>, target_h: usize, target_w: usize) ->
 
 #[cfg(test)]
 mod tests {
+    use image::Rgba;
+
     use super::*;
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
@@ -1349,5 +1495,117 @@ mod tests {
         assert_eq!(rgb[0], 128);
         assert_eq!(rgb[1], 64);
         assert_eq!(rgb[2], 255);
+    }
+
+    fn chessboard(square_size: u32, on_top_left: bool) -> TransparentBgConfig {
+        TransparentBgConfig {
+            pattern: TransparentBgPattern::Chessboard,
+            chessboard_square_size: square_size,
+            chessboard_square_on_top_left: on_top_left,
+            chessboard_white_value: 255,
+            chessboard_gray_value: 180,
+        }
+    }
+
+    /// Mirrors the reference `_create_chessboard_background`:
+    /// `bg[y, x] = gray if (y//s + x//s) % 2 == (1 if on_top_left else 0)`.
+    fn reference_board(config: TransparentBgConfig, x: u32, y: u32) -> u8 {
+        let s = config.chessboard_square_size;
+        let gray_cell = u32::from(config.chessboard_square_on_top_left);
+        if (y / s + x / s) % 2 == gray_cell {
+            config.chessboard_gray_value
+        } else {
+            config.chessboard_white_value
+        }
+    }
+
+    #[test]
+    fn chessboard_background_matches_reference() {
+        for on_top_left in [true, false] {
+            let config = chessboard(8, on_top_left);
+            let transparent =
+                DynamicImage::from(image::RgbaImage::from_pixel(24, 24, Rgba([0, 0, 0, 0])));
+            let out = fill_transparent_bg(&transparent, config);
+            for y in 0..24 {
+                for x in 0..24 {
+                    let expected = reference_board(config, x, y);
+                    assert_eq!(
+                        out.get_pixel(x, y),
+                        &Rgb([expected, expected, expected]),
+                        "({x},{y}) with on_top_left={on_top_left}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fill_transparent_bg_blends_partial_alpha() {
+        // The reference computes `a*img + (1-a)*bg` in float32, then truncates
+        // via `.astype(np.uint8)`. Check that arithmetic exactly.
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, Rgba([200, 100, 50, 64]));
+        img.put_pixel(1, 0, Rgba([200, 100, 50, 192]));
+        let config = TransparentBgConfig {
+            pattern: TransparentBgPattern::Gray, // flat 128, so no board phase
+            ..Default::default()
+        };
+
+        let out = fill_transparent_bg(&DynamicImage::from(img), config);
+        for (x, alpha) in [(0u32, 64.0f32), (1, 192.0)] {
+            let a = alpha / 255.0;
+            for (c, src) in [200.0f32, 100.0, 50.0].into_iter().enumerate() {
+                let expected = (a * src + (1.0 - a) * 128.0) as u8;
+                assert_eq!(out.get_pixel(x, 0)[c], expected, "x={x} channel={c}");
+            }
+        }
+    }
+
+    #[test]
+    fn fill_transparent_bg_is_identity_without_alpha() {
+        let rgb = create_test_image(4, 4, Rgb([12, 34, 56]));
+        let out = fill_transparent_bg(&rgb, chessboard(2, true));
+        assert!(out.pixels().all(|p| p == &Rgb([12, 34, 56])));
+    }
+
+    #[test]
+    fn fill_transparent_bg_survives_zero_square_size() {
+        // The reference raises on square_size=0; clamp instead of dividing by zero.
+        let transparent =
+            DynamicImage::from(image::RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 0])));
+        let out = fill_transparent_bg(&transparent, chessboard(0, true));
+        assert_eq!(out.dimensions(), (4, 4));
+    }
+
+    #[test]
+    fn transparent_bg_config_fills_missing_fields() {
+        // A model may ship only `pattern`; the rest must fall back rather than
+        // failing the whole preprocessor_config parse.
+        let config: TransparentBgConfig =
+            serde_json::from_str(r#"{"pattern": "chessboard"}"#).unwrap();
+        assert_eq!(config.pattern, TransparentBgPattern::Chessboard);
+        assert_eq!(
+            config.chessboard_square_size,
+            TransparentBgConfig::default().chessboard_square_size
+        );
+    }
+
+    #[test]
+    fn straight_alpha_resize_keeps_rgba_and_ignores_premultiply() {
+        // Compositing after the resize needs the alpha channel intact, and RGB
+        // under transparent pixels must not be scaled toward zero.
+        let mut img = image::RgbaImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                img.put_pixel(x, y, Rgba([255, 128, 0, 0]));
+            }
+        }
+        let out = resize_straight_alpha(&DynamicImage::from(img), 2, 2, FilterType::CatmullRom);
+        assert!(out.color().has_alpha(), "alpha must survive the resize");
+        let rgba = out.to_rgba8();
+        for px in rgba.pixels() {
+            assert_eq!(px[0], 255, "premultiplication would zero this out");
+            assert_eq!(px[3], 0);
+        }
     }
 }
