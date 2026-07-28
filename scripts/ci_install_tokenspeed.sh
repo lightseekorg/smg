@@ -18,14 +18,11 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
-# a scheduled bump-and-CI routine) rather than floating against ``main`` —
-# upstream has renamed APIs before and the gRPC servicer broke until we
-# caught up.
-# This pin includes the EPD package promotion (tokenspeed #743):
-# ``tokenspeed.runtime.pd.epd`` moved to ``tokenspeed.runtime.epd``. Keep the
-# encoder-servicer import in sync when advancing it.
-TOKENSPEED_REF="${TOKENSPEED_REF:-815f50cfb21742f41cc1f9a27ee78a1b8e2b04a5}"
+# Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (the
+# engine-watch workflow files an issue when this drifts) rather than
+# floating against ``main`` — upstream has renamed APIs before and the
+# gRPC servicer broke until we caught up.
+TOKENSPEED_REF="${TOKENSPEED_REF:-0f68676069141857a605b8805c13131d9f53e901}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 
@@ -123,6 +120,11 @@ export TOKENSPEED_KERNEL_BACKEND="${TOKENSPEED_KERNEL_BACKEND:-cuda}"
 # every install below resolves the CUDA-13 torch + nvidia deps.
 export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+# Match pip's cross-index best-version semantics (what upstream's pip-based
+# install_deps.sh relies on). uv's default first-index strategy pins each
+# package to the first index carrying it, so the cu130 index's stale
+# ``packaging`` (<=24.1) would block flashinfer-python's packaging>=24.2.
+export UV_INDEX_STRATEGY="${UV_INDEX_STRATEGY:-unsafe-best-match}"
 
 # Keep Cutlass DSL and quack versioning owned by TokenSpeed's requirements.
 # Duplicating those exact pins here makes the install unsatisfiable when
