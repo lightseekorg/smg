@@ -64,6 +64,12 @@ const TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
 const TOOLS_CLOSE: &str = "<|close|>tools<|sep|>";
 const RESPONSE_OPEN: &str = "<|open|>response<|sep|>";
 const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
+const THINK_CLOSE: &str = "<|close|>think<|sep|>";
+
+/// Channel closings that may precede the tools section, one per shape the
+/// generation prompt can leave open: nothing, `think` (thinking mode), or
+/// `response` (non-thinking mode). See [`KimiK3Parser::build_structural_tag`].
+const TOOLS_SECTION_PREFIXES: [&str; 3] = ["", THINK_CLOSE, RESPONSE_CLOSE];
 
 /// Bare XTML control markers, used to assemble structural-tag literals.
 const OPEN: &str = "<|open|>";
@@ -130,11 +136,27 @@ impl KimiK3Parser {
     /// <|close|>tools<|sep|>
     /// ```
     ///
-    /// A `triggered_tags` format dispatches to the tools section once
-    /// `<|open|>tools<|sep|>` appears, then forces the framing above. All K3
-    /// tool calls live in a single section, so its `content` is a `plus` of
-    /// call blocks (native parallel calls) and a lone section suffices — unlike
-    /// K2, which repeats a tag per call. Within a call, arguments are
+    /// A `triggered_tags` format dispatches to the tools section, then forces
+    /// the framing above. All K3 tool calls live in a single section, so its
+    /// `content` is a `plus` of call blocks (native parallel calls) and a lone
+    /// section per prefix suffices — unlike K2, which repeats a tag per call.
+    ///
+    /// # Closing the prefilled channel first
+    ///
+    /// `at_least_one` makes xgrammar mask every token that is not a trigger
+    /// prefix, so the trigger set decides what may precede the tools section.
+    /// K3's generation prompt leaves a channel open (`<|open|>think<|sep|>` in
+    /// thinking mode, `<|open|>response<|sep|>` otherwise), and that channel has
+    /// to close before a sibling `tools` section can start. Triggering on
+    /// `<|open|>tools<|sep|>` alone would forbid the closing marker, forcing a
+    /// tools section nested inside a channel the model can never close — output
+    /// the reasoning parser then swallows whole, leaving `tool_calls` empty.
+    ///
+    /// So emit one tag per prefix in [`TOOLS_SECTION_PREFIXES`] and register each
+    /// closing marker as a trigger, mirroring the Harmony builder, which likewise
+    /// pairs one tag per channel-entry shape with a trigger per prefix.
+    ///
+    /// Within a call, arguments are
     /// constrained per the JSON schema (Strict mode): properties are pinned in
     /// the schema's declared order (the crate enables `serde_json`'s
     /// `preserve_order`), each `required` property mandatory and each optional
@@ -163,17 +185,25 @@ impl KimiK3Parser {
             json!({ "type": "or", "elements": call_formats })
         };
 
-        let tools_section = json!({
-            "begin": TOOLS_OPEN,
-            "content": { "type": "plus", "content": call_choice },
-            "end": TOOLS_CLOSE,
-        });
+        let content = json!({ "type": "plus", "content": call_choice });
+
+        // One tools section per prefill shape; only `begin` differs.
+        let tags: Vec<Value> = TOOLS_SECTION_PREFIXES
+            .iter()
+            .map(|prefix| {
+                json!({
+                    "begin": format!("{prefix}{TOOLS_OPEN}"),
+                    "content": content,
+                    "end": TOOLS_CLOSE,
+                })
+            })
+            .collect();
 
         json!({
             "format": {
                 "type": "triggered_tags",
-                "triggers": [TOOLS_OPEN],
-                "tags": [tools_section],
+                "triggers": [TOOLS_OPEN, THINK_CLOSE, RESPONSE_CLOSE],
+                "tags": tags,
                 "at_least_one": at_least_one,
             }
         })
@@ -993,6 +1023,62 @@ mod tests {
         assert_eq!(section["end"], TOOLS_CLOSE);
         // A tools section is one or more call blocks.
         assert_eq!(section["content"]["type"], "plus");
+    }
+
+    #[test]
+    fn test_build_structural_tag_allows_closing_prefilled_channel() {
+        // Regression: the prompt leaves `think` or `response` open, and
+        // `at_least_one` admits only trigger-prefixed tokens. Each closing
+        // marker therefore needs both a trigger and a matching tag, or the
+        // model can never close the channel it was left in.
+        let tag = KimiK3Parser::build_structural_tag(&sample_tools(), true);
+        let format = &tag["format"];
+
+        let triggers: Vec<&str> = format["triggers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert!(triggers.contains(&THINK_CLOSE), "got: {triggers:?}");
+        assert!(triggers.contains(&RESPONSE_CLOSE), "got: {triggers:?}");
+        assert!(triggers.contains(&TOOLS_OPEN), "got: {triggers:?}");
+
+        let begins: Vec<&str> = format["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["begin"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            begins,
+            vec![
+                TOOLS_OPEN,
+                &format!("{THINK_CLOSE}{TOOLS_OPEN}")[..],
+                &format!("{RESPONSE_CLOSE}{TOOLS_OPEN}")[..],
+            ]
+        );
+
+        // Every variant frames an identical tools section.
+        for section in format["tags"].as_array().unwrap() {
+            assert_eq!(section["end"], TOOLS_CLOSE);
+            assert_eq!(section["content"]["type"], "plus");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_complete_handles_think_close_prefixed_tools_section() {
+        // What the grammar now produces under thinking + forced tools: close
+        // the prefilled think channel, then open tools.
+        let parser = KimiK3Parser::new();
+        let input = THINK_CLOSE.to_string()
+            + &_tools(&[_call("get_weather", 1, &[_arg("city", "string", "SF")])]);
+
+        let (_content, calls) = parser.parse_complete(&input).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"city": "SF"}));
     }
 
     #[test]
