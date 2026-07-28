@@ -1,25 +1,22 @@
 //! Kimi-K2.5 (MoonViT) image processor.
 //!
-//! Matches the HuggingFace `KimiK25VisionProcessor` preprocessing pipeline:
+//! Matches the HuggingFace `KimiK25VisionProcessor` preprocessing pipeline,
+//! which is implemented in [`super::moonvit`] and shared with Kimi-K3. This
+//! module supplies only K2.5's defaults.
 //!
-//! 1. Compute scale to fit within patch limits (never upscale)
-//! 2. Resize with BICUBIC interpolation
-//! 3. Zero-pad to make dimensions divisible by factor (patch_size * merge_size)
-//! 4. Normalize with [0.5, 0.5, 0.5] mean/std
-//! 5. Extract patches as [N, C, patch_size, patch_size]
-//!
-//! Kimi resizes then zero-pads to make dimensions divisible by the alignment
-//! factor (patch_size * merge_size). The model was trained with zero-padded
-//! images, so using direct resize-to-aligned would degrade image quality.
+//! K2.5's checkpoint declares no `transparent_bg_config`, and its reference
+//! processor has no transparency handling at all, so alpha-carrying images are
+//! flattened by dropping the alpha channel — matching `image.convert("RGB")`.
 
-use image::{DynamicImage, GenericImageView};
-use ndarray::Array3;
+use std::ops::Deref;
 
+use image::DynamicImage;
+
+use super::moonvit::{MoonVitConfig, MoonVitProcessorBase};
 use crate::vision::{
     preprocessor_config::PreProcessorConfig,
-    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
-    scratch,
-    transforms::{self, TransformError},
+    processor::{PreprocessedEncoderInputs, VisionPreProcessor},
+    transforms::TransformError,
 };
 
 pub const KIMI_K25_MEAN: [f64; 3] = [0.5, 0.5, 0.5];
@@ -32,21 +29,9 @@ pub const DEFAULT_IN_PATCH_LIMIT: usize = 16384;
 /// Maximum patches along one spatial dimension
 pub const DEFAULT_PATCH_LIMIT_ON_ONE_SIDE: usize = 512;
 
-/// Kimi-K2.5 resize configuration for a single image.
-struct ResizeConfig {
-    new_width: usize,
-    new_height: usize,
-    pad_width: usize,
-    pad_height: usize,
-    num_tokens: usize,
-}
-
 #[derive(Debug, Clone)]
 pub struct KimiK25Processor {
-    patch_size: usize,
-    merge_size: usize,
-    in_patch_limit: usize,
-    patch_limit_on_one_side: usize,
+    inner: MoonVitProcessorBase,
 }
 
 impl Default for KimiK25Processor {
@@ -56,189 +41,63 @@ impl Default for KimiK25Processor {
 }
 
 impl KimiK25Processor {
+    /// Create a processor with Kimi-K2.5's published defaults.
     pub fn new() -> Self {
         Self {
-            patch_size: DEFAULT_PATCH_SIZE,
-            merge_size: DEFAULT_MERGE_SIZE,
-            in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
-            patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
+            inner: MoonVitProcessorBase::new(MoonVitConfig {
+                patch_size: DEFAULT_PATCH_SIZE,
+                merge_size: DEFAULT_MERGE_SIZE,
+                in_patch_limit: DEFAULT_IN_PATCH_LIMIT,
+                patch_limit_on_one_side: DEFAULT_PATCH_LIMIT_ON_ONE_SIDE,
+                mean: KIMI_K25_MEAN,
+                std: KIMI_K25_STD,
+                model_name: "kimi-k2.5",
+            }),
         }
     }
 
     pub fn from_preprocessor_config(config: &PreProcessorConfig) -> Self {
         Self {
-            patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE),
-            merge_size: config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
-            in_patch_limit: config
-                .get_extra::<usize>("in_patch_limit")
-                .unwrap_or(DEFAULT_IN_PATCH_LIMIT),
-            patch_limit_on_one_side: config
-                .get_extra::<usize>("patch_limit_on_one_side")
-                .unwrap_or(DEFAULT_PATCH_LIMIT_ON_ONE_SIDE),
+            inner: MoonVitProcessorBase::new(MoonVitConfig {
+                patch_size: config.get_patch_size(DEFAULT_PATCH_SIZE),
+                merge_size: config.merge_size.unwrap_or(DEFAULT_MERGE_SIZE),
+                in_patch_limit: config
+                    .get_extra::<usize>("in_patch_limit")
+                    .unwrap_or(DEFAULT_IN_PATCH_LIMIT),
+                patch_limit_on_one_side: config
+                    .get_extra::<usize>("patch_limit_on_one_side")
+                    .unwrap_or(DEFAULT_PATCH_LIMIT_ON_ONE_SIDE),
+                mean: KIMI_K25_MEAN,
+                std: KIMI_K25_STD,
+                model_name: "kimi-k2.5",
+            }),
         }
     }
 
     pub fn patch_size(&self) -> usize {
-        self.patch_size
+        self.inner.patch_size()
     }
 
     pub fn merge_size(&self) -> usize {
-        self.merge_size
+        self.inner.merge_size()
     }
+}
 
-    #[inline]
-    fn factor(&self) -> usize {
-        self.patch_size * self.merge_size
-    }
+impl Deref for KimiK25Processor {
+    type Target = MoonVitProcessorBase;
 
-    /// Compute resize dimensions and padding, matching HF `navit_resize_image`.
-    ///
-    /// Never upscales (scale capped at 1.0). Pads with zeros to align to factor.
-    fn compute_resize_config(&self, width: usize, height: usize) -> ResizeConfig {
-        let ps = self.patch_size;
-        let patches_w = (width / ps).max(1) as f64;
-        let patches_h = (height / ps).max(1) as f64;
-
-        let s1 = (self.in_patch_limit as f64 / (patches_w * patches_h)).sqrt();
-        let s2 = (self.patch_limit_on_one_side * ps) as f64 / width as f64;
-        let s3 = (self.patch_limit_on_one_side * ps) as f64 / height as f64;
-        let scale = f64::min(1.0, f64::min(s1, f64::min(s2, s3)));
-
-        let new_w = ((width as f64 * scale) as usize).max(1);
-        let new_h = ((height as f64 * scale) as usize).max(1);
-        let new_w = new_w.min(self.patch_limit_on_one_side * ps);
-        let new_h = new_h.min(self.patch_limit_on_one_side * ps);
-
-        let factor = self.factor();
-        let pad_width = (factor - new_w % factor) % factor;
-        let pad_height = (factor - new_h % factor) % factor;
-
-        let token_height = (new_h + pad_height) / factor;
-        let token_width = (new_w + pad_width) / factor;
-        let num_tokens = token_height * token_width;
-
-        ResizeConfig {
-            new_width: new_w,
-            new_height: new_h,
-            pad_width,
-            pad_height,
-            num_tokens,
-        }
-    }
-
-    /// Fused resize + zero-pad + normalize into a single [C, H_padded, W_padded] tensor.
-    ///
-    /// Avoids intermediate allocations by:
-    /// 1. Allocating the final padded canvas directly
-    /// 2. Pre-filling with normalized black (bias value)
-    /// 3. Deinterleaving + normalizing the image region in one pass
-    fn resize_pad_and_normalize(
-        image: &DynamicImage,
-        cfg: &ResizeConfig,
-        mean: &[f64; 3],
-        std: &[f64; 3],
-    ) -> Array3<f32> {
-        let canvas_h = cfg.new_height + cfg.pad_height;
-        let canvas_w = cfg.new_width + cfg.pad_width;
-
-        // Resize using SIMD-accelerated BICUBIC (fast_image_resize)
-        let resized = transforms::resize(
-            image,
-            cfg.new_width as u32,
-            cfg.new_height as u32,
-            image::imageops::FilterType::CatmullRom,
-        );
-
-        let (img_w, img_h, raw) = transforms::rgb_bytes(&resized);
-        let canvas_pixels = canvas_h * canvas_w;
-
-        // Precompute fused scale/bias: pixel/255 → normalized
-        // output[c][i] = raw[i*3+c] / 255.0 * (1/std[c]) + (-mean[c]/std[c])
-        let scale: [f32; 3] = std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32));
-        let bias: [f32; 3] = std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32));
-
-        // Pooled: this per-image CHW buffer (tens of MB) is recycled by the
-        // caller after patch extraction, keeping its pages mapped and hot.
-        let mut data = scratch::take_f32(3 * canvas_pixels);
-        let (r_plane, rest) = data.split_at_mut(canvas_pixels);
-        let (g_plane, b_plane) = rest.split_at_mut(canvas_pixels);
-
-        // Pre-fill with normalized black: (0/255 - mean) / std = bias
-        r_plane.fill(bias[0]);
-        g_plane.fill(bias[1]);
-        b_plane.fill(bias[2]);
-
-        // Overwrite image region row-by-row using vectorized deinterleave
-        let rw = img_w.min(canvas_w);
-        let rh = img_h.min(canvas_h);
-        for y in 0..rh {
-            let src_row = &raw[y * img_w * 3..y * img_w * 3 + rw * 3];
-            let dst_offset = y * canvas_w;
-            transforms::deinterleave_rgb_to_planes(
-                src_row,
-                &mut r_plane[dst_offset..dst_offset + rw],
-                &mut g_plane[dst_offset..dst_offset + rw],
-                &mut b_plane[dst_offset..dst_offset + rw],
-                scale,
-                bias,
-            );
-        }
-
-        #[expect(
-            clippy::expect_used,
-            reason = "data has exactly 3*canvas_h*canvas_w elements by construction"
-        )]
-        Array3::from_shape_vec((3, canvas_h, canvas_w), data)
-            .expect("shape matches pre-allocated buffer")
-    }
-
-    /// Extract [C, patch_size, patch_size] patches from a contiguous [C, H, W] tensor.
-    ///
-    /// Uses row-based `copy_from_slice` instead of per-element indexing so the
-    /// compiler can auto-vectorize the inner copy.
-    /// Append this image's patches directly into `out` (no per-image intermediate
-    /// Vec): `out` is the pooled batch buffer pre-sized for the whole request.
-    fn extract_patches_into(tensor: &Array3<f32>, patch_size: usize, out: &mut Vec<f32>) {
-        let channels = tensor.shape()[0];
-        let height = tensor.shape()[1];
-        let width = tensor.shape()[2];
-
-        let grid_h = height / patch_size;
-        let grid_w = width / patch_size;
-
-        // Get contiguous slice for direct row addressing
-        let flat = tensor.as_standard_layout();
-        #[expect(
-            clippy::expect_used,
-            reason = "as_standard_layout guarantees contiguous C-order memory"
-        )]
-        let data = flat
-            .as_slice()
-            .expect("as_standard_layout guarantees contiguous memory");
-
-        for gh in 0..grid_h {
-            for gw in 0..grid_w {
-                let h_start = gh * patch_size;
-                let w_start = gw * patch_size;
-                for c in 0..channels {
-                    let plane_offset = c * height * width;
-                    for ph in 0..patch_size {
-                        let row_start = plane_offset + (h_start + ph) * width + w_start;
-                        out.extend_from_slice(&data[row_start..row_start + patch_size]);
-                    }
-                }
-            }
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 impl VisionPreProcessor for KimiK25Processor {
     fn default_mean(&self) -> [f64; 3] {
-        KIMI_K25_MEAN
+        self.inner.default_mean()
     }
 
     fn default_std(&self) -> [f64; 3] {
-        KIMI_K25_STD
+        self.inner.default_std()
     }
 
     fn preprocess(
@@ -246,95 +105,19 @@ impl VisionPreProcessor for KimiK25Processor {
         images: &[DynamicImage],
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        if images.is_empty() {
-            return Err(TransformError::EmptyBatch);
-        }
-
-        let item_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
-        let mean = config.get_image_mean();
-        let std = config.get_image_std();
-
-        // Pre-size the pooled batch buffer exactly (patch_features per patch =
-        // 3 * patch_size^2; this is the data plane's hottest allocation).
-        let patch_features = 3 * self.patch_size * self.patch_size;
-        let mut estimated_total = 0usize;
-        for image in images {
-            let (w, h) = image.dimensions();
-            let cfg = self.compute_resize_config(w as usize, h as usize);
-            let grid_h = (cfg.new_height + cfg.pad_height) / self.patch_size;
-            let grid_w = (cfg.new_width + cfg.pad_width) / self.patch_size;
-            estimated_total += grid_h * grid_w * patch_features;
-        }
-        let mut all_patches: Vec<f32> = scratch::take_f32_cap(estimated_total);
-        let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
-        let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
-        let mut feature_token_counts = Vec::with_capacity(images.len());
-
-        for image in images {
-            let (w, h) = image.dimensions();
-            let cfg = self.compute_resize_config(w as usize, h as usize);
-
-            // Fused resize + pad + normalize in one pass (avoids 2 extra allocations)
-            let tensor = Self::resize_pad_and_normalize(image, &cfg, &mean, &std);
-
-            let padded_h = cfg.new_height + cfg.pad_height;
-            let padded_w = cfg.new_width + cfg.pad_width;
-            let grid_h = padded_h / self.patch_size;
-            let grid_w = padded_w / self.patch_size;
-            let grid_t = 1usize;
-
-            grid_thw_data.push(grid_t as i64);
-            grid_thw_data.push(grid_h as i64);
-            grid_thw_data.push(grid_w as i64);
-
-            let num_patches = grid_h * grid_w;
-            feature_token_counts.push(cfg.num_tokens);
-
-            // Patchify directly into the pooled batch buffer, then recycle the
-            // CHW tensor's storage (standard layout, offset 0) for the next image.
-            Self::extract_patches_into(&tensor, self.patch_size, &mut all_patches);
-            let (storage, _offset) = tensor.into_raw_vec_and_offset();
-            scratch::give_f32(storage);
-            patches_per_image.push(num_patches as i64);
-        }
-
-        let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
-        let encoder_input = ndarray::Array4::from_shape_vec(
-            (total_patches, 3, self.patch_size, self.patch_size),
-            all_patches,
-        )
-        .map_err(|e| {
-            TransformError::ShapeError(format!(
-                "Failed to create encoder_input [{total_patches}, 3, {}, {}]: {e}",
-                self.patch_size, self.patch_size
-            ))
-        })?;
-
-        let result =
-            PreprocessedEncoderInputs::new(encoder_input, feature_token_counts, item_sizes)
-                .with_extra(
-                    "grid_thws",
-                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
-                )
-                .with_extra(
-                    "patches_per_image",
-                    ModelSpecificValue::int_1d(patches_per_image),
-                );
-
-        Ok(result)
+        self.inner.preprocess(images, config)
     }
 
-    fn calculate_num_tokens(&self, width: u32, height: u32, _config: &PreProcessorConfig) -> usize {
-        self.compute_resize_config(width as usize, height as usize)
-            .num_tokens
+    fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
+        self.inner.calculate_num_tokens(width, height, config)
     }
 
     fn model_name(&self) -> &'static str {
-        "kimi-k2.5"
+        self.inner.model_name()
     }
 
-    fn get_processed_size(&self, _config: &PreProcessorConfig) -> Option<(u32, u32)> {
-        None
+    fn get_processed_size(&self, config: &PreProcessorConfig) -> Option<(u32, u32)> {
+        self.inner.get_processed_size(config)
     }
 }
 
@@ -343,7 +126,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::*;
-    use crate::vision::preprocessor_config::PatchSize;
+    use crate::vision::{preprocessor_config::PatchSize, processor::ModelSpecificValue};
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
         DynamicImage::from(RgbImage::from_pixel(width, height, color))
@@ -566,7 +349,7 @@ mod tests {
             ..Default::default()
         };
         let p = KimiK25Processor::from_preprocessor_config(&config);
-        assert_eq!(p.in_patch_limit, 8192);
-        assert_eq!(p.patch_limit_on_one_side, 256);
+        assert_eq!(p.in_patch_limit(), 8192);
+        assert_eq!(p.patch_limit_on_one_side(), 256);
     }
 }

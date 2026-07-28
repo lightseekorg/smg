@@ -13,6 +13,7 @@
 //! - **Qwen3-Omni** (`qwen3_omni_vision`): Qwen3 vision preprocessing with Omni video limits and timing metadata
 //! - **Inkling** (`inkling`): Optional aspect-preserving resize with CLIP normalization and padded patch columns
 //! - **Kimi-K2.5** (`kimi_k25`): MoonViT resize and zero-padding to patch alignment
+//! - **Kimi-K3** (`kimi_k3`): Same MoonViT stack as K2.5 with K3's own parameters
 //! - **Phi3-Vision** (`phi3_vision`): Dynamic HD transform with 336x336 tiles
 //! - **Phi4-Vision** (`phi4_vision`): Dynamic HD transform with 448x448 tiles and SiGLIP encoder
 //! - **LLaMA 4 Vision** (`llama4_vision`): Tile-based processing with 336x336 tiles and global tile
@@ -20,8 +21,10 @@
 
 pub mod inkling;
 pub mod kimi_k25;
+pub mod kimi_k3;
 pub mod llama4_vision;
 pub mod llava;
+pub mod moonvit;
 pub mod phi3_vision;
 pub mod phi4_vision;
 pub mod pixtral;
@@ -32,6 +35,7 @@ pub mod qwen_vl_base;
 
 pub use inkling::InklingImageProcessor;
 pub use kimi_k25::KimiK25Processor;
+pub use kimi_k3::KimiK3Processor;
 pub use llama4_vision::Llama4VisionProcessor;
 pub use llava::{ImageAspectRatio, LlavaNextProcessor, LlavaProcessor};
 pub use phi3_vision::Phi3VisionProcessor;

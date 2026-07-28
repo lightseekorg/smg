@@ -325,7 +325,7 @@ impl VisionProcessorRegistry {
             Box::new(super::processors::Llama4VisionProcessor::new()),
         );
 
-        // Register Kimi-K2.5 Vision (also used by Kimi-K3, same MoonViT stack)
+        // Register Kimi-K2.5 Vision
         registry.register(
             "kimi-k2",
             Box::new(super::processors::KimiK25Processor::new()),
@@ -334,13 +334,16 @@ impl VisionProcessorRegistry {
             "kimi_k2",
             Box::new(super::processors::KimiK25Processor::new()),
         );
+
+        // Register Kimi-K3 Vision. Shares K2.5's MoonViT stack but keeps its own
+        // processor: the reference ships a separate class whose parameters differ.
         registry.register(
             "kimi-k3",
-            Box::new(super::processors::KimiK25Processor::new()),
+            Box::new(super::processors::KimiK3Processor::new()),
         );
         registry.register(
             "kimi_k3",
-            Box::new(super::processors::KimiK25Processor::new()),
+            Box::new(super::processors::KimiK3Processor::new()),
         );
 
         registry
