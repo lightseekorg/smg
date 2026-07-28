@@ -298,35 +298,11 @@ mod tests {
     }
 
     #[test]
-    fn test_k25_drops_alpha_rather_than_compositing() {
-        // K2.5 ships no transparent_bg_config: a fully transparent pixel keeps
-        // its stored RGB (0,0,0) → normalized -1.0, matching `.convert("RGB")`.
-        let p = KimiK25Processor::new();
-        let config = PreProcessorConfig {
-            image_mean: Some(KIMI_K25_MEAN.to_vec()),
-            image_std: Some(KIMI_K25_STD.to_vec()),
-            ..Default::default()
-        };
-        let transparent = DynamicImage::from(image::RgbaImage::from_pixel(
-            56,
-            56,
-            image::Rgba([0, 0, 0, 0]),
-        ));
-        let result = p.preprocess(&[transparent], &config).unwrap();
-        let flat = result.encoder_input_flat();
-        assert!(
-            flat.iter().all(|&v| (v - (-1.0)).abs() < 1e-6),
-            "K2.5 must drop alpha, leaving normalized black"
-        );
-    }
-
-    #[test]
     fn test_k25_drops_alpha_before_resizing() {
-        // `.convert("RGB")` ignores alpha and keeps the stored RGB, and the
-        // reference does it at load time — before any resize. Resizing the RGBA
-        // image first would premultiply (both `fast_image_resize` and PIL do),
-        // discarding the colour underneath transparent pixels instead of
-        // convolving it. Fully transparent red must therefore survive as red.
+        // K2.5 ships no transparent_bg_config, so alpha is dropped and the
+        // stored RGB kept. The reference does that at load time, before any
+        // resize; resizing RGBA first would premultiply and discard the colour
+        // under transparent pixels, so transparent red must survive as red.
         let p = KimiK25Processor::new();
         let config = PreProcessorConfig {
             image_mean: Some(KIMI_K25_MEAN.to_vec()),

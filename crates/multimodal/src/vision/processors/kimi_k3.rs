@@ -40,12 +40,9 @@ pub const DEFAULT_IN_PATCH_LIMIT: usize = 65536;
 pub const DEFAULT_PATCH_LIMIT_ON_ONE_SIDE: usize = 512;
 
 /// The `transparent_bg_config` shipped with `moonshotai/Kimi-K3`, verbatim from
-/// the checkpoint's `preprocessor_config.json`.
-///
-/// Note the stage. The reference falls back to `"before_resize"` when the key is
-/// absent, but K3 ships `"after_resize"`; these defaults describe K3, not the
-/// reference's generic fallback, so another MoonViT checkpoint must declare its
-/// own stage rather than inherit this one.
+/// the checkpoint's `preprocessor_config.json`. These values describe K3 only —
+/// note the stage is `"after_resize"` where the reference's fallback for a
+/// missing key is `"before_resize"`.
 fn default_transparent_bg() -> TransparentBg {
     TransparentBg {
         config: TransparentBgConfig {
@@ -102,18 +99,13 @@ impl KimiK3Processor {
 
     /// Overlay the model's own transparency settings, if it ships any.
     ///
-    /// The registry hands out one shared instance built from the defaults
-    /// above, so this is the only point at which a checkpoint's real config can
-    /// take effect. An absent or malformed `transparent_bg_config` keeps K3's
-    /// shipped board rather than silently disabling compositing:
-    /// `preprocessor_config.json` is optional in this runtime and each
-    /// processor is expected to carry its own model's defaults (see
-    /// `grpc::multimodal::config`).
-    ///
-    /// That does diverge from the reference, which reads a missing
-    /// `transparent_bg_config` as "drop alpha". A checkpoint that genuinely
-    /// wants the alpha-dropping path has to say so explicitly with
-    /// `"transparent_bg_config": null`.
+    /// The registry hands out one shared instance, so this is the only point at
+    /// which a checkpoint's real config can take effect. An absent or malformed
+    /// key keeps K3's shipped board rather than silently disabling compositing,
+    /// because `preprocessor_config.json` is optional in this runtime (see
+    /// `grpc::multimodal::config`). That diverges from the reference, which
+    /// reads a missing key as "drop alpha", so a checkpoint wanting that path
+    /// must say `"transparent_bg_config": null` explicitly.
     fn resolved_transparent_bg(&self, config: &PreProcessorConfig) -> Option<TransparentBg> {
         if config
             .extra
@@ -395,9 +387,8 @@ mod tests {
 
     #[test]
     fn test_explicit_null_config_disables_compositing() {
-        // Absence keeps K3's shipped board, so a checkpoint that really wants
-        // the reference's alpha-dropping path needs an explicit null. Without
-        // this escape hatch the compiled-in default could not be turned off.
+        // Absence keeps K3's shipped board, so an explicit null is the only way
+        // to reach the reference's alpha-dropping path.
         let mut config = norm_config();
         config
             .extra
@@ -419,10 +410,10 @@ mod tests {
 
     #[test]
     fn test_after_resize_ignores_colour_hidden_under_alpha() {
-        // The reference resizes the RGBA image with PIL before compositing, and
-        // PIL premultiplies for RGBA (verified against Pillow 11.2.1). Colour
-        // stored underneath fully transparent pixels therefore cannot bleed
-        // into their neighbours, so swapping it must not change the tensor.
+        // The reference resizes RGBA with PIL before compositing, and PIL
+        // premultiplies (verified against Pillow 11.2.1), so colour under fully
+        // transparent pixels cannot bleed into neighbours: swapping it must not
+        // change the tensor.
         let p = KimiK3Processor::new();
         let mut config = norm_config();
         // Cap the long side at 2 * 14 px so a real downscale happens.

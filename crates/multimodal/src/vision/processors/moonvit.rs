@@ -122,18 +122,11 @@ pub struct ResizeConfig {
 /// 2. Pre-filling with normalized black (bias value)
 /// 3. Deinterleaving + normalizing the image region in one pass
 ///
-/// When `transparent_bg` is set and the image carries alpha, the alpha channel
-/// is composited over that background at the configured stage. K3 ships
-/// `"after_resize"`, and that ordering is load-bearing: a chessboard background
-/// is generated at the resolution of whatever it is painted onto, so the
-/// squares come out a different size relative to the content if it is applied
-/// to the source image instead.
-///
-/// Models with no `transparent_bg_config` pass `None` and drop alpha *before*
-/// the resize. That ordering matters too: the reference converts at load time
-/// (`_to_pil` -> `.convert("RGB")`), so it convolves the RGB stored underneath
-/// transparent pixels, whereas resizing RGBA first would premultiply and
-/// exclude it.
+/// Alpha handling follows the reference. With a `transparent_bg` the image is
+/// composited at the configured stage; K3 ships `"after_resize"`, and the
+/// ordering is load-bearing because a chessboard is generated at the resolution
+/// of whatever it is painted onto. With `None` alpha is dropped *before* the
+/// resize, matching the reference's `.convert("RGB")` at load time.
 fn resize_pad_and_normalize(
     image: &DynamicImage,
     cfg: &ResizeConfig,
@@ -159,9 +152,8 @@ fn resize_pad_and_normalize(
     };
     let source = pre_flattened.as_ref().unwrap_or(image);
 
-    // Resize using SIMD-accelerated BICUBIC (fast_image_resize). Where alpha
-    // survives to here it is premultiplied for the convolution, which is what
-    // `PIL.Image.resize` does for RGBA — the reference's resizer.
+    // SIMD-accelerated BICUBIC (fast_image_resize). Surviving alpha is
+    // premultiplied, as `PIL.Image.resize` does for RGBA.
     let after_resize = bg.is_some_and(|b| b.stage == TransparentBgFillStage::AfterResize);
     let resized = transforms::resize(
         source,

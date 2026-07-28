@@ -361,9 +361,8 @@ thread_local! {
 /// * `filter` - Interpolation filter (Nearest, Triangle/Bilinear, CatmullRom/Bicubic, Lanczos3)
 ///
 /// Alpha-carrying input is premultiplied for the convolution and un-multiplied
-/// afterwards (`fast_image_resize` defaults `mul_div_alpha` to `true`). That is
-/// also what `PIL.Image.resize` does for `RGBA`, so RGB under transparent
-/// pixels does not bleed into its neighbours on either side.
+/// afterwards (`fast_image_resize` defaults `mul_div_alpha` to `true`), which is
+/// what `PIL.Image.resize` does for `RGBA`.
 pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType) -> DynamicImage {
     let pixel_type = match image.pixel_type() {
         Some(pt) => pt,
@@ -1565,44 +1564,6 @@ mod tests {
         assert_eq!(
             config.chessboard_square_size,
             TransparentBgConfig::default().chessboard_square_size
-        );
-    }
-
-    #[test]
-    fn rgba_resize_premultiplies_like_pil_and_interpolates_alpha() {
-        // Two opaque red rows over two fully transparent green rows. Verified
-        // against Pillow 11.2.1: `Image.resize` on RGBA matches
-        // `convert("RGBa").resize(...).convert("RGBA")` exactly and differs
-        // from convolving the bands independently, so the transparent green
-        // must contribute no colour at all.
-        let mut img = image::RgbaImage::new(4, 4);
-        for y in 0..4 {
-            let px = if y < 2 {
-                Rgba([255, 0, 0, 255])
-            } else {
-                Rgba([0, 255, 0, 0])
-            };
-            for x in 0..4 {
-                img.put_pixel(x, y, px);
-            }
-        }
-
-        let out = resize(&DynamicImage::from(img), 2, 2, FilterType::CatmullRom);
-        assert!(out.color().has_alpha(), "alpha must survive the resize");
-        let rgba = out.to_rgba8();
-
-        for px in rgba.pixels() {
-            assert!(
-                px[0] > px[1],
-                "green under alpha=0 must not bleed into RGB, got {px:?}"
-            );
-        }
-        // Alpha itself is still convolved: the two output rows straddle the
-        // opaque/transparent boundary, so they cannot come out equal.
-        assert_ne!(
-            rgba.get_pixel(0, 0)[3],
-            rgba.get_pixel(0, 1)[3],
-            "alpha channel must be resized, not carried through untouched"
         );
     }
 }
