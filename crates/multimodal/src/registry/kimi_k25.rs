@@ -28,12 +28,9 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
-        // K2.5 only. Kimi-K3 shares the `<|media_pad|>` fill token
-        // (media_placeholder_token_id 163605) and the patchification layout, but
-        // its prompt carries a per-image `<|media_begin|>image {w}x{h}…` wrapper
-        // that K2.5's chat template emits itself — see `registry::kimi_k3`. The
-        // two do not share a pixel pipeline either; `vision::processors::kimi_k3`
-        // has the patch budget and alpha-compositing differences.
+        // K2.5 only — K3 shares the `<|media_pad|>` fill token and the
+        // patchification layout, but neither the prompt shape nor the pixel
+        // pipeline. See `registry::kimi_k3` and `vision::processors::kimi_k3`.
         let id = metadata.model_id.to_ascii_lowercase();
         id.contains("kimi") && id.contains("k2")
             || metadata

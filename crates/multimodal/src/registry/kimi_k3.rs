@@ -18,20 +18,14 @@ const MEDIA_END: &str = "<|media_end|>";
 
 /// Kimi-K3.
 ///
-/// K3 shares K2.5's NaViT transport layout and `<|media_pad|>` fill token, but
-/// not its prompt shape: the K3 checkpoint ships no jinja chat template, and its
-/// Python renderer splices a per-image `<|media_begin|>image {w}x{h}
-/// <|media_content|>…<|media_end|>` block into the raw text at each
-/// `<|kimi_image_placeholder|>` marker (`kimi_k3_processor.py::update_raw_text`).
-/// K2.5's template emits the wrapper itself and carries no dimensions, so the two
-/// families need separate specs.
+/// Shares K2.5's MoonViT transport layout and `<|media_pad|>` fill token, but
+/// not its prompt shape: K3 wraps each image in a block carrying the pre-resize
+/// dimensions, while K2.5's chat template emits its own dimensionless wrapper.
 ///
-/// SMG cannot build that block while rendering — the chat template runs before
-/// any media is fetched, so the image dimensions do not exist yet. It is built
-/// here instead, from the pre-resize sizes the preprocessor reports, which is
-/// where vLLM builds it too (`kimi_k3.py::_get_prompt_updates`). The renderer
-/// emits a bare `<|media_pad|>` anchor per image and this replacement expands it
-/// into the full wrapper.
+/// That block cannot be built while rendering — the chat template runs before
+/// any media is fetched, so the dimensions do not exist yet. It is built here
+/// instead, from the sizes the preprocessor reports, as vLLM does in
+/// `kimi_k3.py::_get_prompt_updates`.
 pub(super) struct KimiK3VisionSpec;
 
 impl KimiK3VisionSpec {
@@ -45,11 +39,11 @@ impl KimiK3VisionSpec {
             })
     }
 
-    /// Encode ordinary text (no special tokens) into token ids.
+    /// Encode ordinary text into token ids.
     ///
     /// The dimension text sits between two special tokens, which are hard
-    /// segment boundaries for the tiktoken encoder, so encoding it on its own
-    /// yields the same ids the reference gets from encoding the whole block.
+    /// segment boundaries for the encoder, so encoding it alone yields the same
+    /// ids as the reference's one-shot encoding of the whole block.
     fn encode_plain_text(metadata: &ModelMetadata, text: &str) -> RegistryResult<Vec<TokenId>> {
         let encoding = metadata.tokenizer.encode(text, false).map_err(|_| {
             ModelRegistryError::TextEncodingFailed {
@@ -109,10 +103,9 @@ impl ModelProcessorSpec for KimiK3VisionSpec {
         let media_content = metadata.token_id(MEDIA_CONTENT)?;
         let media_end = metadata.token_id(MEDIA_END)?;
 
-        // MoonViT reports `item_sizes` as the decoded `(width, height)` before any
-        // resize, which is exactly the pair the reference prints. The caller
-        // checks both vectors against the media count, so a short zip here would
-        // already have been rejected upstream.
+        // `item_sizes` is the decoded `(width, height)` before any resize — the
+        // pair the reference prints. The caller already checks both vectors
+        // against the media count, so a short zip cannot reach here.
         preprocessed
             .feature_token_counts
             .iter()
@@ -165,13 +158,12 @@ mod tests {
         types::{Modality, PlaceholderRange, TokenId},
     };
 
-    /// Token ids the K3 checkpoint actually assigns to the wrapper.
+    /// Wrapper token ids as the K3 checkpoint assigns them.
     const MEDIA_BEGIN_ID: u32 = 163602;
     const MEDIA_CONTENT_ID: u32 = 163603;
     const MEDIA_END_ID: u32 = 163604;
     const MEDIA_PAD_ID: u32 = 163605;
-    /// Offset of the byte encoder used by `TestTokenizer::with_byte_encoder`,
-    /// chosen so plain-text ids cannot collide with the media token ids.
+    /// Byte-encoder offset, chosen so text ids cannot collide with media ids.
     const TEXT_BASE: u32 = 1000;
 
     fn k3_tokenizer() -> TestTokenizer {
@@ -266,8 +258,7 @@ mod tests {
         assert_eq!(rep.tokens, expected);
 
         // Only the pad run is an encoder-feature position; the wrapper is text.
-        // The pads start after `<|media_begin|>`, the dimensions, and
-        // `<|media_content|>`.
+        // Pads start after `<|media_begin|>`, the dims, and `<|media_content|>`.
         assert_eq!(
             rep.feature_ranges,
             Some(vec![PlaceholderRange {

@@ -182,11 +182,9 @@ fn thinking_effort_invalid_is_rejected() {
 /// `apply_chat_template`.
 ///
 /// `apply_chat_template` stands in for the checkpoint's `tokenization_kimi`
-/// wrapper, not for `build_chat_segments`, so its output is the plain fixture
-/// *plus* the `max` effort directive the wrapper's
-/// `setdefault("thinking_effort", "max")` produces. The expected bytes are the
-/// `thinking_effort_low` fixture with its effort word swapped — the directive is
-/// otherwise identical at every level.
+/// wrapper, so its output is the plain fixture *plus* the `max` effort
+/// directive. The expected bytes are the `thinking_effort_low` fixture with its
+/// effort word swapped — the directive is identical at every level.
 #[test]
 fn tokenizer_loads_and_renders_k3_without_chat_template() {
     let dir = TempDir::new().unwrap();

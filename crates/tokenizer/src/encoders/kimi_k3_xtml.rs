@@ -30,16 +30,11 @@
 //!
 //! # Image prompts are not built here
 //!
-//! The reference renders each image as a `<|kimi_image_placeholder|>` marker and
-//! a caller-supplied `image_prompts` entry —
-//! `<|media_begin|>image {w}x{h}<|media_content|><|media_pad|><|media_end|>` —
-//! which `kimi_k3_processor.py::update_raw_text` splices in afterwards. SMG
-//! cannot do that here: this renderer runs before any media is fetched, so the
-//! dimensions do not exist yet. The gateway instead renders one bare
-//! `<|media_pad|>` anchor per image (media parts arrive already flattened into
-//! the message string) and expands it into the full block during prompt
-//! expansion, from the preprocessor's reported sizes — see
-//! `llm_multimodal::registry::kimi_k3`.
+//! The reference splices a per-image `<|media_begin|>image {w}x{h}…` block in
+//! afterwards (`kimi_k3_processor.py::update_raw_text`). This renderer runs
+//! before any media is fetched, so those dimensions do not exist yet: the
+//! gateway emits one bare `<|media_pad|>` anchor per image and expands it
+//! during prompt expansion — see `llm_multimodal::registry::kimi_k3`.
 
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
@@ -54,17 +49,15 @@ const IMAGE_PLACEHOLDER: &str = "<|kimi_image_placeholder|>";
 
 /// The effort the reference applies when a request names none.
 ///
-/// The two reference layers differ here: `build_chat_segments` injects no
-/// directive at all, while the served entry point above it
-/// (`tokenization_kimi.apply_chat_template`, which vLLM calls) runs
-/// `kwargs.setdefault("thinking_effort", "max")` first. So every served K3
-/// request carries the directive even though the renderer itself never adds one.
+/// `build_chat_segments` injects no directive; the served entry point above it
+/// (`tokenization_kimi.apply_chat_template`, which vLLM calls) first runs
+/// `kwargs.setdefault("thinking_effort", "max")`.
 pub const DEFAULT_THINKING_EFFORT: &str = "max";
 
 /// Render a Kimi-K3 chat prompt to an XTML `String`, exactly as the Python
-/// `build_chat_segments` does — including emitting no `thinking-effort`
-/// directive when the request names no effort. Callers standing in for the
-/// served entry point want [`apply_kimi_k3_xtml_with_effort_default`].
+/// `build_chat_segments` does — emitting no `thinking-effort` directive when
+/// the request names none. Callers standing in for the served entry point want
+/// [`apply_kimi_k3_xtml_with_effort_default`].
 ///
 /// `params.tools` (when non-empty) produces the leading `tool-declare` system
 /// message. `params.add_generation_prompt` appends the assistant generation
@@ -130,12 +123,10 @@ fn render_xtml(
     //      `minimal`/`none` already switch thinking off upstream and `medium` has
     //      no K3 equivalent, so such values emit no directive rather than erroring
     //      on an otherwise-valid OpenAI field.
-    //   3. Absent both, `default_effort` — `None` for a bare `build_chat_segments`
-    //      port, `Some("max")` for the served entry point. See
-    //      [`DEFAULT_THINKING_EFFORT`].
+    //   3. Absent both, `default_effort` — `None` for the bare port, `Some("max")`
+    //      for the served entry point. See [`DEFAULT_THINKING_EFFORT`].
     //
-    // `preserve_thinking` (which some callers send alongside the effort) is not
-    // read by the reference renderer and is ignored.
+    // `preserve_thinking` is not read by the reference renderer and is ignored.
     if thinking {
         if let Some(effort_val) = params
             .template_kwargs
@@ -352,11 +343,9 @@ fn push_internal_system_message(out: &mut String, message_type: &str, body: &str
 
 /// Render `content` (string, or an OpenAI content-part array) into `out`.
 ///
-/// Image parts in an array emit the reference's bare
-/// `<|kimi_image_placeholder|>` marker. The gateway does not reach that branch:
-/// K3 reports the `String` content format, so media parts are already flattened
-/// into the message text as `<|media_pad|>` anchors before rendering (see module
-/// docs).
+/// Image parts emit the reference's bare `<|kimi_image_placeholder|>` marker.
+/// The gateway does not reach that branch: K3 reports the `String` content
+/// format, so media parts arrive already flattened into the message text.
 fn push_content(out: &mut String, content: Option<&Value>) {
     match content {
         Some(Value::String(s)) => out.push_str(s),
@@ -1029,7 +1018,7 @@ mod tests {
 
     #[test]
     fn no_effort_directive_when_unspecified() {
-        // Byte-parity with `build_chat_segments`: absent both keys, this entry
+        // Byte-parity with `build_chat_segments`: absent both keys this entry
         // point injects nothing. The served wrapper above it does — see
         // `served_entry_point_defaults_effort_to_max`.
         let messages = vec![json!({"role": "user", "content": "Hi"})];

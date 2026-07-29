@@ -556,9 +556,8 @@ impl TokenizerTrait for TiktokenTokenizer {
         match self.renderer {
             Renderer::Jinja => self.chat_template.apply(messages, params),
             Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
-            // This is the layer the K3 checkpoint's own `apply_chat_template`
-            // sits at, so it applies that wrapper's `thinking_effort` default —
-            // the bare renderer stays a faithful `build_chat_segments` port.
+            // This is the layer the checkpoint's own `apply_chat_template` sits
+            // at, so it applies that wrapper's `thinking_effort` default.
             Renderer::KimiK3Xtml => apply_kimi_k3_xtml_with_effort_default(messages, &params),
         }
     }

@@ -115,11 +115,11 @@ pub(super) mod test_helpers {
             }
         }
 
-        /// Encode ordinary text as one id per byte, offset by `base`.
+        /// Encode text as one id per byte, offset by `base`.
         ///
-        /// Off by default (plain text encodes to nothing) so specs that only
-        /// look up special tokens are unaffected. Specs that splice encoded
-        /// text into a replacement enable it to assert the exact layout.
+        /// Off by default so specs that only look up special tokens are
+        /// unaffected; specs that splice encoded text into a replacement
+        /// enable it to assert the exact layout.
         pub fn with_byte_encoder(mut self, base: u32) -> Self {
             self.text_base = Some(base);
             self
