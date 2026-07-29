@@ -28,16 +28,17 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
-        // Kimi-K3 uses the same `<|media_pad|>` placeholder
-        // (media_placeholder_token_id 163605), patchification layout and
-        // prompt-replacement shape, so it shares this spec. Note that the two
-        // do *not* share a pixel pipeline — see `vision::processors::kimi_k3`
-        // for the patch budget and alpha-compositing differences.
+        // K2.5 only. Kimi-K3 shares the `<|media_pad|>` fill token
+        // (media_placeholder_token_id 163605) and the patchification layout, but
+        // its prompt carries a per-image `<|media_begin|>image {w}x{h}…` wrapper
+        // that K2.5's chat template emits itself — see `registry::kimi_k3`. The
+        // two do not share a pixel pipeline either; `vision::processors::kimi_k3`
+        // has the patch budget and alpha-compositing differences.
         let id = metadata.model_id.to_ascii_lowercase();
-        id.contains("kimi") && (id.contains("k2") || id.contains("k3"))
+        id.contains("kimi") && id.contains("k2")
             || metadata
                 .config_model_type()
-                .is_some_and(|mt| mt == "kimi_k25" || mt == "kimi_k3")
+                .is_some_and(|mt| mt == "kimi_k25")
     }
 
     fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -126,31 +127,25 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_matches_model_id_and_model_type() {
+    fn kimi_k3_does_not_use_the_k25_spec() {
+        // K3's prompt carries per-image dimensions that this spec cannot emit,
+        // so it must route to `kimi_k3` by model_id and by model_type alike.
         let tokenizer = TestTokenizer::new(&[("<|media_pad|>", 163605)]);
-        // Match by model_id containing kimi + k3.
         let config = json!({
             "model_type": "kimi_k3",
             "media_placeholder_token_id": 163605
         });
-        let metadata = ModelMetadata {
-            model_id: "moonshotai/Kimi-K3",
-            tokenizer: &tokenizer,
-            config: &config,
-        };
         let registry = ModelRegistry::new();
-        let spec = registry
-            .lookup(&metadata)
-            .expect("kimi_k3 -> kimi_k25 spec");
-        assert_eq!(spec.name(), "kimi_k25");
 
-        // Also match by model_type alone (id without a k3 hint).
-        let metadata_by_type = ModelMetadata {
-            model_id: "internal/checkpoint-final",
-            tokenizer: &tokenizer,
-            config: &config,
-        };
-        assert!(registry.lookup(&metadata_by_type).is_some());
+        for model_id in ["moonshotai/Kimi-K3", "internal/checkpoint-final"] {
+            let metadata = ModelMetadata {
+                model_id,
+                tokenizer: &tokenizer,
+                config: &config,
+            };
+            let spec = registry.lookup(&metadata).expect("kimi_k3 spec");
+            assert_eq!(spec.name(), "kimi_k3", "model_id {model_id}");
+        }
     }
 
     #[test]

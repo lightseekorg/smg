@@ -1,5 +1,6 @@
 mod inkling;
 mod kimi_k25;
+mod kimi_k3;
 mod llama4;
 mod llava;
 mod phi3_v;
@@ -11,6 +12,7 @@ mod traits;
 
 use inkling::InklingSpec;
 use kimi_k25::KimiK25VisionSpec;
+use kimi_k3::KimiK3VisionSpec;
 use llama4::Llama4Spec;
 use llava::{LlavaNextSpec, LlavaSpec};
 use once_cell::sync::Lazy;
@@ -33,6 +35,9 @@ impl ModelRegistry {
         Self {
             specs: vec![
                 LazySpec::new(|| Box::new(InklingSpec)),
+                // Kimi-K3 must be registered before Kimi-K2.5: the two families
+                // share a transport layout but not a prompt shape.
+                LazySpec::new(|| Box::new(KimiK3VisionSpec)),
                 LazySpec::new(|| Box::new(KimiK25VisionSpec)),
                 LazySpec::new(|| Box::new(Llama4Spec)),
                 // LlavaNext must be registered before Llava so "llava_next" model_type matches first.
@@ -95,6 +100,7 @@ pub(super) mod test_helpers {
 
     pub struct TestTokenizer {
         vocab: HashMap<String, u32>,
+        text_base: Option<u32>,
     }
 
     impl TestTokenizer {
@@ -103,13 +109,31 @@ pub(super) mod test_helpers {
                 .iter()
                 .map(|(token, id)| ((*token).to_string(), *id))
                 .collect();
-            Self { vocab }
+            Self {
+                vocab,
+                text_base: None,
+            }
+        }
+
+        /// Encode ordinary text as one id per byte, offset by `base`.
+        ///
+        /// Off by default (plain text encodes to nothing) so specs that only
+        /// look up special tokens are unaffected. Specs that splice encoded
+        /// text into a replacement enable it to assert the exact layout.
+        pub fn with_byte_encoder(mut self, base: u32) -> Self {
+            self.text_base = Some(base);
+            self
         }
     }
 
     impl Encoder for TestTokenizer {
-        fn encode(&self, _input: &str, _add_special_tokens: bool) -> anyhow::Result<Encoding> {
-            Ok(Encoding::Plain(Vec::new()))
+        fn encode(&self, input: &str, _add_special_tokens: bool) -> anyhow::Result<Encoding> {
+            let Some(base) = self.text_base else {
+                return Ok(Encoding::Plain(Vec::new()));
+            };
+            Ok(Encoding::Plain(
+                input.bytes().map(|b| base + u32::from(b)).collect(),
+            ))
         }
 
         fn encode_batch(
@@ -119,7 +143,7 @@ pub(super) mod test_helpers {
         ) -> anyhow::Result<Vec<Encoding>> {
             inputs
                 .iter()
-                .map(|_| self.encode("", add_special_tokens))
+                .map(|input| self.encode(input, add_special_tokens))
                 .collect()
         }
     }
