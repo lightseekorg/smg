@@ -25,6 +25,7 @@ use super::{
     slots::SlotPool,
     Class, ClassRuntimeConfig, SchedulerSettings,
 };
+use crate::worker::WorkerCapacity;
 
 /// Max time to wait, after firing a preemption cancel, for the victim's slot
 /// to free before falling back to enqueue.
@@ -479,6 +480,25 @@ impl PriorityScheduler {
     /// on the scheduler fires `release_notify`, which lets the
     /// dispatcher observe the failed upgrade and exit.
     pub fn spawn_dispatcher(self: &Arc<Self>, capacity_watch: watch::Receiver<u16>) {
+        self.spawn_dispatcher_inner(capacity_watch, None);
+    }
+
+    /// Spawn the dispatcher while retaining the capacity tracker that owns
+    /// the watch sender. The dispatcher is the tracker consumer, so its task
+    /// owns the tracker for exactly as long as dynamic capacity is needed.
+    pub(crate) fn spawn_dispatcher_retaining_capacity(
+        self: &Arc<Self>,
+        capacity_watch: watch::Receiver<u16>,
+        worker_capacity: Arc<WorkerCapacity>,
+    ) {
+        self.spawn_dispatcher_inner(capacity_watch, Some(worker_capacity));
+    }
+
+    fn spawn_dispatcher_inner(
+        self: &Arc<Self>,
+        capacity_watch: watch::Receiver<u16>,
+        capacity_owner: Option<Arc<WorkerCapacity>>,
+    ) {
         let weak = Arc::downgrade(self);
         let notify = Arc::clone(&self.release_notify);
         // Periodic tick so the starvation override can fire even when no
@@ -495,6 +515,9 @@ impl PriorityScheduler {
             reason = "dispatcher loop holds only a Weak<Self> and exits when the scheduler is dropped (Drop fires release_notify)"
         )]
         tokio::spawn(async move {
+            // Keep the sender and its worker-event task alive until this
+            // dispatcher exits. Existing receiver-only callers pass None.
+            let capacity_owner = capacity_owner;
             // `Option<watch::Receiver>` so we can drop the receiver once the
             // upstream sender is closed. A bare `Receiver` whose sender is
             // gone makes `changed()` resolve `Err` immediately on every
@@ -504,6 +527,9 @@ impl PriorityScheduler {
             let mut tick = tokio::time::interval(tick_period);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
+                // This read keeps an optional tracker owned by the task for
+                // every iteration, without extending Scheduler's lifetime.
+                let _ = capacity_owner.as_ref();
                 let new_capacity = match capacity_watch.as_mut() {
                     Some(rx) => tokio::select! {
                         () = notify.notified() => None,
