@@ -17,7 +17,9 @@ use crate::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
-    encoders::{kimi_k25_tools::apply_kimi_k25_tools, kimi_k3_xtml::apply_kimi_k3_xtml},
+    encoders::{
+        kimi_k25_tools::apply_kimi_k25_tools, kimi_k3_xtml::apply_kimi_k3_xtml_with_effort_default,
+    },
     factory::discover_chat_template_in_dir,
     kimi_k2_tokenizer,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
@@ -554,7 +556,10 @@ impl TokenizerTrait for TiktokenTokenizer {
         match self.renderer {
             Renderer::Jinja => self.chat_template.apply(messages, params),
             Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
-            Renderer::KimiK3Xtml => apply_kimi_k3_xtml(messages, &params),
+            // This is the layer the K3 checkpoint's own `apply_chat_template`
+            // sits at, so it applies that wrapper's `thinking_effort` default —
+            // the bare renderer stays a faithful `build_chat_segments` port.
+            Renderer::KimiK3Xtml => apply_kimi_k3_xtml_with_effort_default(messages, &params),
         }
     }
 
