@@ -90,6 +90,11 @@ impl AdmissionMode {
             ..CapacityTrackerSettings::default()
         };
         let worker_capacity = WorkerCapacity::spawn(registry, cap_settings);
+        // Keep a receiver alive as soon as the tracker exists. Tokio's
+        // `watch::Sender::send` does not retain a value when no receiver is
+        // subscribed, so parsing the scheduler configuration must not create
+        // a gap where the first fleet update is lost.
+        let capacity_watch = worker_capacity.watch();
 
         let default_max_class = Class::parse_header(&rc.priority_scheduler_default_max_class);
         let yaml = load_yaml(rc.priority_scheduler_config.as_deref())?;
@@ -101,11 +106,10 @@ impl AdmissionMode {
         )
         .map_err(|e| e.to_string())?;
 
-        // Subscribe before reading the initial value. If capacity changes
-        // while the scheduler is being built, the receiver records that
-        // change and the dispatcher applies it instead of missing it.
-        let capacity_watch = worker_capacity.watch();
-        let scheduler = PriorityScheduler::new(&settings, *capacity_watch.borrow())
+        // The atomic value covers any update that won the race before the
+        // receiver subscribed; subsequent updates remain queued for the
+        // dispatcher through `capacity_watch`.
+        let scheduler = PriorityScheduler::new(&settings, worker_capacity.current())
             .map_err(|e| e.to_string())?;
         scheduler.spawn_dispatcher_retaining_capacity(capacity_watch, worker_capacity);
         scheduler.spawn_sampler(SAMPLER_INTERVAL);
