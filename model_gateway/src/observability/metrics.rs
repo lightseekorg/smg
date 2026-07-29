@@ -266,6 +266,10 @@ pub(crate) fn init_metrics() {
         "smg_manual_policy_cache_entries",
         "Number of routing entries in manual policy cache"
     );
+    describe_counter!(
+        "smg_engine_metrics_scrape_total",
+        "Engine /metrics scrape attempts by connection_mode and result (success/failure/skipped)"
+    );
 
     // Layer 3: Worker resilience metrics (circuit breaker)
     describe_gauge!(
@@ -531,6 +535,8 @@ pub mod metrics_labels {
     pub const RESULT_ERROR: &str = "error";
     pub const RESULT_TIMEOUT: &str = "timeout";
     pub const RESULT_NOT_FOUND: &str = "not_found";
+    pub const RESULT_FAILURE: &str = "failure";
+    pub const RESULT_SKIPPED: &str = "skipped";
 
     // Discovery sources
     pub const DISCOVERY_STATIC: &str = "static";
@@ -1093,6 +1099,21 @@ impl Metrics {
             "worker_type" => worker_type,
             "connection_mode" => connection_mode,
             "error_type" => error_type
+        )
+        .increment(1);
+    }
+
+    /// Record an engine `/metrics` scrape attempt.
+    ///
+    /// `result` is one of [`metrics_labels::RESULT_SUCCESS`],
+    /// [`metrics_labels::RESULT_FAILURE`], or [`metrics_labels::RESULT_SKIPPED`]
+    /// (skipped = no scrape endpoint known for the worker). Both labels are
+    /// static, so no interning is needed.
+    pub fn record_engine_metrics_scrape(connection_mode: &'static str, result: &'static str) {
+        counter!(
+            "smg_engine_metrics_scrape_total",
+            "connection_mode" => connection_mode,
+            "result" => result
         )
         .increment(1);
     }

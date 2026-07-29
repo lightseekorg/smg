@@ -852,6 +852,14 @@ const SGLANG_GRPC_KEYS: &[&str] = &[
     "is_embedding",
     "vocab_size",
     "weight_version",
+    // Engine /metrics scrape discovery (W1). Consumed by
+    // `discover_metadata::derive_grpc_metrics_url` to compute the `metrics_url`
+    // label; never scraped unless `enable_metrics` is truthy.
+    "metrics_url",
+    "prometheus_port",
+    "enable_metrics",
+    "host",
+    "port",
 ];
 
 /// Keys worth extracting from TokenSpeed gRPC `server_args` (post-rename: bare
