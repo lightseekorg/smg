@@ -54,6 +54,8 @@ impl fmt::Debug for AnthropicRouter {
 impl AnthropicRouter {
     pub fn new(context: Arc<AppContext>) -> Result<Self, String> {
         let request_timeout = Duration::from_secs(context.router_config.request_timeout_secs);
+        let stream_idle_timeout =
+            Duration::from_secs(context.router_config.stream_idle_timeout_secs);
         let mcp_orchestrator = context
             .mcp_orchestrator
             .get()
@@ -64,8 +66,10 @@ impl AnthropicRouter {
             mcp_orchestrator,
             mcp_format_registry: context.mcp_format_registry.clone(),
             http_client: context.client.clone(),
+            streaming_http_client: context.streaming_client.clone(),
             worker_registry: context.worker_registry.clone(),
             request_timeout,
+            stream_idle_timeout,
         };
 
         Ok(Self {

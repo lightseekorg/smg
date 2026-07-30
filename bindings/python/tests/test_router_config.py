@@ -136,11 +136,13 @@ class TestRouterConfigValidation:
             worker_startup_timeout_secs=600,
             worker_startup_check_interval=30,
             request_timeout_secs=1800,
+            stream_idle_timeout_secs=300,
             queue_timeout_secs=60,
         )
         assert args.worker_startup_timeout_secs == 600
         assert args.worker_startup_check_interval == 30
         assert args.request_timeout_secs == 1800
+        assert args.stream_idle_timeout_secs == 300
         assert args.queue_timeout_secs == 60
 
     def test_retry_config_validation(self):

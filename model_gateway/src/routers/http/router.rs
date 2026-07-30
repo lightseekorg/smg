@@ -1,9 +1,16 @@
-use std::{error::Error as _, sync::Arc, time::Instant};
+use std::{
+    error::Error as _,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::{to_bytes, Body},
     extract::Request,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        HeaderMap, HeaderValue, Method, StatusCode,
+    },
     response::{IntoResponse, Response},
     Json,
 };
@@ -29,7 +36,7 @@ use reqwest::{
     Client,
 };
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
 use crate::{
@@ -50,6 +57,8 @@ use crate::{
                 ws::handle_realtime_ws, RealtimeLabels, RealtimeRegistry,
             },
             retry::{is_retryable_status, RetryExecutor},
+            sse,
+            stream_timeout::{StreamDeadline, StreamTimeoutKind},
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
         error::{self, extract_error_code_from_response},
@@ -68,10 +77,56 @@ pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
+    streaming_client: Client,
+    stream_timeout: Duration,
+    stream_idle_timeout: Duration,
     retry_config: RetryConfig,
     realtime_registry: Arc<RealtimeRegistry>,
     webrtc_bind_addr: Option<std::net::IpAddr>,
     webrtc_stun_server: Option<String>,
+}
+
+#[derive(Clone)]
+struct RouterStreamMetrics {
+    model_id: String,
+    endpoint: &'static str,
+    start_time: Instant,
+}
+
+fn typed_stream_terminal_observers(route: &str) -> Vec<sse::SseTerminalObserver> {
+    match route {
+        "/generate" | "/v1/chat/completions" | "/v1/completions" => {
+            vec![sse::SseTerminalObserver::done()]
+        }
+        "/v1/messages" => vec![sse::SseTerminalObserver::event_type("message_stop")],
+        "/v1/responses" => vec![
+            sse::SseTerminalObserver::done(),
+            sse::SseTerminalObserver::event_type("response.completed"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn record_regular_router_stream_outcome(metrics: &RouterStreamMetrics, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            metrics.start_time.elapsed(),
+        );
+    } else {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            &metrics.model_id,
+            metrics.endpoint,
+            error_type_from_status(status),
+        );
+    }
 }
 
 impl std::fmt::Debug for Router {
@@ -80,6 +135,9 @@ impl std::fmt::Debug for Router {
             .field("worker_registry", &self.worker_registry)
             .field("policy_registry", &self.policy_registry)
             .field("client", &self.client)
+            .field("streaming_client", &self.streaming_client)
+            .field("stream_timeout", &self.stream_timeout)
+            .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
@@ -96,6 +154,9 @@ impl Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
+            streaming_client: ctx.streaming_client.clone(),
+            stream_timeout: Duration::from_secs(ctx.router_config.request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(ctx.router_config.stream_idle_timeout_secs),
             retry_config: ctx.router_config.effective_retry_config(),
             realtime_registry: ctx.realtime_registry.clone(),
             webrtc_bind_addr: ctx.webrtc_bind_addr,
@@ -271,6 +332,7 @@ impl Router {
         let retry_config = per_model_retry_config
             .as_ref()
             .unwrap_or(&self.retry_config);
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
 
         let response = RetryExecutor::execute_response_with_retry(
             retry_config,
@@ -285,6 +347,8 @@ impl Router {
                         canonical_model.as_deref(),
                         is_stream,
                         &text,
+                        start,
+                        stream_deadline,
                     )
                     .await;
 
@@ -298,7 +362,10 @@ impl Router {
                 res
             },
             // should_retry predicate
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| {
+                is_retryable_status(res.status())
+                    && (!is_stream || !stream_deadline.is_total_elapsed())
+            },
             // on_backoff hook
             |delay, attempt| {
                 // Layer 3 worker metrics
@@ -312,7 +379,7 @@ impl Router {
         )
         .await;
 
-        if response.status().is_success() {
+        if !is_stream && response.status().is_success() {
             let duration = start.elapsed();
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
@@ -322,7 +389,7 @@ impl Router {
                 endpoint,
                 duration,
             );
-        } else if !is_retryable_status(response.status()) {
+        } else if !response.status().is_success() {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_REGULAR,
@@ -338,7 +405,7 @@ impl Router {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "per-attempt state threaded from route_typed_request; a struct would only move the arity"
+        reason = "typed retry attempts pass alias, route, and stream metric context explicitly"
     )]
     async fn route_typed_request_once<T: GenerationRequest + serde::Serialize + Clone>(
         &self,
@@ -349,6 +416,8 @@ impl Router {
         canonical_model: Option<&str>,
         is_stream: bool,
         text: &str,
+        start_time: Instant,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
             Some(w) => w,
@@ -395,24 +464,23 @@ impl Router {
                 typed_req,
                 route,
                 canonical_model,
-                worker.as_ref(),
+                worker.clone(),
                 is_stream,
                 load_guard,
+                RouterStreamMetrics {
+                    model_id: model_id.to_string(),
+                    endpoint: route_to_endpoint(route),
+                    start_time,
+                },
+                stream_deadline,
             )
             .await;
 
         events::RequestReceivedEvent {}.emit();
 
-        let status = response.status();
-        worker.record_outcome(status.as_u16());
-
-        // Record worker errors for server errors (5xx)
-        if status.is_server_error() {
-            Metrics::record_worker_error(
-                metrics_labels::WORKER_REGULAR,
-                metrics_labels::CONNECTION_HTTP,
-                error_type_from_status(status),
-            );
+        if !is_stream {
+            let status = response.status();
+            record_regular_worker_outcome(worker.as_ref(), status);
         }
 
         response
@@ -685,7 +753,12 @@ impl Router {
         };
 
         let endpoint_url = worker.endpoint_url(route);
-        let mut request_builder = self.client.post(&endpoint_url).multipart(form);
+        let client = if is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        let mut request_builder = client.post(&endpoint_url).multipart(form);
 
         if let Some(key) = worker.api_key().cloned() {
             let mut auth_header = String::with_capacity(7 + key.len());
@@ -710,7 +783,38 @@ impl Router {
             }
         }
 
-        let res = match request_builder.send().await {
+        let stream_deadline = StreamDeadline::new(self.stream_timeout, self.stream_idle_timeout);
+        let send_result = if is_stream {
+            match stream_deadline.until_total(request_builder.send()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let err_resp = error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(StreamTimeoutKind::Total),
+                    );
+                    let err_status = err_resp.status();
+                    record_regular_worker_outcome(worker.as_ref(), err_status);
+                    Metrics::record_router_upstream_response(
+                        metrics_labels::ROUTER_HTTP,
+                        err_status.as_u16(),
+                        extract_error_code_from_response(&err_resp),
+                    );
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_HTTP,
+                        metrics_labels::BACKEND_REGULAR,
+                        metrics_labels::CONNECTION_HTTP,
+                        model_id,
+                        endpoint,
+                        error_type_from_status(err_status),
+                    );
+                    return err_resp;
+                }
+            }
+        } else {
+            request_builder.send().await
+        };
+
+        let res = match send_result {
             Ok(res) => res,
             Err(e) => {
                 error!(
@@ -725,14 +829,7 @@ impl Router {
                 // and worker-error metric; transport failures (timeouts,
                 // connect errors) must be visible to health tracking so the
                 // same bad worker isn't picked repeatedly.
-                worker.record_outcome(err_status.as_u16());
-                if err_status.is_server_error() {
-                    Metrics::record_worker_error(
-                        metrics_labels::WORKER_REGULAR,
-                        metrics_labels::CONNECTION_HTTP,
-                        error_type_from_status(err_status),
-                    );
-                }
+                record_regular_worker_outcome(worker.as_ref(), err_status);
                 Metrics::record_router_upstream_response(
                     metrics_labels::ROUTER_HTTP,
                     err_status.as_u16(),
@@ -766,7 +863,15 @@ impl Router {
             // JSON body (success or 4xx error). Don't relabel non-SSE
             // responses as SSE; leave that judgment to whatever the worker
             // set.
-            let response_headers = header_utils::preserve_response_headers(res.headers());
+            let mut response_headers = header_utils::preserve_response_headers(res.headers());
+            response_headers.remove(CONTENT_LENGTH);
+            if !status.is_success() {
+                record_regular_worker_outcome(worker.as_ref(), status);
+            }
+            let stream_is_sse = response_headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
             let stream = res.bytes_stream();
             // Bounded channel applies backpressure: if the downstream client
             // is slow, the upstream relay awaits on `send` rather than piling
@@ -790,36 +895,69 @@ impl Router {
             )]
             tokio::spawn(async move {
                 let mut stream = stream;
-                let mut stream_failed = false;
-                while let Some(chunk) = stream.next().await {
+                let mut stream_failure_status = None;
+                let mut relay_send_timed_out = false;
+                let mut done_observer = sse::SseTerminalObserver::done();
+                let mut boundary_tail = Vec::new();
+                let mut at_event_boundary = true;
+                loop {
+                    let chunk = match stream_deadline.next(&mut stream).await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(timeout) => {
+                            stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                            let timeout_item = if stream_is_sse && at_event_boundary {
+                                Ok(stream_deadline.sse_error_event(timeout))
+                            } else {
+                                Err(stream_deadline.message(timeout))
+                            };
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, timeout_item)
+                                .await;
+                            break;
+                        }
+                    };
                     match chunk {
                         Ok(bytes) => {
-                            if tx.send(Ok(bytes)).await.is_err() {
+                            let stream_done =
+                                stream_is_sse && done_observer.observe(bytes.as_ref());
+                            at_event_boundary =
+                                sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
+                            match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(_) => {
+                                    relay_send_timed_out = true;
+                                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                                    break;
+                                }
+                            }
+                            if stream_done {
                                 break;
                             }
                         }
                         Err(e) => {
-                            stream_failed = true;
-                            let _ = tx.send(Err(format!("Stream error: {e}"))).await;
+                            stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .await;
                             break;
                         }
                     }
                 }
-                // Effective status = BAD_GATEWAY if the relay failed, else the
-                // worker's header status. Covers both "5xx header returned
-                // while stream=true" and "200 header then mid-stream break".
-                let effective_status = if stream_failed {
-                    StatusCode::BAD_GATEWAY
-                } else {
-                    stream_header_status
-                };
-                worker_for_stream.record_outcome(effective_status.as_u16());
-                if effective_status.is_server_error() {
-                    Metrics::record_worker_error(
-                        metrics_labels::WORKER_REGULAR,
-                        metrics_labels::CONNECTION_HTTP,
-                        error_type_from_status(effective_status),
-                    );
+                // For successful stream headers, delay worker/router outcome
+                // accounting until the body relay finishes so mid-stream
+                // failures are visible. Non-success headers were recorded
+                // before returning the response so retry selection can see
+                // the failed worker immediately.
+                let effective_status = stream_failure_status.unwrap_or(stream_header_status);
+                if stream_header_status.is_success() {
+                    let worker_status = if relay_send_timed_out {
+                        stream_header_status
+                    } else {
+                        effective_status
+                    };
+                    record_regular_worker_outcome(worker_for_stream.as_ref(), worker_status);
                 }
                 if effective_status.is_success() {
                     Metrics::record_router_duration(
@@ -872,14 +1010,7 @@ impl Router {
         // that. Streaming outcomes are owned by the relay task above.
         if !is_stream {
             let final_status = response.status();
-            worker.record_outcome(final_status.as_u16());
-            if final_status.is_server_error() {
-                Metrics::record_worker_error(
-                    metrics_labels::WORKER_REGULAR,
-                    metrics_labels::CONNECTION_HTTP,
-                    error_type_from_status(final_status),
-                );
-            }
+            record_regular_worker_outcome(worker.as_ref(), final_status);
             if final_status.is_success() {
                 Metrics::record_router_duration(
                     metrics_labels::ROUTER_HTTP,
@@ -911,7 +1042,7 @@ impl Router {
     // heard of the alias, so the body it receives carries the canonical name.
     #[expect(
         clippy::too_many_arguments,
-        reason = "per-request state threaded from route_typed_request_once; a struct would only move the arity"
+        reason = "request forwarding needs alias, worker, load guard, stream mode, and metric context"
     )]
     async fn send_typed_request<T: serde::Serialize>(
         &self,
@@ -919,9 +1050,11 @@ impl Router {
         typed_req: &T,
         route: &'static str,
         canonical_model: Option<&str>,
-        worker: &dyn Worker,
+        worker: Arc<dyn Worker>,
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
+        router_metrics: RouterStreamMetrics,
+        stream_deadline: StreamDeadline,
     ) -> Response {
         let api_key = worker.api_key().cloned();
         let endpoint_url = worker.endpoint_url(route);
@@ -951,7 +1084,12 @@ impl Router {
         };
         strip_default_sglang_fields(&mut json_val);
 
-        let mut request_builder = self.client.post(&endpoint_url).json(&json_val);
+        let client = if is_stream {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        let mut request_builder = client.post(&endpoint_url).json(&json_val);
 
         if let Some(key) = api_key {
             // Pre-allocate string with capacity to avoid reallocation
@@ -969,7 +1107,23 @@ impl Router {
             }
         }
 
-        let res = match request_builder.send().await {
+        let send_result = if is_stream {
+            match stream_deadline.until_total(request_builder.send()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let response = error::gateway_timeout(
+                        "streaming_timeout",
+                        stream_deadline.message(StreamTimeoutKind::Total),
+                    );
+                    record_regular_worker_outcome(worker.as_ref(), response.status());
+                    return response;
+                }
+            }
+        } else {
+            request_builder.send().await
+        };
+
+        let res = match send_result {
             Ok(res) => res,
             Err(e) => {
                 error!(
@@ -979,7 +1133,11 @@ impl Router {
                     e
                 );
 
-                return convert_reqwest_error(e);
+                let response = convert_reqwest_error(e);
+                if is_stream {
+                    record_regular_worker_outcome(worker.as_ref(), response.status());
+                }
+                return response;
             }
         };
 
@@ -989,11 +1147,21 @@ impl Router {
         if is_stream {
             // Preserve headers for streaming response
             let mut response_headers = header_utils::preserve_response_headers(res.headers());
+            response_headers.remove(CONTENT_LENGTH);
+            if !status.is_success() {
+                record_regular_worker_outcome(worker.as_ref(), status);
+            }
             // Ensure we set the correct content-type for SSE
             response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
 
             let stream = res.bytes_stream();
-            let (tx, rx) = mpsc::unbounded_channel();
+            const STREAM_RELAY_BUFFER: usize = 32;
+            let (tx, rx) = mpsc::channel(STREAM_RELAY_BUFFER);
+            let worker_for_stream = worker.clone();
+            let stream_router_metrics = router_metrics.clone();
+            let terminal_observers = typed_stream_terminal_observers(route);
+            let response_error_observer = (route == "/v1/responses")
+                .then(|| sse::SseTerminalObserver::event_type("response.error"));
 
             // Spawn task to forward stream
             #[expect(
@@ -1002,22 +1170,85 @@ impl Router {
             )]
             tokio::spawn(async move {
                 let mut stream = stream;
-                while let Some(chunk) = stream.next().await {
+                let mut stream_failure_status = None;
+                let mut relay_send_timed_out = false;
+                let mut boundary_tail = Vec::new();
+                let mut at_event_boundary = true;
+                let requires_terminal = !terminal_observers.is_empty();
+                let mut terminal_observers = terminal_observers;
+                let mut response_error_observer = response_error_observer;
+                let mut terminal_seen = false;
+                loop {
+                    let chunk = match stream_deadline.next(&mut stream).await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => {
+                            if requires_terminal && !terminal_seen {
+                                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            }
+                            break;
+                        }
+                        Err(timeout) => {
+                            stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                            let timeout_item = if at_event_boundary {
+                                Ok(stream_deadline.sse_error_event(timeout))
+                            } else {
+                                Err(stream_deadline.message(timeout))
+                            };
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, timeout_item)
+                                .await;
+                            break;
+                        }
+                    };
                     match chunk {
                         Ok(bytes) => {
-                            if tx.send(Ok(bytes)).is_err() {
+                            if response_error_observer
+                                .as_mut()
+                                .is_some_and(|observer| observer.observe(bytes.as_ref()))
+                            {
+                                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            }
+                            let stream_done = terminal_observers
+                                .iter_mut()
+                                .any(|observer| observer.observe(bytes.as_ref()));
+                            terminal_seen |= stream_done;
+                            at_event_boundary =
+                                sse::update_event_boundary(&mut boundary_tail, bytes.as_ref());
+                            match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(_) => {
+                                    relay_send_timed_out = true;
+                                    stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                                    break;
+                                }
+                            }
+                            if stream_done {
                                 break;
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(format!("Stream error: {e}")));
+                            stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                            let _ = stream_deadline
+                                .send_terminal_before_total(&tx, Err(format!("Stream error: {e}")))
+                                .await;
                             break;
                         }
                     }
                 }
+                let effective_status = stream_failure_status.unwrap_or(status);
+                if status.is_success() {
+                    let worker_status = if relay_send_timed_out {
+                        status
+                    } else {
+                        effective_status
+                    };
+                    record_regular_worker_outcome(worker_for_stream.as_ref(), worker_status);
+                    record_regular_router_stream_outcome(&stream_router_metrics, effective_status);
+                }
             });
 
-            let stream = UnboundedReceiverStream::new(rx);
+            let stream = ReceiverStream::new(rx);
             let body = Body::from_stream(stream);
 
             let mut response = Response::new(body);
@@ -1077,6 +1308,17 @@ impl Router {
             rerank_response.drop_documents();
         }
         Ok(Json(rerank_response).into_response())
+    }
+}
+
+fn record_regular_worker_outcome(worker: &dyn Worker, status: StatusCode) {
+    worker.record_outcome(status.as_u16());
+    if status.is_server_error() {
+        Metrics::record_worker_error(
+            metrics_labels::WORKER_REGULAR,
+            metrics_labels::CONNECTION_HTTP,
+            error_type_from_status(status),
+        );
     }
 }
 
@@ -1515,6 +1757,9 @@ mod tests {
             worker_registry,
             policy_registry,
             client: Client::new(),
+            streaming_client: Client::new(),
+            stream_timeout: Duration::from_secs(1800),
+            stream_idle_timeout: Duration::from_secs(300),
             retry_config: RetryConfig::default(),
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: None,
@@ -1561,5 +1806,21 @@ mod tests {
 
         let worker = router.worker_registry.get_by_url(&url).unwrap();
         assert!(worker.is_healthy());
+    }
+
+    #[test]
+    fn typed_stream_routes_require_protocol_specific_terminal_events() {
+        let mut chat = typed_stream_terminal_observers("/v1/chat/completions");
+        assert!(chat[0].observe(b"data: [DONE]\n\n"));
+
+        let mut messages = typed_stream_terminal_observers("/v1/messages");
+        assert!(messages[0].observe(b"event: message_stop\ndata: {}\n\n"));
+
+        let mut responses = typed_stream_terminal_observers("/v1/responses");
+        assert!(responses
+            .iter_mut()
+            .any(|observer| observer.observe(b"event: response.completed\ndata: {}\n\n")));
+
+        assert!(typed_stream_terminal_observers("/v1/embeddings").is_empty());
     }
 }

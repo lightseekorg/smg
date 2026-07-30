@@ -3,7 +3,7 @@
 //! Handles both passthrough (no MCP) and MCP tool loop streaming paths,
 //! composing worker, sse, and mcp primitives.
 
-use std::{io, time::Instant};
+use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
@@ -11,6 +11,7 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
+use futures_util::Stream;
 use openai_protocol::messages::{InputContent, InputMessage, Role};
 use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
@@ -23,9 +24,14 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::{mcp_utils::DEFAULT_MAX_ITERATIONS, sse::SseEncoder},
+        common::{
+            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            sse::{update_event_boundary, SseEncoder, SseTerminalObserver},
+            stream_timeout::{StreamDeadline, StreamTimeoutKind},
+        },
         error::{self as router_error, extract_error_code_from_response},
     },
+    worker::Worker as WorkerTrait,
 };
 
 /// Channel buffer size for SSE events sent to the client.
@@ -51,56 +57,230 @@ async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -
 
     worker::record_router_request(model_id, true);
     let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
-    let response = match worker::send_request(
-        &router.http_client,
-        &url,
-        &req_headers,
-        &req_ctx.request,
-        router.request_timeout,
-    )
-    .await
+    let stream_deadline = StreamDeadline::new(router.request_timeout, router.stream_idle_timeout);
+    let response = match stream_deadline
+        .until_total(worker::send_request(
+            &router.streaming_http_client,
+            &url,
+            &req_headers,
+            &req_ctx.request,
+            None,
+        ))
+        .await
     {
-        Ok(r) => r,
-        Err(resp) => return resp,
+        Ok(result) => match result {
+            Ok(r) => r,
+            Err(resp) => {
+                let status = resp.status();
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
+                record_streaming_router_outcome(model_id, start_time, status);
+                return resp;
+            }
+        },
+        Err(_) => {
+            record_streaming_timeout_metrics(model_id, start_time);
+            record_streaming_worker_outcome(
+                Some(req_ctx.worker.as_ref()),
+                StatusCode::GATEWAY_TIMEOUT,
+            );
+            return router_error::gateway_timeout(
+                "streaming_timeout",
+                stream_deadline.message(StreamTimeoutKind::Total),
+            );
+        }
     };
 
-    build_streaming_response(response, model_id, start_time).await
+    build_streaming_response(
+        response,
+        req_ctx.worker.clone(),
+        model_id,
+        start_time,
+        stream_deadline,
+    )
+    .await
 }
 
 /// Build a streaming SSE response.
 async fn build_streaming_response(
     response: reqwest::Response,
+    worker: Arc<dyn WorkerTrait>,
     model_id: &str,
     start_time: Instant,
+    stream_deadline: StreamDeadline,
 ) -> Response {
     let status = response.status();
 
     if !status.is_success() {
-        return build_streaming_error_response(response, model_id, start_time).await;
+        return build_streaming_error_response(
+            response,
+            worker.as_ref(),
+            model_id,
+            start_time,
+            stream_deadline,
+        )
+        .await;
     }
 
     debug!(model = %model_id, status = %status, "Starting streaming response");
 
-    Metrics::record_router_duration(
+    let headers = response.headers().clone();
+    let upstream_stream = response.bytes_stream();
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
+    )]
+    tokio::spawn(relay_stream_with_deadline(
+        tx,
+        upstream_stream,
+        stream_deadline,
+        model_id.to_string(),
+        start_time,
+        Some(worker),
+        true,
+    ));
+
+    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+
+    sse::build_sse_response(status, headers, body)
+}
+
+fn record_streaming_error_metric(model_id: &str, error_type: &'static str) {
+    Metrics::record_router_error(
         metrics_labels::ROUTER_HTTP,
         metrics_labels::BACKEND_EXTERNAL,
         metrics_labels::CONNECTION_HTTP,
         model_id,
         "messages",
-        start_time.elapsed(),
+        error_type,
     );
+}
 
-    let headers = response.headers().clone();
-    let body = Body::from_stream(response.bytes_stream());
+fn record_streaming_timeout_metrics(model_id: &str, _start_time: Instant) {
+    record_streaming_error_metric(model_id, "streaming_timeout");
+}
 
-    sse::build_sse_response(status, headers, body)
+fn record_streaming_router_outcome(model_id: &str, start_time: Instant, status: StatusCode) {
+    if status.is_success() {
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            "messages",
+            start_time.elapsed(),
+        );
+    } else {
+        let error_type = if status == StatusCode::GATEWAY_TIMEOUT {
+            "streaming_timeout"
+        } else {
+            metrics_labels::ERROR_BACKEND
+        };
+        record_streaming_error_metric(model_id, error_type);
+    }
+}
+
+fn record_streaming_worker_outcome(worker: Option<&dyn WorkerTrait>, status: StatusCode) {
+    let Some(worker) = worker else {
+        return;
+    };
+    worker::record_worker_outcome(worker, status);
+}
+
+fn is_streaming_timeout_message(message: &str) -> bool {
+    message.starts_with("Streaming request exceeded configured ")
+}
+
+async fn relay_stream_with_deadline<S>(
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+    mut upstream_stream: S,
+    stream_deadline: StreamDeadline,
+    model_id: String,
+    start_time: Instant,
+    worker: Option<Arc<dyn WorkerTrait>>,
+    record_router_outcome: bool,
+) where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
+{
+    let mut encoder = SseEncoder::new();
+    let mut boundary_tail = Vec::new();
+    let mut at_event_boundary = true;
+    let mut terminal_observer = SseTerminalObserver::event_type("message_stop");
+    let mut stream_failure_status = None;
+    let mut relay_send_timed_out = false;
+    let mut terminal_seen = false;
+    loop {
+        let chunk = match stream_deadline.next(&mut upstream_stream).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
+                if record_router_outcome && !terminal_seen {
+                    stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                }
+                break;
+            }
+            Err(timeout) => {
+                let message = stream_deadline.message(timeout);
+                stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                if at_event_boundary {
+                    let error_event = sse::encode_error(&mut encoder, &message);
+                    let _ = stream_deadline
+                        .send_terminal_before_total(&tx, Ok(error_event))
+                        .await;
+                } else {
+                    let _ = stream_deadline
+                        .send_terminal_before_total(&tx, Err(io::Error::other(message)))
+                        .await;
+                }
+                break;
+            }
+        };
+        match chunk {
+            Ok(bytes) => {
+                let stream_done = terminal_observer.observe(bytes.as_ref());
+                terminal_seen |= stream_done;
+                at_event_boundary = update_event_boundary(&mut boundary_tail, bytes.as_ref());
+                match stream_deadline.send_before_total(&tx, Ok(bytes)).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => {
+                        relay_send_timed_out = true;
+                        stream_failure_status = Some(StatusCode::GATEWAY_TIMEOUT);
+                        break;
+                    }
+                }
+                if stream_done {
+                    break;
+                }
+            }
+            Err(e) => {
+                stream_failure_status = Some(StatusCode::BAD_GATEWAY);
+                let _ = stream_deadline
+                    .send_terminal_before_total(&tx, Err(io::Error::other(e)))
+                    .await;
+                break;
+            }
+        }
+    }
+    let effective_status = stream_failure_status.unwrap_or(StatusCode::OK);
+    let worker_status = if relay_send_timed_out {
+        StatusCode::OK
+    } else {
+        effective_status
+    };
+    record_streaming_worker_outcome(worker.as_deref(), worker_status);
+    if record_router_outcome {
+        record_streaming_router_outcome(&model_id, start_time, effective_status);
+    }
 }
 
 /// Handle a non-success streaming response.
 async fn build_streaming_error_response(
     response: reqwest::Response,
+    selected_worker: &dyn WorkerTrait,
     model_id: &str,
     start_time: Instant,
+    stream_deadline: StreamDeadline,
 ) -> Response {
     let status = response.status();
     let content_type = response
@@ -132,15 +312,40 @@ async fn build_streaming_error_response(
             "messages",
             "streaming_error",
         );
+        worker::record_worker_outcome(selected_worker, status);
 
         let headers = response.headers().clone();
-        let body = Body::from_stream(response.bytes_stream());
+        let upstream_stream = response.bytes_stream();
+        let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "fire-and-forget error stream relay; gateway shutdown need not wait for individual stream forwarding"
+        )]
+        tokio::spawn(relay_stream_with_deadline(
+            tx,
+            upstream_stream,
+            stream_deadline,
+            model_id.to_string(),
+            start_time,
+            None,
+            false,
+        ));
+
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
 
         return sse::build_sse_response(status, headers, body);
     }
 
     // Non-SSE error: read the body and return a proper error response
-    worker::handle_error_response(response, model_id, start_time).await
+    worker::handle_streaming_error_response(
+        response,
+        selected_worker,
+        model_id,
+        start_time,
+        stream_deadline,
+    )
+    .await
 }
 
 // ============================================================================
@@ -150,6 +355,7 @@ async fn build_streaming_error_response(
 /// Spawn the MCP tool loop in a background task and return an SSE response.
 fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
+    let stream_deadline = StreamDeadline::new(router.request_timeout, router.stream_idle_timeout);
 
     let router = router.clone();
 
@@ -158,14 +364,18 @@ fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Res
         reason = "fire-and-forget streaming task; gateway shutdown need not wait for individual MCP tool loops"
     )]
     tokio::spawn(async move {
-        if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx).await {
+        if let Err(e) = Box::pin(run_tool_loop(tx.clone(), router, req_ctx, stream_deadline)).await
+        {
             if e == sse::CLIENT_DISCONNECTED_ERROR {
                 debug!(error = %e, "Streaming tool loop ended: client disconnected");
                 return;
             }
             warn!(error = %e, "Streaming tool loop failed");
             let mut enc = SseEncoder::new();
-            let _ = sse::send_error(&tx, &mut enc, &e).await;
+            let error_event = sse::encode_error(&mut enc, &e);
+            let _ = stream_deadline
+                .send_terminal_before_total(&tx, Ok(error_event))
+                .await;
         }
     });
 
@@ -189,6 +399,7 @@ async fn run_tool_loop(
     tx: mpsc::Sender<Result<Bytes, io::Error>>,
     router: RouterContext,
     mut req_ctx: RequestContext,
+    stream_deadline: StreamDeadline,
 ) -> Result<(), String> {
     let session_id = format!("msg_{}", uuid::Uuid::now_v7());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
@@ -207,13 +418,21 @@ async fn run_tool_loop(
     for _iteration in 0..DEFAULT_MAX_ITERATIONS {
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
-        let response = send_streaming_request(&router, &req_ctx).await?;
+        let iteration_start = Instant::now();
+        let response = send_streaming_request(
+            &router,
+            &req_ctx,
+            stream_deadline,
+            iteration_start,
+            is_first_iteration,
+        )
+        .await?;
 
         if !response.status().is_success() {
-            return Err(format!(
-                "Worker returned error status: {}",
-                response.status()
-            ));
+            let status = response.status();
+            record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
+            record_streaming_router_outcome(&req_ctx.model_id, iteration_start, status);
+            return Err(format!("Worker returned error status: {status}"));
         }
 
         // Consume the upstream SSE stream
@@ -223,11 +442,30 @@ async fn run_tool_loop(
             response,
             &mut global_index,
             is_first_iteration,
+            stream_deadline,
             |name| session.resolve_tool_server_label(name),
         )
         .await;
 
-        let consumed = result?;
+        let consumed = match result {
+            Ok(consumed) => {
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), StatusCode::OK);
+                consumed
+            }
+            Err(err) => {
+                if err == sse::CLIENT_DISCONNECTED_ERROR {
+                    return Err(err);
+                }
+                let status = if is_streaming_timeout_message(&err) {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                record_streaming_router_outcome(&req_ctx.model_id, iteration_start, status);
+                record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), status);
+                return Err(err);
+            }
+        };
         is_first_iteration = false;
 
         // Accumulate usage
@@ -239,7 +477,25 @@ async fn run_tool_loop(
         }
 
         // Check if we should continue the tool loop
-        match mcp::process_iteration(&consumed.iteration, &session, &req_ctx.model_id).await {
+        let action = match Box::pin(stream_deadline.until_activity(mcp::process_iteration(
+            &consumed.iteration,
+            &session,
+            &req_ctx.model_id,
+        )))
+        .await
+        {
+            Ok(action) => action,
+            Err(timeout) => {
+                record_streaming_timeout_metrics(&req_ctx.model_id, iteration_start);
+                let error_event =
+                    sse::encode_error(&mut encoder, &stream_deadline.message(timeout));
+                let _ = stream_deadline
+                    .send_terminal_before_total(&tx, Ok(error_event))
+                    .await;
+                return Ok(());
+            }
+        };
+        match action {
             mcp::ToolLoopAction::Done => {
                 sse::emit_final(
                     &tx,
@@ -247,8 +503,10 @@ async fn run_tool_loop(
                     consumed.iteration.stop_reason.as_ref(),
                     total_input_tokens,
                     total_output_tokens,
+                    stream_deadline,
                 )
-                .await;
+                .await?;
+                record_streaming_router_outcome(&req_ctx.model_id, iteration_start, StatusCode::OK);
                 return Ok(());
             }
             mcp::ToolLoopAction::Error(msg) => {
@@ -257,10 +515,14 @@ async fn run_tool_loop(
             mcp::ToolLoopAction::Continue(cont) => {
                 // Emit mcp_tool_result events for each completed tool call
                 for call in &cont.mcp_calls {
-                    if !sse::emit_mcp_tool_result(&tx, &mut encoder, call, &mut global_index).await
-                    {
-                        return Ok(());
-                    }
+                    sse::emit_mcp_tool_result(
+                        &tx,
+                        &mut encoder,
+                        call,
+                        &mut global_index,
+                        stream_deadline,
+                    )
+                    .await?;
                 }
 
                 // Append assistant + tool_result messages for next iteration
@@ -282,7 +544,10 @@ async fn run_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
     let error_msg = format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})");
-    let _ = sse::send_error(&tx, &mut encoder, &error_msg).await;
+    let error_event = sse::encode_error(&mut encoder, &error_msg);
+    let _ = stream_deadline
+        .send_terminal_before_total(&tx, Ok(error_event))
+        .await;
     Ok(())
 }
 
@@ -290,18 +555,30 @@ async fn run_tool_loop(
 async fn send_streaming_request(
     router: &RouterContext,
     req_ctx: &RequestContext,
+    stream_deadline: StreamDeadline,
+    start_time: Instant,
+    is_first_iteration: bool,
 ) -> Result<reqwest::Response, String> {
     worker::record_router_request(&req_ctx.model_id, true);
 
     let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
-    let response = worker::send_request(
-        &router.http_client,
+    let send_future = worker::send_request(
+        &router.streaming_http_client,
         &url,
         &req_headers,
         &req_ctx.request,
-        router.request_timeout,
-    )
-    .await
+        None,
+    );
+    let response = if is_first_iteration {
+        stream_deadline.until_total(send_future).await
+    } else {
+        stream_deadline.until_activity(send_future).await
+    }
+    .map_err(|timeout| {
+        record_streaming_timeout_metrics(&req_ctx.model_id, start_time);
+        record_streaming_worker_outcome(Some(req_ctx.worker.as_ref()), StatusCode::GATEWAY_TIMEOUT);
+        stream_deadline.message(timeout)
+    })?
     .map_err(|e| {
         format!(
             "Failed to send request to worker ({})",

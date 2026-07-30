@@ -11,7 +11,6 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures::StreamExt;
 use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -19,7 +18,10 @@ use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
 use crate::routers::{
-    common::sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+    common::{
+        sse::{SseDecodeError, SseDecoder, SseEncodeError, SseEncoder, SseFrame},
+        stream_timeout::StreamDeadline,
+    },
     error::internal_error,
 };
 
@@ -92,17 +94,21 @@ pub(crate) fn build_sse_response(
 // SSE event formatting and sending
 // ============================================================================
 
-/// Format and send an SSE event through the channel.
-///
-/// Returns `true` if the send succeeded, `false` if the receiver was dropped.
-pub(crate) async fn send_event(
+/// Format and send an SSE event without allowing downstream backpressure to
+/// outlive the configured total stream deadline.
+async fn send_event(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     enc: &mut SseEncoder,
     event_type: &str,
     data: &Value,
-) -> bool {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let bytes = format_sse_event(enc, event_type, data);
-    tx.send(Ok(bytes)).await.is_ok()
+    match stream_deadline.send_before_total(tx, Ok(bytes)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(CLIENT_DISCONNECTED_ERROR.into()),
+        Err(timeout) => Err(stream_deadline.message(timeout)),
+    }
 }
 
 /// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
@@ -114,12 +120,8 @@ fn format_sse_event(enc: &mut SseEncoder, event_type: &str, data: &Value) -> Byt
         })
 }
 
-/// Send an SSE error event.
-pub(crate) async fn send_error(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    enc: &mut SseEncoder,
-    message: &str,
-) -> bool {
+/// Format an SSE error event.
+pub(crate) fn encode_error(enc: &mut SseEncoder, message: &str) -> Bytes {
     let data = serde_json::json!({
         "type": "error",
         "error": {
@@ -127,7 +129,7 @@ pub(crate) async fn send_error(
             "message": message
         }
     });
-    send_event(tx, enc, "error", &data).await
+    format_sse_event(enc, "error", &data)
 }
 
 /// Emit `content_block_start` + `content_block_stop` events for an
@@ -137,7 +139,8 @@ pub(crate) async fn emit_mcp_tool_result(
     enc: &mut SseEncoder,
     call: &McpToolCall,
     global_index: &mut u32,
-) -> bool {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let index = *global_index;
 
     // content_block_start with mcp_tool_result
@@ -155,9 +158,14 @@ pub(crate) async fn emit_mcp_tool_result(
         }
     });
 
-    if !send_event(tx, enc, "content_block_start", &block_start).await {
-        return false;
-    }
+    send_event(
+        tx,
+        enc,
+        "content_block_start",
+        &block_start,
+        stream_deadline,
+    )
+    .await?;
 
     // content_block_stop
     let block_stop = serde_json::json!({
@@ -165,12 +173,10 @@ pub(crate) async fn emit_mcp_tool_result(
         "index": index
     });
 
-    if !send_event(tx, enc, "content_block_stop", &block_stop).await {
-        return false;
-    }
+    send_event(tx, enc, "content_block_stop", &block_stop, stream_deadline).await?;
 
     *global_index += 1;
-    true
+    Ok(())
 }
 
 /// Emit the final `message_delta` and `message_stop` events.
@@ -180,7 +186,8 @@ pub(crate) async fn emit_final(
     stop_reason: Option<&StopReason>,
     total_input_tokens: u32,
     total_output_tokens: u32,
-) {
+    stream_deadline: StreamDeadline,
+) -> Result<(), String> {
     let stop_reason_val = stop_reason
         .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
@@ -197,16 +204,12 @@ pub(crate) async fn emit_final(
         }
     });
 
-    if !send_event(tx, enc, "message_delta", &message_delta).await {
-        debug!("Failed to send final message_delta — channel closed");
-    }
+    send_event(tx, enc, "message_delta", &message_delta, stream_deadline).await?;
 
     let message_stop = serde_json::json!({
         "type": "message_stop"
     });
-    if !send_event(tx, enc, "message_stop", &message_stop).await {
-        debug!("Failed to send message_stop — channel closed");
-    }
+    send_event(tx, enc, "message_stop", &message_stop, stream_deadline).await
 }
 
 // ============================================================================
@@ -224,6 +227,7 @@ pub(crate) async fn consume_and_forward<F>(
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
+    stream_deadline: StreamDeadline,
     resolve_server_name: F,
 ) -> Result<StreamConsumeResult, String>
 where
@@ -236,10 +240,15 @@ where
         enc,
         global_index,
         is_first_iteration,
+        stream_deadline,
         resolve_server_name,
     );
-
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match stream_deadline.next(&mut stream).await {
+            Ok(Some(chunk_result)) => chunk_result,
+            Ok(None) => break,
+            Err(timeout) => return Err(stream_deadline.message(timeout)),
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         decoder.push(&chunk).map_err(|e| match e {
@@ -253,6 +262,9 @@ where
             let frame = frame.map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
             if let Some((event_type, data)) = resolve_event(frame) {
                 processor.process(&event_type, &data).await?;
+                if processor.terminal_seen() {
+                    return Ok(processor.into_result());
+                }
             }
         }
         decoder.compact();
@@ -269,7 +281,11 @@ where
         }
     }
 
-    Ok(processor.into_result())
+    if processor.terminal_seen() {
+        Ok(processor.into_result())
+    } else {
+        Err("Upstream stream ended before message_stop".to_string())
+    }
 }
 
 // ============================================================================
@@ -448,6 +464,8 @@ struct EventProcessor<'a, F> {
     result: IterationResult,
     usage: Option<MessageDeltaUsage>,
     upstream_blocks: Vec<BlockAccumulator>,
+    terminal_seen: bool,
+    stream_deadline: StreamDeadline,
 }
 
 impl<'a, F> EventProcessor<'a, F>
@@ -459,6 +477,7 @@ where
         enc: &'a mut SseEncoder,
         global_index: &'a mut u32,
         is_first_iteration: bool,
+        stream_deadline: StreamDeadline,
         resolve_server_name: F,
     ) -> Self {
         let index_base = *global_index;
@@ -476,6 +495,8 @@ where
             },
             usage: None,
             upstream_blocks: Vec::new(),
+            terminal_seen: false,
+            stream_deadline,
         }
     }
 
@@ -487,12 +508,13 @@ where
         }
     }
 
+    fn terminal_seen(&self) -> bool {
+        self.terminal_seen
+    }
+
     /// Send an SSE event to the client, returning `Err` on disconnect.
     async fn send(&mut self, event_type: &str, data: &Value) -> Result<(), String> {
-        if !send_event(self.tx, self.enc, event_type, data).await {
-            return Err(CLIENT_DISCONNECTED_ERROR.into());
-        }
-        Ok(())
+        send_event(self.tx, self.enc, event_type, data, self.stream_deadline).await
     }
 
     /// Process a single SSE event from the upstream worker.
@@ -510,7 +532,9 @@ where
             "content_block_delta" => self.handle_block_delta(&mut parsed).await?,
             "content_block_stop" => self.handle_block_stop(&parsed).await?,
             "message_delta" => self.handle_message_delta(&parsed),
-            "message_stop" => { /* Don't forward — we emit our own at the end */ }
+            "message_stop" => {
+                self.terminal_seen = true;
+            }
             "ping" => {
                 self.send("ping", &serde_json::json!({"type": "ping"}))
                     .await?;
@@ -777,6 +801,71 @@ mod tests {
         assert!(text.starts_with("event: ping\n"));
         assert!(text.contains("data: "));
         assert!(text.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn test_encode_error() {
+        let mut enc = SseEncoder::new();
+        let bytes = encode_error(&mut enc, "deadline elapsed");
+        let events = decode_events(&bytes);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "error");
+        let payload: Value = serde_json::from_str(&events[0].1).unwrap();
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["error"]["message"], "deadline elapsed");
+    }
+
+    #[tokio::test]
+    async fn test_send_event_respects_total_deadline_when_channel_is_full() {
+        let deadline = StreamDeadline::new(
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_secs(1),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let mut enc = SseEncoder::new();
+        let data = serde_json::json!({"type": "ping"});
+
+        send_event(&tx, &mut enc, "ping", &data, deadline)
+            .await
+            .unwrap();
+        let result = send_event(&tx, &mut enc, "ping", &data, deadline).await;
+
+        assert!(result.is_err_and(
+            |error| error.starts_with("Streaming request exceeded configured total timeout")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_consume_and_forward_rejects_eof_before_message_stop() {
+        let upstream = http::Response::builder()
+            .status(StatusCode::OK)
+            .body("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+            .unwrap();
+        let response = reqwest::Response::from(upstream);
+        let (tx, _rx) = mpsc::channel(2);
+        let mut encoder = SseEncoder::new();
+        let mut global_index = 0;
+        let deadline = StreamDeadline::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+
+        let result = consume_and_forward(
+            &tx,
+            &mut encoder,
+            response,
+            &mut global_index,
+            true,
+            deadline,
+            str::to_owned,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "Upstream stream ended before message_stop"
+        ));
     }
 
     #[test]

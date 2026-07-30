@@ -289,6 +289,152 @@ pub fn parse_block(block: &str) -> Option<SseFrame<'_>> {
     parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
+/// Update a rolling tail of raw SSE bytes and return whether the stream is
+/// currently positioned at an event boundary.
+pub fn update_event_boundary(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let suffix = if bytes.len() > 4 {
+        &bytes[bytes.len() - 4..]
+    } else {
+        bytes
+    };
+    let mut window = Vec::with_capacity(tail.len() + suffix.len());
+    window.extend_from_slice(tail);
+    window.extend_from_slice(suffix);
+
+    let start = window.len().saturating_sub(4);
+    tail.clear();
+    tail.extend_from_slice(&window[start..]);
+
+    let mut offset = 0;
+    let mut at_boundary = false;
+    while let Some((pos, len)) = find_frame_boundary(&window[offset..]) {
+        let end = offset + pos + len;
+        at_boundary = end == window.len();
+        offset = end;
+    }
+    at_boundary
+}
+
+enum TerminalEvent {
+    Done,
+    EventType(Vec<u8>),
+}
+
+/// Incrementally observes terminal SSE events without buffering event payloads.
+///
+/// This is intentionally separate from [`SseDecoder`]: terminal tracking must
+/// recover after an oversized upstream event while the full decoder retains its
+/// strict buffer limit. Only enough bytes to match the configured terminal
+/// field are retained from each line.
+pub struct SseTerminalObserver {
+    target: TerminalEvent,
+    line: Vec<u8>,
+    max_line_len: usize,
+    line_truncated: bool,
+    skip_lf_after_cr: bool,
+    has_data: bool,
+    data_is_done: bool,
+    event_type_matches: bool,
+}
+
+impl SseTerminalObserver {
+    pub fn done() -> Self {
+        Self::new(TerminalEvent::Done, b"data: [DONE]".len())
+    }
+
+    pub fn event_type(event_type: &str) -> Self {
+        Self::new(
+            TerminalEvent::EventType(event_type.as_bytes().to_vec()),
+            b"event: ".len() + event_type.len(),
+        )
+    }
+
+    fn new(target: TerminalEvent, max_line_len: usize) -> Self {
+        Self {
+            target,
+            line: Vec::with_capacity(max_line_len),
+            max_line_len,
+            line_truncated: false,
+            skip_lf_after_cr: false,
+            has_data: false,
+            data_is_done: false,
+            event_type_matches: false,
+        }
+    }
+
+    /// Feed raw SSE bytes and report whether a complete target event was seen.
+    pub fn observe(&mut self, bytes: &[u8]) -> bool {
+        let mut terminal_seen = false;
+        for &byte in bytes {
+            if self.skip_lf_after_cr {
+                self.skip_lf_after_cr = false;
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+
+            match byte {
+                b'\r' => {
+                    terminal_seen |= self.finish_line();
+                    self.skip_lf_after_cr = true;
+                }
+                b'\n' => terminal_seen |= self.finish_line(),
+                _ if self.line.len() < self.max_line_len => self.line.push(byte),
+                _ => self.line_truncated = true,
+            }
+        }
+        terminal_seen
+    }
+
+    fn finish_line(&mut self) -> bool {
+        if self.line.is_empty() && !self.line_truncated {
+            let terminal_seen = self.has_data
+                && match &self.target {
+                    TerminalEvent::Done => self.data_is_done,
+                    TerminalEvent::EventType(_) => self.event_type_matches,
+                };
+            self.reset_event();
+            return terminal_seen;
+        }
+
+        let colon = self.line.iter().position(|&byte| byte == b':');
+        let (field, mut value) = match colon {
+            Some(index) => (&self.line[..index], &self.line[index + 1..]),
+            None => (self.line.as_slice(), &[][..]),
+        };
+        if value.first() == Some(&b' ') {
+            value = &value[1..];
+        }
+
+        match field {
+            b"data" => {
+                self.data_is_done = !self.has_data && !self.line_truncated && value == b"[DONE]";
+                self.has_data = true;
+            }
+            b"event" => {
+                self.event_type_matches = !self.line_truncated
+                    && match &self.target {
+                        TerminalEvent::Done => false,
+                        TerminalEvent::EventType(target) => value == target,
+                    };
+            }
+            _ => {}
+        }
+
+        self.line.clear();
+        self.line_truncated = false;
+        false
+    }
+
+    fn reset_event(&mut self) {
+        self.line.clear();
+        self.line_truncated = false;
+        self.has_data = false;
+        self.data_is_done = false;
+        self.event_type_matches = false;
+    }
+}
+
 // ============================================================================
 // Shared helpers
 // ============================================================================
@@ -532,6 +678,56 @@ mod tests {
         let json_str = serde_json::to_string(&val).unwrap();
         let expected = format!("event: content_block_start\ndata: {json_str}\n\n");
         assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn update_event_boundary_detects_split_boundaries() {
+        let mut tail = Vec::new();
+
+        assert!(!update_event_boundary(&mut tail, b"data: he"));
+        assert!(!update_event_boundary(&mut tail, b"llo\n"));
+        assert!(update_event_boundary(&mut tail, b"\n"));
+
+        assert!(!update_event_boundary(&mut tail, b"data: next\r\n"));
+        assert!(update_event_boundary(&mut tail, b"\r\n"));
+    }
+
+    #[test]
+    fn observe_done_event_detects_split_done_frame() {
+        let mut observer = SseTerminalObserver::done();
+
+        assert!(!observer.observe(b"data: [DO"));
+        assert!(observer.observe(b"NE]\n\n"));
+    }
+
+    #[test]
+    fn observe_event_type_detects_split_terminal_event() {
+        let mut observer = SseTerminalObserver::event_type("message_stop");
+
+        assert!(!observer.observe(b"event: message_stop\nda"));
+        assert!(observer.observe(b"ta: {\"type\":\"message_stop\"}\n\n"));
+    }
+
+    #[test]
+    fn terminal_observer_recovers_after_oversized_event() {
+        let mut done_observer = SseTerminalObserver::done();
+        assert!(!done_observer.observe(b"data: an oversized payload that"));
+        assert!(!done_observer.observe(b" continues across chunks\n\n"));
+        assert!(done_observer.observe(b"data: [DONE]\n\n"));
+
+        let mut event_observer = SseTerminalObserver::event_type("message_stop");
+        assert!(event_observer.observe(
+            b"data: an oversized payload that exceeds the tracked line\n\n\
+              event: message_stop\ndata: {}\n\n"
+        ));
+    }
+
+    #[test]
+    fn terminal_observer_does_not_match_done_line_inside_oversized_event() {
+        let mut observer = SseTerminalObserver::done();
+
+        assert!(!observer.observe(b"data: an oversized first line\ndata: [DONE]\n\n"));
+        assert!(observer.observe(b"data: [DONE]\n\n"));
     }
 
     // --- SseDecoder tests ---
