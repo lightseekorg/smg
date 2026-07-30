@@ -102,32 +102,70 @@ impl KimiK3Parser {
 
     /// Locate the end of the think channel in `text`, searching from `from`.
     ///
-    /// Returns `(reasoning_end, content_start)` for whichever comes first: the
-    /// think-close marker (consumed, so content resumes after it) or a sibling
-    /// `response`/`tools` opener (left in place for downstream parsing).
-    /// `None` when neither is present.
+    /// Returns `(reasoning_end, content_start)` for whichever terminator comes
+    /// first. `None` when none is present.
     ///
-    /// A sibling opener has to count as an implicit close because a forced tool
-    /// call can jump straight from the prefilled `<|open|>think<|sep|>` into
-    /// `<|open|>tools<|sep|>`; without it the tools channel would be swallowed
-    /// as reasoning. `message` is excluded — it wraps the whole assistant turn
-    /// and opens *before* the think channel.
-    fn think_channel_end(&self, text: &str, from: usize) -> Option<(usize, usize)> {
+    /// Three kinds of terminator, each with a different span:
+    ///
+    /// - The think-close marker: consumed, so content resumes after it.
+    /// - A sibling `response`/`tools` *opener*: left in place for downstream
+    ///   parsing, so reasoning ends and content starts at the marker. A sibling
+    ///   opener has to count as an implicit close because a forced tool call can
+    ///   jump straight from the prefilled `<|open|>think<|sep|>` into
+    ///   `<|open|>tools<|sep|>`; without it the tools channel would be swallowed
+    ///   as reasoning. `message` is excluded here — it wraps the whole assistant
+    ///   turn and opens *before* the think channel.
+    /// - A sibling `response`/`message` *closer*, but only when `think_observed`
+    ///   is false. See below; the span is `(from, from)`, i.e. no reasoning at
+    ///   all and content covering everything from `from`.
+    ///
+    /// `think_observed` says whether a literal `<|open|>think<|sep|>` was found
+    /// in `text`, as opposed to the channel merely being *assumed* open because
+    /// the caller pre-marked reasoning for a prefilled prompt. Reaching a closer
+    /// for a sibling channel without ever having entered the think channel is a
+    /// contradiction that can only be resolved one way: the model ignored the
+    /// prefilled `<|open|>think<|sep|>` and answered directly, closing the
+    /// channel as `response`/`message`. Everything from `from` is therefore the
+    /// answer, and `strip_content_wrapper` removes the stray closers. When the
+    /// think channel *was* observed, the same closer is just malformed output
+    /// and must not be allowed to retroactively empty the reasoning span.
+    ///
+    /// Note the asymmetry in span: text before a sibling *opener* is reasoning,
+    /// whereas text before a sibling *closer* is the response body.
+    fn think_channel_end(
+        &self,
+        text: &str,
+        from: usize,
+        think_observed: bool,
+    ) -> Option<(usize, usize)> {
         let close = self
             .think_close_re
             .find_at(text, from)
-            .map(|m| (m.start(), m.end()));
-        let sibling = [&self.response_open_re, &self.tools_open_re]
+            .map(|m| (m.start(), (m.start(), m.end())));
+        let sibling_open = [&self.response_open_re, &self.tools_open_re]
             .into_iter()
             .filter_map(|re| re.find_at(text, from).map(|m| m.start()))
             .min()
-            .map(|start| (start, start));
-        // Ties favour `close` (listed first); the markers cannot in fact start
-        // at the same offset, since one begins `<|close|>` and the other `<|open|>`.
-        [close, sibling]
+            .map(|start| (start, (start, start)));
+        let sibling_close = (!think_observed)
+            .then(|| {
+                [&self.response_close_re, &self.message_close_re]
+                    .into_iter()
+                    .filter_map(|re| re.find_at(text, from).map(|m| m.start()))
+                    .min()
+            })
+            .flatten()
+            .map(|start| (start, (from, from)));
+        // Compare on the marker's own position, not on the returned span, so the
+        // `(from, from)` case does not win by virtue of starting at the lowest
+        // possible offset. Ties favour whichever is listed first, preserving the
+        // original preference for `close`; the markers cannot in fact start at
+        // the same offset, since no two of them share a literal prefix.
+        [close, sibling_open, sibling_close]
             .into_iter()
             .flatten()
-            .min_by_key(|&(end, _)| end)
+            .min_by_key(|&(marker_start, _)| marker_start)
+            .map(|(_, span)| span)
     }
 
     /// Return the prefix of accumulated reasoning text that is safe to stream.
@@ -143,10 +181,21 @@ impl KimiK3Parser {
 
         // Sibling openers are held back alongside the think markers: a partial
         // `<|open|>too…` at the tail would otherwise leak into `reasoning_text`
-        // before it completes and ends the channel.
+        // before it completes and ends the channel. Sibling *closers* are held
+        // back for the same reason now that they too can end the channel, and
+        // sharing the `<|close|>` prefix with `THINK_CLOSE` is not enough —
+        // `compute_overlap` matches whole suffixes, so `<|close|>res` would
+        // otherwise leak the `res`.
         let overlap = Self::compute_overlap(
             after_open,
-            &[THINK_OPEN, THINK_CLOSE, RESPONSE_OPEN, TOOLS_OPEN],
+            &[
+                THINK_OPEN,
+                THINK_CLOSE,
+                RESPONSE_OPEN,
+                RESPONSE_CLOSE,
+                MESSAGE_CLOSE,
+                TOOLS_OPEN,
+            ],
         );
         if overlap > 0 {
             &after_open[..after_open.len() - overlap]
@@ -245,7 +294,8 @@ impl ReasoningParser for KimiK3Parser {
             return Ok(ParserResult::normal(self.strip_content_wrapper(text)));
         }
 
-        let Some((reasoning_end, content_start)) = self.think_channel_end(text, reasoning_start)
+        let Some((reasoning_end, content_start)) =
+            self.think_channel_end(text, reasoning_start, m_open.is_some())
         else {
             // Opened but never closed — e.g. output truncated mid-thought.
             // Classify the remainder as reasoning rather than lose it.
@@ -307,13 +357,21 @@ impl ReasoningParser for KimiK3Parser {
         // opener as well as the think-close marker is what lets a forced tools
         // channel reach the content phase instead of streaming as reasoning
         // indefinitely.
-        let r_start = self
-            .think_open_re
-            .find(&self.buffer)
-            .map(|m| m.end())
-            .unwrap_or(0);
+        //
+        // A sibling closer can also end it, but only when the think channel was
+        // assumed rather than observed — see `think_channel_end`. That recovery
+        // is inherently partial while streaming: reasoning deltas for what turns
+        // out to be the answer have already left the building and cannot be
+        // recalled, so the answer is repeated in `reasoning_text`. What the fix
+        // buys here is a correct and complete `normal_text` (a client reading
+        // only `content` sees the whole answer) and a cleared `in_reasoning`,
+        // which is what gates the tool parser. Non-streaming is exact.
+        let think_open = self.think_open_re.find(&self.buffer);
+        let think_observed = think_open.is_some();
+        let r_start = think_open.map(|m| m.end()).unwrap_or(0);
 
-        if let Some((reasoning_end, content_start)) = self.think_channel_end(&self.buffer, r_start)
+        if let Some((reasoning_end, content_start)) =
+            self.think_channel_end(&self.buffer, r_start, think_observed)
         {
             // Transition: reasoning phase ends.
             self.reason_phase_ended = true;
@@ -544,6 +602,85 @@ mod tests {
     }
 
     #[test]
+    fn in_reasoning_answer_closed_as_response_is_content_not_reasoning() {
+        // Regression (observed on 16/700 BEAM answers): the generation prompt
+        // prefills `<|open|>think<|sep|>`, the gateway pre-marks reasoning, and
+        // then the model ignores the think channel and answers straight into it,
+        // closing it as `response`. The completion therefore carries sibling
+        // *closers* and no opener of any kind. Before the fix nothing matched as
+        // a terminator, the whole answer was filed as reasoning, and `content`
+        // came back empty with the wrapper markers still attached.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let input = format!("The answer is 42.{CLOSE}response{SEP}{CLOSE}message{SEP}");
+        let r = p.detect_and_parse_reasoning(&input).unwrap();
+        assert_eq!(r.normal_text, "The answer is 42.");
+        assert_eq!(r.reasoning_text, "");
+        assert!(!p.is_in_reasoning());
+    }
+
+    #[test]
+    fn in_reasoning_answer_closed_as_message_only_is_content() {
+        // Same shape with only the outer `message` closer present.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let input = format!("Paris.{CLOSE}message{SEP}");
+        let r = p.detect_and_parse_reasoning(&input).unwrap();
+        assert_eq!(r.normal_text, "Paris.");
+        assert_eq!(r.reasoning_text, "");
+    }
+
+    #[test]
+    fn observed_think_channel_ignores_a_stray_sibling_closer() {
+        // The contradiction argument only holds when the think channel was
+        // *assumed*. With a real `<|open|>think<|sep|>` in the text, a stray
+        // `<|close|>response<|sep|>` is malformed output, not proof that the
+        // deliberation was really the answer — the reasoning must survive.
+        let mut p = KimiK3Parser::new();
+        let input = format!("{}deliberating{CLOSE}response{SEP}", think_open());
+        let r = p.detect_and_parse_reasoning(&input).unwrap();
+        assert_eq!(
+            r.reasoning_text,
+            format!("deliberating{CLOSE}response{SEP}")
+        );
+        assert_eq!(r.normal_text, "");
+        assert!(p.is_in_reasoning());
+    }
+
+    #[test]
+    fn think_close_wins_over_a_later_sibling_closer() {
+        // A properly closed think channel is terminated by its own marker; the
+        // response closer that follows is just wrapper to strip. This is the
+        // ordering the new closer branch must not disturb.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let input = format!(
+            "step{}{}answer{}{}",
+            think_close(),
+            response_open(),
+            response_close(),
+            message_close()
+        );
+        let r = p.detect_and_parse_reasoning(&input).unwrap();
+        assert_eq!(r.reasoning_text, "step");
+        assert_eq!(r.normal_text, "answer");
+    }
+
+    #[test]
+    fn sibling_opener_before_a_closer_still_splits_at_the_opener() {
+        // Text before a sibling *opener* is reasoning; text before a sibling
+        // *closer* is the answer. When both are present the opener comes first
+        // and must win, or the deliberation would be relabelled as content.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let input =
+            format!("thought{OPEN}response{SEP}answer{CLOSE}response{SEP}{CLOSE}message{SEP}");
+        let r = p.detect_and_parse_reasoning(&input).unwrap();
+        assert_eq!(r.reasoning_text, "thought");
+        assert_eq!(r.normal_text, "answer");
+    }
+
+    #[test]
     fn no_think_channel_is_all_content() {
         let mut p = KimiK3Parser::new();
         let r = p.detect_and_parse_reasoning("just an answer").unwrap();
@@ -614,6 +751,60 @@ mod tests {
             )
         );
         assert!(!p.is_in_reasoning());
+    }
+
+    #[test]
+    fn streaming_answer_closed_as_response_recovers_content() {
+        // Streaming counterpart of
+        // `in_reasoning_answer_closed_as_response_is_content_not_reasoning`.
+        //
+        // The recovery is necessarily partial: by the time the `response` closer
+        // arrives the answer has already been streamed as reasoning deltas and
+        // cannot be recalled, so it appears in both fields. What matters is that
+        // `normal_text` is complete and correct — a client reading only
+        // `content` now gets the whole answer instead of an empty string — and
+        // that `in_reasoning` clears, since it gates the tool parser.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let chunks = [
+            "The answer ",
+            "is 42.",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+        ];
+
+        let mut reasoning = String::new();
+        let mut normal = String::new();
+        for chunk in chunks {
+            let result = p.parse_reasoning_streaming_incremental(chunk).unwrap();
+            reasoning.push_str(&result.reasoning_text);
+            normal.push_str(&result.normal_text);
+        }
+
+        assert_eq!(normal, "The answer is 42.");
+        assert_eq!(reasoning, "The answer is 42.");
+        assert!(!p.is_in_reasoning());
+    }
+
+    #[test]
+    fn streaming_split_sibling_closer_does_not_leak_into_reasoning() {
+        // A sibling closer now ends the reasoning phase, so a partial one at the
+        // chunk boundary has to be held back like any other terminator. Sharing
+        // the `<|close|>` prefix with the think-close marker is not enough:
+        // `compute_overlap` matches whole suffixes, so without `RESPONSE_CLOSE`
+        // in the holdback set the `res` would be emitted as reasoning.
+        let mut p = KimiK3Parser::new();
+        p.mark_reasoning_started();
+        let partial = p
+            .parse_reasoning_streaming_incremental("The answer<|close|>res")
+            .unwrap();
+        assert_eq!(partial.reasoning_text, "The answer");
+        assert_eq!(partial.normal_text, "");
+        let completed = p
+            .parse_reasoning_streaming_incremental("ponse<|sep|>")
+            .unwrap();
+        assert_eq!(completed.reasoning_text, "");
+        assert_eq!(completed.normal_text, "The answer");
     }
 
     #[test]
