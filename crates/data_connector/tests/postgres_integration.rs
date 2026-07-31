@@ -1,6 +1,6 @@
 //! Integration tests for the Postgres backend against a live PostgreSQL instance.
 //!
-//! Regression coverage for https://github.com/lightseekorg/smg/issues/1930: the
+//! Regression coverage for https://github.com/smg-project/smg/issues/1930: the
 //! `responses.input`/`responses.raw_response`, `conversations.metadata`, and
 //! `conversation_items.content` columns are native Postgres `JSON` columns.
 //! `tokio-postgres` panics with `WrongType` if a `JSON` column is fetched as

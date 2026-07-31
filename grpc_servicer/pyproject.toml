@@ -45,8 +45,8 @@ mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0", "transformers<5
 tokenspeed = ["pyzmq>=25.0.0", "msgspec>=0.18.0"]
 
 [project.urls]
-Homepage = "https://github.com/lightseekorg/smg"
-Repository = "https://github.com/lightseekorg/smg"
+Homepage = "https://github.com/smg-project/smg"
+Repository = "https://github.com/smg-project/smg"
 
 [tool.setuptools.packages.find]
 where = ["."]

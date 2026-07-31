@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn chat_request_accepts_function_tool_without_parameters() {
-        // https://github.com/lightseekorg/smg/issues/1974 — omitting
+        // https://github.com/smg-project/smg/issues/1974 — omitting
         // `parameters` is spec-legal and must not reject the request.
         let value = json!({
             "model": "test-model",

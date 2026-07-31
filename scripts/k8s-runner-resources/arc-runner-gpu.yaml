@@ -8,7 +8,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - 4-gpu-h100
         - k8s-runner-gpu
@@ -135,7 +135,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - 4-gpu-a10
         - k8s-runner-gpu
@@ -250,7 +250,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - 1-gpu-h100
         - 1-gpu
@@ -377,7 +377,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - 1-gpu
       serviceAccountName: arc-runner-sa
@@ -502,7 +502,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - 2-gpu-h100
       serviceAccountName: arc-runner-sa

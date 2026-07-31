@@ -18,7 +18,7 @@ Thank you for your interest in contributing to Shepherd Model Gateway! This guid
 
     Found a bug? Open an issue with a clear description, steps to reproduce, and expected vs actual behavior.
 
-    [:octicons-arrow-right-24: Open an issue](https://github.com/lightseekorg/smg/issues/new)
+    [:octicons-arrow-right-24: Open an issue](https://github.com/smg-project/smg/issues/new)
 
 -   :material-lightbulb:{ .lg .middle } **Suggest Features**
 
@@ -26,7 +26,7 @@ Thank you for your interest in contributing to Shepherd Model Gateway! This guid
 
     Have an idea? Open a feature request describing the problem you're solving and your proposed solution.
 
-    [:octicons-arrow-right-24: Request a feature](https://github.com/lightseekorg/smg/issues/new)
+    [:octicons-arrow-right-24: Request a feature](https://github.com/smg-project/smg/issues/new)
 
 -   :material-code-tags:{ .lg .middle } **Contribute Code**
 
@@ -42,7 +42,7 @@ Thank you for your interest in contributing to Shepherd Model Gateway! This guid
 
     Documentation improvements are always welcome! Fix typos, clarify explanations, or add examples.
 
-    [:octicons-arrow-right-24: Edit on GitHub](https://github.com/lightseekorg/smg/tree/main/docs)
+    [:octicons-arrow-right-24: Edit on GitHub](https://github.com/smg-project/smg/tree/main/docs)
 
 </div>
 
@@ -141,15 +141,15 @@ docs(readme): update installation instructions
 
 ## Getting Help
 
-- **Questions**: Open a [GitHub Discussion](https://github.com/lightseekorg/smg/discussions)
-- **Bugs**: Open an [Issue](https://github.com/lightseekorg/smg/issues)
+- **Questions**: Open a [GitHub Discussion](https://github.com/smg-project/smg/discussions)
+- **Bugs**: Open an [Issue](https://github.com/smg-project/smg/issues)
 - **Chat**: Join our community on [Discord](https://discord.gg/wkQ73CVTvR) or [Slack](https://join.slack.com/t/lightseekorg/shared_invite/zt-3py6mpreo-XUGd064dSsWeQizh3YKQrQ)
 
 ---
 
 ## Code of Conduct
 
-We are committed to providing a welcoming and inclusive environment. Please read and follow our [Code of Conduct](https://github.com/lightseekorg/smg/blob/main/CODE_OF_CONDUCT.md).
+We are committed to providing a welcoming and inclusive environment. Please read and follow our [Code of Conduct](https://github.com/smg-project/smg/blob/main/CODE_OF_CONDUCT.md).
 
 ---
 

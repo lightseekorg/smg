@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Questions & Discussions
-    url: https://github.com/lightseekorg/smg/discussions
+    url: https://github.com/smg-project/smg/discussions
     about: Ask questions, share ideas, or discuss SMG usage
   - name: Security Vulnerabilities
-    url: https://github.com/lightseekorg/smg/security/advisories/new
+    url: https://github.com/smg-project/smg/security/advisories/new
     about: Report security vulnerabilities privately

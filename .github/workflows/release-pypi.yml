@@ -152,7 +152,7 @@ jobs:
 
   upload:
     name: Upload to PyPI
-    if: github.repository == 'lightseekorg/smg'  # Ensure this job only runs for the lightseekorg/smg repository
+    if: github.repository == 'smg-project/smg'  # Ensure this job only runs for the smg-project/smg repository
     needs: [build, build-sdist]
     runs-on: ubuntu-latest
     permissions: {}

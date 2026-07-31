@@ -19,7 +19,7 @@ permissions:
 jobs:
   prep:
     name: Compute nightly tag suffix
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     runs-on: ubuntu-latest
     # Inherits the workflow default (contents: read only) — no package access needed.
     outputs:
@@ -32,7 +32,7 @@ jobs:
   build:
     name: Build ${{ matrix.engine }} nightly
     needs: [prep]
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     # The reusable workflow checks out SMG and pushes images to ghcr.io, so this
     # job (not the whole workflow) needs packages: write.
     permissions:

@@ -291,7 +291,7 @@ pub enum Role {
     /// forwarded to the chat template **in place**, so backends that render
     /// `system` inline (e.g. GLM-4.5+/5.x) keep its position, while backends
     /// that only read a leading system (e.g. MiniMax-M2) handle it per their
-    /// own template. See https://github.com/lightseekorg/smg/issues/1795
+    /// own template. See https://github.com/smg-project/smg/issues/1795
     System,
 }
 

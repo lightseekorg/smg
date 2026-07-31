@@ -1,5 +1,5 @@
 ## GitHub config URL for the runner scale set
-githubConfigUrl: "https://github.com/lightseekorg/smg"
+githubConfigUrl: "https://github.com/smg-project/smg"
 
 ## Name of the Kubernetes secret containing GitHub credentials
 ## The secret should contain either a PAT (github_token) or GitHub App credentials

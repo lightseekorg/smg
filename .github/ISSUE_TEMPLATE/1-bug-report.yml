@@ -9,8 +9,8 @@ body:
         Thanks for taking the time to report a bug! Please fill out the form below to help us investigate.
 
         **Before submitting**, please:
-        - Search [existing issues](https://github.com/lightseekorg/smg/issues) to avoid duplicates
-        - Check [discussions](https://github.com/lightseekorg/smg/discussions) for known issues or workarounds
+        - Search [existing issues](https://github.com/smg-project/smg/issues) to avoid duplicates
+        - Check [discussions](https://github.com/smg-project/smg/discussions) for known issues or workarounds
 
   - type: textarea
     id: description

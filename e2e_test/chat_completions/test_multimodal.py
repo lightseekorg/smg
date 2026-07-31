@@ -29,10 +29,10 @@ PUG_IMAGE_PATH = FIXTURES_DIR / "pug.jpg"  # Pug in blanket
 # Using the repo's own pug.jpg also makes the duplicate-image assertion in
 # test_multi_images_mixed exact: the URL and base64 pug are now byte-identical.
 IMAGE_DOG_URL = (
-    "https://raw.githubusercontent.com/lightseekorg/smg/main/e2e_test/fixtures/images/dog.jpg"
+    "https://raw.githubusercontent.com/smg-project/smg/main/e2e_test/fixtures/images/dog.jpg"
 )
 IMAGE_PUG_URL = (
-    "https://raw.githubusercontent.com/lightseekorg/smg/main/e2e_test/fixtures/images/pug.jpg"
+    "https://raw.githubusercontent.com/smg-project/smg/main/e2e_test/fixtures/images/pug.jpg"
 )
 
 

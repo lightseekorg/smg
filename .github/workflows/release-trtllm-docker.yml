@@ -39,7 +39,7 @@ on:
       smg_repo:
         description: 'SMG repo URL'
         required: false
-        default: 'https://github.com/lightseekorg/smg'
+        default: 'https://github.com/smg-project/smg'
         type: string
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
@@ -67,7 +67,7 @@ jobs:
       base_image_ref: ${{ matrix.base_image }}
       engine_repo: ${{ inputs.trtllm_repo }}
       engine_commit: ${{ inputs.trtllm_commit || 'latest' }}
-      smg_repo: ${{ inputs.smg_repo || 'https://github.com/lightseekorg/smg' }}
+      smg_repo: ${{ inputs.smg_repo || 'https://github.com/smg-project/smg' }}
       smg_commit: ${{ github.event_name == 'pull_request' && 'main' || inputs.smg_commit || 'v1.9.0' }}
       tag: ${{ inputs.tag }}
       source_build_repo: ${{ inputs.trtllm_repo }}

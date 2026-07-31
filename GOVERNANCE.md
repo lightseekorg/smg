@@ -65,7 +65,7 @@ remaining core maintainers.
 
 Project communication happens in the open on GitHub — issues, pull
 requests, and discussions in
-[lightseekorg/smg](https://github.com/lightseekorg/smg). Security issues
+[smg-project/smg](https://github.com/smg-project/smg). Security issues
 should be reported privately to the core maintainers (see contact
 information above).
 

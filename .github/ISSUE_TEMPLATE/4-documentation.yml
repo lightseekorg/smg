@@ -77,7 +77,7 @@ body:
       description: Where is this documentation (file path, URL, or section name)?
       placeholder: |
         - File: README.md, line 45
-        - URL: https://github.com/lightseekorg/smg/blob/main/docs/configuration.md
+        - URL: https://github.com/smg-project/smg/blob/main/docs/configuration.md
         - Section: "Routing Policies"
     validations:
       required: true

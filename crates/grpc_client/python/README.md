@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/smg-grpc-proto)](https://pypi.org/project/smg-grpc-proto/)
 [![Python](https://img.shields.io/pypi/pyversions/smg-grpc-proto)](https://pypi.org/project/smg-grpc-proto/)
 
-Protocol Buffer definitions for [SMG](https://github.com/lightseekorg/smg) (Shepherd Model Gateway) gRPC services.
+Protocol Buffer definitions for [SMG](https://github.com/smg-project/smg) (Shepherd Model Gateway) gRPC services.
 
 This package provides pre-compiled Python gRPC stubs for:
 - **SGLang** scheduler service (`sglang_scheduler.proto`)
@@ -30,7 +30,7 @@ from smg_grpc_proto import trtllm_service_pb2, trtllm_service_pb2_grpc
 
 ## Proto Source
 
-The proto source files live in [`grpc_client/proto/`](https://github.com/lightseekorg/smg/tree/main/grpc_client/proto) in the SMG repository. Python stubs are generated at build time using `grpcio-tools` and shipped in the wheel.
+The proto source files live in [`grpc_client/proto/`](https://github.com/smg-project/smg/tree/main/grpc_client/proto) in the SMG repository. Python stubs are generated at build time using `grpcio-tools` and shipped in the wheel.
 
 ## Development
 

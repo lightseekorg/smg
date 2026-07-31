@@ -1,8 +1,8 @@
 site_name: Shepherd Model Gateway
 site_description: High-performance inference gateway for large-scale LLM deployments
-site_url: https://lightseekorg.github.io/smg
-repo_url: https://github.com/lightseekorg/smg
-repo_name: lightseekorg/smg
+site_url: https://smg-project.github.io/smg
+repo_url: https://github.com/smg-project/smg
+repo_name: smg-project/smg
 edit_uri: edit/main/docs/
 
 copyright: Copyright &copy; 2024 SMG Contributors
@@ -76,7 +76,7 @@ extra:
     deprecated: Deprecated
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/lightseekorg/smg
+      link: https://github.com/smg-project/smg
     - icon: fontawesome/brands/slack
       link: https://join.slack.com/t/lightseekorg/shared_invite/zt-3py6mpreo-XUGd064dSsWeQizh3YKQrQ
   generator: false
@@ -115,7 +115,7 @@ markdown_extensions:
   - pymdownx.magiclink:
       normalize_issue_symbols: true
       repo_url_shorthand: true
-      user: lightseekorg
+      user: smg-project
       repo: smg
   - pymdownx.mark
   - pymdownx.smartsymbols

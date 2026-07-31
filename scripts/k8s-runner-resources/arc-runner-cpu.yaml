@@ -8,7 +8,7 @@ spec:
   template:
     spec:
       ephemeral: true
-      repository: lightseekorg/smg
+      repository: smg-project/smg
       labels:
         - k8s-runner-cpu
       serviceAccountName: arc-runner-sa

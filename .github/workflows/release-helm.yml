@@ -15,7 +15,7 @@ permissions:
 jobs:
   release:
     name: Package and push Helm chart
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     runs-on: ubuntu-latest
     concurrency:
       group: release-helm-${{ github.ref }}

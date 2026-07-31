@@ -1,25 +1,25 @@
 <p align="center">
-  <img alt="SMG Logo" src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/logos/logomark-dark.svg" width="80">
+  <img alt="SMG Logo" src="https://raw.githubusercontent.com/smg-project/smg/main/docs/assets/images/logos/logomark-dark.svg" width="80">
 </p>
 
 <h1 align="center">Shepherd Model Gateway</h1>
 
 <p align="center">
-  <a href="https://github.com/lightseekorg/smg/releases/latest"><img src="https://img.shields.io/github/v/release/lightseekorg/smg?logo=github&label=Release" alt="Release"></a>
+  <a href="https://github.com/smg-project/smg/releases/latest"><img src="https://img.shields.io/github/v/release/smg-project/smg?logo=github&label=Release" alt="Release"></a>
   <a href="https://github.com/orgs/lightseekorg/packages/container/package/smg"><img src="https://img.shields.io/badge/ghcr.io-lightseekorg%2Fsmg-blue?logo=docker" alt="Docker"></a>
   <a href="https://pypi.org/project/smg/"><img src="https://img.shields.io/pypi/v/smg?logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://lightseekorg.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
+  <a href="https://smg-project.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
   <a href="https://discord.lightseek.org"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://slack.lightseek.org"><img src="https://img.shields.io/badge/Slack-Join%20Us-4A154B?logo=slack&logoColor=white" alt="Slack"></a>
-  <a href="https://deepwiki.com/lightseekorg/smg"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://deepwiki.com/smg-project/smg"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://pytorch.org/blog/lightseek-smg/"><img src="https://img.shields.io/badge/PyTorch-Technical%20Blog-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch Blog"></a>
 </p>
 
 Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
+  <img src="https://raw.githubusercontent.com/smg-project/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
 </p>
 
 ## Why SMG?

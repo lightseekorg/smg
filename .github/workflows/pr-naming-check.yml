@@ -13,7 +13,7 @@ jobs:
     name: Branch Naming Convention
     runs-on: ubuntu-latest
     # Only enforce on internal PRs, not forks
-    if: github.event.pull_request.head.repo.full_name == 'lightseekorg/smg' && github.head_ref != 'main'
+    if: github.event.pull_request.head.repo.full_name == 'smg-project/smg' && github.head_ref != 'main'
     permissions:
       contents: read
       pull-requests: write

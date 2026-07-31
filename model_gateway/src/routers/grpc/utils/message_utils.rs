@@ -149,7 +149,7 @@ pub(crate) fn process_message_content_format(
             // A `system`-role message in `messages[]` (e.g. from Claude Code) is
             // forwarded in place, preserving its position in the conversation so
             // inline-`system` chat templates render it where it was sent.
-            // See https://github.com/lightseekorg/smg/issues/1795
+            // See https://github.com/smg-project/smg/issues/1795
             messages::Role::System => {
                 result.push(convert_system_message(&message.content));
             }

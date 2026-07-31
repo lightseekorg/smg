@@ -3,7 +3,7 @@
 Thank you for your interest in contributing to Shepherd Model Gateway. This
 document is the front door. The detailed guides live under
 [`docs/contributing/`](./docs/contributing/) and are served at
-<https://lightseekorg.github.io/smg/contributing/>.
+<https://smg-project.github.io/smg/contributing/>.
 
 - **Code of Conduct**: [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — applies to
   every interaction in this repo and in community spaces.
@@ -138,8 +138,8 @@ maintainer list, or reach out in the `#security` channel of the
 
 ## Getting help
 
-- **Questions**: [GitHub Discussions](https://github.com/lightseekorg/smg/discussions)
-- **Bugs**: [GitHub Issues](https://github.com/lightseekorg/smg/issues/new)
+- **Questions**: [GitHub Discussions](https://github.com/smg-project/smg/discussions)
+- **Bugs**: [GitHub Issues](https://github.com/smg-project/smg/issues/new)
 - **Chat**: [Slack](https://slack.lightseek.org) · [Discord](https://discord.gg/wkQ73CVTvR)
 
 ---

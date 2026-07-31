@@ -22,7 +22,7 @@ jobs:
   # Pushes only when triggered by a version bump (pyproject.toml) or manual dispatch.
   build-and-push:
     name: Build and push Docker image
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     runs-on: ["cpu-e5"]
     permissions:
       contents: read

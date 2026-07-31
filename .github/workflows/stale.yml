@@ -8,7 +8,7 @@ on:
 
 jobs:
   close-stale-prs:
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     permissions:
       pull-requests: write
     runs-on: ubuntu-latest

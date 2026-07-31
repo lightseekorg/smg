@@ -77,7 +77,7 @@ jobs:
 
   upload-proto:
     name: Upload proto to PyPI
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     needs: [build-proto]
     runs-on: ubuntu-latest
     steps:
@@ -142,7 +142,7 @@ jobs:
     needs: [build-servicer]
     if: >-
       always()
-      && github.repository == 'lightseekorg/smg'
+      && github.repository == 'smg-project/smg'
       && needs.build-servicer.result == 'success'
     runs-on: ubuntu-latest
     steps:

@@ -27,7 +27,7 @@ on:
       smg_repo:
         description: 'SMG repo URL'
         required: false
-        default: 'https://github.com/lightseekorg/smg'
+        default: 'https://github.com/smg-project/smg'
         type: string
       smg_commit:
         description: 'SMG commit/ref ("latest" for HEAD)'
@@ -61,7 +61,7 @@ on:
 
 jobs:
   build-and-push:
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     runs-on: ["cpu-e5"]
     steps:
       - name: Print inputs to summary

@@ -136,7 +136,7 @@ Request tracking and response transformation.
 
 </div>
 
-Find complete source code and build instructions in [`examples/wasm/`](https://github.com/lightseekorg/smg/tree/main/examples/wasm).
+Find complete source code and build instructions in [`examples/wasm/`](https://github.com/smg-project/smg/tree/main/examples/wasm).
 
 ---
 
@@ -282,7 +282,7 @@ WASM plugins execute in a sandboxed environment with multiple protection layers:
 
 Complete source code with build instructions.
 
-[View Examples →](https://github.com/lightseekorg/smg/tree/main/examples/wasm)
+[View Examples →](https://github.com/smg-project/smg/tree/main/examples/wasm)
 
 </div>
 

@@ -64,7 +64,7 @@ Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This
     source "$HOME/.cargo/env"
 
     # Clone and build
-    git clone https://github.com/lightseekorg/smg.git
+    git clone https://github.com/smg-project/smg.git
     cd smg
     cargo build --release
     ```

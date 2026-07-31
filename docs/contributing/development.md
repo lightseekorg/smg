@@ -21,7 +21,7 @@ This guide covers setting up a development environment and contributing code to 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/lightseekorg/smg.git
+git clone https://github.com/smg-project/smg.git
 cd smg
 ```
 
@@ -465,6 +465,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Getting Help
 
-- **Stuck?** Open a [Discussion](https://github.com/lightseekorg/smg/discussions)
-- **Found a bug?** Open an [Issue](https://github.com/lightseekorg/smg/issues)
+- **Stuck?** Open a [Discussion](https://github.com/smg-project/smg/discussions)
+- **Found a bug?** Open an [Issue](https://github.com/smg-project/smg/issues)
 - **Have questions about a PR?** Tag a maintainer

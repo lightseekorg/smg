@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Multimodal pixel RDMA (NIXL) transport for the SMG gateway"
 license = "Apache-2.0"
-repository = "https://github.com/lightseekorg/smg"
+repository = "https://github.com/smg-project/smg"
 
 [features]
 default = []

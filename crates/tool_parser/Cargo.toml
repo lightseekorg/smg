@@ -4,7 +4,7 @@ version = "1.6.0"
 edition = "2021"
 description = "Tool/function call parser for LLM model outputs"
 license = "Apache-2.0"
-repository = "https://github.com/lightseekorg/smg"
+repository = "https://github.com/smg-project/smg"
 authors = [
     "Simo Lin <linsimo.mark@gmail.com>",
     "Chang Su <mckvtl@gmail.com>",

@@ -35,7 +35,7 @@ permissions:
 jobs:
   benchmark:
     name: Tokenizer
-    if: github.repository == 'lightseekorg/smg'
+    if: github.repository == 'smg-project/smg'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

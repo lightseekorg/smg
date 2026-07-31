@@ -25,7 +25,7 @@
 ## 2. Install the GitHub App
 
 1. From the GitHub App settings, click **Install App**
-2. Select the organization and choose the target repository (e.g. `lightseekorg/smg`)
+2. Select the organization and choose the target repository (e.g. `smg-project/smg`)
 3. Click **Install**
 4. Note the **Installation ID** from the URL: `https://github.com/organizations/<org>/settings/installations/<installation-id>`
 
