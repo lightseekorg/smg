@@ -1,16 +1,16 @@
 # Contributing to SMG
 
 Thank you for your interest in contributing to Shepherd Model Gateway. This
-document is the front door. The detailed guides live under
-[`docs/contributing/`](./docs/contributing/) and are served at
-<https://smg-project.github.io/smg/contributing/>.
+document is the front door. The detailed guides live in the
+[smg-docs](https://github.com/smg-project/smg-docs) repository under
+[`src/lib/content/contributing/`](https://github.com/smg-project/smg-docs/tree/main/src/lib/content/contributing).
 
 - **Code of Conduct**: [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — applies to
   every interaction in this repo and in community spaces.
 - **Governance**: For how the project is governed — roles, decision making, and how maintainers are added — see [GOVERNANCE.md](GOVERNANCE.md).
-- **How to contribute code**: [`docs/contributing/index.md`](./docs/contributing/index.md)
-- **Development environment**: [`docs/contributing/development.md`](./docs/contributing/development.md)
-- **Code style**: [`docs/contributing/code-style.md`](./docs/contributing/code-style.md)
+- **How to contribute code**: [Contributing guide](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/index.md)
+- **Development environment**: [Development setup](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/development.md)
+- **Code style**: [Code style](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/code-style.md)
 - **Review guidelines**: [`REVIEW.md`](./REVIEW.md)
 - **PR template**: [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 
@@ -41,7 +41,7 @@ cargo build
 cargo test
 ```
 
-Full setup details are in [`docs/contributing/development.md`](./docs/contributing/development.md).
+Full setup details are in the [development setup guide](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/development.md).
 
 ---
 

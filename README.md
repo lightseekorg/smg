@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="SMG Logo" src="https://raw.githubusercontent.com/smg-project/smg/main/docs/assets/images/logos/logomark-dark.svg" width="80">
+  <img alt="SMG Logo" src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/logomark-dark.svg" width="80">
 </p>
 
 <h1 align="center">Shepherd Model Gateway</h1>
@@ -19,7 +19,7 @@
 Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/smg-project/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
+  <img src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
 </p>
 
 ## Why SMG?
