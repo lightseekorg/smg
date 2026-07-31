@@ -942,11 +942,21 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
             let step_duration = step_start.elapsed();
 
-            self.state_store
-                .update(instance_id, |s| {
-                    s.context = context.clone();
-                })
-                .await?;
+            // Persist the step's context mutations back to shared state — but not
+            // for a Skip. A Skip is a pre-mutation early return (the step ran no
+            // logic), so `context` is just the stale full-copy read at step start;
+            // writing it back would clobber a concurrent parallel-branch step
+            // under last-writer-wins. Concretely: an instantly-skipping external
+            // branch step would erase the `connection_mode` a just-finished local
+            // branch step committed, because the whole context is snapshotted and
+            // rewritten wholesale rather than field-merged.
+            if !matches!(result, Ok(Ok(StepResult::Skip))) {
+                self.state_store
+                    .update(instance_id, |s| {
+                        s.context = context.clone();
+                    })
+                    .await?;
+            }
 
             match result {
                 Ok(Ok(StepResult::Success)) => {
