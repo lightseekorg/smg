@@ -10,7 +10,6 @@ documentation:
       - any-glob-to-any-file:
           - '**/*.md'
           - 'docs/**/*'
-          - 'mkdocs.yml'
 
 dependencies:
   - changed-files:

@@ -88,27 +88,27 @@ That's it. SMG is now load-balancing requests across your workers.
 
 | Feature | Description |
 |---------|-------------|
-| **[8 Routing Policies](docs/concepts/routing/load-balancing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
-| **[gRPC Pipeline](docs/concepts/architecture/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
-| **[MCP Integration](docs/concepts/extensibility/mcp.md)** | Connect external tool servers via Model Context Protocol |
-| **[High Availability](docs/concepts/architecture/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
-| **[Chat History](docs/concepts/data/chat-history.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
-| **[WASM Plugins](docs/concepts/extensibility/wasm-plugins.md)** | Extend with custom WebAssembly logic |
-| **[Resilience](docs/concepts/reliability/index.md)** | Circuit breakers, retries with backoff, rate limiting |
+| **[8 Routing Policies](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/routing/load-balancing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
+| **[gRPC Pipeline](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
+| **[MCP Integration](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/extensibility/mcp.md)** | Connect external tool servers via Model Context Protocol |
+| **[High Availability](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
+| **[Chat History](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/data/chat-history.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
+| **[WASM Plugins](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/extensibility/wasm-plugins.md)** | Extend with custom WebAssembly logic |
+| **[Resilience](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/reliability/index.md)** | Circuit breakers, retries with backoff, rate limiting |
 
 ## Documentation
 
 | | |
 |:--|:--|
-| [Getting Started](docs/getting-started/index.md) | Installation and first steps |
-| [Architecture](docs/concepts/architecture/overview.md) | How SMG works |
-| [Configuration](docs/reference/configuration.md) | CLI reference and options |
-| [API Reference](docs/reference/api/openai.md) | OpenAI-compatible endpoints |
-| [Kubernetes Setup](docs/getting-started/service-discovery.md) | In-cluster discovery and production setup |
+| [Getting Started](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/getting-started/index.md) | Installation and first steps |
+| [Architecture](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/overview.md) | How SMG works |
+| [Configuration](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/reference/configuration.md) | CLI reference and options |
+| [API Reference](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/reference/api/openai.md) | OpenAI-compatible endpoints |
+| [Kubernetes Setup](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/getting-started/service-discovery.md) | In-cluster discovery and production setup |
 
 ## Contributing
 
-We welcome contributions! See [Contributing Guide](docs/contributing/index.md) for details.
+We welcome contributions! See [Contributing Guide](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/index.md) for details.
 
-- [Development Setup](docs/contributing/development.md)
-- [Code Style](docs/contributing/code-style.md)
+- [Development Setup](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/development.md)
+- [Code Style](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/code-style.md)
