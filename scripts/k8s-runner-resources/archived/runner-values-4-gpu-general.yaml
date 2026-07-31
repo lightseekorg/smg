@@ -5,6 +5,11 @@ githubConfigUrl: "https://github.com/smg-project/smg"
 ## The secret should contain either a PAT (github_token) or GitHub App credentials
 githubConfigSecret: github-arc-secret
 
+## The shared ARC controller runs in a separate namespace.
+controllerServiceAccount:
+  name: arc-gha-rs-controller
+  namespace: org-actions-runner
+
 ## Runner scaling configuration
 minRunners: 2
 maxRunners: 20

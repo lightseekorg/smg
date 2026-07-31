@@ -4,7 +4,7 @@ metadata:
   name: arc-runner-4-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 4
+  replicas: 0
   template:
     spec:
       ephemeral: true
@@ -131,7 +131,7 @@ metadata:
   name: arc-runner-gpu-a10
   namespace: actions-runner-system
 spec:
-  replicas: 2
+  replicas: 0
   template:
     spec:
       ephemeral: true
@@ -246,7 +246,7 @@ metadata:
   name: arc-runner-1-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 4
+  replicas: 0
   template:
     spec:
       ephemeral: true
@@ -373,7 +373,7 @@ metadata:
   name: arc-runner-1-gpu
   namespace: actions-runner-system
 spec:
-  replicas: 2
+  replicas: 0
   template:
     spec:
       ephemeral: true
@@ -498,7 +498,7 @@ metadata:
   name: arc-runner-2-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 2
+  replicas: 0
   template:
     spec:
       ephemeral: true

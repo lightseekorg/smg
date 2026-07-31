@@ -10,14 +10,6 @@ metadata:
   name: arc-runner
   namespace: actions-runner-system
 rules:
-  - apiGroups: [""]
-    resources:
-      - secrets
-    verbs:
-      - get
-      - list
-      - watch
-
   # Pods
   - apiGroups: [""]
     resources:
