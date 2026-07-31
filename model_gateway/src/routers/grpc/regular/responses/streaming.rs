@@ -11,11 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axum::{
-    body::Body,
-    http::{header, StatusCode},
-    response::Response,
-};
+use axum::{body::Body, response::Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
@@ -35,8 +31,7 @@ use smg_data_connector::{
     ResponseStorage,
 };
 use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
@@ -54,6 +49,7 @@ use crate::{
             mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
             openai_bridge::{self, ResponseFormat},
         },
+        error,
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -94,8 +90,13 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             params.model_id,
             ctx.components.clone(),
             Some(params.tenant_request_meta),
+            None,
         )
         .await;
+
+    if !chat_response.status().is_success() {
+        return chat_response;
+    }
 
     // Extract body from chat response
     let (_parts, body) = chat_response.into_parts();
@@ -173,7 +174,15 @@ async fn process_and_transform_sse_stream(
     let mut stream = body.into_data_stream();
 
     // Process stream chunks (each chunk is a complete SSE event)
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            biased;
+            () = tx.closed() => return Err("Client disconnected".to_string()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Convert chunk to string
@@ -431,7 +440,7 @@ impl StreamingResponseAccumulator {
 /// This streams each iteration's response to the client while accumulating
 /// to check for tool calls. If tool calls are found, executes them and
 /// continues with the next streaming iteration.
-pub(super) fn execute_tool_loop_streaming(
+pub(super) async fn execute_tool_loop_streaming(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
@@ -440,6 +449,7 @@ pub(super) fn execute_tool_loop_streaming(
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+    let (ready_tx, ready_rx) = oneshot::channel();
 
     // Clone data for background task
     let ctx_clone = ctx.clone();
@@ -458,6 +468,7 @@ pub(super) fn execute_tool_loop_streaming(
             params,
             mcp_servers,
             tx.clone(),
+            ready_tx,
         )
         .await;
 
@@ -470,33 +481,14 @@ pub(super) fn execute_tool_loop_streaming(
         let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
     });
 
-    // Build SSE response
-    let stream = UnboundedReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-
-    #[expect(
-        clippy::expect_used,
-        reason = "Response::builder with valid status and no invalid headers is infallible"
-    )]
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(body)
-        .expect("infallible: valid status code, no invalid headers");
-
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("text/event-stream"),
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-cache"),
-    );
-    response.headers_mut().insert(
-        header::CONNECTION,
-        header::HeaderValue::from_static("keep-alive"),
-    );
-
-    response
+    match ready_rx.await {
+        Ok(Ok(())) => build_sse_response(rx),
+        Ok(Err(response)) => response,
+        Err(_) => error::internal_error(
+            "responses_stream_start_failed",
+            "Responses stream failed before the backend request started",
+        ),
+    }
 }
 
 /// Internal streaming tool loop implementation
@@ -507,7 +499,9 @@ async fn execute_tool_loop_streaming_internal(
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ready: oneshot::Sender<Result<(), Response>>,
 ) -> Result<(), String> {
+    let mut ready = Some(ready);
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
@@ -567,23 +561,47 @@ async fn execute_tool_loop_streaming_internal(
         }
 
         // Convert to chat request
-        let mut chat_request = conversions::responses_to_chat(&current_request)
-            .map_err(|e| format!("Failed to convert request: {e}"))?;
+        let mut chat_request = match conversions::responses_to_chat(&current_request) {
+            Ok(request) => request,
+            Err(conversion_error) => {
+                let message = format!("Failed to convert request: {conversion_error}");
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(error::bad_request("convert_request_failed", message)));
+                    return Ok(());
+                }
+                return Err(message);
+            }
+        };
 
         // Prepare tools and tool_choice for this iteration (same logic as non-streaming)
         prepare_chat_tools_and_choice(&mut chat_request, &mcp_chat_tools, state.iteration);
 
         // Execute chat streaming
-        let response = ctx
-            .pipeline
-            .execute_chat(
+        let response = tokio::select! {
+            biased;
+            () = tx.closed() => return Err("Client disconnected".to_string()),
+            response = ctx.pipeline.execute_chat(
                 Arc::new(chat_request),
                 params.headers.clone(),
                 params.model_id.clone(),
                 ctx.components.clone(),
                 Some(params.tenant_request_meta.clone()),
-            )
-            .await;
+                Some(&mut ready),
+            ) => response,
+        };
+
+        if !response.status().is_success() {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err(response));
+                return Ok(());
+            }
+            return Err(format!("Chat pipeline returned HTTP {}", response.status()));
+        }
+        if let Some(ready) = ready.take() {
+            if ready.send(Ok(())).is_err() {
+                return Ok(());
+            }
+        }
 
         // Convert chat stream to Responses API events while accumulating for tool call detection
         // Stream text naturally - it only appears on final iteration (tool iterations have empty content)
@@ -939,7 +957,15 @@ async fn convert_and_accumulate_stream(
     let mut accumulator = ChatResponseAccumulator::new();
     let mut stream = body.into_data_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            biased;
+            () = tx.closed() => return Err("Client disconnected".to_string()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Parse chunk

@@ -562,6 +562,29 @@ class TestParseRouterArgs:
         assert router_args.prefill_policy == "power_of_two"
         assert router_args.decode_policy == "round_robin"
 
+    def test_parse_pd_prefill_admission_args(self):
+        """Test parsing explicit Prefill admission options."""
+        args = [
+            "--pd-disaggregation",
+            "--prefill",
+            "http://prefill1:8000",
+            "none",
+            "--decode",
+            "http://decode1:8001",
+            "--prefill-max-inflight-requests-per-worker",
+            "7",
+            "--prefill-queue-size",
+            "13",
+            "--prefill-queue-timeout-secs",
+            "17",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.prefill_max_inflight_requests_per_worker == 7
+        assert router_args.prefill_queue_size == 13
+        assert router_args.prefill_queue_timeout_secs == 17
+
     def test_parse_epd_args(self):
         """Test parsing EPD disaggregated mode arguments."""
         args = [

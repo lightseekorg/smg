@@ -48,7 +48,8 @@ use crate::{
                 },
             },
             context,
-            proto_wrapper::{ProtoResponseVariant, ProtoStream},
+            context::ExecutionStream,
+            proto_wrapper::ProtoResponseVariant,
             utils,
         },
     },
@@ -175,7 +176,7 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from a single stream
     async fn process_single_stream(
-        grpc_stream: ProtoStream,
+        grpc_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -195,17 +196,17 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from prefill/decode streams (prefill + decode)
     async fn process_prefill_decode_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
-        // Phase 1: Process prefill stream (collect metadata)
+        // Phase 1: Process prefill stream and collect metadata.
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
-        while let Some(result) = prefill_stream.next().await {
+        while let Some(result) = prefill_stream.next_or_closed(tx).await? {
             let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
@@ -213,7 +214,6 @@ impl HarmonyStreamingProcessor {
                 cached_tokens.insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
             }
         }
-
         // Phase 2: Decode (shared helper)
         Self::process_chat_decode_stream(
             decode_stream,
@@ -224,9 +224,6 @@ impl HarmonyStreamingProcessor {
             &mut cached_tokens,
         )
         .await?;
-
-        // Mark prefill stream completed AFTER decode succeeds
-        // This ensures that if client disconnects during decode, BOTH streams send abort
         prefill_stream.mark_completed();
         Ok(())
     }
@@ -238,7 +235,7 @@ impl HarmonyStreamingProcessor {
     /// (prefill/decode stream) or empty (single stream). Values from `Complete` messages
     /// are inserted only if not already present.
     async fn process_chat_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: ExecutionStream,
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -260,7 +257,7 @@ impl HarmonyStreamingProcessor {
         let stream_options = &original_request.stream_options;
 
         // Process stream
-        while let Some(result) = decode_stream.next().await {
+        while let Some(result) = decode_stream.next_or_closed(tx).await? {
             let response = result.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match response.into_response() {
@@ -570,16 +567,16 @@ impl HarmonyStreamingProcessor {
     }
 
     async fn process_responses_prefill_decode_stream(
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
         format_registry: Option<&FormatRegistry>,
     ) -> Result<ResponsesIterationResult, String> {
-        // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
+        // Phase 1: Drain prefill stream and collect cached tokens.
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
-        while let Some(result) = prefill_stream.next().await {
+        while let Some(result) = prefill_stream.next_or_closed(tx).await? {
             let response = result.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
                 prefill_cached_tokens_by_index
@@ -587,7 +584,6 @@ impl HarmonyStreamingProcessor {
             }
         }
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
-
         // Phase 2: Process decode stream
         let result = Self::process_decode_stream(
             decode_stream,
@@ -597,15 +593,14 @@ impl HarmonyStreamingProcessor {
             format_registry,
             prefill_cached_tokens,
         )
-        .await;
-
+        .await?;
         prefill_stream.mark_completed();
-        result
+        Ok(result)
     }
 
     /// Process decode stream for tool call events.
     async fn process_decode_stream(
-        mut decode_stream: ProtoStream,
+        mut decode_stream: ExecutionStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
@@ -638,7 +633,7 @@ impl HarmonyStreamingProcessor {
 
         // Process stream
         let mut chunk_count = 0;
-        while let Some(result) = decode_stream.next().await {
+        while let Some(result) = decode_stream.next_or_closed(tx).await? {
             chunk_count += 1;
             let response = result.map_err(|e| format!("Decode stream error: {}", e.message()))?;
 

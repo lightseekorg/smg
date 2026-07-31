@@ -38,7 +38,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
-        error, RouterTrait,
+        error, RouterTrait, PD_PREFILL_QUEUE_FULL, PD_PREFILL_QUEUE_TIMEOUT,
     },
     worker::{ConnectionMode, WorkerRegistry, WorkerType},
 };
@@ -86,6 +86,14 @@ const QWEN3_ASR_LABEL_KEYS: &[&str] = &[
     "tokenizer",
     "tokenizer_path",
 ];
+
+fn is_retryable_response(response: &Response) -> bool {
+    is_retryable_status(response.status())
+        && !matches!(
+            error::extract_error_code_from_response(response),
+            PD_PREFILL_QUEUE_FULL | PD_PREFILL_QUEUE_TIMEOUT
+        )
+}
 
 fn strip_chatml_like_tokens(text: &str) -> String {
     let mut remaining = text;
@@ -360,13 +368,18 @@ impl GrpcRouter {
         let configured_deps = PipelineDeps::new(
             worker_registry.clone(),
             policy_registry.clone(),
+            ctx.prefill_admission.clone(),
             tool_parser_factory.clone(),
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
         );
         // Deps for the parser-free endpoints (completion/embeddings/classify).
-        let pair_deps = PipelineDeps::pair(worker_registry.clone(), policy_registry.clone());
+        let pair_deps = PipelineDeps::pair(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            ctx.prefill_admission.clone(),
+        );
 
         // Present in every mode: chat/generate, messages, completion.
         let pipeline = RequestPipeline::build(Endpoint::Chat, mode, &configured_deps)
@@ -526,12 +539,19 @@ impl GrpcRouter {
                 let tenant_meta = tenant_meta_cloned.clone();
                 async move {
                     pipeline
-                        .execute_chat(request, headers, model_id, components, Some(tenant_meta))
+                        .execute_chat(
+                            request,
+                            headers,
+                            model_id,
+                            components,
+                            Some(tenant_meta),
+                            None,
+                        )
                         .await
                 }
             },
             // Should retry: check if status is retryable
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| is_retryable_response(res),
             // On backoff: record retry metrics
             |delay, attempt| {
                 self.record_retry(metrics_labels::ENDPOINT_CHAT);
@@ -581,7 +601,7 @@ impl GrpcRouter {
                 }
             },
             // Should retry: check if status is retryable
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| is_retryable_response(res),
             // On backoff: record retry metrics
             |delay, attempt| {
                 self.record_retry(metrics_labels::ENDPOINT_GENERATE);
@@ -726,7 +746,7 @@ impl GrpcRouter {
                         .await
                 }
             },
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| is_retryable_response(res),
             |delay, attempt| {
                 self.record_retry(metrics_labels::ENDPOINT_MESSAGES);
                 Metrics::record_worker_retry_backoff(attempt, delay);
@@ -777,7 +797,7 @@ impl GrpcRouter {
                         .await
                 }
             },
-            |res, _attempt| is_retryable_status(res.status()),
+            |res, _attempt| is_retryable_response(res),
             |delay, attempt| {
                 self.record_retry(metrics_labels::ENDPOINT_COMPLETIONS);
                 Metrics::record_worker_retry_backoff(attempt, delay);
@@ -1231,6 +1251,17 @@ mod tests {
             .status(),
             StatusCode::OK
         );
+    }
+
+    #[test]
+    fn local_prefill_queue_rejections_are_not_retryable() {
+        for code in [PD_PREFILL_QUEUE_FULL, PD_PREFILL_QUEUE_TIMEOUT] {
+            let response = error::too_many_requests(code, "Prefill admission rejected");
+            assert!(!is_retryable_response(&response));
+        }
+
+        let upstream = StatusCode::TOO_MANY_REQUESTS.into_response();
+        assert!(is_retryable_response(&upstream));
     }
 }
 

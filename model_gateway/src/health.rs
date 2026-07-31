@@ -20,8 +20,7 @@
 //!    maintainer recomputes on every `WorkerEvent` (bursts coalesced) and on
 //!    a short checkpoint interval. The checkpoint covers the status
 //!    mutations that bypass the registry broadcast — `set_status()` called
-//!    directly by `ActivateWorkersStep`, the mesh inbound health refresh in
-//!    `WorkerRegistry::on_remote_worker_state`, FFI bindings — and tokenizer
+//!    directly by `ActivateWorkersStep`, FFI bindings — and tokenizer
 //!    registrations, which emit no worker event at all.
 //!
 //! 2. **Dedicated probe listener.** When `--health-check-port` (config

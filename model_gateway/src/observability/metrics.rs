@@ -227,7 +227,22 @@ pub(crate) fn init_metrics() {
         "smg_pd_kv_transfer_failures_total",
         "PD KV-transfer failures (missing connector params at decode handoff)"
     );
-
+    describe_gauge!(
+        "smg_pd_prefill_admission_inflight",
+        "Prefill requests admitted by SMG per worker"
+    );
+    describe_gauge!(
+        "smg_pd_prefill_admission_queued",
+        "Requests waiting in the SMG Prefill admission queue"
+    );
+    describe_histogram!(
+        "smg_pd_prefill_admission_wait_seconds",
+        "Time spent waiting in the SMG Prefill admission queue"
+    );
+    describe_counter!(
+        "smg_pd_prefill_admission_rejections_total",
+        "Prefill admission rejections by reason"
+    );
     // Layer 3: Worker metrics
     describe_gauge!(
         "smg_worker_pool_size",
@@ -1017,6 +1032,31 @@ impl Metrics {
     /// Record a PD KV-transfer failure (missing connector params at handoff).
     pub fn record_pd_kv_transfer_failure() {
         counter!("smg_pd_kv_transfer_failures_total").increment(1);
+    }
+
+    pub fn set_pd_prefill_admission_inflight(worker_url: &str, count: usize) {
+        let worker = intern_string(worker_url);
+        gauge!(
+            "smg_pd_prefill_admission_inflight",
+            "worker" => worker
+        )
+        .set(count as f64);
+    }
+
+    pub fn set_pd_prefill_admission_queued(depth: usize) {
+        gauge!("smg_pd_prefill_admission_queued").set(depth as f64);
+    }
+
+    pub fn record_pd_prefill_admission_wait(duration: Duration) {
+        histogram!("smg_pd_prefill_admission_wait_seconds").record(duration.as_secs_f64());
+    }
+
+    pub fn record_pd_prefill_admission_rejection(reason: &'static str) {
+        counter!(
+            "smg_pd_prefill_admission_rejections_total",
+            "reason" => reason
+        )
+        .increment(1);
     }
 
     // ========================================================================

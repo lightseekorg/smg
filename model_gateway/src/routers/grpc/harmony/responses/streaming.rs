@@ -7,7 +7,7 @@ use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
 use serde_json::json;
 use smg_mcp::{McpServerBinding, McpToolSession};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -23,6 +23,7 @@ use crate::{
     observability::metrics::Metrics,
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        error,
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
@@ -66,6 +67,7 @@ pub(crate) async fn serve_harmony_responses_stream(
 
     // Create SSE channel
     let (tx, rx) = mpsc::unbounded_channel();
+    let (ready_tx, ready_rx) = oneshot::channel();
 
     // Create response event emitter
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -105,6 +107,7 @@ pub(crate) async fn serve_harmony_responses_stream(
                 mcp_servers,
                 &mut emitter,
                 &tx,
+                ready_tx,
             )
             .await;
         } else {
@@ -115,13 +118,20 @@ pub(crate) async fn serve_harmony_responses_stream(
                 tenant_request_meta,
                 &mut emitter,
                 &tx,
+                ready_tx,
             )
             .await;
         }
     });
 
-    // Return SSE stream response
-    build_sse_response(rx)
+    match ready_rx.await {
+        Ok(Ok(())) => build_sse_response(rx),
+        Ok(Err(response)) => response,
+        Err(_) => error::internal_error(
+            "responses_stream_start_failed",
+            "Responses stream failed before the backend request started",
+        ),
+    }
 }
 
 /// Execute MCP tool loop with streaming
@@ -132,6 +142,10 @@ pub(crate) async fn serve_harmony_responses_stream(
 /// - Loops through tool execution iterations
 /// - Emits final response.completed event
 /// - Persists response internally
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the streaming tool loop requires request, MCP, event, and startup state"
+)]
 async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
@@ -140,7 +154,9 @@ async fn execute_mcp_tool_loop_streaming(
     mcp_servers: Vec<McpServerBinding>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ready: oneshot::Sender<Result<(), Response>>,
 ) {
+    let mut ready = Some(ready);
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
@@ -220,17 +236,30 @@ async fn execute_mcp_tool_loop_streaming(
         );
 
         // Execute pipeline and get stream + load guards
-        let (execution_result, _load_guards) = match ctx
-            .pipeline
-            .execute_harmony_responses_streaming(
+        let pipeline_result = tokio::select! {
+            biased;
+            () = tx.closed() => return,
+            result = ctx.pipeline.execute_harmony_responses_streaming(
                 &current_request,
                 ctx,
                 Some(tenant_request_meta.clone()),
-            )
-            .await
-        {
-            Ok(result) => result,
+                &mut ready,
+            ) => result,
+        };
+        let (execution_result, _load_guards) = match pipeline_result {
+            Ok(result) => {
+                if let Some(ready) = ready.take() {
+                    if ready.send(Ok(())).is_err() {
+                        return;
+                    }
+                }
+                result
+            }
             Err(err_response) => {
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(err_response));
+                    return;
+                }
                 emitter.emit_error(
                     &format!("Pipeline execution failed: {err_response:?}"),
                     Some("pipeline_error"),
@@ -436,17 +465,36 @@ async fn execute_without_mcp_streaming(
     tenant_request_meta: TenantRequestMeta,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ready: oneshot::Sender<Result<(), Response>>,
 ) {
     debug!("No MCP tools - executing single iteration");
+    let mut ready = Some(ready);
 
     // Execute pipeline and get stream + load guards
-    let (execution_result, _load_guards) = match ctx
-        .pipeline
-        .execute_harmony_responses_streaming(current_request, ctx, Some(tenant_request_meta))
-        .await
-    {
-        Ok(result) => result,
+    let pipeline_result = tokio::select! {
+        biased;
+        () = tx.closed() => return,
+        result = ctx.pipeline.execute_harmony_responses_streaming(
+            current_request,
+            ctx,
+            Some(tenant_request_meta),
+            &mut ready,
+        ) => result,
+    };
+    let (execution_result, _load_guards) = match pipeline_result {
+        Ok(result) => {
+            if let Some(ready) = ready.take() {
+                if ready.send(Ok(())).is_err() {
+                    return;
+                }
+            }
+            result
+        }
         Err(err_response) => {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err(err_response));
+                return;
+            }
             emitter.emit_error(
                 &format!("Pipeline execution failed: {err_response:?}"),
                 Some("pipeline_error"),

@@ -15,6 +15,7 @@ use openai_protocol::{
     messages::CreateMessageRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tokio::sync::oneshot;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{debug, error};
 
@@ -53,7 +54,7 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
-    worker::WorkerRegistry,
+    worker::{PrefillAdmission, WorkerRegistry},
 };
 
 /// Which endpoint a pipeline serves. Selects the endpoint-specific stage list
@@ -78,6 +79,7 @@ pub(crate) enum Endpoint {
 pub(crate) struct PipelineDeps {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
+    prefill_admission: Option<Arc<PrefillAdmission>>,
     tool_parser_factory: ToolParserFactory,
     reasoning_parser_factory: ReasoningParserFactory,
     configured_tool_parser: Option<String>,
@@ -90,6 +92,7 @@ impl PipelineDeps {
     pub(crate) fn new(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        prefill_admission: Option<Arc<PrefillAdmission>>,
         tool_parser_factory: ToolParserFactory,
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
@@ -98,6 +101,7 @@ impl PipelineDeps {
         Self {
             worker_registry,
             policy_registry,
+            prefill_admission,
             tool_parser_factory,
             reasoning_parser_factory,
             configured_tool_parser,
@@ -110,10 +114,12 @@ impl PipelineDeps {
     pub(crate) fn pair(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        prefill_admission: Option<Arc<PrefillAdmission>>,
     ) -> Self {
         Self {
             worker_registry,
             policy_registry,
+            prefill_admission,
             tool_parser_factory: ToolParserFactory::default(),
             reasoning_parser_factory: ReasoningParserFactory::default(),
             configured_tool_parser: None,
@@ -176,11 +182,21 @@ impl PipelineDeps {
         Self {
             worker_registry: Arc::new(WorkerRegistry::new()),
             policy_registry: Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin)),
+            prefill_admission: None,
             tool_parser_factory: ToolParserFactory::default(),
             reasoning_parser_factory: ReasoningParserFactory::default(),
             configured_tool_parser: None,
             configured_reasoning_parser: None,
         }
+    }
+
+    fn worker_selection_stage(&self, mode: WorkerSelectionMode) -> WorkerSelectionStage {
+        WorkerSelectionStage::new(
+            self.worker_registry.clone(),
+            self.policy_registry.clone(),
+            mode,
+            self.prefill_admission.clone(),
+        )
     }
 }
 
@@ -188,6 +204,8 @@ impl PipelineDeps {
 ///
 /// Orchestrates all stages from request preparation to response delivery.
 /// Configured differently for regular vs PD mode.
+pub(crate) type StreamStartSender = oneshot::Sender<Result<(), Response>>;
+
 #[derive(Clone)]
 pub(crate) struct RequestPipeline {
     stages: Arc<Vec<Box<dyn PipelineStage>>>,
@@ -259,11 +277,7 @@ impl RequestPipeline {
                 let (processor, streaming_processor) = deps.configured_processors(backend);
                 let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(ChatGeneratePreparationStage::new()),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                 ];
                 if matches!(mode, Mode::EncodePrefillDecode) {
@@ -275,7 +289,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(ChatGenerateResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -287,11 +301,7 @@ impl RequestPipeline {
                 let (processor, streaming_processor) = deps.configured_processors(backend);
                 let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(MessagePreparationStage),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                 ];
                 if matches!(mode, Mode::EncodePrefillDecode) {
@@ -303,7 +313,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(MessageResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -316,11 +326,7 @@ impl RequestPipeline {
                 let (processor, streaming_processor) = PipelineDeps::default_processors(backend);
                 let mut stages: Vec<Box<dyn PipelineStage>> = vec![
                     Box::new(CompletionPreparationStage),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                 ];
                 if matches!(mode, Mode::EncodePrefillDecode) {
@@ -332,7 +338,7 @@ impl RequestPipeline {
                         plan_kind,
                     )) as Box<dyn PipelineStage>,
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(CompletionResponseProcessingStage::new(
                         processor,
                         streaming_processor,
@@ -347,18 +353,14 @@ impl RequestPipeline {
                 }
                 vec![
                     Box::new(harmony::stages::HarmonyPreparationStage::new()),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                     Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
                         inject_pd_metadata,
                         plan_kind,
                     )),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
                 ]
             }
@@ -369,15 +371,11 @@ impl RequestPipeline {
                 }
                 vec![
                     Box::new(EmbeddingPreparationStage::new()),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(EmbeddingResponseProcessingStage::new()),
                 ]
             }
@@ -388,15 +386,11 @@ impl RequestPipeline {
                 }
                 vec![
                     Box::new(EmbeddingPreparationStage::new()),
-                    Box::new(WorkerSelectionStage::new(
-                        deps.worker_registry.clone(),
-                        deps.policy_registry.clone(),
-                        worker_selection,
-                    )),
+                    Box::new(deps.worker_selection_stage(worker_selection)),
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
                     Box::new(DispatchMetadataStage),
-                    Box::new(RequestExecutionStage::new()),
+                    Box::new(RequestExecutionStage),
                     Box::new(ClassifyResponseProcessingStage::new()),
                 ]
             }
@@ -416,6 +410,7 @@ impl RequestPipeline {
         model_id: String,
         components: Arc<SharedComponents>,
         tenant_request_meta: Option<TenantRequestMeta>,
+        mut stream_start: Option<&mut Option<StreamStartSender>>,
     ) -> Response {
         let start = Instant::now();
         let streaming = request.stream;
@@ -434,6 +429,13 @@ impl RequestPipeline {
         );
 
         for stage in self.stages.iter() {
+            if stage.begins_backend_dispatch() {
+                if let Some(stream_start) = stream_start.as_deref_mut() {
+                    if let Some(sender) = stream_start.take() {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+            }
             match stage.execute(&mut ctx).await {
                 Ok(Some(response)) => {
                     // Stage completed with streaming response - record success and return
@@ -1135,6 +1137,7 @@ impl RequestPipeline {
         request: &openai_protocol::responses::ResponsesRequest,
         harmony_ctx: &ResponsesContext,
         tenant_request_meta: Option<TenantRequestMeta>,
+        stream_start: &mut Option<StreamStartSender>,
     ) -> Result<(ExecutionResult, Option<LoadGuards>), Response> {
         // Create RequestContext for this Responses request
         let mut ctx = RequestContext::for_responses(
@@ -1146,6 +1149,11 @@ impl RequestPipeline {
         ctx.input.tenant_request_meta = tenant_request_meta;
 
         for (idx, stage) in self.stages.iter().enumerate() {
+            if stage.begins_backend_dispatch() {
+                if let Some(sender) = stream_start.take() {
+                    let _ = sender.send(Ok(()));
+                }
+            }
             match stage.execute(&mut ctx).await {
                 Ok(Some(response)) => {
                     error!(
@@ -1481,7 +1489,7 @@ mod alias_pipeline_tests {
             .unwrap();
 
         let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
-        let deps = PipelineDeps::pair(worker_registry.clone(), policy_registry);
+        let deps = PipelineDeps::pair(worker_registry.clone(), policy_registry, None);
         let pipeline = RequestPipeline::build(Endpoint::Chat, Mode::PrefillDecode, &deps).unwrap();
         let components = Arc::new(SharedComponents {
             tokenizer_registry,

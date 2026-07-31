@@ -172,6 +172,33 @@ smg \
 | `--decode` | Decode worker URLs |
 | `--prefill-policy` | Routing policy for prefill workers |
 | `--decode-policy` | Routing policy for decode workers |
+| `--prefill-max-inflight-requests-per-worker` | Maximum in-flight Prefill requests per worker; non-positive disables it (default: `-1`) |
+| `--prefill-queue-size` | Maximum requests waiting for Prefill admission (default: `100` when enabled; `0` disables waiting) |
+| `--prefill-queue-timeout-secs` | Maximum Prefill admission wait (default: `60`) |
+
+Each SMG process applies the Prefill limit independently to each registered
+Prefill worker. One client request occupies one slot from worker selection until
+the Prefill response reaches EOF. Batch inputs and parallel samples requested
+through `n` still occupy one slot. With `--dp-aware`, every registered rank is a
+separate worker and therefore has its own limit.
+
+When every eligible Prefill worker is full, the request joins one Router-wide
+FIFO queue. Queued requests do not bind to a worker. At the head of the queue,
+SMG reads the current worker health, capacity, and cache state before running the
+Prefill policy. The head also re-checks once per second, so a worker that becomes
+usable again without reporting a state change is still picked up. A full queue
+and an expired queue wait both return `429` with different error codes. Decode
+workers keep their normal load tracking but have no admission limit. Prefill
+admission cannot be enabled together with the priority scheduler.
+
+With the `consistent_hashing` policy, `X-SMG-Target-Worker` remains strict: a
+request waits for the selected Prefill worker and is never moved to another
+worker when that target is full.
+
+SMG exports `smg_pd_prefill_admission_inflight` per worker,
+`smg_pd_prefill_admission_queued`, `smg_pd_prefill_admission_wait_seconds`, and
+`smg_pd_prefill_admission_rejections_total` by rejection reason. These metrics
+measure Router admission, not the queue inside the inference engine.
 
 ### Per-Phase Policies
 

@@ -58,9 +58,19 @@ smg \
   --pd-disaggregation \
   --prefill http://prefill:8000 9001 \
   --decode http://decode:8001 \
+  --prefill-max-inflight-requests-per-worker 32 \
+  --prefill-queue-size 32 \
+  --prefill-queue-timeout-secs 30 \
   --host 0.0.0.0 \
   --port 30000
 ```
+
+Each SMG process applies the optional limit independently to each registered
+Prefill worker. One client request occupies one slot until Prefill reaches EOF.
+When every eligible worker is full, requests wait in one Router-wide FIFO queue.
+SMG selects a worker only when the request reaches the head and capacity is
+available. Queue full and queue timeout responses use HTTP `429`. Decode remains
+unlimited by this feature.
 
 ### Multiple Workers
 
@@ -124,6 +134,9 @@ smg \
   --prefill grpc://prefill:50051 \
   --decode grpc://decode:50052 \
   --model-path /path/to/model \
+  --prefill-max-inflight-requests-per-worker 32 \
+  --prefill-queue-size 32 \
+  --prefill-queue-timeout-secs 30 \
   --host 0.0.0.0 \
   --port 30000
 ```

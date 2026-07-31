@@ -22,6 +22,13 @@ pub trait PipelineStage: Send + Sync {
     /// - `Err(response)` - Error occurred, return this error response
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response>;
 
+    /// Whether this stage starts backend work. Streaming adapters commit their
+    /// HTTP response immediately before this boundary so earlier failures can
+    /// still preserve their HTTP status and error body.
+    fn begins_backend_dispatch(&self) -> bool {
+        false
+    }
+
     /// Stage name for logging
     fn name(&self) -> &'static str;
 
