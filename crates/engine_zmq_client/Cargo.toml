@@ -1,0 +1,50 @@
+[package]
+name = "engine-zmq-client"
+version = "0.1.0"
+edition = "2021"
+description = "Engine-agnostic ZMQ transport + per-engine protocol modules for same-host SMG backend connections"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+
+# The vLLM EngineCore protocol module is a clean-room port of vLLM's Apache-2.0
+# `vllm-engine-core-client` crate (vllm-project/vllm, rust/src/engine-core-client).
+# It is a protocol reference, not a dependency — see #2001.
+
+[features]
+# Expose the engine-side ZMQ driver (`mock_engine`) so out-of-crate consumers
+# (mock-worker) can run a mock vLLM EngineCore. Always compiled under `cfg(test)`
+# for the crate's own loopback tests.
+mock-engine = []
+
+[dependencies]
+# Wire codec: msgpack + positional-tuple serde + zero-copy tensor aux-frames.
+rmp-serde.workspace = true
+rmpv.workspace = true
+serde.workspace = true
+serde_default.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+serde_tuple.workspace = true
+serde_with.workspace = true
+bytemuck.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+half.workspace = true
+
+# Transport + async runtime.
+zeromq.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
+tokio-util.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+
+# Errors + logging.
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

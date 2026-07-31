@@ -10,6 +10,7 @@ mod config;
 mod engine;
 mod grpc;
 mod http;
+mod zmq;
 
 use std::{process::ExitCode, sync::Arc};
 
@@ -55,6 +56,12 @@ async fn main() -> ExitCode {
             break;
         };
         workers.spawn(grpc::serve(cfg.clone(), cfg.host.clone(), port));
+    }
+    if let Some(handshake) = cfg.zmq_handshake.clone() {
+        for i in 0..cfg.zmq_count {
+            let engine_index = cfg.zmq_start_index + i as u32;
+            workers.spawn(zmq::serve(cfg.clone(), handshake.clone(), engine_index));
+        }
     }
 
     tracing::info!("started {} mock workers; ctrl-c to stop", workers.len());

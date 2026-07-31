@@ -17,6 +17,13 @@ pub struct Config {
     pub grpc_base_port: u16,
     /// Number of gRPC workers to start.
     pub grpc_count: u16,
+    /// Frontend handshake `ipc://` address ZMQ mock engines connect to (they
+    /// dial the SMG/test frontend, which binds the sockets).
+    pub zmq_handshake: Option<String>,
+    /// Number of ZMQ mock EngineCore ranks to start (each a DP rank).
+    pub zmq_count: u16,
+    /// Engine index of the first ZMQ rank; ranks use `[start, start+count)`.
+    pub zmq_start_index: u32,
     /// Model id advertised by every worker (one model, many replicas).
     pub model_id: String,
     /// Tokenizer path advertised by gRPC workers (for gateway autoload).
@@ -42,6 +49,9 @@ impl Config {
             http_count: 0,
             grpc_base_port: 0,
             grpc_count: 0,
+            zmq_handshake: None,
+            zmq_count: 0,
+            zmq_start_index: 0,
             model_id: "mock-model".to_string(),
             tokenizer_path: String::new(),
             gen_delay: Duration::from_millis(0),
@@ -58,6 +68,11 @@ impl Config {
                 "--http-count" => cfg.http_count = parse(value(&mut args, &flag)?, &flag)?,
                 "--grpc-base-port" => cfg.grpc_base_port = parse(value(&mut args, &flag)?, &flag)?,
                 "--grpc-count" => cfg.grpc_count = parse(value(&mut args, &flag)?, &flag)?,
+                "--zmq-handshake" => cfg.zmq_handshake = Some(value(&mut args, &flag)?),
+                "--zmq-count" => cfg.zmq_count = parse(value(&mut args, &flag)?, &flag)?,
+                "--zmq-start-index" => {
+                    cfg.zmq_start_index = parse(value(&mut args, &flag)?, &flag)?
+                }
                 "--model" => cfg.model_id = value(&mut args, &flag)?,
                 "--tokenizer" => cfg.tokenizer_path = value(&mut args, &flag)?,
                 "--gen-ms" => {
@@ -102,14 +117,17 @@ impl Config {
         // `--output-tokens` doubles as the realistic engine's default output
         // length when a request omits `max_tokens`.
         cfg.engine.max_new_default = cfg.output_tokens;
-        if cfg.http_count == 0 && cfg.grpc_count == 0 {
+        if cfg.http_count == 0 && cfg.grpc_count == 0 && cfg.zmq_count == 0 {
             return Err(format!(
-                "nothing to do: pass --http-count and/or --grpc-count\n\n{}",
+                "nothing to do: pass --http-count, --grpc-count, and/or --zmq-count\n\n{}",
                 usage()
             ));
         }
         if cfg.grpc_count > 0 && cfg.grpc_base_port == 0 {
             return Err("--grpc-base-port is required when --grpc-count > 0".to_string());
+        }
+        if cfg.zmq_count > 0 && cfg.zmq_handshake.is_none() {
+            return Err("--zmq-handshake <ipc://…> is required when --zmq-count > 0".to_string());
         }
         Ok(cfg)
     }
@@ -133,6 +151,9 @@ fn usage() -> String {
        --http-count <n>         number of HTTP workers (default 0)\n\
        --grpc-base-port <port>  first gRPC port (required if --grpc-count > 0)\n\
        --grpc-count <n>         number of gRPC workers (default 0)\n\
+       --zmq-handshake <addr>   frontend ipc:// handshake addr (required if --zmq-count > 0)\n\
+       --zmq-count <n>          number of ZMQ mock EngineCore ranks (default 0)\n\
+       --zmq-start-index <n>    engine index of the first ZMQ rank (default 0)\n\
        --model <id>             advertised model id (default mock-model)\n\
        --tokenizer <path>       tokenizer path for gRPC autoload (default = model)\n\
        --gen-ms <ms>            canned per-request latency (default 0)\n\

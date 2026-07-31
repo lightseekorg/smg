@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Adapted from the Apache-2.0 reference `vllm-engine-core-client`
+// (vllm-project/vllm): protocol/dtype.rs and protocol/logprobs/array.rs.
+
+use std::io::Cursor;
+
+use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
+
+use crate::error::{Error, Result};
+
+/// Effective model dtype reported by the engine after config resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModelDtype {
+    #[serde(rename = "float16")]
+    Float16,
+    #[serde(rename = "bfloat16")]
+    BFloat16,
+    #[serde(rename = "float32")]
+    Float32,
+}
+
+impl ModelDtype {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Float16 => "float16",
+            Self::BFloat16 => "bfloat16",
+            Self::Float32 => "float32",
+        }
+    }
+}
+
+/// The scalar element type of a wire ndarray, parsed from its numpy dtype string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarType {
+    I32,
+    I64,
+    F32,
+}
+
+impl ScalarType {
+    /// Size in bytes of one element.
+    pub fn element_size(self) -> usize {
+        match self {
+            Self::I32 | Self::F32 => 4,
+            Self::I64 => 8,
+        }
+    }
+}
+
+/// Byte order encoded by the numpy dtype prefix (`<`, `>`, `=`, `|`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endianness {
+    Little,
+    Big,
+    Native,
+}
+
+/// Parse a numpy dtype string (e.g. `"<i4"`, `"float32"`) into a scalar type
+/// and byte order.
+pub fn parse_dtype(dtype: &str, field: &str) -> Result<(ScalarType, Endianness)> {
+    let (endianness, body) = match dtype.as_bytes().first().copied() {
+        Some(b'<') => (Endianness::Little, &dtype[1..]),
+        Some(b'>') => (Endianness::Big, &dtype[1..]),
+        Some(b'=') | Some(b'|') => (Endianness::Native, &dtype[1..]),
+        _ => (Endianness::Native, dtype),
+    };
+
+    let scalar = match body {
+        "i4" | "int32" => ScalarType::I32,
+        "i8" | "int64" => ScalarType::I64,
+        "f4" | "float32" => ScalarType::F32,
+        _ => {
+            return Err(decode_error(
+                field,
+                &format!("unsupported dtype string {dtype:?}"),
+            ))
+        }
+    };
+    Ok((scalar, endianness))
+}
+
+/// Decode a little/big/native-endian buffer into a `Vec<i32>`.
+pub fn decode_i32_vec(bytes: &[u8], endianness: Endianness, field: &str) -> Result<Vec<i32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(decode_error(
+            field,
+            &format!("byte length {} is not divisible by 4", bytes.len()),
+        ));
+    }
+    let mut cursor = Cursor::new(bytes);
+    let mut values = Vec::with_capacity(bytes.len() / 4);
+    while (cursor.position() as usize) < bytes.len() {
+        let value = match endianness {
+            Endianness::Little => cursor.read_i32::<LittleEndian>(),
+            Endianness::Big => cursor.read_i32::<BigEndian>(),
+            Endianness::Native => cursor.read_i32::<NativeEndian>(),
+        }
+        .map_err(|error| decode_error(field, &format!("failed to read i32 payload: {error}")))?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Decode a little/big/native-endian buffer into a `Vec<i64>`.
+pub fn decode_i64_vec(bytes: &[u8], endianness: Endianness, field: &str) -> Result<Vec<i64>> {
+    if !bytes.len().is_multiple_of(8) {
+        return Err(decode_error(
+            field,
+            &format!("byte length {} is not divisible by 8", bytes.len()),
+        ));
+    }
+    let mut cursor = Cursor::new(bytes);
+    let mut values = Vec::with_capacity(bytes.len() / 8);
+    while (cursor.position() as usize) < bytes.len() {
+        let value = match endianness {
+            Endianness::Little => cursor.read_i64::<LittleEndian>(),
+            Endianness::Big => cursor.read_i64::<BigEndian>(),
+            Endianness::Native => cursor.read_i64::<NativeEndian>(),
+        }
+        .map_err(|error| decode_error(field, &format!("failed to read i64 payload: {error}")))?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Decode a little/big/native-endian buffer into a `Vec<f32>`.
+pub fn decode_f32_vec(bytes: &[u8], endianness: Endianness, field: &str) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(decode_error(
+            field,
+            &format!("byte length {} is not divisible by 4", bytes.len()),
+        ));
+    }
+    let mut cursor = Cursor::new(bytes);
+    let mut values = Vec::with_capacity(bytes.len() / 4);
+    while (cursor.position() as usize) < bytes.len() {
+        let value = match endianness {
+            Endianness::Little => cursor.read_f32::<LittleEndian>(),
+            Endianness::Big => cursor.read_f32::<BigEndian>(),
+            Endianness::Native => cursor.read_f32::<NativeEndian>(),
+        }
+        .map_err(|error| decode_error(field, &format!("failed to read f32 payload: {error}")))?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Convert a signed token id / rank into `u32`, rejecting negatives and overflow.
+pub fn convert_to_u32<I>(value: I, field: &str) -> Result<u32>
+where
+    I: TryInto<u32> + std::fmt::Display + Copy,
+{
+    value.try_into().map_err(|_| {
+        decode_error(
+            field,
+            &format!("expected non-negative value that fits in u32, got {value}"),
+        )
+    })
+}
+
+/// Build an [`Error::ExtValueDecode`] scoped to a field name.
+pub fn decode_error(field: &str, reason: &str) -> Error {
+    Error::ExtValueDecode {
+        message: format!("{field}: {reason}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_uses_protocol_dtype_strings() {
+        assert_eq!(
+            serde_json::to_value(ModelDtype::Float16).unwrap(),
+            serde_json::json!("float16")
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelDtype>(serde_json::json!("bfloat16")).unwrap(),
+            ModelDtype::BFloat16
+        );
+        assert_eq!(ModelDtype::Float32.as_str(), "float32");
+    }
+
+    #[test]
+    fn parse_dtype_handles_endianness_and_aliases() {
+        assert_eq!(
+            parse_dtype("<i4", "f").unwrap(),
+            (ScalarType::I32, Endianness::Little)
+        );
+        assert_eq!(
+            parse_dtype(">i8", "f").unwrap(),
+            (ScalarType::I64, Endianness::Big)
+        );
+        assert_eq!(
+            parse_dtype("=f4", "f").unwrap(),
+            (ScalarType::F32, Endianness::Native)
+        );
+        assert_eq!(
+            parse_dtype("float32", "f").unwrap(),
+            (ScalarType::F32, Endianness::Native)
+        );
+        assert!(parse_dtype("<c8", "f").is_err());
+    }
+
+    #[test]
+    fn decoders_respect_endianness() {
+        let le = 1_i32.to_le_bytes();
+        assert_eq!(
+            decode_i32_vec(&le, Endianness::Little, "f").unwrap(),
+            vec![1]
+        );
+        let be = 1_i32.to_be_bytes();
+        assert_eq!(decode_i32_vec(&be, Endianness::Big, "f").unwrap(), vec![1]);
+        assert!(decode_i32_vec(&[0, 1, 2], Endianness::Little, "f").is_err());
+
+        let f = 2.5_f32.to_le_bytes();
+        assert_eq!(
+            decode_f32_vec(&f, Endianness::Little, "f").unwrap(),
+            vec![2.5]
+        );
+        let big = 7_i64.to_be_bytes();
+        assert_eq!(decode_i64_vec(&big, Endianness::Big, "f").unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn convert_to_u32_rejects_negative() {
+        assert_eq!(convert_to_u32(5_i32, "f").unwrap(), 5);
+        assert!(convert_to_u32(-1_i32, "f").is_err());
+    }
+}
