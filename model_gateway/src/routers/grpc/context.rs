@@ -18,6 +18,7 @@ use openai_protocol::{
     responses::ResponsesRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tokio::sync::mpsc::UnboundedSender;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -32,7 +33,7 @@ use super::{
 };
 use crate::{
     middleware::TenantRequestMeta,
-    worker::{RuntimeType, Worker, WorkerLoadGuard, WorkerRegistry},
+    worker::{PrefillLoadGuard, RuntimeType, Worker, WorkerLoadGuard, WorkerRegistry},
 };
 
 /// Main request processing context
@@ -181,6 +182,10 @@ pub(crate) struct ProcessingState {
 
     // Load guard for worker load tracking (created at execution stage)
     pub load_guards: Option<LoadGuards>,
+
+    // PD load reservations are acquired with worker selection, before clients
+    // or EPD encode work are created.
+    pub pd_load_guards: Option<PdLoadGuards>,
 
     // Stage 6: Response processing state
     pub response: ResponseState,
@@ -405,49 +410,130 @@ pub(crate) struct DispatchMetadata {
     pub weight_version: Option<String>,
 }
 
-/// Load guards for worker load tracking
-/// Automatically decrements load when dropped
+/// Regular-mode load tracking. Streaming response stages attach these guards
+/// to the client response body, preserving the existing lifecycle.
 pub(crate) enum LoadGuards {
-    Single {
-        _guard: WorkerLoadGuard,
-    },
-    /// Disaggregated guards cover the prefill+decode pair. EPD encode workers are
-    /// assigned per item; their fire-and-supervise RPCs do not hold load guards.
-    Disaggregated {
-        _prefill: WorkerLoadGuard,
-        _decode: WorkerLoadGuard,
-    },
-    /// Batched completion fan-out: one guard set per sub-request so load-aware
-    /// policies see the real backend concurrency.
-    Batch {
-        _guards: Vec<LoadGuards>,
-    },
+    Single { _guard: WorkerLoadGuard },
+    Batch { _guards: Vec<LoadGuards> },
 }
 
 impl LoadGuards {
-    pub fn new(selection: &WorkerSelection, headers: Option<&HeaderMap>) -> Self {
-        match selection {
-            WorkerSelection::Single { worker } => LoadGuards::Single {
-                _guard: WorkerLoadGuard::new(worker.clone(), headers),
-            },
-            WorkerSelection::Disaggregated {
-                prefill, decode, ..
-            } => LoadGuards::Disaggregated {
-                _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
-                _decode: WorkerLoadGuard::new(decode.clone(), headers),
-            },
+    fn new(worker: &Arc<dyn Worker>, headers: Option<&HeaderMap>) -> Self {
+        Self::Single {
+            _guard: WorkerLoadGuard::new(Arc::clone(worker), headers),
         }
     }
 
-    /// One guard set per concurrent sub-request.
-    pub fn scaled(selection: &WorkerSelection, headers: Option<&HeaderMap>, count: usize) -> Self {
+    pub fn scaled(worker: &Arc<dyn Worker>, headers: Option<&HeaderMap>, count: usize) -> Self {
         if count <= 1 {
-            Self::new(selection, headers)
+            Self::new(worker, headers)
         } else {
             Self::Batch {
-                _guards: (0..count).map(|_| Self::new(selection, headers)).collect(),
+                _guards: (0..count).map(|_| Self::new(worker, headers)).collect(),
             }
         }
+    }
+}
+
+/// One client request's Prefill and Decode load reservations.
+///
+/// Batch prompts share one Prefill admission reservation. Decode load, and
+/// Prefill load without admission, remain one unit per backend sub-request.
+pub(crate) struct PdLoadGuards {
+    pub prefill: PrefillLoadGuard,
+    pub decode: WorkerLoadGuard,
+}
+
+impl PdLoadGuards {
+    pub(crate) fn share_across(self, parts: usize) -> Option<Vec<Self>> {
+        if parts == 0 {
+            return None;
+        }
+
+        if parts == 1 {
+            return Some(vec![self]);
+        }
+
+        let mut split = Vec::with_capacity(parts);
+        split.push(self);
+        while split.len() < parts {
+            let replica = {
+                let first = &split[0];
+                Self {
+                    prefill: first.prefill.replicate(),
+                    decode: first.decode.replicate(),
+                }
+            };
+            split.push(replica);
+        }
+        Some(split)
+    }
+}
+
+enum StreamReservation {
+    Prefill { _guard: PrefillLoadGuard },
+    Decode { _guard: WorkerLoadGuard },
+}
+
+/// A backend stream and the reservation for that backend phase. The reservation
+/// belongs to the task that drains the upstream stream, not the client body.
+pub(crate) struct ExecutionStream {
+    stream: ProtoStream,
+    reservation: Option<StreamReservation>,
+}
+
+impl ExecutionStream {
+    pub fn untracked(stream: ProtoStream) -> Self {
+        Self {
+            stream,
+            reservation: None,
+        }
+    }
+
+    pub fn tracked_prefill(stream: ProtoStream, guard: PrefillLoadGuard) -> Self {
+        Self {
+            stream,
+            reservation: Some(StreamReservation::Prefill { _guard: guard }),
+        }
+    }
+
+    pub fn tracked_decode(stream: ProtoStream, guard: WorkerLoadGuard) -> Self {
+        Self {
+            stream,
+            reservation: Some(StreamReservation::Decode { _guard: guard }),
+        }
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<super::proto_wrapper::ProtoGenerateResponse, tonic::Status>> {
+        let response = self.stream.next().await;
+        if !matches!(&response, Some(Ok(_))) {
+            self.reservation = None;
+        }
+        response
+    }
+
+    pub async fn next_or_closed<T>(
+        &mut self,
+        sender: &UnboundedSender<T>,
+    ) -> Result<
+        Option<Result<super::proto_wrapper::ProtoGenerateResponse, tonic::Status>>,
+        &'static str,
+    > {
+        let response = tokio::select! {
+            biased;
+            () = sender.closed() => Err("client disconnected"),
+            response = self.stream.next() => Ok(response),
+        };
+        if !matches!(&response, Ok(Some(Ok(_)))) {
+            self.reservation = None;
+        }
+        response
+    }
+
+    pub fn mark_completed(&mut self) {
+        self.stream.mark_completed();
     }
 }
 
@@ -906,14 +992,14 @@ impl ClientSelection {
 }
 
 /// Result of request execution (streams from workers)
-/// Uses ProtoStream to automatically abort on cancellation
+/// Uses the underlying ProtoStream to abort unfinished requests on cancellation.
 pub(crate) enum ExecutionResult {
     Single {
-        stream: ProtoStream,
+        stream: ExecutionStream,
     },
     PrefillDecode {
-        prefill: ProtoStream,
-        decode: Box<ProtoStream>,
+        prefill: ExecutionStream,
+        decode: Box<ExecutionStream>,
         /// PD timing context, for honest PD TTFT (prefill start to first decode token).
         pd_timing: PdTiming,
     },
@@ -956,6 +1042,7 @@ pub(crate) enum FinalResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::{BasicWorkerBuilder, PrefillAdmission, WorkerType};
 
     fn completion_prep(texts: &[&str], joined: Option<&str>) -> PreparationOutput {
         PreparationOutput::Completion {
@@ -992,5 +1079,79 @@ mod tests {
         assert_eq!(plan.request_id(), "cmpl_shared");
         assert_eq!(plan.request_type(), "generate");
         assert_eq!(plan.mode_label(), "prefill_decode");
+    }
+
+    #[tokio::test]
+    async fn batch_prompts_preserve_phase_load_semantics() {
+        let prefill: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://prefill:30000")
+                .worker_type(WorkerType::Prefill)
+                .build(),
+        );
+        let decode: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://decode:30000")
+                .worker_type(WorkerType::Decode)
+                .build(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-smg-routing-key", "batch-key".parse().unwrap());
+
+        let admission = PrefillAdmission::new(1, 0, std::time::Duration::from_secs(1));
+        let admitted = admission
+            .admit(Some(&headers), {
+                let prefill = Arc::clone(&prefill);
+                move |capacity| capacity.select(Arc::clone(&prefill), ())
+            })
+            .await
+            .unwrap();
+        let guards = PdLoadGuards {
+            prefill: PrefillLoadGuard::Admission {
+                _reservation: Arc::new(admitted.reservation),
+            },
+            decode: WorkerLoadGuard::new(Arc::clone(&decode), Some(&headers)),
+        };
+
+        let mut children = guards.share_across(3).unwrap();
+        assert_eq!(prefill.load(), 1);
+        assert_eq!(decode.load(), 3);
+        assert_eq!(prefill.routing_key_load(), 1);
+        assert_eq!(decode.routing_key_load(), 1);
+
+        drop(children.pop());
+        assert_eq!(prefill.load(), 1);
+        assert_eq!(decode.load(), 2);
+        assert_eq!(prefill.routing_key_load(), 1);
+        assert_eq!(decode.routing_key_load(), 1);
+
+        drop(children);
+        assert_eq!(prefill.load(), 0);
+        assert_eq!(decode.load(), 0);
+        assert_eq!(prefill.routing_key_load(), 0);
+        assert_eq!(decode.routing_key_load(), 0);
+
+        let guards = PdLoadGuards {
+            prefill: PrefillLoadGuard::Unbounded {
+                _guard: WorkerLoadGuard::new(Arc::clone(&prefill), Some(&headers)),
+            },
+            decode: WorkerLoadGuard::new(Arc::clone(&decode), Some(&headers)),
+        };
+
+        let mut children = guards.share_across(3).unwrap();
+        assert_eq!(prefill.load(), 3);
+        assert_eq!(decode.load(), 3);
+        assert_eq!(prefill.routing_key_load(), 1);
+        assert_eq!(decode.routing_key_load(), 1);
+
+        drop(children.pop());
+        assert_eq!(prefill.load(), 2);
+        assert_eq!(decode.load(), 2);
+        assert_eq!(prefill.routing_key_load(), 1);
+        assert_eq!(decode.routing_key_load(), 1);
+
+        drop(children);
+        assert_eq!(prefill.load(), 0);
+        assert_eq!(decode.load(), 0);
+        assert_eq!(prefill.routing_key_load(), 0);
+        assert_eq!(decode.routing_key_load(), 0);
     }
 }

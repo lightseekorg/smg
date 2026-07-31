@@ -177,6 +177,36 @@ Prefill-Decode disaggregated mode separates prefill and decode operations across
 | `--prefill-policy` | Specific policy for prefill nodes | Uses main `--policy` |
 | `--decode-policy` | Specific policy for decode nodes | Uses main `--policy` |
 
+### PD/EPD Prefill Admission
+
+Prefill admission bounds requests assigned by one SMG process to each registered
+Prefill worker. One client request occupies one slot until Prefill reaches EOF,
+fails, or is cancelled. Batch inputs and parallel samples requested through `n`
+still occupy one slot.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--prefill-max-inflight-requests-per-worker` | Maximum in-flight Prefill requests per worker; non-positive disables the limit | `-1` |
+| `--prefill-queue-size` | Router-wide FIFO queue depth; `0` disables waiting | `100` when enabled |
+| `--prefill-queue-timeout-secs` | Maximum time waiting for Prefill capacity | `60` when enabled |
+
+Queued requests do not bind to a worker. The queue head re-evaluates worker
+health, capacity, and cache state before selecting a Prefill worker. New requests
+cannot bypass existing waiters. Queue full returns `429` with
+`pd_prefill_queue_full`; queue timeout returns `429` with
+`pd_prefill_queue_timeout`. Local admission errors are not retried by SMG.
+
+The limit and queue are local to each SMG process. With `--dp-aware`, each rank
+is a separate worker and receives its own limit. Decode workers retain load
+tracking but have no admission limit. Prefill admission cannot be combined with
+`--priority-scheduler-enabled`. Queue options without a positive Prefill limit
+are rejected at startup.
+
+Prometheus exposes `smg_pd_prefill_admission_inflight` per worker,
+`smg_pd_prefill_admission_queued`, `smg_pd_prefill_admission_wait_seconds`, and
+`smg_pd_prefill_admission_rejections_total`. These are SMG admission metrics;
+engine queue metrics remain separate.
+
 ### Worker Startup Configuration
 
 | Option | Description | Default |

@@ -9,8 +9,8 @@ use tracing::error as trace_error;
 use crate::routers::{
     error,
     grpc::{
-        context::ExecutionResult,
-        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant, ProtoStream},
+        context::{ExecutionResult, ExecutionStream},
+        proto_wrapper::{ProtoGenerateComplete, ProtoResponseVariant},
         utils::tonic_ext::TonicStatusExt,
     },
 };
@@ -41,17 +41,14 @@ pub(crate) async fn collect_responses(
             decode,
             ..
         } => {
-            // Collect prefill for input_logprobs (don't mark completed yet)
+            // Release capacity at EOF, but keep abort-on-drop armed until Decode succeeds.
             let prefill_responses = collect_stream_responses(&mut prefill, "Prefill").await?;
-
-            // Collect decode for actual output (don't mark completed yet)
+            // Collect decode for actual output.
             let mut decode_stream = *decode;
             let mut decode_responses =
                 collect_stream_responses(&mut decode_stream, "Decode").await?;
-
-            // Mark both streams as completed now that both succeeded
-            prefill.mark_completed();
             decode_stream.mark_completed();
+            prefill.mark_completed();
 
             // Merge prefill input_logprobs if requested
             if merge_logprobs {
@@ -112,7 +109,7 @@ fn merge_prefill_logprobs(
 
 /// Collect all complete responses from a gRPC stream, discarding chunks.
 async fn collect_stream_responses(
-    stream: &mut ProtoStream,
+    stream: &mut ExecutionStream,
     worker_name: &str,
 ) -> Result<Vec<ProtoGenerateComplete>, Response> {
     let mut all_responses = Vec::new();

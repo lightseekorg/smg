@@ -40,8 +40,8 @@ use crate::{
         common::sse::SseEncoder,
         grpc::{
             common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
-            context,
-            proto_wrapper::{ProtoResponseVariant, ProtoStream},
+            context::{self, ExecutionStream},
+            proto_wrapper::ProtoResponseVariant,
             utils,
             utils::message_utils,
         },
@@ -51,10 +51,10 @@ use crate::{
 /// One backend stream of a `/v1/completions` request. Batched requests fan
 /// out into several, each remapped by a prompt-major choice-index offset.
 enum CompletionStreamUnit {
-    Single(ProtoStream),
+    Single(ExecutionStream),
     PrefillDecode {
-        prefill: ProtoStream,
-        decode: Box<ProtoStream>,
+        prefill: ExecutionStream,
+        decode: Box<ExecutionStream>,
     },
 }
 
@@ -222,7 +222,7 @@ impl StreamingProcessor {
     /// Process streaming chunks from a single stream (Regular mode)
     pub async fn process_streaming_chunks(
         &self,
-        grpc_stream: ProtoStream,
+        grpc_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -247,7 +247,7 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     async fn process_streaming_chunks_inner(
         &self,
-        mut grpc_stream: ProtoStream,
+        mut grpc_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -364,7 +364,7 @@ impl StreamingProcessor {
         }
 
         // Phase 2: Main streaming loop
-        while let Some(response) = grpc_stream.next().await {
+        while let Some(response) = grpc_stream.next_or_closed(tx).await? {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
@@ -686,8 +686,8 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     pub async fn process_prefill_decode_streaming_chunks(
         &self,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -695,44 +695,24 @@ impl StreamingProcessor {
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
         pd_timing: context::PdTiming,
     ) -> Result<(), String> {
-        // Phase 1.5: Collect input_logprobs from prefill stream if requested
-        if original_request.logprobs {
-            while let Some(response) = prefill_stream.next().await {
-                let gen_response =
-                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
-                match gen_response.into_response() {
-                    ProtoResponseVariant::Complete(_complete) => {
-                        // Input logprobs collected but not yet used in streaming
-                        // (OpenAI spec doesn't require prompt logprobs in streaming responses)
-                        break;
-                    }
-                    _ => continue,
-                }
-            }
+        while let Some(response) = prefill_stream.next_or_closed(tx).await? {
+            response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
         }
-
         // Phase 2-5: Process decode stream (same as single mode). Pass pd_timing
         // so the first decode token yields honest PD TTFT.
         // Note: decode_stream will be marked completed inside process_streaming_chunks
-        let result = self
-            .process_streaming_chunks_inner(
-                decode_stream,
-                dispatch,
-                tokenizer,
-                stop_params,
-                original_request,
-                tx,
-                Some(pd_timing),
-            )
-            .await;
-
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
-        if result.is_ok() {
-            prefill_stream.mark_completed();
-        }
-
-        result
+        self.process_streaming_chunks_inner(
+            decode_stream,
+            dispatch,
+            tokenizer,
+            stop_params,
+            original_request,
+            tx,
+            Some(pd_timing),
+        )
+        .await?;
+        prefill_stream.mark_completed();
+        Ok(())
     }
 
     /// Process streaming generate response and return SSE response
@@ -833,7 +813,7 @@ impl StreamingProcessor {
     /// TODO: add streaming logprob support
     async fn process_generate_streaming(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: ExecutionStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
@@ -846,7 +826,7 @@ impl StreamingProcessor {
         // Reusable SSE encoder shared across every chunk emitted for this stream.
         let mut sse_encoder = SseEncoder::new();
 
-        while let Some(response) = stream.next().await {
+        while let Some(response) = stream.next_or_closed(tx).await? {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
@@ -947,39 +927,29 @@ impl StreamingProcessor {
     /// Process prefill/decode streaming for generate endpoint (PD mode with logprobs support)
     async fn process_generate_prefill_decode_streaming(
         tokenizer: Arc<dyn Tokenizer>,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         ctx: GenerateStreamContext,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
         pd_timing: context::PdTiming,
     ) -> Result<(), String> {
-        // Collect input_logprobs from prefill stream if requested
-        let input_token_logprobs = if ctx.return_logprob {
-            let mut input_logprobs = None;
-            while let Some(response) = prefill_stream.next().await {
-                let gen_response =
-                    response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
-                match gen_response.into_response() {
-                    ProtoResponseVariant::Complete(complete) => {
-                        // Extract input_logprobs from prefill Complete message (convert proto to SGLang format)
-                        input_logprobs = complete
-                            .input_logprobs()
-                            .as_ref()
-                            .map(utils::convert_generate_input_logprobs);
-                        break;
-                    }
-                    _ => continue,
+        let mut input_token_logprobs = None;
+        while let Some(response) = prefill_stream.next_or_closed(tx).await? {
+            let gen_response =
+                response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
+            if ctx.return_logprob && input_token_logprobs.is_none() {
+                if let ProtoResponseVariant::Complete(complete) = gen_response.into_response() {
+                    input_token_logprobs = complete
+                        .input_logprobs()
+                        .as_ref()
+                        .map(utils::convert_generate_input_logprobs);
                 }
             }
-            input_logprobs
-        } else {
-            None
-        };
-
+        }
         // Process decode stream with input_logprobs prepended. Pass pd_timing so
         // the first decode token yields honest PD TTFT.
         // Note: decode_stream will be marked completed inside the function
-        let result = Self::process_generate_streaming_with_input_logprobs(
+        Self::process_generate_streaming_with_input_logprobs(
             tokenizer,
             decode_stream,
             ctx,
@@ -987,21 +957,15 @@ impl StreamingProcessor {
             tx,
             Some(pd_timing),
         )
-        .await;
-
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
-        if result.is_ok() {
-            prefill_stream.mark_completed();
-        }
-
-        result
+        .await?;
+        prefill_stream.mark_completed();
+        Ok(())
     }
 
     /// Process generate streaming with optional input_logprobs
     async fn process_generate_streaming_with_input_logprobs(
         tokenizer: Arc<dyn Tokenizer>,
-        mut stream: ProtoStream,
+        mut stream: ExecutionStream,
         ctx: GenerateStreamContext,
         input_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
@@ -1018,7 +982,7 @@ impl StreamingProcessor {
         // Reusable SSE encoder shared across every chunk emitted for this stream.
         let mut sse_encoder = SseEncoder::new();
 
-        while let Some(response) = stream.next().await {
+        while let Some(response) = stream.next_or_closed(tx).await? {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
@@ -1693,7 +1657,7 @@ impl StreamingProcessor {
     /// state tracking. Always n=1 (no per-index HashMap).
     pub async fn process_messages_streaming_chunks(
         &self,
-        mut grpc_stream: ProtoStream,
+        mut grpc_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -1858,7 +1822,7 @@ impl StreamingProcessor {
         )?;
 
         // Phase 2: Main streaming loop
-        while let Some(response) = grpc_stream.next().await {
+        while let Some(response) = grpc_stream.next_or_closed(tx).await? {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
@@ -2320,40 +2284,28 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     pub async fn process_prefill_decode_messages_streaming_chunks(
         &self,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
         original_request: Arc<CreateMessageRequest>,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<(), String> {
-        // Consume prefill stream (Messages API does not expose prompt logprobs)
-        while let Some(response) = prefill_stream.next().await {
-            let gen_response =
-                response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
-            match gen_response.into_response() {
-                ProtoResponseVariant::Complete(_) => break,
-                _ => continue,
-            }
+        while let Some(response) = prefill_stream.next_or_closed(tx).await? {
+            response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
         }
-
-        let result = self
-            .process_messages_streaming_chunks(
-                decode_stream,
-                dispatch,
-                tokenizer,
-                stop_params,
-                original_request,
-                tx,
-            )
-            .await;
-
-        if result.is_ok() {
-            prefill_stream.mark_completed();
-        }
-
-        result
+        self.process_messages_streaming_chunks(
+            decode_stream,
+            dispatch,
+            tokenizer,
+            stop_params,
+            original_request,
+            tx,
+        )
+        .await?;
+        prefill_stream.mark_completed();
+        Ok(())
     }
 
     // =========================================================================
@@ -2565,7 +2517,7 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     async fn process_completion_streaming_chunks(
         &self,
-        mut grpc_stream: ProtoStream,
+        mut grpc_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -2598,7 +2550,7 @@ impl StreamingProcessor {
         let mut reasoning_tokens: HashMap<u32, u32> = HashMap::new();
         let mut total_completion = CompletionTokenTracker::new();
 
-        while let Some(response) = grpc_stream.next().await {
+        while let Some(response) = grpc_stream.next_or_closed(tx).await? {
             let gen_response = response.map_err(|e| format!("Stream error: {}", e.message()))?;
 
             match gen_response.into_response() {
@@ -2856,8 +2808,8 @@ impl StreamingProcessor {
     #[expect(clippy::too_many_arguments)]
     async fn process_prefill_decode_completion_streaming_chunks(
         &self,
-        mut prefill_stream: ProtoStream,
-        decode_stream: ProtoStream,
+        mut prefill_stream: ExecutionStream,
+        decode_stream: ExecutionStream,
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         stop_params: (Option<StringOrArray>, Option<Vec<u32>>, bool, bool, bool),
@@ -2866,17 +2818,10 @@ impl StreamingProcessor {
         index_offset: u32,
         tx: &UnboundedSender<Result<Bytes, io::Error>>,
     ) -> Result<CompletionStreamOutcome, String> {
-        while let Some(response) = prefill_stream.next().await {
-            let gen_response =
-                response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
-
-            match gen_response.into_response() {
-                ProtoResponseVariant::Complete(_) => break,
-                _ => continue,
-            }
+        while let Some(response) = prefill_stream.next_or_closed(tx).await? {
+            response.map_err(|e| format!("Prefill stream error: {}", e.message()))?;
         }
-
-        let result = self
+        let outcome = self
             .process_completion_streaming_chunks(
                 decode_stream,
                 dispatch,
@@ -2887,15 +2832,9 @@ impl StreamingProcessor {
                 index_offset,
                 tx,
             )
-            .await;
-
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
-        if result.is_ok() {
-            prefill_stream.mark_completed();
-        }
-
-        result
+            .await?;
+        prefill_stream.mark_completed();
+        Ok(outcome)
     }
 
     /// Format a `CompletionStreamResponse` into the SSE buffer.

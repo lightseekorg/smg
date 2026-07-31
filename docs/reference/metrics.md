@@ -267,6 +267,20 @@ HTTP responses from upstream workers.
 
 ---
 
+### PD Prefill Admission Metrics
+
+Router-local Prefill admission state for PD and EPD routing. These metrics do
+not include queues inside the inference engine.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `smg_pd_prefill_admission_inflight` | Gauge | `worker` | Admitted requests whose Prefill phase has not finished |
+| `smg_pd_prefill_admission_queued` | Gauge | None | Requests waiting for Prefill capacity |
+| `smg_pd_prefill_admission_wait_seconds` | Histogram | None | Time spent waiting for Prefill capacity |
+| `smg_pd_prefill_admission_rejections_total` | Counter | `reason` | Rejections grouped by `queue_full`, `queue_timeout`, or `unavailable` |
+
+---
+
 ## Layer 3: Worker Metrics
 
 Metrics for worker pool management and resilience.

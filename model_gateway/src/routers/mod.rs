@@ -46,6 +46,9 @@ pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience
 pub use http::{pd_router, pd_types, router};
 
+pub(crate) const PD_PREFILL_QUEUE_FULL: &str = "pd_prefill_queue_full";
+pub(crate) const PD_PREFILL_QUEUE_TIMEOUT: &str = "pd_prefill_queue_timeout";
+
 /// Core trait for all router implementations
 ///
 /// This trait provides a unified interface for routing requests,

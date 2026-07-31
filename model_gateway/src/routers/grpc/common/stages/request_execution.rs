@@ -15,8 +15,9 @@ use crate::{
         grpc::{
             common::stages::encode::EncodeDispatchPlan,
             context::{
-                ClientSelection, ExecutionPlan, ExecutionPlanKind, ExecutionResult, LoadGuards,
-                PdTiming, RequestContext, WorkerSelection,
+                ClientSelection, ExecutionPlan, ExecutionPlanKind, ExecutionResult,
+                ExecutionStream, LoadGuards, PdLoadGuards, PdTiming, RequestContext,
+                WorkerSelection,
             },
             proto_wrapper::{
                 ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
@@ -121,12 +122,6 @@ fn mooncake_decode_params(transfer_id: &str, engine_id: &str, host: &str, port: 
 /// Request execution stage: execute the plan produced by request building.
 pub(crate) struct RequestExecutionStage;
 
-impl RequestExecutionStage {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 #[async_trait]
 impl PipelineStage for RequestExecutionStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
@@ -142,17 +137,7 @@ impl PipelineStage for RequestExecutionStage {
         // jobs' SHM Drop guards here: dispatch consumes them, while an early
         // error before dispatch drops them and reclaims the SHM.
         let encode_dispatch = ctx.state.encode_outputs.take().map(|o| o.dispatch);
-
-        let clients = ctx.state.clients.as_mut().ok_or_else(|| {
-            error!(
-                function = "RequestExecutionStage::execute",
-                "Client acquisition not completed"
-            );
-            error::internal_error(
-                "client_acquisition_not_completed",
-                "Client acquisition not completed",
-            )
-        })?;
+        let mut pd_load_guards = ctx.state.pd_load_guards.take();
 
         // Create load guards for worker load tracking (increment load when created)
         // They will be automatically dropped (and decrement load) when RequestContext is dropped
@@ -171,11 +156,39 @@ impl PipelineStage for RequestExecutionStage {
             ExecutionPlan::Batch { requests, .. } => requests.len(),
             _ => 1,
         };
-        ctx.state.load_guards = Some(LoadGuards::scaled(
-            workers,
-            ctx.input.headers.as_ref(),
-            sub_requests,
-        ));
+        match workers {
+            WorkerSelection::Single { worker } => {
+                if pd_load_guards.is_some() {
+                    return Err(error::internal_error(
+                        "unexpected_pd_load_reservation",
+                        "Single-worker execution received PD load reservations",
+                    ));
+                }
+                ctx.state.load_guards = Some(LoadGuards::scaled(
+                    worker,
+                    ctx.input.headers.as_ref(),
+                    sub_requests,
+                ));
+            }
+            WorkerSelection::Disaggregated { .. } if pd_load_guards.is_none() => {
+                return Err(error::internal_error(
+                    "pd_load_reservation_missing",
+                    "PD execution has no worker load reservations",
+                ));
+            }
+            WorkerSelection::Disaggregated { .. } => {}
+        }
+
+        let clients = ctx.state.clients.as_mut().ok_or_else(|| {
+            error!(
+                function = "RequestExecutionStage::execute",
+                "Client acquisition not completed"
+            );
+            error::internal_error(
+                "client_acquisition_not_completed",
+                "Client acquisition not completed",
+            )
+        })?;
 
         // Extract dispatch metadata for tracing span
         let dispatch = ctx.state.dispatch.as_ref();
@@ -203,18 +216,45 @@ impl PipelineStage for RequestExecutionStage {
                     }
                 },
                 ExecutionPlan::PrefillDecode(req) => {
-                    self.execute_pd_dispatch(req, clients, workers, model).await
+                    let guards = pd_load_guards.take().ok_or_else(|| {
+                        error::internal_error(
+                            "pd_load_reservation_missing",
+                            "PD execution has no worker load reservations",
+                        )
+                    })?;
+                    self.execute_pd_dispatch(req, clients, workers, model, guards)
+                        .await
                 }
                 ExecutionPlan::EncodePrefillDecode { request } => {
                     // Bootstrap info was injected into the prefill request during
                     // request building; dispatch the encode jobs with the
                     // prefill+decode leg.
-                    self.execute_epd_dispatch(request, clients, workers, model, encode_dispatch)
-                        .await
+                    let guards = pd_load_guards.take().ok_or_else(|| {
+                        error::internal_error(
+                            "pd_load_reservation_missing",
+                            "EPD execution has no worker load reservations",
+                        )
+                    })?;
+                    self.execute_epd_dispatch(
+                        request,
+                        clients,
+                        workers,
+                        model,
+                        encode_dispatch,
+                        guards,
+                    )
+                    .await
                 }
                 ExecutionPlan::Batch { kind, requests, .. } => {
-                    self.execute_batch_dispatch(kind, requests, clients, workers, model)
-                        .await
+                    self.execute_batch_dispatch(
+                        kind,
+                        requests,
+                        clients,
+                        workers,
+                        model,
+                        pd_load_guards,
+                    )
+                    .await
                 }
             }
         }
@@ -224,6 +264,10 @@ impl PipelineStage for RequestExecutionStage {
         // Store result in context for ResponseProcessingStage
         ctx.state.response.execution_result = Some(result);
         Ok(None)
+    }
+
+    fn begins_backend_dispatch(&self) -> bool {
+        true
     }
 
     fn name(&self) -> &'static str {
@@ -238,6 +282,7 @@ impl RequestExecutionStage {
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
         model: &str,
+        guards: PdLoadGuards,
     ) -> Result<ExecutionResult, Response> {
         // Dispatch based on runtime type:
         // - SGLang: parallel prefill/decode dispatch with bootstrap metadata
@@ -245,13 +290,13 @@ impl RequestExecutionStage {
         let runtime_type = workers.disaggregated_runtime_type();
         match runtime_type {
             Some(RuntimeType::Vllm) => {
-                self.execute_sequential_pd(proto_request, clients, workers, model)
+                self.execute_sequential_pd(proto_request, clients, workers, model, guards)
                     .await
             }
             Some(RuntimeType::Sglang) | Some(RuntimeType::TokenSpeed) => {
                 // These runtimes carry bootstrap rendezvous in the request
                 // and use parallel prefill/decode dispatch.
-                self.execute_parallel_pd(proto_request, clients, workers)
+                self.execute_parallel_pd(proto_request, clients, workers, guards)
                     .await
             }
             Some(RuntimeType::Trtllm)
@@ -288,12 +333,13 @@ impl RequestExecutionStage {
         workers: &WorkerSelection,
         model: &str,
         encode_dispatch: Option<EncodeDispatchPlan>,
+        guards: PdLoadGuards,
     ) -> Result<ExecutionResult, Response> {
         if let Some(encode_dispatch) = encode_dispatch {
             Self::spawn_encode_dispatch(encode_dispatch);
         }
         proto_request.clear_mm_pixel_values();
-        self.execute_pd_dispatch(proto_request, clients, workers, model)
+        self.execute_pd_dispatch(proto_request, clients, workers, model, guards)
             .await
     }
 
@@ -351,24 +397,57 @@ impl RequestExecutionStage {
         clients: &ClientSelection,
         workers: &WorkerSelection,
         model: &str,
+        pd_load_guards: Option<PdLoadGuards>,
     ) -> Result<ExecutionResult, Response> {
-        let dispatches = requests.into_iter().map(|request| {
-            let mut clients = clients.clone();
-            async move {
-                match kind {
-                    ExecutionPlanKind::Single => {
-                        self.execute_single(request, &mut clients, workers).await
-                    }
-                    // Completion EPD carries no encode jobs; sub-requests dispatch as PD.
-                    ExecutionPlanKind::PrefillDecode | ExecutionPlanKind::EncodePrefillDecode => {
-                        self.execute_pd_dispatch(request, &mut clients, workers, model)
-                            .await
-                    }
+        let results = match kind {
+            ExecutionPlanKind::Single => {
+                if pd_load_guards.is_some() {
+                    return Err(error::internal_error(
+                        "unexpected_pd_load_reservation",
+                        "Single-worker batch received PD load reservations",
+                    ));
                 }
+                try_join_all(requests.into_iter().map(|request| {
+                    let mut clients = clients.clone();
+                    async move { self.execute_single(request, &mut clients, workers).await }
+                }))
+                .await?
             }
-        });
-
-        let results = try_join_all(dispatches).await?;
+            // Completion EPD carries no encode jobs; sub-requests dispatch as PD.
+            ExecutionPlanKind::PrefillDecode | ExecutionPlanKind::EncodePrefillDecode => {
+                let guards = pd_load_guards.ok_or_else(|| {
+                    error::internal_error(
+                        "pd_load_reservation_missing",
+                        "PD batch has no worker load reservations",
+                    )
+                })?;
+                let guard_sets = guards.share_across(requests.len()).ok_or_else(|| {
+                    error::internal_error(
+                        "pd_batch_load_reservation_mismatch",
+                        "PD batch load reservation does not match its prompt count",
+                    )
+                })?;
+                try_join_all(
+                    requests
+                        .into_iter()
+                        .zip(guard_sets)
+                        .map(|(request, guards)| {
+                            let mut clients = clients.clone();
+                            async move {
+                                self.execute_pd_dispatch(
+                                    request,
+                                    &mut clients,
+                                    workers,
+                                    model,
+                                    guards,
+                                )
+                                .await
+                            }
+                        }),
+                )
+                .await?
+            }
+        };
         Ok(ExecutionResult::Batch { results })
     }
 
@@ -404,7 +483,9 @@ impl RequestExecutionStage {
             )
         })?;
 
-        Ok(ExecutionResult::Single { stream })
+        Ok(ExecutionResult::Single {
+            stream: ExecutionStream::untracked(stream),
+        })
     }
 
     async fn execute_single_embed(
@@ -443,7 +524,12 @@ impl RequestExecutionStage {
         proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
+        guards: PdLoadGuards,
     ) -> Result<ExecutionResult, Response> {
+        let PdLoadGuards {
+            prefill: prefill_guard,
+            decode: decode_guard,
+        } = guards;
         let runtime = workers
             .disaggregated_runtime_type()
             .map(|r| r.as_str())
@@ -474,9 +560,9 @@ impl RequestExecutionStage {
             decode_request.set_data_parallel_rank(rank as i32);
         }
 
-        // `generate` only establishes the prefill stream here (SMG does not drain
-        // it on this path), so prefill duration cannot be measured — only TTFT,
-        // recorded at the first decode token in streaming. prefill_start anchors it.
+        // `generate` only establishes the Prefill stream here. Downstream response
+        // handling drains it, so this stage cannot measure the full Prefill duration.
+        // `prefill_start` anchors TTFT at the first Decode token.
         let prefill_start = Instant::now();
         let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
             prefill_client.generate(prefill_request),
@@ -518,8 +604,8 @@ impl RequestExecutionStage {
         })?;
 
         Ok(ExecutionResult::PrefillDecode {
-            prefill: prefill_stream,
-            decode: Box::new(decode_stream),
+            prefill: ExecutionStream::tracked_prefill(prefill_stream, prefill_guard),
+            decode: Box::new(ExecutionStream::tracked_decode(decode_stream, decode_guard)),
             pd_timing: PdTiming {
                 prefill_start,
                 runtime,
@@ -539,7 +625,12 @@ impl RequestExecutionStage {
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
         model: &str,
+        guards: PdLoadGuards,
     ) -> Result<ExecutionResult, Response> {
+        let PdLoadGuards {
+            prefill: prefill_guard,
+            decode: decode_guard,
+        } = guards;
         let runtime = workers
             .disaggregated_runtime_type()
             .map(|r| r.as_str())
@@ -649,7 +740,7 @@ impl RequestExecutionStage {
 
         // Send to prefill, wait for completion
         let prefill_start = Instant::now();
-        let mut prefill_stream = prefill_client
+        let prefill_stream = prefill_client
             .generate(prefill_request)
             .await
             .map_err(|e| {
@@ -662,6 +753,7 @@ impl RequestExecutionStage {
                 error!(function = "execute_sequential_pd", error = %e, "Prefill worker failed to start");
                 e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
             })?;
+        let mut prefill_stream = ExecutionStream::tracked_prefill(prefill_stream, prefill_guard);
 
         // Drain prefill response, harvesting connector params from the Complete frame
         let mut prefill_kv_params: Option<String> = None;
@@ -689,7 +781,6 @@ impl RequestExecutionStage {
                 }
             }
         }
-        prefill_stream.mark_completed();
         workers.record_outcome_prefill(200);
         // Captured at drain; recorded below only once decode is established.
         let prefill_duration = prefill_start.elapsed();
@@ -779,6 +870,10 @@ impl RequestExecutionStage {
             )
         })?;
 
+        // Prefill EOF releases its capacity, but keep abort-on-drop armed until
+        // Decode accepts the handoff. A failed Decode start must reclaim the
+        // Prefill request and any KV state left for that handoff.
+        prefill_stream.mark_completed();
         workers.record_outcome_decode(200);
         // Decode established: record the success-only PD metrics here.
         Metrics::record_pd_kv_connector_mode(kv_connector_label);
@@ -796,7 +891,7 @@ impl RequestExecutionStage {
         );
 
         Ok(ExecutionResult::Single {
-            stream: decode_stream,
+            stream: ExecutionStream::tracked_decode(decode_stream, decode_guard),
         })
     }
 }
