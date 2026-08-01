@@ -1341,3 +1341,73 @@ async fn test_depends_on_any_one_fails_one_succeeds() {
     // Step C SHOULD have executed (because B succeeded)
     assert_eq!(c_executed_clone.load(Ordering::SeqCst), 1);
 }
+
+/// Regression: a `Skip` step must not persist its (stale) context copy back to
+/// shared state. The engine snapshots the whole context per step and writes it
+/// back wholesale, so a parallel branch that skips after a sibling committed a
+/// mutation would otherwise clobber it (last-writer-wins). See engine.rs.
+#[tokio::test]
+async fn test_skip_does_not_clobber_parallel_context_mutation() {
+    let engine: WorkflowEngine<TestWorkflowData> = WorkflowEngine::new();
+
+    // Both steps snapshot the context at ~t0 (both see test_key=None). The
+    // writer then commits its mutation at ~t40; the skipping step wakes at ~t120
+    // and, with the pre-fix bug, writes its stale (None) snapshot back last —
+    // clobbering the writer. The delays make that ordering deterministic:
+    //   skip reads None (t0) < writer persists Some (t40) < skip persists (t120)
+
+    struct WriterStep;
+    #[async_trait::async_trait]
+    impl StepExecutor<TestWorkflowData> for WriterStep {
+        async fn execute(
+            &self,
+            context: &mut WorkflowContext<TestWorkflowData>,
+        ) -> WorkflowResult<StepResult> {
+            sleep(Duration::from_millis(40)).await;
+            context.data.test_key = Some("survived".to_string());
+            Ok(StepResult::Success)
+        }
+    }
+
+    struct SlowSkipStep;
+    #[async_trait::async_trait]
+    impl StepExecutor<TestWorkflowData> for SlowSkipStep {
+        async fn execute(
+            &self,
+            _context: &mut WorkflowContext<TestWorkflowData>,
+        ) -> WorkflowResult<StepResult> {
+            sleep(Duration::from_millis(120)).await;
+            Ok(StepResult::Skip)
+        }
+    }
+
+    // No dependency between the two steps → they run in parallel.
+    let workflow = WorkflowDefinition::new("skip_clobber", "Skip must not clobber")
+        .add_step(StepDefinition::new(
+            "writer",
+            "Writer",
+            Arc::new(WriterStep),
+        ))
+        .add_step(StepDefinition::new(
+            "slow_skip",
+            "Slow skip",
+            Arc::new(SlowSkipStep),
+        ));
+
+    let workflow_id = workflow.id.clone();
+    engine.register_workflow(workflow).unwrap();
+    let instance_id = engine
+        .start_workflow(workflow_id, TestWorkflowData::default())
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(250)).await;
+
+    let state = engine.get_status(instance_id).await.unwrap();
+    assert_eq!(state.status, WorkflowStatus::Completed);
+    assert_eq!(
+        state.context.data.test_key.as_deref(),
+        Some("survived"),
+        "a Skip step clobbered a parallel step's committed context mutation"
+    );
+}
