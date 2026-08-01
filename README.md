@@ -75,13 +75,13 @@ That's it. SMG is now load-balancing requests across your workers.
 
 ## Supported Backends
 
-| Self-Hosted | Cloud Providers |
-|-------------|-----------------|
-| vLLM | OpenAI |
-| TensorRT-LLM | Anthropic |
-| TokenSpeed | Google Gemini |
-| SGLang | AWS Bedrock |
-| Ollama | Azure OpenAI |
+| Self-Hosted | Cloud Providers                |
+|-------------|--------------------------------|
+| vLLM | OpenAI                         |
+| TensorRT-LLM | Anthropic                      |
+| TokenSpeed | Google Gemini                  |
+| SGLang | Oracle Generative AI Service   |
+| Ollama | Azure OpenAI                   |
 | Any OpenAI-compatible server | Any OpenAI-compatible provider |
 
 ## Features
