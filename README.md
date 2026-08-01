@@ -1,5 +1,9 @@
 <p align="center">
-  <img alt="SMG Logo" src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/logomark.svg" width="80">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/logomark-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/logomark-black.svg">
+    <img alt="SMG Logo" src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/logomark.svg" width="80">
+  </picture>
 </p>
 
 <h1 align="center">Shepherd Model Gateway</h1>
