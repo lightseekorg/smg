@@ -27,11 +27,11 @@ use zeromq::{
 use crate::{
     codec::{decode_msgpack, encode_msgpack},
     error::{Error, Result},
-    protocol::vllm::{
+    protocol::{
         handshake::{
             EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
         },
-        output::{decode_engine_core_outputs, EngineCoreOutputs},
+        EngineBatch, EngineProtocol,
     },
 };
 
@@ -426,13 +426,13 @@ pub async fn send_message(
     Ok(())
 }
 
-/// Receive engine outputs from the shared PULL socket, decode them, and forward
-/// them on `tx`. Terminates on the `ENGINE_CORE_DEAD` sentinel, a transport
-/// error, or when the receiver is dropped. Decode errors are forwarded but do
-/// not stop the loop.
-pub async fn run_output_loop(
+/// Receive engine outputs from the shared PULL socket, decode them with the
+/// engine's protocol `P`, and forward them on `tx`. Terminates on the
+/// `ENGINE_CORE_DEAD` sentinel, a transport error, or when the receiver is
+/// dropped. Decode errors are forwarded but do not stop the loop.
+pub async fn run_output_loop<P: EngineProtocol>(
     mut output_socket: PullSocket,
-    tx: mpsc::Sender<Result<EngineCoreOutputs>>,
+    tx: mpsc::Sender<Result<EngineBatch<P::Output>>>,
 ) {
     loop {
         let message = match output_socket.recv().await {
@@ -455,7 +455,7 @@ pub async fn run_output_loop(
             return;
         }
 
-        let decoded = match decode_engine_core_outputs(&frames) {
+        let decoded = match P::decode_batch(&frames) {
             Ok(decoded) => Ok(decoded),
             Err(error) => {
                 // Keep the loop running so a single bad message doesn't drop the
@@ -483,6 +483,7 @@ mod tests {
                 EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
             },
             request::{EngineCoreRequest, EngineCoreRequestType},
+            VllmProtocol,
         },
     };
 
@@ -578,7 +579,7 @@ mod tests {
             clippy::disallowed_methods,
             reason = "test output loop torn down when the test ends"
         )]
-        let _output_loop = tokio::spawn(run_output_loop(output_socket, out_tx));
+        let _output_loop = tokio::spawn(run_output_loop::<VllmProtocol>(output_socket, out_tx));
 
         let outputs = EngineCoreOutputs::RequestBatch(RequestBatchOutputs {
             engine_index: 0,
@@ -596,12 +597,11 @@ mod tests {
             .await
             .unwrap();
 
-        let received = out_rx
+        let batch = out_rx
             .recv()
             .await
             .expect("output delivered")
             .expect("decoded ok");
-        let batch = received.as_request_batch().expect("request batch");
         assert_eq!(batch.outputs[0].new_token_ids, vec![100, 101]);
         assert_eq!(
             batch.outputs[0].finish_reason,
@@ -641,7 +641,10 @@ mod tests {
             clippy::disallowed_methods,
             reason = "test output loop torn down when the test ends"
         )]
-        let _output_loop = tokio::spawn(run_output_loop(transport.output_socket, out_tx));
+        let _output_loop = tokio::spawn(run_output_loop::<VllmProtocol>(
+            transport.output_socket,
+            out_tx,
+        ));
 
         engine
             .send_output(vec![Bytes::from_static(ENGINE_CORE_DEAD_SENTINEL)])

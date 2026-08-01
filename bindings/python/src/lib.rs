@@ -27,6 +27,12 @@ pub enum BackendType {
     Sglang,
     Openai,
     Anthropic,
+    /// vLLM engine. Routing behaves like the default; over ZMQ this pins the
+    /// startup workers' wire protocol to vLLM EngineCore.
+    Vllm,
+    /// TokenSpeed engine. Routing behaves like the default; over ZMQ this pins
+    /// the startup workers' wire protocol to TokenSpeed.
+    Tokenspeed,
 }
 
 #[pyclass(eq, from_py_object)]
@@ -736,6 +742,22 @@ impl Router {
             None
         };
 
+        // `backend` normally only steers the routing mode. Over ZMQ it
+        // additionally pins the startup workers' runtime: the shared EngineCore
+        // handshake carries no engine identity, so the wire protocol cannot be
+        // probed. HTTP/gRPC keep auto-detection (None). Mirrors
+        // `to_router_config` in model_gateway/src/main.rs.
+        let startup_worker_runtime_type =
+            if matches!(self.connection_mode, worker::ConnectionMode::Zmq) {
+                match self.backend {
+                    BackendType::Vllm => Some(worker::RuntimeType::Vllm),
+                    BackendType::Tokenspeed => Some(worker::RuntimeType::TokenSpeed),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
         config::RouterConfig::builder()
             .mode(mode)
             .policy(policy)
@@ -743,6 +765,7 @@ impl Router {
             .port(self.port)
             .health_check_port(self.health_check_port)
             .connection_mode(self.connection_mode)
+            .startup_worker_runtime_type(startup_worker_runtime_type)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)

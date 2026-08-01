@@ -9,7 +9,10 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult};
-use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
+use crate::{
+    tenant::DEFAULT_TENANT_HEADER_NAME,
+    worker::{ConnectionMode, RuntimeType},
+};
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +20,13 @@ pub struct RouterConfig {
     pub mode: RoutingMode,
     #[serde(default)]
     pub connection_mode: ConnectionMode,
+    /// Explicit runtime for the startup workers (`--worker-urls`), set from
+    /// `--backend` when the connection mode is ZMQ. The ZMQ handshake is shared
+    /// across engine runtimes, so the wire protocol cannot be probed and must
+    /// be declared up front; HTTP/gRPC workers keep auto-detection and ignore
+    /// this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_worker_runtime_type: Option<RuntimeType>,
     pub policy: PolicyConfig,
     /// Per-request sticky-routing override (honors `X-SMG-Routing-Key`).
     #[serde(default)]
@@ -826,6 +836,7 @@ impl Default for RouterConfig {
             health_check: HealthCheckConfig::default(),
             enable_igw: false,
             connection_mode: ConnectionMode::Http,
+            startup_worker_runtime_type: None,
             model_path: None,
             tokenizer_path: None,
             chat_template: None,

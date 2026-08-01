@@ -114,6 +114,13 @@ impl BasicWorkerBuilder {
         self
     }
 
+    /// Set the explicit ZMQ handshake bind address (replaces the address
+    /// derived from the ipc:// worker URL). Only meaningful for ZMQ workers.
+    pub fn zmq_handshake_address(mut self, address: impl Into<String>) -> Self {
+        self.spec.zmq_handshake_address = Some(address.into());
+        self
+    }
+
     /// Set labels for worker identification
     pub fn labels(mut self, labels: HashMap<String, String>) -> Self {
         self.spec.labels = labels;
@@ -356,6 +363,20 @@ mod tests {
 
     use super::*;
     use crate::worker::worker::Worker;
+
+    #[test]
+    fn zmq_handshake_address_reaches_the_built_spec() {
+        // The connect path reads the override from the built worker's spec, so
+        // dropping it here would silently fall back to the derived address.
+        let worker = BasicWorkerBuilder::new("ipc:///tmp/w.ipc")
+            .connection_mode(ConnectionMode::Zmq)
+            .zmq_handshake_address("tcp://127.0.0.1:30500")
+            .build();
+        assert_eq!(
+            worker.metadata().spec.zmq_handshake_address.as_deref(),
+            Some("tcp://127.0.0.1:30500")
+        );
+    }
 
     #[test]
     fn test_basic_worker_builder_minimal() {

@@ -712,6 +712,14 @@ pub struct WorkerSpec {
     /// is used. Overrides the router-level `multimodal_shm_min_bytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multimodal_shm_min_bytes: Option<usize>,
+
+    /// Handshake address the frontend BINDS for this worker's engine handshake.
+    /// Only meaningful for `connection_mode: zmq`; must be a `tcp://` address.
+    /// When unset, the frontend derives a deterministic port from the worker's
+    /// `ipc://` path instead — this override exists for engines that dial a
+    /// fixed, pre-agreed address rather than the derived one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zmq_handshake_address: Option<String>,
 }
 
 impl WorkerSpec {
@@ -744,6 +752,7 @@ impl WorkerSpec {
             load_monitor_interval_secs: None,
             multimodal_tensor_transport: None,
             multimodal_shm_min_bytes: None,
+            zmq_handshake_address: None,
         }
     }
 }

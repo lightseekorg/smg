@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
-use tracing::debug;
+use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::ModelsResponse;
@@ -285,8 +285,21 @@ impl StepExecutor<WorkerWorkflowData> for DetectBackendStep {
                     step_id: wfaas::StepId::new("detect_backend"),
                     message: format!("gRPC backend detection failed for {}: {}", config.url, e),
                 })?,
-            // A ZMQ EngineCore is always vLLM; there is nothing to probe.
-            ConnectionMode::Zmq => "vllm".to_string(),
+            // A ZMQ EngineCore handshake is shared across engine runtimes, so the
+            // runtime cannot be probed here. An explicit `runtime_type` (vllm,
+            // sglang, tokenspeed, ...) is honored by the early return above; only a
+            // worker that left it unspecified reaches this default of vLLM.
+            ConnectionMode::Zmq => {
+                warn!(
+                    worker = %config.url,
+                    "runtime_type unspecified for ZMQ worker; defaulting to vLLM \
+                     EngineCore. A TokenSpeed engine must declare its runtime to \
+                     speak the correct wire protocol: `--backend tokenspeed` for \
+                     startup --worker-urls workers, or an explicit runtime_type \
+                     on the worker API spec / YAML worker config."
+                );
+                "vllm".to_string()
+            }
         };
 
         debug!(

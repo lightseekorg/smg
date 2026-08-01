@@ -565,6 +565,13 @@ impl JobQueue {
                     spec.worker_type = proto_worker_type;
                     spec.api_key.clone_from(&api_key);
                     spec.bootstrap_port = bootstrap_port;
+                    // ZMQ startup workers carry the runtime pinned by
+                    // `--backend` (the shared handshake cannot be probed for a
+                    // wire protocol); `None` — HTTP/gRPC or no `--backend` —
+                    // keeps auto-detection in detect_backend.
+                    if let Some(runtime) = router_config.startup_worker_runtime_type {
+                        spec.runtime_type = runtime;
+                    }
                     // Health config is resolved at worker build time from router
                     // defaults + per-worker overrides (spec.health). No need to
                     // set spec.health here since these workers have no overrides.

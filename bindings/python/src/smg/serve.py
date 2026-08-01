@@ -300,6 +300,63 @@ class VllmWorkerLauncher(WorkerLauncher):
         return cmd
 
 
+class TokenspeedWorkerLauncher(WorkerLauncher):
+    """Launcher for TokenSpeed inference workers (ZMQ direct-backend only)."""
+
+    def _get_tp_size(self, args: argparse.Namespace) -> int:
+        return getattr(args, "tensor_parallel_size", 1) or 1
+
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
+        if getattr(args, "connection_mode", "grpc") != "zmq":
+            raise ValueError(
+                "TokenSpeed backend only supports --connection-mode zmq "
+                "(the headless engine speaks the ZMQ direct-backend wire)"
+            )
+        return self._build_zmq_command(args, backend_args, port)
+
+    def _build_zmq_command(
+        self, args: argparse.Namespace, backend_args: list[str], port: int
+    ) -> list[str]:
+        """Launch a headless TokenSpeed scheduler that dials SMG's ZMQ handshake.
+
+        SMG (the router) binds the tcp handshake + ipc data-plane sockets it
+        derives from the ipc:// worker URL; this engine connects in. Each worker
+        is a standalone engine (`--zmq-engine-index 0`); running several is
+        dense data parallelism as N independent ZMQ workers.
+        """
+        rpc_port = _zmq_handshake_port(_zmq_ipc_url(port))
+        cmd = [
+            sys.executable,
+            "-m",
+            "tokenspeed.cli",
+            "serve",
+            "--headless",
+            "--model",
+            getattr(args, "model", ""),
+            "--data-parallel-address",
+            "127.0.0.1",
+            "--data-parallel-rpc-port",
+            str(rpc_port),
+            "--zmq-engine-index",
+            "0",
+        ]
+        cmd.extend(
+            self._filter_backend_args(
+                backend_args,
+                [
+                    "--model",
+                    "--headless",
+                    "--data-parallel-address",
+                    "--data-parallel-rpc-port",
+                    "--zmq-engine-index",
+                ],
+            )
+        )
+        return cmd
+
+
 class TrtllmWorkerLauncher(WorkerLauncher):
     """Launcher for TensorRT-LLM inference workers (gRPC mode only).
 
@@ -380,6 +437,7 @@ BACKEND_LAUNCHERS: dict[str, type[WorkerLauncher]] = {
     "sglang": SglangWorkerLauncher,
     "vllm": VllmWorkerLauncher,
     "trtllm": TrtllmWorkerLauncher,
+    "tokenspeed": TokenspeedWorkerLauncher,
 }
 
 
@@ -543,10 +601,32 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
 
 
+def _add_tokenspeed_stub_args(parser: argparse.ArgumentParser) -> None:
+    """Add TokenSpeed-specific arguments.
+
+    TokenSpeed args are passed through verbatim to the engine command; only the
+    flags the launcher itself consumes are declared here (parse_serve_args uses
+    parse_known_args for this backend, like trtllm).
+    """
+    group = parser.add_argument_group("TokenSpeed Options")
+    group.add_argument(
+        "--model",
+        type=str,
+        help="Model path (HuggingFace ID or local path)",
+    )
+    group.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size (for per-worker GPU assignment)",
+    )
+
+
 BACKEND_ARG_ADDERS = {
     "sglang": _add_sglang_args,
     "vllm": _add_vllm_args,
     "trtllm": _add_trtllm_stub_args,
+    "tokenspeed": _add_tokenspeed_stub_args,
 }
 
 BACKEND_CHOICES = list(BACKEND_ARG_ADDERS.keys())
@@ -573,7 +653,8 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         choices=["grpc", "http", "zmq"],
         help=(
             "Connection mode for workers (default: grpc). Note: trtllm only "
-            "supports grpc, and zmq is only supported for the vllm backend"
+            "supports grpc, tokenspeed only supports zmq, and zmq is otherwise "
+            "only supported for the vllm backend"
         ),
     )
     # Router host/port - may be overridden by backend (e.g. sglang)
@@ -652,11 +733,12 @@ def parse_serve_args(
     serve_router_args, backend_args = pre_parser.parse_known_args(argv)
     backend = serve_router_args.backend
 
-    # ZMQ direct-backend is a same-host vLLM EngineCore connection; no other
-    # backend speaks the EngineCore ZMQ protocol.
-    if serve_router_args.connection_mode == "zmq" and backend != "vllm":
+    # ZMQ direct-backend is a same-host engine connection; only vLLM EngineCore
+    # and TokenSpeed speak a supported ZMQ wire protocol.
+    if serve_router_args.connection_mode == "zmq" and backend not in ("vllm", "tokenspeed"):
         pre_parser.error(
-            f"connection-mode zmq is only supported for the vllm backend, not {backend}"
+            "connection-mode zmq is only supported for the vllm and tokenspeed "
+            f"backends, not {backend}"
         )
 
     # Pass 2: full parser with backend-specific args; resolve so backend can override
@@ -671,7 +753,9 @@ def parse_serve_args(
         _add_vllm_frontend_args(parser)
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
 
-    if backend == "trtllm":
+    # trtllm/tokenspeed only declare stub args (no full engine parser); unknown
+    # tokens stay in backend_args and are passed through to the worker command.
+    if backend in ("trtllm", "tokenspeed"):
         args, _ = parser.parse_known_args(argv)
     else:
         args = parser.parse_args(argv)
@@ -755,6 +839,13 @@ class ServeOrchestrator:
         ]
         router_args = RouterArgs.from_cli_args(self.args, use_router_prefix=True)
         router_args.worker_urls = worker_urls
+        # The ZMQ handshake is shared across engine runtimes, so the router
+        # cannot probe the wire protocol; forward the serve backend so the Rust
+        # side stamps the startup workers' runtime. (RouterArgs.backend
+        # otherwise keeps its own --router-backend value, which serve's
+        # --backend does not reach.)
+        if getattr(self.args, "connection_mode", "grpc") == "zmq":
+            router_args.backend = self.backend
         # Router-level retries and circuit breaker are redundant when there is a
         # single worker — per-worker resilience already handles failures — so
         # disable them by default for dp<=1. Users who want them must run dp>1.

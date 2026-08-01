@@ -26,7 +26,11 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::header_utils::extract_routing_key,
-        grpc::{backend_client::BackendClient, client::GrpcClient, zmq_client::ZmqEngineClient},
+        grpc::{
+            backend_client::BackendClient,
+            client::GrpcClient,
+            zmq_client::{ZmqEngineClient, ZMQ_LOOPBACK_HOST},
+        },
     },
 };
 
@@ -46,10 +50,6 @@ const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
 /// the engine loads the model and profiles KV cache between INIT and READY.
 const ZMQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Loopback host for the TCP handshake. ZMQ direct connections are same-host
-/// only, so the handshake never leaves loopback.
-const ZMQ_HANDSHAKE_HOST: &str = "127.0.0.1";
-
 /// Derive a deterministic TCP handshake port from the ipc data-plane path.
 ///
 /// vLLM's headless engine dials a *TCP* handshake (`--data-parallel-address` +
@@ -57,6 +57,9 @@ const ZMQ_HANDSHAKE_HOST: &str = "127.0.0.1";
 /// URL lets the operator compute the same `--data-parallel-rpc-port` without a
 /// side channel. FNV-1a keeps it stable across processes and builds. Mapped
 /// into 20000..=29999 to avoid well-known and typical ephemeral ranges.
+///
+/// `_zmq_handshake_port` in `bindings/python/src/smg/serve.py` mirrors this
+/// function — keep them in sync.
 fn derive_handshake_port(path: &str) -> u16 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in path.as_bytes() {
@@ -77,15 +80,39 @@ fn derive_handshake_port(path: &str) -> u16 {
 /// and hands them to the engine during the handshake INIT). The operator gives a
 /// single `ipc://<path>` base; SMG binds the ipc input/output at
 /// `<path>-in.sock` / `-out.sock` and derives the TCP handshake port from the
-/// path. Returns `(handshake, input, output)`.
-fn zmq_socket_addresses(base_url: &str) -> WorkerResult<(String, String, String)> {
+/// path. A `WorkerSpec.zmq_handshake_address` override replaces the derived
+/// handshake address verbatim (it must be `tcp://`), for engines that dial a
+/// fixed, pre-agreed address — e.g. TokenSpeed's default dial target is
+/// `tcp://127.0.0.1:30500` (its `--data-parallel-address`/
+/// `--data-parallel-rpc-port` defaults, outside the derived 20000..=29999
+/// band), so setting the override to that value pairs a bare
+/// `ts serve --headless` with a manually registered worker.
+/// Returns `(handshake, input, output)`.
+fn zmq_socket_addresses(
+    base_url: &str,
+    handshake_override: Option<&str>,
+) -> WorkerResult<(String, String, String)> {
     let path = base_url
         .strip_prefix("ipc://")
         .ok_or_else(|| WorkerError::ConnectionFailed {
             url: base_url.to_string(),
             reason: "ZMQ worker URL must be ipc://<path>".to_string(),
         })?;
-    let handshake = format!("tcp://{ZMQ_HANDSHAKE_HOST}:{}", derive_handshake_port(path));
+    let handshake = match handshake_override {
+        Some(address) => {
+            if !address.starts_with("tcp://") {
+                return Err(WorkerError::ConnectionFailed {
+                    url: base_url.to_string(),
+                    reason: format!(
+                        "zmq_handshake_address must be a tcp:// address \
+                         (the engine dials a TCP handshake), got '{address}'"
+                    ),
+                });
+            }
+            address.to_string()
+        }
+        None => format!("tcp://{ZMQ_LOOPBACK_HOST}:{}", derive_handshake_port(path)),
+    };
     let input = format!("ipc://{path}-in.sock");
     let output = format!("ipc://{path}-out.sock");
     Ok((handshake, input, output))
@@ -161,8 +188,11 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
 async fn connect_zmq_backend(
     base_url: String,
     model_id: String,
+    runtime: RuntimeType,
+    handshake_override: Option<String>,
 ) -> WorkerResult<Arc<BackendClient>> {
-    let (handshake, input, output) = zmq_socket_addresses(&base_url)?;
+    let (handshake, input, output) =
+        zmq_socket_addresses(&base_url, handshake_override.as_deref())?;
     ensure_ipc_socket_dir(&base_url).await?;
     tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
     match ZmqEngineClient::connect(
@@ -171,6 +201,7 @@ async fn connect_zmq_backend(
         &output,
         1,
         model_id,
+        runtime,
         ZMQ_CONNECT_TIMEOUT,
     )
     .await
@@ -1430,9 +1461,13 @@ impl Worker for BasicWorker {
                 // wire (see create_worker).
                 let base_url = self.metadata.base_url().to_string();
                 let model_id = self.metadata.model_id().to_string();
+                let runtime = self.metadata.spec.runtime_type;
+                let handshake_override = self.metadata.spec.zmq_handshake_address.clone();
                 let cell = self.backend_client.load_full();
                 let client = cell
-                    .get_or_try_init(|| connect_zmq_backend(base_url, model_id))
+                    .get_or_try_init(|| {
+                        connect_zmq_backend(base_url, model_id, runtime, handshake_override)
+                    })
                     .await?;
                 Ok(Some(Arc::clone(client)))
             }
@@ -1520,6 +1555,8 @@ impl Worker for BasicWorker {
             let base_url = self.metadata.base_url().to_string();
             let model_id = self.metadata.model_id().to_string();
             let url = self.metadata.spec.url.clone();
+            let runtime = self.metadata.spec.runtime_type;
+            let handshake_override = self.metadata.spec.zmq_handshake_address.clone();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "detached one-shot handshake driver; the OnceCell dedupes with the request path and the guard self-clears on failure to allow a retry"
@@ -1527,7 +1564,9 @@ impl Worker for BasicWorker {
             // Detached: dropping the handle at scope end leaves the task running.
             let _handle = tokio::spawn(async move {
                 if let Err(e) = cell
-                    .get_or_try_init(|| connect_zmq_backend(base_url, model_id))
+                    .get_or_try_init(|| {
+                        connect_zmq_backend(base_url, model_id, runtime, handshake_override)
+                    })
                     .await
                 {
                     tracing::warn!(
@@ -1708,6 +1747,56 @@ mod tests {
         assert_eq!(WorkerType::Regular.to_string(), "regular");
         assert_eq!(WorkerType::Prefill.to_string(), "prefill");
         assert_eq!(WorkerType::Decode.to_string(), "decode");
+    }
+
+    #[test]
+    fn derive_handshake_port_matches_pinned_vectors() {
+        // Fixed vectors shared with `_zmq_handshake_port` in
+        // bindings/python/src/smg/serve.py — a change on either side breaks the
+        // engine/router port agreement, so these must stay in sync.
+        assert_eq!(derive_handshake_port("/tmp/smg-zmq/ts0.ipc"), 25152);
+        assert_eq!(derive_handshake_port("/tmp/smg-zmq/engine-31000"), 22714);
+        // Range invariant: every path maps into 20000..=29999.
+        for p in ["", "a", "/x/y/z.ipc", "very/long/path/with/segments.sock"] {
+            let port = derive_handshake_port(p);
+            assert!(
+                (20000..=29999).contains(&port),
+                "port {port} out of band for {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zmq_socket_addresses_derive_handshake_by_default() {
+        let (handshake, input, output) =
+            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", None).unwrap();
+        assert_eq!(handshake, "tcp://127.0.0.1:25152");
+        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
+        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
+    }
+
+    #[test]
+    fn zmq_socket_addresses_honor_handshake_override() {
+        // TokenSpeed's default dial target — outside the derived band; the
+        // override must be bound verbatim while the data plane stays derived.
+        let (handshake, input, output) =
+            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("tcp://127.0.0.1:30500"))
+                .unwrap();
+        assert_eq!(handshake, "tcp://127.0.0.1:30500");
+        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
+        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
+    }
+
+    #[test]
+    fn zmq_socket_addresses_reject_non_tcp_override() {
+        // The engine dials a TCP handshake; a non-tcp override is a config
+        // error and must fail loudly rather than bind something unexpected.
+        let err = zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("ipc:///tmp/hs.sock"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("tcp://"),
+            "error must name the required scheme: {err}"
+        );
     }
 
     #[test]
@@ -2652,37 +2741,6 @@ mod tests {
         assert!(worker.has_models_discovered());
     }
 
-    /// Pinned FNV-1a vectors. serve.py's `_zmq_handshake_port` derives the same
-    /// value from the same `ipc://` path so the launcher can pass a matching
-    /// `--data-parallel-rpc-port` without a side channel — if this changes, that
-    /// mirror must change in lockstep or the engine and router pick different
-    /// handshake ports and never connect.
-    #[test]
-    fn derive_handshake_port_matches_pinned_vectors() {
-        assert_eq!(derive_handshake_port("/tmp/smg-zmq/ts0.ipc"), 25152);
-        assert_eq!(derive_handshake_port("/tmp/smg-zmq/ts1.ipc"), 22735);
-        assert_eq!(derive_handshake_port("ts0.ipc"), 23912);
-        // Range invariant: every path maps into 20000..=29999.
-        for p in ["", "a", "/x/y/z.ipc", "very/long/path/with/segments.sock"] {
-            let port = derive_handshake_port(p);
-            assert!(
-                (20000..=29999).contains(&port),
-                "port {port} out of band for {p:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn zmq_socket_addresses_split_handshake_tcp_from_ipc_data_plane() {
-        let (handshake, input, output) =
-            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc").unwrap();
-        assert_eq!(handshake, "tcp://127.0.0.1:25152");
-        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
-        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
-        // A non-ipc base URL has no data-plane topology and must be rejected.
-        assert!(zmq_socket_addresses("tcp://127.0.0.1:5000").is_err());
-    }
-
     #[tokio::test]
     async fn ensure_ipc_socket_dir_creates_a_private_owner_only_dir() {
         let base = tempfile::tempdir().unwrap();
@@ -2740,6 +2798,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
             connect_to_frontend(

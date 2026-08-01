@@ -345,8 +345,8 @@ fn prepare_tokenspeed_items(
 }
 
 /// Display name of the engine runtime behind a client, for diagnostics. Keyed on
-/// the runtime, not the transport: a ZMQ worker is a vLLM engine reached over
-/// `ipc://`, so it reports "vLLM" like any other vLLM worker.
+/// the runtime, not the transport: a ZMQ worker reports its engine runtime
+/// (vLLM or TokenSpeed) the same as a gRPC worker for that engine.
 fn backend_name(client: &BackendClient) -> &'static str {
     match client.runtime_type() {
         RuntimeType::Sglang => "SGLang",

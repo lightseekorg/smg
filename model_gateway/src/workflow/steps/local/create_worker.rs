@@ -110,6 +110,29 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
             RuntimeType::Sglang
         };
 
+        validate_zmq_handshake_override(config, *connection_mode).map_err(|message| {
+            WorkflowError::StepFailed {
+                step_id: StepId::new("create_worker"),
+                message,
+            }
+        })?;
+
+        // Only vLLM EngineCore and TokenSpeed speak the ZMQ direct-backend wire.
+        // Fail registration here rather than letting the connect-time rejection
+        // strand the worker in Pending.
+        if *connection_mode == ConnectionMode::Zmq
+            && !matches!(runtime_type, RuntimeType::Vllm | RuntimeType::TokenSpeed)
+        {
+            return Err(WorkflowError::StepFailed {
+                step_id: StepId::new("create_worker"),
+                message: format!(
+                    "ZMQ worker {} has unsupported runtime {}: only vllm and tokenspeed \
+                     are supported over the ZMQ direct backend",
+                    config.url, runtime_type
+                ),
+            });
+        }
+
         // Normalize URL
         let url = normalize_url(&config.url, *connection_mode);
 
@@ -189,6 +212,9 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                 }
                 if let Some(ref e) = kv_engine_id {
                     builder = builder.kv_engine_id(e);
+                }
+                if let Some(ref address) = config.zmq_handshake_address {
+                    builder = builder.zmq_handshake_address(address.clone());
                 }
 
                 // Builder sets initial status: Pending if health-checked, Ready if not.
@@ -348,6 +374,23 @@ fn infer_non_generation_type(labels: &HashMap<String, String>) -> ModelType {
     ModelType::EMBEDDINGS
 }
 
+/// `zmq_handshake_address` only steers the ZMQ handshake bind; on any other
+/// connection mode it would be silently ignored, so reject the registration
+/// loudly instead.
+fn validate_zmq_handshake_override(
+    config: &WorkerSpec,
+    connection_mode: ConnectionMode,
+) -> Result<(), String> {
+    if config.zmq_handshake_address.is_some() && connection_mode != ConnectionMode::Zmq {
+        return Err(format!(
+            "worker {} sets zmq_handshake_address but its connection mode is \
+             {connection_mode:?}: the field is only meaningful for ZMQ workers",
+            config.url
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
     if url.starts_with("http://")
         || url.starts_with("https://")
@@ -422,6 +465,23 @@ mod tests {
         assert_eq!(
             normalize_url("localhost:30001", ConnectionMode::Grpc),
             "grpc://localhost:30001"
+        );
+    }
+
+    #[test]
+    fn zmq_handshake_override_is_rejected_off_the_zmq_path() {
+        let mut spec = WorkerSpec::new("http://worker:8080");
+        spec.zmq_handshake_address = Some("tcp://127.0.0.1:30500".to_string());
+
+        for mode in [ConnectionMode::Http, ConnectionMode::Grpc] {
+            let err = validate_zmq_handshake_override(&spec, mode)
+                .expect_err("non-ZMQ workers must reject the handshake override");
+            assert!(err.contains("zmq_handshake_address"), "{err}");
+        }
+        // On the ZMQ path the override is legitimate; unset is always fine.
+        assert!(validate_zmq_handshake_override(&spec, ConnectionMode::Zmq).is_ok());
+        assert!(
+            validate_zmq_handshake_override(&WorkerSpec::new("x"), ConnectionMode::Http).is_ok()
         );
     }
 

@@ -610,6 +610,31 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 && effective_waiting == 0
                 && pending_check.is_empty()
             {
+                // A step can finish in the gap between Phase 0's drain and Phase 1's
+                // tracker read: it removes itself from `running` and sends its
+                // completion in one lock scope, so Phase 1 sees running == 0 while
+                // the message is still queued in `rx` and its dependents were never
+                // added to `pending_check`. Re-drain before declaring deadlock;
+                // instant-completing steps (e.g. ZMQ connection detection) hit this
+                // window routinely.
+                let mut drained_completion = false;
+                while let Ok((step_id, result)) = rx.try_recv() {
+                    drained_completion = true;
+                    tracing::debug!(
+                        step_id = %step_id,
+                        result = ?result,
+                        "Step completed (deadlock-check drain)"
+                    );
+                    if matches!(result, StepResult::Success | StepResult::Skip) {
+                        for &dep_idx in definition.get_dependent_indices(&step_id) {
+                            pending_check.push_back(dep_idx);
+                        }
+                    }
+                }
+                if drained_completion {
+                    continue;
+                }
+
                 let failed_step = tracker.read().failed.iter().next().cloned();
                 // Use &'static str to avoid allocation in common error paths
                 let error_message: &'static str = if failed_step.is_some() {
@@ -668,11 +693,14 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                                         "Step skipped due to run_if condition"
                                     );
 
-                                    // Update tracker and send skip signal
+                                    // Remove from running and send the skip signal in one
+                                    // lock scope so the deadlock re-drain never sees
+                                    // running == 0 with the completion still unsent.
                                     {
                                         let mut t = tracker.write();
                                         t.running.remove(&step_id);
                                         t.skipped.insert(step_id.clone());
+                                        let _ = tx.try_send((step_id.clone(), StepResult::Skip));
                                     }
 
                                     // Update state store
@@ -686,9 +714,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                                             }
                                         })
                                         .await;
-
-                                    // Send skip signal
-                                    let _ = tx.try_send((step_id, StepResult::Skip));
                                     return;
                                 }
                             }
@@ -700,11 +725,14 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                                     "Failed to get context for run_if evaluation, failing step"
                                 );
 
-                                // Update tracker
+                                // Remove from running and send the failure signal in one
+                                // lock scope so the deadlock re-drain never sees
+                                // running == 0 with the completion still unsent.
                                 {
                                     let mut t = tracker.write();
                                     t.running.remove(&step_id);
                                     t.failed.insert(step_id.clone());
+                                    let _ = tx.try_send((step_id.clone(), StepResult::Failure));
                                 }
 
                                 // Update state store
@@ -718,9 +746,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                                         }
                                     })
                                     .await;
-
-                                // Send failure signal
-                                let _ = tx.try_send((step_id, StepResult::Failure));
                                 return;
                             }
                         }

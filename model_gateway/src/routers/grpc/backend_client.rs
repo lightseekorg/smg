@@ -2,7 +2,8 @@
 //!
 //! A worker's backend is reached either via gRPC (the [`GrpcClient`] multiplexer
 //! over SGLang/vLLM/TRT-LLM/MLX/TokenSpeed) or via a direct ZMQ connection to a
-//! same-host vLLM EngineCore ([`ZmqEngineClient`]). `BackendClient` keeps those
+//! same-host engine — vLLM EngineCore or TokenSpeed ([`ZmqEngineClient`]).
+//! `BackendClient` keeps those
 //! first-class siblings — `GrpcClient` stays pure gRPC — while the execution
 //! pipeline (which works against [`ProtoStream`]/[`ProtoGenerateRequest`]) is
 //! shared unchanged.
@@ -24,7 +25,8 @@ use crate::routers::grpc::{
     zmq_client::ZmqEngineClient,
 };
 
-/// A backend connection: gRPC (any engine) or direct ZMQ (vLLM EngineCore).
+/// A backend connection: gRPC (any engine) or direct ZMQ (vLLM EngineCore or
+/// TokenSpeed).
 #[derive(Clone)]
 pub enum BackendClient {
     Grpc(GrpcClient),
@@ -36,8 +38,7 @@ impl BackendClient {
     pub fn runtime_type(&self) -> crate::worker::RuntimeType {
         match self {
             Self::Grpc(client) => client.runtime_type(),
-            // ZMQ is the vLLM engine over a different transport.
-            Self::Zmq(_) => crate::worker::RuntimeType::Vllm,
+            Self::Zmq(client) => client.runtime(),
         }
     }
 
