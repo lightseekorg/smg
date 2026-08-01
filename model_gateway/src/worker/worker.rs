@@ -93,6 +93,17 @@ fn require_grpc_client(
     })
 }
 
+/// Error for an admin op invoked on a ZMQ worker. ZMQ backend operations are
+/// wired in a follow-up; until then a ZMQ worker is recognized but its admin
+/// surface is unavailable (it never routes through the gRPC client).
+fn zmq_admin_unsupported(url: &str, operation: &str) -> WorkerError {
+    WorkerError::OperationFailed {
+        url: url.to_string(),
+        operation: operation.to_string(),
+        reason: "admin operations are not yet supported for ZMQ workers".to_string(),
+    }
+}
+
 /// Map a gRPC admin-op outcome (`success` flag plus message) to a
 /// [`WorkerResult`].
 fn admin_grpc_result(
@@ -532,6 +543,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "flush_cache")),
         }
     }
 
@@ -577,6 +589,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "start_profile")),
         }
     }
 
@@ -605,6 +618,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "stop_profile")),
         }
     }
 }
@@ -619,6 +633,7 @@ impl ConnectionModeExt for ConnectionMode {
         match self {
             ConnectionMode::Http => metrics_labels::CONNECTION_HTTP,
             ConnectionMode::Grpc => metrics_labels::CONNECTION_GRPC,
+            ConnectionMode::Zmq => metrics_labels::CONNECTION_ZMQ,
         }
     }
 }
@@ -1054,6 +1069,9 @@ impl Worker for BasicWorker {
         let probe_ok = match &self.metadata.spec.connection_mode {
             ConnectionMode::Http => self.http_health_check().await?,
             ConnectionMode::Grpc => self.grpc_health_check().await?,
+            // ZMQ liveness lands with the backend client; until then a ZMQ
+            // worker is recognized but never becomes ready (not routable).
+            ConnectionMode::Zmq => false,
         };
 
         if probe_ok {
@@ -1204,7 +1222,10 @@ impl Worker for BasicWorker {
 
     async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
         match self.metadata.spec.connection_mode {
-            ConnectionMode::Http => Ok(None),
+            // Neither HTTP nor ZMQ has a gRPC client. A ZMQ worker's backend
+            // client is a separate type wired in a follow-up; it is never a
+            // gRPC client.
+            ConnectionMode::Http | ConnectionMode::Zmq => Ok(None),
             ConnectionMode::Grpc => {
                 // OnceCell provides lock-free reads after initialization.
                 // get_or_try_init only acquires internal lock on first call.

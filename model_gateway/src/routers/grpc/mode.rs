@@ -45,7 +45,11 @@ impl Mode {
 
 /// Derive the gRPC mode from config. `None` for non-gRPC backends.
 pub(crate) fn grpc_mode(cfg: &RouterConfig) -> Option<Mode> {
-    if cfg.connection_mode != ConnectionMode::Grpc {
+    // ZMQ reuses the gRPC router pipeline (same ProtoStream/execution stages).
+    if !matches!(
+        cfg.connection_mode,
+        ConnectionMode::Grpc | ConnectionMode::Zmq
+    ) {
         return None;
     }
     match cfg.mode {

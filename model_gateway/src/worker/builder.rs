@@ -237,8 +237,14 @@ impl BasicWorkerBuilder {
 
         use tokio::sync::OnceCell;
 
-        // Derive bootstrap_host from URL at construction time
-        self.spec.bootstrap_host = parse_bootstrap_host(&self.spec.url);
+        // bootstrap_host is a PD/TCP-disaggregation concept (a host:port peer),
+        // so derive it only for transports that carry a host. An ipc:// ZMQ
+        // worker has no host; leave bootstrap_host empty rather than forcing the
+        // URL through host:port parsing (which would warn and default to
+        // localhost).
+        if self.spec.connection_mode != ConnectionMode::Zmq {
+            self.spec.bootstrap_host = parse_bootstrap_host(&self.spec.url);
+        }
 
         // Resolve health config: use explicit config if set, otherwise
         // apply per-worker overrides from spec.health to defaults.

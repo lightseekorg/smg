@@ -285,6 +285,8 @@ impl StepExecutor<WorkerWorkflowData> for DetectBackendStep {
                     step_id: wfaas::StepId::new("detect_backend"),
                     message: format!("gRPC backend detection failed for {}: {}", config.url, e),
                 })?,
+            // A ZMQ EngineCore is always vLLM; there is nothing to probe.
+            ConnectionMode::Zmq => "vllm".to_string(),
         };
 
         debug!(

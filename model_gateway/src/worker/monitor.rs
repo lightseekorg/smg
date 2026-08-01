@@ -834,6 +834,10 @@ async fn group_monitor_loop(
                             WorkerMonitor::fetch_http_load(&client, &worker).await
                         }
                         ConnectionMode::Grpc => WorkerMonitor::fetch_grpc_load(&worker).await,
+                        // ZMQ load monitoring lands with the backend client; a
+                        // ZMQ worker reports no load until then (never via the
+                        // gRPC load path).
+                        ConnectionMode::Zmq => None,
                     };
                     (worker.url().to_string(), response)
                 }

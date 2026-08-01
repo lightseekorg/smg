@@ -54,7 +54,7 @@ impl RouterFactory {
     /// Create a router instance from application context
     pub async fn create_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
         match ctx.router_config.connection_mode {
-            ConnectionMode::Grpc => {
+            ConnectionMode::Grpc | ConnectionMode::Zmq => {
                 // Register the per-role policies each disaggregation mode needs,
                 // then build the mode-parameterized gRPC router.
                 match &ctx.router_config.mode {

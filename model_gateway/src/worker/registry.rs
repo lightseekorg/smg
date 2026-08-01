@@ -608,7 +608,7 @@ impl WorkerRegistry {
 
             match worker.connection_mode() {
                 ConnectionMode::Http => http_count += 1,
-                ConnectionMode::Grpc => grpc_count += 1,
+                ConnectionMode::Grpc | ConnectionMode::Zmq => grpc_count += 1,
             }
 
             match worker.circuit_breaker_state() {

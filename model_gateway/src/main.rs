@@ -992,12 +992,15 @@ impl CliArgs {
     }
 
     fn determine_connection_mode(worker_urls: &[String]) -> ConnectionMode {
-        for url in worker_urls {
-            if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return ConnectionMode::Grpc;
-            }
-        }
-        ConnectionMode::Http
+        // First worker URL that declares ipc:// or grpc:// wins; http:// and bare
+        // host:port fall through to the HTTP default. See ConnectionMode::from_url.
+        worker_urls
+            .iter()
+            .find_map(|url| match ConnectionMode::from_url(url) {
+                mode @ (Some(ConnectionMode::Zmq) | Some(ConnectionMode::Grpc)) => mode,
+                _ => None,
+            })
+            .unwrap_or(ConnectionMode::Http)
     }
 
     fn parse_selector(selector_list: &[String]) -> HashMap<String, String> {

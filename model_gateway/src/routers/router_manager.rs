@@ -155,15 +155,25 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::PrefillDecode { .. }) => router_ids::HTTP_PD,
             (ConnectionMode::Http, RoutingMode::OpenAI { .. }) => router_ids::HTTP_OPENAI,
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
-            (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
-            (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
+            (ConnectionMode::Grpc | ConnectionMode::Zmq, RoutingMode::Regular { .. }) => {
+                router_ids::GRPC_REGULAR
+            }
+            (ConnectionMode::Grpc | ConnectionMode::Zmq, RoutingMode::PrefillDecode { .. }) => {
+                router_ids::GRPC_PD
+            }
             // EPD only runs on gRPC; the HTTP arm never reaches a real router
             // (the factory errors), but the match must stay exhaustive.
             (_, RoutingMode::EncodePrefillDecode { .. }) => router_ids::GRPC_EPD,
             (ConnectionMode::Http, RoutingMode::Gemini { .. }) => router_ids::HTTP_GEMINI,
-            (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
-            (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
-            (ConnectionMode::Grpc, RoutingMode::Gemini { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc | ConnectionMode::Zmq, RoutingMode::OpenAI { .. }) => {
+                router_ids::GRPC_REGULAR
+            }
+            (ConnectionMode::Grpc | ConnectionMode::Zmq, RoutingMode::Anthropic { .. }) => {
+                router_ids::GRPC_REGULAR
+            }
+            (ConnectionMode::Grpc | ConnectionMode::Zmq, RoutingMode::Gemini { .. }) => {
+                router_ids::GRPC_REGULAR
+            }
         }
     }
 
@@ -267,13 +277,21 @@ impl RouterManager {
 
         for w in workers {
             match (w.worker_type(), w.connection_mode()) {
-                (WorkerType::Encode, ConnectionMode::Grpc) => grpc_encode += 1,
+                (WorkerType::Encode, ConnectionMode::Grpc | ConnectionMode::Zmq) => {
+                    grpc_encode += 1;
+                }
                 (WorkerType::Encode, ConnectionMode::Http) => {}
-                (WorkerType::Prefill, ConnectionMode::Grpc) => grpc_prefill += 1,
+                (WorkerType::Prefill, ConnectionMode::Grpc | ConnectionMode::Zmq) => {
+                    grpc_prefill += 1;
+                }
                 (WorkerType::Prefill, ConnectionMode::Http) => http_prefill += 1,
-                (WorkerType::Decode, ConnectionMode::Grpc) => grpc_decode += 1,
+                (WorkerType::Decode, ConnectionMode::Grpc | ConnectionMode::Zmq) => {
+                    grpc_decode += 1;
+                }
                 (WorkerType::Decode, ConnectionMode::Http) => http_decode += 1,
-                (WorkerType::Regular, ConnectionMode::Grpc) => grpc_regular += 1,
+                (WorkerType::Regular, ConnectionMode::Grpc | ConnectionMode::Zmq) => {
+                    grpc_regular += 1;
+                }
                 (WorkerType::Regular, ConnectionMode::Http) => http_regular += 1,
             }
         }

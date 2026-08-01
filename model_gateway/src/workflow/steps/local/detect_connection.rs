@@ -16,16 +16,6 @@ use crate::{
     },
 };
 
-fn explicit_connection_mode(url: &str) -> Option<ConnectionMode> {
-    if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-        Some(ConnectionMode::Grpc)
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        Some(ConnectionMode::Http)
-    } else {
-        None
-    }
-}
-
 /// Step 1: Detect connection mode (HTTP vs gRPC).
 ///
 /// Explicit URL schemes are honored. For bare host:port URLs, probes both
@@ -62,10 +52,14 @@ impl StepExecutor<WorkerWorkflowData> for DetectConnectionModeStep {
             .unwrap_or(app_context.router_config.health_check.timeout_secs);
         let client = &app_context.client;
 
-        if let Some(connection_mode) = explicit_connection_mode(&url) {
+        if let Some(connection_mode) = ConnectionMode::from_url(&url) {
             let result = match connection_mode {
                 ConnectionMode::Http => try_http_reachable(&url, timeout, client).await,
                 ConnectionMode::Grpc => try_grpc_reachable(&url, timeout).await,
+                // SMG binds the ZMQ sockets and the engine dials in, so there is
+                // no endpoint to probe before binding; an explicit ipc:// URL is
+                // taken as reachable.
+                ConnectionMode::Zmq => Ok(()),
             };
 
             match result {
@@ -120,39 +114,5 @@ impl StepExecutor<WorkerWorkflowData> for DetectConnectionModeStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explicit_connection_mode_honors_grpc_scheme() {
-        assert_eq!(
-            explicit_connection_mode("grpc://localhost:30001"),
-            Some(ConnectionMode::Grpc)
-        );
-        assert_eq!(
-            explicit_connection_mode("grpcs://localhost:30001"),
-            Some(ConnectionMode::Grpc)
-        );
-    }
-
-    #[test]
-    fn explicit_connection_mode_honors_http_schemes() {
-        assert_eq!(
-            explicit_connection_mode("http://localhost:30000"),
-            Some(ConnectionMode::Http)
-        );
-        assert_eq!(
-            explicit_connection_mode("https://example.com"),
-            Some(ConnectionMode::Http)
-        );
-    }
-
-    #[test]
-    fn explicit_connection_mode_leaves_bare_urls_for_probe_detection() {
-        assert_eq!(explicit_connection_mode("localhost:30000"), None);
     }
 }

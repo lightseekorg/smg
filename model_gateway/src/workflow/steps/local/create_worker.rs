@@ -64,6 +64,26 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
         let kv_engine_id = labels.remove("kv_engine_id").filter(|s| !s.is_empty());
 
         let model_id = resolve_model_id(config, &labels);
+        // ZMQ EngineCore does not report a served model name over the wire, so a
+        // ZMQ worker's model identity must come from config (`--model-path`).
+        // Without it the worker would register as UNKNOWN and be unroutable, so
+        // fail loudly at registration rather than silently.
+        let model_id = if model_id == UNKNOWN_MODEL_ID && *connection_mode == ConnectionMode::Zmq {
+            app_context
+                .router_config
+                .model_path
+                .as_deref()
+                .ok_or_else(|| WorkflowError::StepFailed {
+                    step_id: StepId::new("create_worker"),
+                    message: format!(
+                        "ZMQ worker {} has no model identity: EngineCore does not report a \
+                         served model name, so --model-path (or a model_id label) is required",
+                        config.url
+                    ),
+                })?
+        } else {
+            model_id
+        };
 
         let model_card = build_model_card(
             model_id,
@@ -332,12 +352,14 @@ fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
         || url.starts_with("https://")
         || url.starts_with("grpc://")
         || url.starts_with("grpcs://")
+        || url.starts_with("ipc://")
     {
         url.to_string()
     } else {
         match connection_mode {
             ConnectionMode::Http => format!("http://{url}"),
             ConnectionMode::Grpc => format!("grpc://{url}"),
+            ConnectionMode::Zmq => format!("ipc://{url}"),
         }
     }
 }

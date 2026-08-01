@@ -478,6 +478,7 @@ pub mod metrics_labels {
     // Connection modes
     pub const CONNECTION_HTTP: &str = "http";
     pub const CONNECTION_GRPC: &str = "grpc";
+    pub const CONNECTION_ZMQ: &str = "zmq";
 
     // Endpoints
     pub const ENDPOINT_CHAT: &str = "chat";

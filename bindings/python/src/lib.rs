@@ -491,12 +491,16 @@ struct Router {
 
 impl Router {
     fn determine_connection_mode(worker_urls: &[String]) -> worker::ConnectionMode {
-        for url in worker_urls {
-            if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return worker::ConnectionMode::Grpc;
-            }
-        }
-        worker::ConnectionMode::Http
+        use worker::ConnectionMode;
+        // First worker URL that declares ipc:// or grpc:// wins; http:// and bare
+        // host:port fall through to the HTTP default. See ConnectionMode::from_url.
+        worker_urls
+            .iter()
+            .find_map(|url| match ConnectionMode::from_url(url) {
+                mode @ (Some(ConnectionMode::Zmq) | Some(ConnectionMode::Grpc)) => mode,
+                _ => None,
+            })
+            .unwrap_or(ConnectionMode::Http)
     }
 
     fn parse_mesh_socket_addr(

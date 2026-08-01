@@ -40,16 +40,29 @@ pub fn validate_worker_url(url: &str) -> ConfigResult<()> {
     // matches schemes case-sensitively, so a mixed-case scheme would be
     // rewritten downstream and diverge from the reservation key — the
     // same orphan failure as a schemeless URL.
-    const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
+    const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs", "ipc"];
     let scheme = url.split_once("://").map_or("", |(s, _)| s);
     if !ALLOWED_SCHEMES.contains(&scheme) {
         return Err(ConfigError::InvalidValue {
             field: "worker_url".to_string(),
             value: url.to_string(),
-            reason:
-                "URL must start with a lowercase http://, https://, grpc://, or grpcs:// scheme"
-                    .to_string(),
+            reason: "URL must start with a lowercase http://, https://, grpc://, grpcs://, or ipc:// scheme"
+                .to_string(),
         });
+    }
+
+    // ipc:// worker URLs are same-host ZMQ unix-socket paths (no host); validate
+    // the path is present rather than requiring a host below.
+    if scheme == "ipc" {
+        let path = url.strip_prefix("ipc://").unwrap_or("");
+        if path.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "worker_url".to_string(),
+                value: url.to_string(),
+                reason: "ipc:// worker URL must include a socket path".to_string(),
+            });
+        }
+        return Ok(());
     }
 
     match ::url::Url::parse(url) {
