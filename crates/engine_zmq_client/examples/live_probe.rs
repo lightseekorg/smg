@@ -14,6 +14,16 @@
 //     --data-parallel-address 127.0.0.1 --data-parallel-rpc-port <port> \
 //     --enforce-eager
 
+// This is a dev-only CLI probe, not library code: printing to stderr, `expect`
+// on argument/handshake errors, and `process::exit` on failure are all
+// appropriate here and intentionally exempt from the workspace restriction lints.
+#![expect(
+    clippy::print_stderr,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    reason = "dev-only live-validation CLI example"
+)]
+
 use std::time::Duration;
 
 use engine_zmq_client::{
