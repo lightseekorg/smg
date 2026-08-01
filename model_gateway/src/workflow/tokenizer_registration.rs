@@ -120,10 +120,9 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                 let name = name.clone();
                 let id = id.clone();
                 async move {
-                    let base_tokenizer = match factory::create_tokenizer_async_with_chat_template_and_model_id(
+                    let base_tokenizer = match factory::create_tokenizer_async_with_chat_template(
                         &source,
                         chat_template.as_deref(),
-                        Some(&name),
                     )
                     .await {
                         Ok(tok) => tok,
@@ -221,7 +220,6 @@ fn with_optional_cache(
 
 fn load_tokenizer_from_bundle(
     bundle: &StreamBundle,
-    model_id: &str,
 ) -> Result<(Arc<dyn Tokenizer>, Option<MultimodalModelConfig>), String> {
     tokenizer_bundle::with_extracted_bundle(bundle, |tokenizer_dir| {
         let tokenizer_path = tokenizer_dir.to_string_lossy().into_owned();
@@ -230,12 +228,8 @@ fn load_tokenizer_from_bundle(
             tokenizer_path
         );
 
-        let tokenizer = factory::create_tokenizer_with_chat_template_and_model_id(
-            &tokenizer_path,
-            None,
-            Some(model_id),
-        )
-        .map_err(|e| format!("tokenizer load failed: {e}"))?;
+        let tokenizer = factory::create_tokenizer_with_chat_template(&tokenizer_path, None)
+            .map_err(|e| format!("tokenizer load failed: {e}"))?;
 
         let mm_config = try_load_multimodal_config(tokenizer_dir);
 
@@ -369,7 +363,7 @@ async fn fetch_tokenizer_from_worker(
             worker.url()
         );
 
-        match load_tokenizer_from_bundle(&bundle, model_id) {
+        match load_tokenizer_from_bundle(&bundle) {
             Ok((tokenizer, mm_config)) => {
                 if let Some(cfg) = mm_config {
                     app_context
@@ -571,10 +565,9 @@ mod tests {
     }
 
     #[test]
-    fn grpc_bundle_load_preserves_flash_0731_model_identity() {
+    fn grpc_bundle_load_uses_deepseek_v4_effort_encoding() {
         let bundle = deepseek_v4_bundle();
-        let (tokenizer, _) =
-            load_tokenizer_from_bundle(&bundle, "deepseek-ai/DeepSeek-V4-Flash-0731").unwrap();
+        let (tokenizer, _) = load_tokenizer_from_bundle(&bundle).unwrap();
         let messages = vec![json!({ "role": "user", "content": "Hello" })];
         let native_effort = json!("max");
         let output = tokenizer

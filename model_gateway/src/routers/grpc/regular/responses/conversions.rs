@@ -483,10 +483,9 @@ mod tests {
             r#"{"architectures":["DeepseekV4ForCausalLM"]}"#,
         )
         .unwrap();
-        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template_and_model_id(
+        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template(
             tokenizer_path.to_str().unwrap(),
             None,
-            Some("deepseek-ai/DeepSeek-V4-Flash-0731"),
         )
         .unwrap();
         (temp, tokenizer)

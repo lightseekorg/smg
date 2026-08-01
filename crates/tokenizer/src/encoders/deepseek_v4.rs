@@ -21,16 +21,6 @@ pub enum ReasoningEffort {
     Max,
 }
 
-/// Selects the reasoning-effort prompt format used by a DeepSeek V4 checkpoint.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ReasoningEffortProfile {
-    /// Original Flash, Flash-DSpark, Pro, and unidentified V4 checkpoints.
-    #[default]
-    Original,
-    /// The newer effort encoding used only by DeepSeek-V4-Flash-0731.
-    Flash0731,
-}
-
 impl ReasoningEffort {
     /// Parse a native 0731 effort name.
     pub fn from_native(value: &str) -> Option<Self> {
@@ -62,7 +52,6 @@ pub struct EncodeParams {
     pub add_default_bos_token: bool,
     pub drop_thinking: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub reasoning_effort_profile: ReasoningEffortProfile,
 }
 impl Default for EncodeParams {
     fn default() -> Self {
@@ -70,7 +59,6 @@ impl Default for EncodeParams {
             add_default_bos_token: true,
             drop_thinking: true,
             reasoning_effort: None,
-            reasoning_effort_profile: ReasoningEffortProfile::Original,
         }
     }
 }
@@ -270,7 +258,6 @@ fn render_message(
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     reasoning_effort: Option<ReasoningEffort>,
-    reasoning_effort_profile: ReasoningEffortProfile,
 ) -> Result<String, DsEncodingError> {
     if index >= messages.len() {
         return Err(DsEncodingError::IndexOutOfRange {
@@ -299,19 +286,14 @@ fn render_message(
 
     // Reasoning effort prefix (only at index 0 in thinking mode).
     if index == 0 && thinking_mode == ThinkingMode::Thinking {
-        match (reasoning_effort_profile, reasoning_effort) {
-            (ReasoningEffortProfile::Original, Some(ReasoningEffort::Max))
-            | (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::High)) => {
+        match reasoning_effort {
+            Some(ReasoningEffort::High) => {
                 prompt.push_str(REASONING_EFFORT_HIGH);
             }
-            (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::Max)) => {
+            Some(ReasoningEffort::Max) => {
                 prompt.push_str(REASONING_EFFORT_MAX);
             }
-            (
-                ReasoningEffortProfile::Original,
-                Some(ReasoningEffort::Low | ReasoningEffort::High) | None,
-            )
-            | (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::Low) | None) => {}
+            Some(ReasoningEffort::Low) | None => {}
         }
     }
 
@@ -718,7 +700,6 @@ pub fn encode_messages(
             thinking_mode,
             effective_drop_thinking,
             params.reasoning_effort,
-            params.reasoning_effort_profile,
         )?);
     }
     Ok(prompt)
@@ -757,7 +738,6 @@ mod tests {
         let msgs = [user("Hello")];
         let params = EncodeParams {
             reasoning_effort: Some(ReasoningEffort::Max),
-            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
             ..EncodeParams::default()
         };
         let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();
@@ -779,7 +759,6 @@ mod tests {
         let msgs = [user("Hello")];
         let params = EncodeParams {
             reasoning_effort: Some(ReasoningEffort::High),
-            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
             ..EncodeParams::default()
         };
         let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();
@@ -793,7 +772,6 @@ mod tests {
         let msgs = [user("Hello")];
         let params = EncodeParams {
             reasoning_effort: Some(ReasoningEffort::Low),
-            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
             ..EncodeParams::default()
         };
         let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();

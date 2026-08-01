@@ -33,15 +33,6 @@ pub fn create_tokenizer_with_chat_template(
     file_path: &str,
     chat_template_path: Option<&str>,
 ) -> Result<Arc<dyn traits::Tokenizer>> {
-    create_tokenizer_with_chat_template_and_model_id(file_path, chat_template_path, None)
-}
-
-/// Create a tokenizer from a file path with an optional model identity hint.
-pub fn create_tokenizer_with_chat_template_and_model_id(
-    file_path: &str,
-    chat_template_path: Option<&str>,
-    model_id: Option<&str>,
-) -> Result<Arc<dyn traits::Tokenizer>> {
     // Special case for testing
     if file_path == "mock" || file_path == "test" {
         return Ok(Arc::new(super::mock::MockTokenizer::new()));
@@ -66,10 +57,9 @@ pub fn create_tokenizer_with_chat_template_and_model_id(
                     "Tokenizer path is not valid UTF-8: {tokenizer_json:?}"
                 ))
             })?;
-            return create_tokenizer_with_chat_template_and_model_id(
+            return create_tokenizer_with_chat_template(
                 tokenizer_path_str,
                 final_chat_template.as_deref(),
-                model_id,
             );
         }
 
@@ -126,11 +116,8 @@ pub fn create_tokenizer_with_chat_template_and_model_id(
 
     let result = match extension.as_deref() {
         Some("json") => {
-            let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template_and_model_id(
-                file_path,
-                chat_template_path,
-                model_id,
-            )?;
+            let tokenizer =
+                HuggingFaceTokenizer::from_file_with_chat_template(file_path, chat_template_path)?;
 
             Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
@@ -151,7 +138,7 @@ pub fn create_tokenizer_with_chat_template_and_model_id(
         }
         _ => {
             // Try to auto-detect by reading file content
-            auto_detect_tokenizer(file_path, model_id)
+            auto_detect_tokenizer(file_path)
         }
     };
 
@@ -172,10 +159,7 @@ fn has_qwen2_tokenizer_class(dir: &Path) -> bool {
 }
 
 /// Auto-detect tokenizer type by examining file content
-fn auto_detect_tokenizer(
-    file_path: &str,
-    model_id: Option<&str>,
-) -> Result<Arc<dyn traits::Tokenizer>> {
+fn auto_detect_tokenizer(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> {
     let mut file = File::open(file_path)?;
     let mut buffer = vec![0u8; 512]; // Read first 512 bytes for detection
     let bytes_read = file.read(&mut buffer)?;
@@ -183,9 +167,7 @@ fn auto_detect_tokenizer(
 
     // Check for JSON (HuggingFace format)
     if is_likely_json(&buffer) {
-        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template_and_model_id(
-            file_path, None, model_id,
-        )?;
+        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template(file_path, None)?;
         return Ok(Arc::new(tokenizer));
     }
 
@@ -376,28 +358,10 @@ pub async fn create_tokenizer_async_with_chat_template(
     model_name_or_path: &str,
     chat_template_path: Option<&str>,
 ) -> Result<Arc<dyn traits::Tokenizer>> {
-    create_tokenizer_async_with_chat_template_and_model_id(
-        model_name_or_path,
-        chat_template_path,
-        Some(model_name_or_path),
-    )
-    .await
-}
-
-/// Create a tokenizer asynchronously with an optional model identity hint.
-pub async fn create_tokenizer_async_with_chat_template_and_model_id(
-    model_name_or_path: &str,
-    chat_template_path: Option<&str>,
-    model_id: Option<&str>,
-) -> Result<Arc<dyn traits::Tokenizer>> {
     // Check if it's a file path
     let path = Path::new(model_name_or_path);
     if path.exists() {
-        return create_tokenizer_with_chat_template_and_model_id(
-            model_name_or_path,
-            chat_template_path,
-            model_id,
-        );
+        return create_tokenizer_with_chat_template(model_name_or_path, chat_template_path);
     }
 
     // Check if it's a GPT model name that should use Tiktoken
@@ -432,10 +396,9 @@ pub async fn create_tokenizer_async_with_chat_template_and_model_id(
                         "Tokenizer path is not valid UTF-8: {tokenizer_path:?}"
                     ))
                 })?;
-                create_tokenizer_with_chat_template_and_model_id(
+                create_tokenizer_with_chat_template(
                     tokenizer_path_str,
                     final_chat_template.as_deref(),
-                    model_id.or(Some(model_name_or_path)),
                 )
             } else if has_tiktoken_file(&cache_dir) {
                 Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
@@ -458,10 +421,9 @@ pub async fn create_tokenizer_async_with_chat_template_and_model_id(
                         let file_path_str = file_path.to_str().ok_or_else(|| {
                             Error::msg(format!("File path is not valid UTF-8: {file_path:?}"))
                         })?;
-                        return create_tokenizer_with_chat_template_and_model_id(
+                        return create_tokenizer_with_chat_template(
                             file_path_str,
                             final_chat_template.as_deref(),
-                            model_id.or(Some(model_name_or_path)),
                         );
                     }
                 }
