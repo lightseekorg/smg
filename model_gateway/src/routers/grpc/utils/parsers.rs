@@ -46,12 +46,30 @@ pub(crate) fn extract_thinking_from_kwargs(
     .and_then(|v| v.as_bool())
 }
 
+fn extract_template_effort_thinking(
+    kwargs: Option<&std::collections::HashMap<String, Value>>,
+    tokenizer: &dyn Tokenizer,
+) -> Option<bool> {
+    if !tokenizer.template_reasoning_effort_enables_thinking() {
+        return None;
+    }
+    match kwargs?.get("reasoning_effort").and_then(Value::as_str) {
+        Some("low" | "high" | "max") => Some(true),
+        _ => None,
+    }
+}
+
 /// Precedence for the effective thinking preference: an explicit template
-/// toggle (already extracted from kwargs) always wins; otherwise fall back to
-/// the protocol-level OpenAI `reasoning_effort` mapping
-/// ([`thinking_from_reasoning_effort`]).
-fn resolve_thinking_pref(explicit: Option<bool>, reasoning_effort: Option<&str>) -> Option<bool> {
-    explicit.or_else(|| thinking_from_reasoning_effort(reasoning_effort))
+/// toggle always wins, followed by a native template effort for renderers that
+/// support it, then the protocol-level OpenAI `reasoning_effort` mapping.
+fn resolve_thinking_pref(
+    explicit: Option<bool>,
+    template_effort: Option<bool>,
+    reasoning_effort: Option<&str>,
+) -> Option<bool> {
+    explicit
+        .or(template_effort)
+        .or_else(|| thinking_from_reasoning_effort(reasoning_effort))
 }
 
 /// Resolve the user's effective thinking preference, honoring an explicit
@@ -64,6 +82,7 @@ pub fn resolve_user_thinking(
 ) -> Option<bool> {
     resolve_thinking_pref(
         extract_thinking_from_kwargs(kwargs, tokenizer),
+        extract_template_effort_thinking(kwargs, tokenizer),
         reasoning_effort,
     )
 }
@@ -197,17 +216,28 @@ mod tests {
     #[test]
     fn resolve_thinking_pref_explicit_kwarg_wins() {
         // An explicit template toggle always wins over the reasoning_effort mapping.
-        assert_eq!(resolve_thinking_pref(Some(true), Some("none")), Some(true));
         assert_eq!(
-            resolve_thinking_pref(Some(false), Some("high")),
+            resolve_thinking_pref(Some(true), Some(false), Some("none")),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_thinking_pref(Some(false), Some(true), Some("high")),
             Some(false)
         );
+        // Native template effort wins over the public effort.
+        assert_eq!(
+            resolve_thinking_pref(None, Some(true), Some("none")),
+            Some(true)
+        );
         // No explicit toggle -> fall back to the reasoning_effort mapping.
-        assert_eq!(resolve_thinking_pref(None, Some("none")), Some(false));
-        assert_eq!(resolve_thinking_pref(None, Some("minimal")), Some(true));
-        assert_eq!(resolve_thinking_pref(None, Some("high")), Some(true));
-        assert_eq!(resolve_thinking_pref(None, Some("max")), Some(true));
-        assert_eq!(resolve_thinking_pref(None, None), None);
+        assert_eq!(resolve_thinking_pref(None, None, Some("none")), Some(false));
+        assert_eq!(
+            resolve_thinking_pref(None, None, Some("minimal")),
+            Some(true)
+        );
+        assert_eq!(resolve_thinking_pref(None, None, Some("high")), Some(true));
+        assert_eq!(resolve_thinking_pref(None, None, Some("max")), Some(true));
+        assert_eq!(resolve_thinking_pref(None, None, None), None);
     }
 
     #[test]

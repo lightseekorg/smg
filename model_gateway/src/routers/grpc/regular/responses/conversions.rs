@@ -685,6 +685,36 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_template_effort_enables_response_reasoning_parsing() {
+        let (_temp, tokenizer) = deepseek_v4_tokenizer();
+        let native_effort = std::collections::HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("max"),
+        )]);
+        let explicit_off = std::collections::HashMap::from([
+            ("reasoning_effort".to_string(), serde_json::json!("max")),
+            ("thinking".to_string(), serde_json::json!(false)),
+        ]);
+
+        assert_eq!(
+            crate::routers::grpc::utils::resolve_user_thinking(
+                Some(&native_effort),
+                Some("none"),
+                &tokenizer,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            crate::routers::grpc::utils::resolve_user_thinking(
+                Some(&explicit_off),
+                Some("max"),
+                &tokenizer,
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn test_items_input_conversion() {
         let req = ResponsesRequest {
             input: ResponseInput::Items(vec![

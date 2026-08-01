@@ -594,6 +594,11 @@ impl TokenizerTrait for HuggingFaceTokenizer {
             Renderer::Jinja => self.chat_template.thinking_key_name(),
         }
     }
+
+    fn template_reasoning_effort_enables_thinking(&self) -> bool {
+        matches!(self.renderer, Renderer::DeepseekV4)
+    }
+
     fn think_in_prefill(&self) -> bool {
         match self.renderer {
             // Both encoders emit `<｜Assistant｜><think>` at the end of the
