@@ -16,8 +16,8 @@ pub(crate) mod pipeline;
 pub(crate) mod proto_wrapper;
 pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
-pub mod utils;
-pub mod zmq_client; // ZMQ backend adapter behind the vLLM client surface // Used by routers/http and bindings/golang
+pub mod utils; // Used by routers/http and bindings/golang
+pub mod zmq_client; // ZMQ backend adapter behind the vLLM client surface
 
 // Re-export for convenience
 pub use proto_wrapper::{MultimodalData, TensorBytes};

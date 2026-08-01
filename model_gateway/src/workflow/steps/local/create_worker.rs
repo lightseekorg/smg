@@ -147,6 +147,18 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                 .dp_info
                 .as_ref()
                 .ok_or_else(|| WorkflowError::ContextValueNotFound("dp_info".to_string()))?;
+            // A ZMQ worker binds a single EngineCore connection (engine_count=1);
+            // DP>1 needs the coordinator + wave protocol (not yet implemented), so
+            // fail loudly rather than silently under-connecting.
+            if *connection_mode == ConnectionMode::Zmq && dp_info.dp_size > 1 {
+                return Err(WorkflowError::StepFailed {
+                    step_id: StepId::new("create_worker"),
+                    message: format!(
+                        "ZMQ worker {} cannot run data-parallel (dp_size={}); DP>1 over ZMQ is not yet supported",
+                        config.url, dp_info.dp_size
+                    ),
+                });
+            }
             (0..dp_info.dp_size)
                 .map(|r| Some((r, dp_info.dp_size)))
                 .collect()

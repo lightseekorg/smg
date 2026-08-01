@@ -63,8 +63,10 @@ fn derive_handshake_port(path: &str) -> u16 {
         hash ^= u64::from(*b);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    // `hash % 20000` is always < 20000, so it fits u16 without truncation.
-    20000 + (hash % 20000) as u16
+    // Map into 20000..=29999: below the Linux default ephemeral range
+    // (`net.ipv4.ip_local_port_range` = 32768..60999) so an outbound socket
+    // can't already hold the port. `hash % 10000` always fits u16.
+    20000 + (hash % 10000) as u16
 }
 
 /// Derive the ZMQ socket addresses for a worker from its base URL.
@@ -101,6 +103,19 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
                 url: base_url.to_string(),
                 reason: format!("failed to create ipc socket dir for {path}: {e}"),
             })?;
+        // The ipc:// data-plane sockets SMG binds here carry no authentication,
+        // so restrict the directory to the owner (0700). Otherwise any local
+        // user could connect to the EngineCore sockets and read/inject traffic.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .await
+                .map_err(|e| WorkerError::ConnectionFailed {
+                    url: base_url.to_string(),
+                    reason: format!("failed to secure ipc socket dir for {path}: {e}"),
+                })?;
+        }
     }
     Ok(())
 }
@@ -157,6 +172,18 @@ fn require_backend_client(
         operation: operation.to_string(),
         reason: "no backend client available".to_string(),
     })
+}
+
+/// EngineCore exposes no admin RPCs over ZMQ, so these ops can never succeed for
+/// a ZMQ worker. Reject them up front rather than dispatching to client
+/// acquisition, which would otherwise drive the (up to 10-minute) lazy handshake
+/// only to return `unimplemented`.
+fn zmq_admin_unsupported(url: &str, operation: &str) -> WorkerError {
+    WorkerError::OperationFailed {
+        url: url.to_string(),
+        operation: operation.to_string(),
+        reason: format!("{operation} is not supported over ZMQ"),
+    }
 }
 
 /// Map a gRPC admin-op outcome (`success` flag plus message) to a
@@ -592,7 +619,8 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc | ConnectionMode::Zmq => {
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "flush_cache")),
+            ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
                     "flush_cache",
@@ -628,7 +656,8 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc | ConnectionMode::Zmq => {
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "start_profile")),
+            ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
                     "start_profile",
@@ -668,7 +697,8 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc | ConnectionMode::Zmq => {
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "stop_profile")),
+            ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
                     "stop_profile",
@@ -1408,10 +1438,24 @@ impl Worker for BasicWorker {
 
     async fn zmq_health_check(&self) -> WorkerResult<bool> {
         // Acquiring the backend client completes the handshake on the first call
-        // (an implicit liveness check). Thereafter liveness is local: the
-        // connector marks the client closed on ENGINE_CORE_DEAD or a transport
-        // failure. There is no health RPC to make over the raw ZMQ wire.
-        let Some(backend_client) = self.get_backend_client().await? else {
+        // (an implicit liveness check). Bound that by the configured health
+        // timeout — not the much longer handshake window (ZMQ_CONNECT_TIMEOUT) —
+        // so a worker whose engine has not dialed in yet reports not-ready and
+        // frees the probe slot; the next probe retries. Thereafter liveness is
+        // local: the connector marks the client closed on ENGINE_CORE_DEAD or a
+        // transport failure. There is no health RPC on the raw ZMQ wire.
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
+        let acquired = match time::timeout(timeout, self.get_backend_client()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::debug!(
+                    "ZMQ handshake for {} not complete within health timeout",
+                    self.metadata.spec.url
+                );
+                return Ok(false);
+            }
+        };
+        let Some(backend_client) = acquired else {
             tracing::error!(
                 "Worker {} has connection mode ZMQ but no ZMQ client",
                 self.metadata.spec.url

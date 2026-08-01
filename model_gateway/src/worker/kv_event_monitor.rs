@@ -103,8 +103,11 @@ impl KvEventMonitor {
         // Normalize model_id to match routing's normalize_model_key — empty → "unknown".
         let model_id = Self::normalize_model_id(worker.model_id());
 
-        if *worker.connection_mode() == ConnectionMode::Http {
-            debug!(worker_url = %url, "HTTP worker, skipping KV event subscription");
+        // Only gRPC workers stream KV events. HTTP proxies don't, and a ZMQ
+        // EngineCore returns `unimplemented` for SubscribeKvEvents — subscribing
+        // there would just be a wasted handshake + round-trip per registration.
+        if *worker.connection_mode() != ConnectionMode::Grpc {
+            debug!(worker_url = %url, mode = %worker.connection_mode(), "non-gRPC worker, skipping KV event subscription");
             return;
         }
 
@@ -377,7 +380,7 @@ impl KvEventMonitor {
         }
 
         loop {
-            let grpc_client = match worker.get_backend_client().await {
+            let backend_client = match worker.get_backend_client().await {
                 Ok(Some(client)) => client,
                 Ok(None) => {
                     // HTTP workers are filtered in on_worker_added, so this should
@@ -386,7 +389,7 @@ impl KvEventMonitor {
                     warn!(
                         worker_url = %worker_url,
                         delay_ms = reconnect_delay_ms,
-                        "Worker has no gRPC client yet, retrying"
+                        "Worker has no backend client yet, retrying"
                     );
                     if sleep_or_shutdown!(
                         Duration::from_millis(reconnect_delay_ms),
@@ -403,7 +406,7 @@ impl KvEventMonitor {
                         worker_url = %worker_url,
                         error = %e,
                         delay_ms = reconnect_delay_ms,
-                        "Failed to get gRPC client, retrying"
+                        "Failed to get backend client, retrying"
                     );
                     if sleep_or_shutdown!(
                         Duration::from_millis(reconnect_delay_ms),
@@ -417,7 +420,7 @@ impl KvEventMonitor {
                 }
             };
 
-            let stream = match grpc_client.subscribe_kv_events(last_seq).await {
+            let stream = match backend_client.subscribe_kv_events(last_seq).await {
                 Ok(stream) => {
                     info!(
                         worker_url = %worker_url,

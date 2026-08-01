@@ -314,7 +314,7 @@ async fn fetch_tokenizer_from_worker(
             runtime
         );
 
-        let grpc_client = match worker.get_backend_client().await {
+        let backend_client = match worker.get_backend_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 failures.push(format!(
@@ -332,7 +332,7 @@ async fn fetch_tokenizer_from_worker(
             }
         };
 
-        let bundle = match grpc_client.get_tokenizer().await {
+        let bundle = match backend_client.get_tokenizer().await {
             Ok(bundle) => bundle,
             Err(e) => {
                 let is_unimplemented = e

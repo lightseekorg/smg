@@ -610,27 +610,27 @@ impl WorkerMonitor {
         }
     }
 
-    /// Fetch load via the gRPC `GetLoads` RPC. Only supported for SGLang
-    /// backends. Returns `None` on missing client, RPC error, or empty
-    /// `loads` array.
-    pub(crate) async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
-        let grpc_client = match worker.get_backend_client().await {
+    /// Fetch load via the backend client's `GetLoads` (gRPC RPC or the ZMQ
+    /// engine's pushed scheduler stats). Returns `None` on missing client,
+    /// error, or empty `loads` array.
+    pub(crate) async fn fetch_backend_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
+        let backend_client = match worker.get_backend_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
-                debug!("No gRPC client for worker {}", worker.url());
+                debug!("No backend client for worker {}", worker.url());
                 return None;
             }
             Err(e) => {
-                debug!("Failed to get gRPC client for {}: {e}", worker.url());
+                debug!("Failed to get backend client for {}: {e}", worker.url());
                 return None;
             }
         };
 
-        match grpc_client.get_loads().await {
+        match backend_client.get_loads().await {
             Ok(load) if !load.loads.is_empty() => Some(load),
             Ok(_) => None,
             Err(e) => {
-                debug!("gRPC GetLoads failed for {}: {e}", worker.url());
+                debug!("backend GetLoads failed for {}: {e}", worker.url());
                 None
             }
         }
@@ -834,7 +834,7 @@ async fn group_monitor_loop(
                             WorkerMonitor::fetch_http_load(&client, &worker).await
                         }
                         ConnectionMode::Grpc | ConnectionMode::Zmq => {
-                            WorkerMonitor::fetch_grpc_load(&worker).await
+                            WorkerMonitor::fetch_backend_load(&worker).await
                         }
                     };
                     (worker.url().to_string(), response)

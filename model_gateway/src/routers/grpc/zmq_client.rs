@@ -242,14 +242,20 @@ fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, St
         Some(vllm::generate_request::Input::Text(_)) => {
             return Err("ZMQ mode requires pre-tokenized input (TokenizedInput)".to_string());
         }
-        None => None,
+        None => {
+            return Err("ZMQ mode requires pre-tokenized input; no input provided".to_string());
+        }
     };
+    let data_parallel_rank = req
+        .data_parallel_rank
+        .map(|rank| u32::try_from(rank).map_err(|_| format!("invalid data_parallel_rank: {rank}")))
+        .transpose()?;
     Ok(EngineCoreRequest {
         request_id: req.request_id,
         prompt_token_ids,
         sampling_params: req.sampling_params.map(translate_sampling),
         arrival_time: now_secs(),
-        data_parallel_rank: req.data_parallel_rank.map(|rank| rank.max(0) as u32),
+        data_parallel_rank,
         ..EngineCoreRequest::default()
     })
 }
@@ -261,7 +267,15 @@ fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
         Some(
             sp.logit_bias
                 .into_iter()
-                .map(|(token, bias)| (token.max(0) as u32, bias))
+                .filter_map(|(token, bias)| match u32::try_from(token) {
+                    Ok(t) => Some((t, bias)),
+                    Err(_) => {
+                        // Don't fold negatives onto key 0 (which would silently
+                        // drop all but the last); skip them with a warning.
+                        tracing::warn!("dropping negative logit_bias token id {token}");
+                        None
+                    }
+                })
                 .collect::<HashMap<_, _>>(),
         )
     };
