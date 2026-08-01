@@ -1,9 +1,8 @@
 <svg width="1220" height="640" viewBox="0 0 1220 640" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="smg-arch-title">
 <title id="smg-arch-title">SMG architecture: clients flow through the gateway layer and router layer to gRPC workers, HTTP workers, and external APIs</title>
 <style>.nb{opacity:0;transform:translateY(-6px);animation:nb 20s linear infinite}.pm{animation:pm 20s linear infinite;transform-box:fill-box;transform-origin:center}@keyframes nb{0%,2.2%{opacity:0;transform:translateY(-6px)}4%,21%{opacity:1;transform:translateY(0)}23%,100%{opacity:0;transform:translateY(-6px)}}@keyframes pm{0%,2.2%{transform:rotate(0deg)}4%,21%{transform:rotate(45deg)}23%,100%{transform:rotate(0deg)}}@media (prefers-reduced-motion:reduce){.nb{animation:none;opacity:1;transform:none}.pm{animation:none}}</style>
-<rect width="1220" height="640" rx="28" fill="#F2F0EB"/>
 <g transform="translate(48,50) scale(1.75)" fill="#B35A11"><path d="M4 1.8558C4 1.79804 3.99661 1.73881 3.99152 1.68032C3.94828 1.24645 3.7482 0.854037 3.41501 0.544551C3.11403 0.265421 2.73506 0.085504 2.31793 0.024051C2.2128 0.00850261 2.10598 0.00109863 2.00085 0.00109863C1.89572 0.00109863 1.78805 0.00924301 1.68376 0.024051C1.26664 0.085504 0.887664 0.265421 0.586689 0.544551C0.251802 0.853297 0.0525646 1.24645 0.00847817 1.67958C0.00254345 1.73807 0 1.7973 0 1.85506C0 1.86838 0 1.88245 0 1.89578C0.00254345 2.01646 0 2.25191 0 2.25413V7.72271C0 7.87523 0.133955 7.99962 0.298432 7.99962H3.70157C3.86604 7.99962 4 7.87523 4 7.72271V2.25413C4 2.25413 3.99661 2.01646 4 1.89578C4 1.88245 4 1.86838 4 1.85506V1.8558Z"/></g>
-<text x="65" y="62" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start" letter-spacing="0.9">HOW IT WORKS</text>
+<text x="65" y="62" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="#8B8680" text-anchor="start" letter-spacing="0.9">HOW IT WORKS</text>
 <g class="nb" style="animation-delay:0.6s">
 <path d="M48 343H226V455A12 12 0 0 1 214 467H60A12 12 0 0 1 48 455Z" fill="#EBE8E3"/>
 <line x1="48" y1="355" x2="226" y2="355" stroke="rgba(26,26,26,0.08)" stroke-width="1"/>
@@ -19,7 +18,7 @@
 <circle cx="243" cy="330" r="9" fill="#D9D7D2"/>
 <circle cx="303" cy="330" r="9" fill="#D9D7D2"/>
 <line x1="252" y1="330" x2="294" y2="330" stroke="#D9D7D2" stroke-width="3.5"/>
-<text x="424" y="147" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle" letter-spacing="0.8">GATEWAY LAYER</text>
+<text x="424" y="147" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#8B8680" text-anchor="middle" letter-spacing="0.8">GATEWAY LAYER</text>
 <rect x="320" y="161" width="208" height="338" rx="18" fill="#EBE8E3"/>
 <rect x="333" y="174" width="182" height="42" rx="9" fill="#FFFFFF"/>
 <text x="424" y="201.5" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="19" font-weight="600" fill="#1A1A1A" text-anchor="middle">Gateway</text>
@@ -38,7 +37,7 @@
 <circle cx="545" cy="330" r="9" fill="#D9D7D2"/>
 <circle cx="605" cy="330" r="9" fill="#D9D7D2"/>
 <line x1="554" y1="330" x2="596" y2="330" stroke="#D9D7D2" stroke-width="3.5"/>
-<text x="726" y="124.5" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle" letter-spacing="0.8">ROUTER LAYER</text>
+<text x="726" y="124.5" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#8B8680" text-anchor="middle" letter-spacing="0.8">ROUTER LAYER</text>
 <rect x="622" y="138.5" width="208" height="383" rx="18" fill="#EBE8E3"/>
 <rect x="635" y="151.5" width="182" height="42" rx="9" fill="#FFFFFF"/>
 <text x="726" y="179" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="19" font-weight="600" fill="#1A1A1A" text-anchor="middle">Router</text>
@@ -95,5 +94,5 @@
 <line x1="880" y1="184" x2="880" y2="450" stroke="#D9D7D2" stroke-width="3.5"/>
 <circle cx="929" cy="162" r="9" fill="#D9D7D2"/>
 <circle cx="929" cy="472" r="9" fill="#D9D7D2"/>
-<text x="610.0" y="600" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="19" font-weight="500" fill="#5C5C5C" text-anchor="middle" letter-spacing="-0.2"><tspan>One API</tspan><tspan dx="10" fill-opacity="0.5">•</tspan><tspan dx="10"> </tspan><tspan>Any Backend</tspan><tspan dx="10" fill-opacity="0.5">•</tspan><tspan dx="10"> </tspan><tspan>Enterprise Reliability</tspan></text>
+<text x="610.0" y="600" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="19" font-weight="500" fill="#8B8680" text-anchor="middle" letter-spacing="-0.2"><tspan>One API</tspan><tspan dx="10" fill-opacity="0.5">•</tspan><tspan dx="10"> </tspan><tspan>Any Backend</tspan><tspan dx="10" fill-opacity="0.5">•</tspan><tspan dx="10"> </tspan><tspan>Enterprise Reliability</tspan></text>
 </svg>
