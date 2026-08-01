@@ -80,7 +80,7 @@ That's it. SMG is now load-balancing requests across your workers.
 | vLLM | OpenAI |
 | TensorRT-LLM | Anthropic |
 | TokenSpeed | Google Gemini |
-| SGLang | AWS Bedrock |
+| SGLang | OCI Generative AI Service |
 | Ollama | Azure OpenAI |
 | Any OpenAI-compatible server | Any OpenAI-compatible provider |
 
