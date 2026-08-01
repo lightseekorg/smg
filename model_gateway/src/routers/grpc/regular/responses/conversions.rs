@@ -451,6 +451,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::routers::grpc::utils::{process_chat_messages, resolve_user_thinking};
 
     const MIN_TOKENIZER_JSON: &str = r#"{
         "version": "1.0",
@@ -657,25 +658,19 @@ mod tests {
             ..Default::default()
         };
 
-        let responses_prompt =
-            crate::routers::grpc::utils::process_chat_messages(&responses_chat, &tokenizer, None)
+        let responses_prompt = process_chat_messages(&responses_chat, &tokenizer, None)
+            .unwrap()
+            .text;
+        let chat_prompt = process_chat_messages(&chat_request, &tokenizer, None)
+            .unwrap()
+            .text;
+        let template_prompt = process_chat_messages(&template_request, &tokenizer, None)
+            .unwrap()
+            .text;
+        let native_override_prompt =
+            process_chat_messages(&native_override_request, &tokenizer, None)
                 .unwrap()
                 .text;
-        let chat_prompt =
-            crate::routers::grpc::utils::process_chat_messages(&chat_request, &tokenizer, None)
-                .unwrap()
-                .text;
-        let template_prompt =
-            crate::routers::grpc::utils::process_chat_messages(&template_request, &tokenizer, None)
-                .unwrap()
-                .text;
-        let native_override_prompt = crate::routers::grpc::utils::process_chat_messages(
-            &native_override_request,
-            &tokenizer,
-            None,
-        )
-        .unwrap()
-        .text;
 
         assert_eq!(responses_prompt, chat_prompt);
         assert_eq!(template_prompt, chat_prompt);
@@ -697,19 +692,11 @@ mod tests {
         ]);
 
         assert_eq!(
-            crate::routers::grpc::utils::resolve_user_thinking(
-                Some(&native_effort),
-                Some("none"),
-                &tokenizer,
-            ),
+            resolve_user_thinking(Some(&native_effort), Some("none"), &tokenizer),
             Some(true)
         );
         assert_eq!(
-            crate::routers::grpc::utils::resolve_user_thinking(
-                Some(&explicit_off),
-                Some("max"),
-                &tokenizer,
-            ),
+            resolve_user_thinking(Some(&explicit_off), Some("max"), &tokenizer),
             Some(false)
         );
     }
