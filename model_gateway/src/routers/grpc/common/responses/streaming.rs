@@ -699,7 +699,7 @@ impl ResponseStreamEventEmitter {
                     .completion_tokens_details
                     .as_ref()
                     .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: None,
+                prompt_tokens_details: u.prompt_tokens_details.clone(),
             };
             ResponsesUsage::Modern(usage_info.to_response_usage())
         });
@@ -1031,13 +1031,24 @@ mod tests {
         let emitter =
             ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 1);
 
-        let wire = serde_json::to_value(emitter.finalize(Some(Usage::from_counts(12, 7))))
+        let usage = Usage::from_counts(12, 7)
+            .with_cached_tokens(3)
+            .with_reasoning_tokens(2);
+        let wire = serde_json::to_value(emitter.finalize(Some(usage)))
             .expect("finalized response should serialize");
         let usage = wire.get("usage").expect("usage should be present");
 
         assert_eq!(usage.get("input_tokens"), Some(&serde_json::json!(12)));
         assert_eq!(usage.get("output_tokens"), Some(&serde_json::json!(7)));
         assert_eq!(usage.get("total_tokens"), Some(&serde_json::json!(19)));
+        assert_eq!(
+            usage.pointer("/input_tokens_details/cached_tokens"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            usage.pointer("/output_tokens_details/reasoning_tokens"),
+            Some(&serde_json::json!(2))
+        );
         assert!(usage.get("prompt_tokens").is_none());
         assert!(usage.get("completion_tokens").is_none());
     }
