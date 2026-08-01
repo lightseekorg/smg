@@ -731,8 +731,22 @@ fn apply_deepseek_v4(
 ) -> Result<String> {
     let owned = inject_tools_into_messages(messages, params.tools);
     let msgs: &[serde_json::Value] = owned.as_deref().unwrap_or(messages);
-    let thinking_mode = derive_thinking_mode(params);
     let reasoning_effort = resolve_deepseek_v4_reasoning_effort(params)?;
+    let explicit_thinking = params
+        .template_kwargs
+        .and_then(|kwargs| kwargs.get("thinking"))
+        .and_then(serde_json::Value::as_bool);
+    let has_native_effort = params.template_reasoning_effort.is_some()
+        || (params.reasoning_effort.is_none()
+            && params
+                .template_kwargs
+                .is_some_and(|kwargs| kwargs.contains_key("reasoning_effort")));
+    let thinking_mode = match explicit_thinking {
+        Some(true) => deepseek_v32::ThinkingMode::Thinking,
+        Some(false) => deepseek_v32::ThinkingMode::Chat,
+        None if has_native_effort => deepseek_v32::ThinkingMode::Thinking,
+        None => derive_thinking_mode(params),
+    };
     let encode_params = deepseek_v4::EncodeParams {
         add_default_bos_token: true,
         drop_thinking: resolve_drop_thinking(msgs),

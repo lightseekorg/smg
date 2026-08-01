@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_and_responses_max_render_the_same_deepseek_v4_prompt() {
+    fn chat_responses_and_template_kwargs_render_the_same_deepseek_v4_prompt() {
         use openai_protocol::responses::ResponseReasoningParam;
 
         let (_temp, tokenizer) = deepseek_v4_tokenizer();
@@ -640,6 +640,22 @@ mod tests {
             reasoning_effort: Some("max".to_string()),
             ..Default::default()
         };
+        let template_request = ChatCompletionRequest {
+            model: responses_request.model.clone(),
+            messages: responses_chat.messages.clone(),
+            chat_template_kwargs: Some(std::collections::HashMap::from([(
+                "reasoning_effort".to_string(),
+                serde_json::json!("max"),
+            )])),
+            ..Default::default()
+        };
+        let native_override_request = ChatCompletionRequest {
+            model: responses_request.model.clone(),
+            messages: responses_chat.messages.clone(),
+            reasoning_effort: Some("none".to_string()),
+            chat_template_kwargs: template_request.chat_template_kwargs.clone(),
+            ..Default::default()
+        };
 
         let responses_prompt =
             crate::routers::grpc::utils::process_chat_messages(&responses_chat, &tokenizer, None)
@@ -649,8 +665,21 @@ mod tests {
             crate::routers::grpc::utils::process_chat_messages(&chat_request, &tokenizer, None)
                 .unwrap()
                 .text;
+        let template_prompt =
+            crate::routers::grpc::utils::process_chat_messages(&template_request, &tokenizer, None)
+                .unwrap()
+                .text;
+        let native_override_prompt = crate::routers::grpc::utils::process_chat_messages(
+            &native_override_request,
+            &tokenizer,
+            None,
+        )
+        .unwrap()
+        .text;
 
         assert_eq!(responses_prompt, chat_prompt);
+        assert_eq!(template_prompt, chat_prompt);
+        assert_eq!(native_override_prompt, chat_prompt);
         assert!(chat_prompt.contains("Reasoning Effort: Beyond maximum"));
         assert!(chat_prompt.ends_with("<think>"));
     }

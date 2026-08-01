@@ -341,6 +341,50 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_top_level_and_template_efforts_render_identically() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+
+        for (effort, expected_prefix) in [
+            ("low", None),
+            ("high", Some("Reasoning Effort: Absolute maximum")),
+            ("max", Some("Reasoning Effort: Beyond maximum")),
+        ] {
+            let top_level = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        thinking: Some(true),
+                        reasoning_effort: Some(effort),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let template_kwargs = HashMap::from([("reasoning_effort".to_string(), json!(effort))]);
+            let native = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        template_kwargs: Some(&template_kwargs),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(native, top_level, "effort {effort}");
+            assert!(native.ends_with("<think>"), "effort {effort}: {native}");
+            match expected_prefix {
+                Some(prefix) => assert!(native.contains(prefix), "effort {effort}: {native}"),
+                None => assert!(
+                    !native.contains("Reasoning Effort:"),
+                    "effort {effort}: {native}"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn deepseek_v4_distinguishes_merged_public_effort_from_native_template_effort() {
         let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash");
         let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
@@ -441,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_resolves_effort_and_thinking_independently() {
+    fn deepseek_v4_explicit_thinking_overrides_effort_defaults() {
         let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
         let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
         let messages = vec![json!({ "role": "user", "content": "Hello" })];
@@ -457,8 +501,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(out.ends_with("</think>"));
-        assert!(!out.contains("Reasoning Effort:"));
+        assert!(out.ends_with("<think>"));
+        assert!(out.contains("Reasoning Effort: Beyond maximum"));
 
         let thinking_off = HashMap::from([("thinking".to_string(), json!(false))]);
         let out = tokenizer
