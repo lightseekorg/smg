@@ -204,8 +204,9 @@ mod tests {
         );
         // No explicit toggle -> fall back to the reasoning_effort mapping.
         assert_eq!(resolve_thinking_pref(None, Some("none")), Some(false));
-        assert_eq!(resolve_thinking_pref(None, Some("minimal")), Some(false));
-        assert_eq!(resolve_thinking_pref(None, Some("high")), None);
+        assert_eq!(resolve_thinking_pref(None, Some("minimal")), Some(true));
+        assert_eq!(resolve_thinking_pref(None, Some("high")), Some(true));
+        assert_eq!(resolve_thinking_pref(None, Some("max")), Some(true));
         assert_eq!(resolve_thinking_pref(None, None), None);
     }
 
@@ -241,6 +242,18 @@ mod tests {
         let parser = create_reasoning_parser(&factory, Some("qwen3"), "unknown-model")
             .expect("configured qwen3 parser exists");
         assert_eq!(parser.model_type(), "qwen3");
+    }
+
+    #[test]
+    fn deepseek_v4_reasoning_parser_is_available_without_override() {
+        let factory = ReasoningParserFactory::new();
+        let model = "deepseek-ai/DeepSeek-V4-Flash-0731";
+
+        assert!(check_reasoning_parser_availability(&factory, None, model));
+        let parser = create_reasoning_parser(&factory, None, model)
+            .expect("DeepSeek V4 parser should be selected automatically");
+        assert_eq!(parser.model_type(), "deepseek_v4");
+        assert!(!parser.is_in_reasoning());
     }
 
     #[test]

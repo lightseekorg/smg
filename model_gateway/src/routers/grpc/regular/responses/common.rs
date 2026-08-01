@@ -426,3 +426,29 @@ pub(super) fn build_next_request(
         repetition_penalty: current_request.repetition_penalty,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ReasoningEffort, ResponseReasoningParam, ResponsesRequest};
+
+    use super::*;
+
+    #[test]
+    fn stateful_tool_loop_preserves_reasoning_effort() {
+        let state = ToolLoopState::new(ResponseInput::Text("use a tool".to_string()));
+        let request = ResponsesRequest {
+            input: ResponseInput::Text("use a tool".to_string()),
+            reasoning: Some(ResponseReasoningParam {
+                effort: Some(ReasoningEffort::Max),
+                summary: None,
+            }),
+            ..Default::default()
+        };
+
+        let next = build_next_request(&state, request);
+        assert!(matches!(
+            next.reasoning.and_then(|reasoning| reasoning.effort),
+            Some(ReasoningEffort::Max)
+        ));
+    }
+}

@@ -30,7 +30,7 @@ use crate::{
 enum Renderer {
     Jinja,
     DeepseekV32,
-    DeepseekV4,
+    DeepseekV4(deepseek_v4::ReasoningEffortProfile),
 }
 
 /// HuggingFace tokenizer wrapper
@@ -78,9 +78,23 @@ impl HuggingFaceTokenizer {
         file_path: &str,
         chat_template_path: Option<&str>,
     ) -> Result<Self> {
+        Self::from_file_with_chat_template_and_model_id(file_path, chat_template_path, None)
+    }
+
+    /// Create a tokenizer with an optional model identity used for variant-specific rendering.
+    pub fn from_file_with_chat_template_and_model_id(
+        file_path: &str,
+        chat_template_path: Option<&str>,
+        model_id: Option<&str>,
+    ) -> Result<Self> {
         let tokenizer = HfTokenizer::from_file(file_path)
             .map_err(|e| Error::msg(format!("Failed to load tokenizer: {e}")))?;
-        Self::from_built_tokenizer(tokenizer, Path::new(file_path), chat_template_path)
+        Self::from_built_tokenizer(
+            tokenizer,
+            Path::new(file_path),
+            chat_template_path,
+            model_id,
+        )
     }
 
     /// Create a Qwen2-compatible byte-level BPE tokenizer from a Hugging Face
@@ -101,7 +115,7 @@ impl HuggingFaceTokenizer {
         // Shared initialization only needs this path to locate sibling config
         // files. The file itself intentionally does not exist in this layout.
         let logical_tokenizer_path = dir.join("tokenizer.json");
-        Self::from_built_tokenizer(tokenizer, &logical_tokenizer_path, chat_template_path)
+        Self::from_built_tokenizer(tokenizer, &logical_tokenizer_path, chat_template_path, None)
     }
 
     fn build_qwen2_bpe_tokenizer(dir: &Path) -> Result<HfTokenizer> {
@@ -221,6 +235,7 @@ impl HuggingFaceTokenizer {
         mut tokenizer: HfTokenizer,
         tokenizer_path: &Path,
         chat_template_path: Option<&str>,
+        model_id: Option<&str>,
     ) -> Result<Self> {
         // Build vocab mappings (include special tokens to get added_tokens like <|im_start|>)
         let vocab = tokenizer.get_vocab(true); // true = include special tokens and added_tokens
@@ -270,7 +285,7 @@ impl HuggingFaceTokenizer {
         // Detect a custom Python-encoder model from config.json::architectures.
         let renderer = tokenizer_path
             .parent()
-            .map(detect_renderer_from_config)
+            .map(|dir| detect_renderer_from_config(dir, model_id))
             .unwrap_or(Renderer::Jinja);
 
         Ok(HuggingFaceTokenizer {
@@ -570,7 +585,7 @@ impl TokenizerTrait for HuggingFaceTokenizer {
                 self.chat_template.apply(messages, params)
             }
             Renderer::DeepseekV32 => apply_deepseek_v32(messages, &params),
-            Renderer::DeepseekV4 => apply_deepseek_v4(messages, &params),
+            Renderer::DeepseekV4(profile) => apply_deepseek_v4(messages, &params, profile),
         }
     }
 
@@ -583,14 +598,14 @@ impl TokenizerTrait for HuggingFaceTokenizer {
             // DeepSeek V3.2 and V4 encoders gate thinking on the `thinking`
             // kwarg, default off. The Jinja processor has no knowledge of
             // the native encoder so we must report it directly.
-            Renderer::DeepseekV32 | Renderer::DeepseekV4 => ThinkingToggle::DefaultOff,
+            Renderer::DeepseekV32 | Renderer::DeepseekV4(_) => ThinkingToggle::DefaultOff,
             Renderer::Jinja => self.chat_template.thinking_toggle(),
         }
     }
 
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
         match self.renderer {
-            Renderer::DeepseekV32 | Renderer::DeepseekV4 => Some(ThinkingKeyName::Thinking),
+            Renderer::DeepseekV32 | Renderer::DeepseekV4(_) => Some(ThinkingKeyName::Thinking),
             Renderer::Jinja => self.chat_template.thinking_key_name(),
         }
     }
@@ -599,7 +614,7 @@ impl TokenizerTrait for HuggingFaceTokenizer {
             // Both encoders emit `<｜Assistant｜><think>` at the end of the
             // prompt when thinking mode is on; the completion therefore starts
             // mid-reasoning and the parser must be told so.
-            Renderer::DeepseekV32 | Renderer::DeepseekV4 => true,
+            Renderer::DeepseekV32 | Renderer::DeepseekV4(_) => true,
             Renderer::Jinja => self.chat_template.think_in_prefill(),
         }
     }
@@ -616,7 +631,7 @@ impl TokenizerTrait for HuggingFaceTokenizer {
 /// use. A missing or malformed file falls back to [`Renderer::Jinja`] without
 /// erroring (debug-logged), preserving backward compatibility for every model
 /// not in the architecture list.
-fn detect_renderer_from_config(dir: &Path) -> Renderer {
+fn detect_renderer_from_config(dir: &Path, model_id: Option<&str>) -> Renderer {
     let path = dir.join("config.json");
     if !path.exists() {
         return Renderer::Jinja;
@@ -644,8 +659,19 @@ fn detect_renderer_from_config(dir: &Path) -> Renderer {
         return Renderer::DeepseekV32;
     }
     if arch_strs.contains(&"DeepseekV4ForCausalLM") {
-        debug!(?path, "selected DeepseekV4 chat-template renderer");
-        return Renderer::DeepseekV4;
+        let profile = if model_id.is_some_and(is_deepseek_v4_flash_0731)
+            || is_deepseek_v4_flash_0731(&dir.to_string_lossy())
+        {
+            deepseek_v4::ReasoningEffortProfile::Flash0731
+        } else {
+            deepseek_v4::ReasoningEffortProfile::Original
+        };
+        debug!(
+            ?path,
+            ?profile,
+            "selected DeepseekV4 chat-template renderer"
+        );
+        return Renderer::DeepseekV4(profile);
     }
     Renderer::Jinja
 }
@@ -728,26 +754,77 @@ fn apply_deepseek_v32(
 fn apply_deepseek_v4(
     messages: &[serde_json::Value],
     params: &ChatTemplateParams,
+    reasoning_effort_profile: deepseek_v4::ReasoningEffortProfile,
 ) -> Result<String> {
     let owned = inject_tools_into_messages(messages, params.tools);
     let msgs: &[serde_json::Value] = owned.as_deref().unwrap_or(messages);
     let thinking_mode = derive_thinking_mode(params);
-    let reasoning_effort = params
-        .template_kwargs
-        .and_then(|k| k.get("reasoning_effort"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "max" => Some(deepseek_v4::ReasoningEffort::Max),
-            "high" => Some(deepseek_v4::ReasoningEffort::High),
-            _ => None,
-        });
+    let reasoning_effort = resolve_deepseek_v4_reasoning_effort(params, reasoning_effort_profile)?;
     let encode_params = deepseek_v4::EncodeParams {
         add_default_bos_token: true,
         drop_thinking: resolve_drop_thinking(msgs),
         reasoning_effort,
+        reasoning_effort_profile,
     };
     deepseek_v4::encode_messages(msgs, thinking_mode, &encode_params)
         .map_err(|e| Error::msg(format!("DeepSeek V4 encode failed: {e}")))
+}
+
+fn resolve_deepseek_v4_reasoning_effort(
+    params: &ChatTemplateParams,
+    profile: deepseek_v4::ReasoningEffortProfile,
+) -> Result<Option<deepseek_v4::ReasoningEffort>> {
+    let combined_effort = params
+        .template_kwargs
+        .and_then(|kwargs| kwargs.get("reasoning_effort"));
+    match profile {
+        deepseek_v4::ReasoningEffortProfile::Original => {
+            let effort = match params.template_reasoning_effort.or(combined_effort) {
+                Some(value) => value.as_str(),
+                None => params.reasoning_effort,
+            };
+            Ok(effort.and_then(|effort| match effort {
+                "high" => Some(deepseek_v4::ReasoningEffort::High),
+                "max" => Some(deepseek_v4::ReasoningEffort::Max),
+                _ => None,
+            }))
+        }
+        deepseek_v4::ReasoningEffortProfile::Flash0731 => {
+            let template_effort = params.template_reasoning_effort.or_else(|| {
+                if params.reasoning_effort.is_none() {
+                    combined_effort
+                } else {
+                    None
+                }
+            });
+            template_effort
+                .map(|value| {
+                    value
+                        .as_str()
+                        .and_then(deepseek_v4::ReasoningEffort::from_native)
+                        .ok_or_else(|| {
+                            Error::msg(
+                                "chat_template_kwargs.reasoning_effort must be one of low, high, max",
+                            )
+                        })
+                })
+                .transpose()
+                .map(|effort| {
+                    effort.or_else(|| {
+                        params
+                            .reasoning_effort
+                            .and_then(deepseek_v4::ReasoningEffort::from_openai)
+                    })
+                })
+        }
+    }
+}
+
+fn is_deepseek_v4_flash_0731(identity: &str) -> bool {
+    identity
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .contains("deepseek-v4-flash-0731")
 }
 
 #[cfg(test)]

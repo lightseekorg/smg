@@ -120,12 +120,12 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                 let name = name.clone();
                 let id = id.clone();
                 async move {
-                    let base_tokenizer = match factory::create_tokenizer_async_with_chat_template(
+                    let base_tokenizer = match factory::create_tokenizer_async_with_chat_template_and_model_id(
                         &source,
                         chat_template.as_deref(),
+                        Some(&name),
                     )
-                    .await
-                    {
+                    .await {
                         Ok(tok) => tok,
                         Err(local_err) => {
                             debug!(
@@ -221,6 +221,7 @@ fn with_optional_cache(
 
 fn load_tokenizer_from_bundle(
     bundle: &StreamBundle,
+    model_id: &str,
 ) -> Result<(Arc<dyn Tokenizer>, Option<MultimodalModelConfig>), String> {
     tokenizer_bundle::with_extracted_bundle(bundle, |tokenizer_dir| {
         let tokenizer_path = tokenizer_dir.to_string_lossy().into_owned();
@@ -229,8 +230,12 @@ fn load_tokenizer_from_bundle(
             tokenizer_path
         );
 
-        let tokenizer = factory::create_tokenizer_with_chat_template(&tokenizer_path, None)
-            .map_err(|e| format!("tokenizer load failed: {e}"))?;
+        let tokenizer = factory::create_tokenizer_with_chat_template_and_model_id(
+            &tokenizer_path,
+            None,
+            Some(model_id),
+        )
+        .map_err(|e| format!("tokenizer load failed: {e}"))?;
 
         let mm_config = try_load_multimodal_config(tokenizer_dir);
 
@@ -364,7 +369,7 @@ async fn fetch_tokenizer_from_worker(
             worker.url()
         );
 
-        match load_tokenizer_from_bundle(&bundle) {
+        match load_tokenizer_from_bundle(&bundle, model_id) {
             Ok((tokenizer, mm_config)) => {
                 if let Some(cfg) = mm_config {
                     app_context
@@ -436,7 +441,48 @@ pub fn create_tokenizer_workflow_data(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write};
+
+    use llm_tokenizer::chat_template::ChatTemplateParams;
+    use serde_json::json;
+    use zip::{write::SimpleFileOptions, ZipWriter};
+
     use super::*;
+
+    const MIN_TOKENIZER_JSON: &str = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": { "type": "Whitespace" },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "vocab": { "hello": 0, "<s>": 1, "</s>": 2 },
+            "merges": []
+        }
+    }"#;
+
+    fn deepseek_v4_bundle() -> StreamBundle {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        writer
+            .start_file("tokenizer.json", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(MIN_TOKENIZER_JSON.as_bytes()).unwrap();
+        writer
+            .start_file("config.json", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(br#"{"architectures":["DeepseekV4ForCausalLM"]}"#)
+            .unwrap();
+        StreamBundle {
+            sha256: String::new(),
+            compressed_data: writer.finish().unwrap().into_inner(),
+        }
+    }
 
     #[test]
     fn test_tokenizer_config_request_serialization() {
@@ -522,5 +568,27 @@ mod tests {
         workflow
             .validate()
             .expect("Workflow validation should pass");
+    }
+
+    #[test]
+    fn grpc_bundle_load_preserves_flash_0731_model_identity() {
+        let bundle = deepseek_v4_bundle();
+        let (tokenizer, _) =
+            load_tokenizer_from_bundle(&bundle, "deepseek-ai/DeepSeek-V4-Flash-0731").unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let native_effort = json!("max");
+        let output = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    thinking: Some(true),
+                    template_reasoning_effort: Some(&native_effort),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(output.contains("Reasoning Effort: Beyond maximum"));
+        assert!(!output.contains("Reasoning Effort: Absolute maximum"));
     }
 }

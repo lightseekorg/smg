@@ -501,6 +501,11 @@ pub(crate) fn process_chat_messages_with_placeholders(
             thinking: openai_protocol::chat::thinking_from_reasoning_effort(
                 request.reasoning_effort.as_deref(),
             ),
+            reasoning_effort: request.reasoning_effort.as_deref(),
+            template_reasoning_effort: request
+                .chat_template_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.get(REASONING_EFFORT_KEY)),
             ..Default::default()
         };
 
@@ -779,7 +784,10 @@ pub(crate) fn parse_finish_reason(
 
 #[cfg(test)]
 mod tests {
-    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use llm_tokenizer::{
+        chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+        traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer},
+    };
     use openai_protocol::{
         chat::{ChatCompletionRequest, ChatMessage, MessageContent},
         common::{AudioUrl, ContentPart, ImageUrl, InputAudio, VideoUrl},
@@ -1332,6 +1340,88 @@ mod tests {
             reasoning_effort: reasoning_effort.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[derive(Default)]
+    struct ReasoningProvenanceTokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    impl Encoder for ReasoningProvenanceTokenizer {
+        fn encode(&self, _input: &str, _add_special_tokens: bool) -> anyhow::Result<Encoding> {
+            Ok(Encoding::Plain(Vec::new()))
+        }
+
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+            _add_special_tokens: bool,
+        ) -> anyhow::Result<Vec<Encoding>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl Decoder for ReasoningProvenanceTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    impl Tokenizer for ReasoningProvenanceTokenizer {
+        fn vocab_size(&self) -> usize {
+            0
+        }
+
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<TokenIdType> {
+            None
+        }
+
+        fn id_to_token(&self, _id: TokenIdType) -> Option<String> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn apply_chat_template(
+            &self,
+            _messages: &[Value],
+            params: ChatTemplateParams,
+        ) -> anyhow::Result<String> {
+            assert_eq!(params.reasoning_effort, Some("high"));
+            assert_eq!(params.template_reasoning_effort, Some(&json!("max")));
+            assert_eq!(params.thinking, Some(true));
+            assert_eq!(
+                params
+                    .template_kwargs
+                    .and_then(|kwargs| kwargs.get("thinking")),
+                Some(&json!(false))
+            );
+            Ok("rendered".to_string())
+        }
+    }
+
+    #[test]
+    fn process_chat_messages_preserves_reasoning_effort_provenance() {
+        let mut request = effort_request(Some("high"));
+        request.chat_template_kwargs = Some(HashMap::from([
+            (REASONING_EFFORT_KEY.to_string(), json!("max")),
+            ("thinking".to_string(), json!(false)),
+        ]));
+
+        let processed =
+            process_chat_messages(&request, &ReasoningProvenanceTokenizer::default(), None)
+                .unwrap();
+        assert_eq!(processed.text, "rendered");
     }
 
     #[test]

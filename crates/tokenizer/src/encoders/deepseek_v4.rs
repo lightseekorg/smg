@@ -1,4 +1,4 @@
-// Ported from https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py
+// Ported from https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/main/encoding/encoding_dsv4.py
 
 use std::fmt::Write as _;
 
@@ -11,13 +11,46 @@ pub use super::deepseek_v32::ThinkingMode;
 
 /// Reasoning effort for the V4 prompt prefix.
 ///
-/// Mirrors the Python `reasoning_effort` parameter, which only accepts
-/// `None`, `"high"`, or `"max"`. Only `Max` actually emits a prefix today;
-/// `High` is accepted for parity with the Python signature.
+/// Mirrors the 0731 Python `reasoning_effort` parameter. `Low` is the default
+/// and emits no prefix; `High` and `Max` emit distinct prefixes in thinking
+/// mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
+    Low,
     High,
     Max,
+}
+
+/// Selects the reasoning-effort prompt format used by a DeepSeek V4 checkpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReasoningEffortProfile {
+    /// Original Flash, Flash-DSpark, Pro, and unidentified V4 checkpoints.
+    #[default]
+    Original,
+    /// The newer effort encoding used only by DeepSeek-V4-Flash-0731.
+    Flash0731,
+}
+
+impl ReasoningEffort {
+    /// Parse a native 0731 effort name.
+    pub fn from_native(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "high" => Some(Self::High),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    /// Map OpenAI-compatible effort names into the three native 0731 buckets.
+    pub fn from_openai(value: &str) -> Option<Self> {
+        match value {
+            "none" | "minimal" | "low" => Some(Self::Low),
+            "medium" | "high" => Some(Self::High),
+            "xhigh" | "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
 }
 
 /// Parameters for [`encode_messages`].
@@ -29,6 +62,7 @@ pub struct EncodeParams {
     pub add_default_bos_token: bool,
     pub drop_thinking: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort_profile: ReasoningEffortProfile,
 }
 impl Default for EncodeParams {
     fn default() -> Self {
@@ -36,6 +70,7 @@ impl Default for EncodeParams {
             add_default_bos_token: true,
             drop_thinking: true,
             reasoning_effort: None,
+            reasoning_effort_profile: ReasoningEffortProfile::Original,
         }
     }
 }
@@ -95,7 +130,8 @@ fn task_sp_token(task: &str) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
-const REASONING_EFFORT_MAX: &str = "Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
+const REASONING_EFFORT_HIGH: &str = "Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
+const REASONING_EFFORT_MAX: &str = "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\nYou MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\nDo not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n";
 
 /// Mirrors V4's `TOOLS_TEMPLATE`. The block name is `tool_calls` (not
 /// `function_calls` like V3.2) and the wording is updated.
@@ -234,6 +270,7 @@ fn render_message(
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort_profile: ReasoningEffortProfile,
 ) -> Result<String, DsEncodingError> {
     if index >= messages.len() {
         return Err(DsEncodingError::IndexOutOfRange {
@@ -260,12 +297,22 @@ fn render_message(
     let tool_calls_owned = tool_calls_raw.map(|tc| tool_calls_from_openai_format(tc));
     let tool_calls = tool_calls_owned.as_deref();
 
-    // Reasoning effort prefix (only at index 0 in thinking mode with max effort)
-    if index == 0
-        && thinking_mode == ThinkingMode::Thinking
-        && reasoning_effort == Some(ReasoningEffort::Max)
-    {
-        prompt.push_str(REASONING_EFFORT_MAX);
+    // Reasoning effort prefix (only at index 0 in thinking mode).
+    if index == 0 && thinking_mode == ThinkingMode::Thinking {
+        match (reasoning_effort_profile, reasoning_effort) {
+            (ReasoningEffortProfile::Original, Some(ReasoningEffort::Max))
+            | (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::High)) => {
+                prompt.push_str(REASONING_EFFORT_HIGH);
+            }
+            (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::Max)) => {
+                prompt.push_str(REASONING_EFFORT_MAX);
+            }
+            (
+                ReasoningEffortProfile::Original,
+                Some(ReasoningEffort::Low | ReasoningEffort::High) | None,
+            )
+            | (ReasoningEffortProfile::Flash0731, Some(ReasoningEffort::Low) | None) => {}
+        }
     }
 
     match role {
@@ -671,6 +718,7 @@ pub fn encode_messages(
             thinking_mode,
             effective_drop_thinking,
             params.reasoning_effort,
+            params.reasoning_effort_profile,
         )?);
     }
     Ok(prompt)
@@ -705,23 +753,52 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_max_prepends_prefix() {
+    fn reasoning_effort_max_uses_0731_prefix() {
         let msgs = [user("Hello")];
         let params = EncodeParams {
             reasoning_effort: Some(ReasoningEffort::Max),
+            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
             ..EncodeParams::default()
         };
         let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();
-        // The prefix appears immediately after BOS, before the user message.
-        let expected_start = format!("{BOS_TOKEN}{REASONING_EFFORT_MAX}");
+        // The 0731 max prefix appears immediately after BOS, before the user message.
+        let expected_start = format!("{BOS_TOKEN}Reasoning Effort: Beyond maximum");
         assert!(
             out.starts_with(&expected_start),
-            "expected prompt to start with BOS+REASONING_EFFORT_MAX, got: {:?}",
+            "expected prompt to start with the 0731 max prefix, got: {:?}",
             &out[..120.min(out.len())]
         );
+        assert!(!out.contains("Reasoning Effort: Absolute maximum"));
         // Without max effort, the prefix is absent.
         let out_chat = encode_messages(&msgs, ThinkingMode::Chat, &params).unwrap();
         assert!(!out_chat.contains("Reasoning Effort"));
+    }
+
+    #[test]
+    fn reasoning_effort_high_uses_absolute_maximum_prefix() {
+        let msgs = [user("Hello")];
+        let params = EncodeParams {
+            reasoning_effort: Some(ReasoningEffort::High),
+            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
+            ..EncodeParams::default()
+        };
+        let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();
+        assert!(out.starts_with(&format!(
+            "{BOS_TOKEN}Reasoning Effort: Absolute maximum with no shortcuts permitted."
+        )));
+    }
+
+    #[test]
+    fn reasoning_effort_low_emits_no_prefix() {
+        let msgs = [user("Hello")];
+        let params = EncodeParams {
+            reasoning_effort: Some(ReasoningEffort::Low),
+            reasoning_effort_profile: ReasoningEffortProfile::Flash0731,
+            ..EncodeParams::default()
+        };
+        let out = encode_messages(&msgs, ThinkingMode::Thinking, &params).unwrap();
+        assert!(!out.contains("Reasoning Effort:"));
+        assert!(out.ends_with(THINKING_START_TOKEN));
     }
 
     #[test]

@@ -481,6 +481,13 @@ pub struct ChatTemplateParams<'a> {
     /// this value as a default. An explicit `template_kwargs` entry for that
     /// key still wins.
     pub thinking: Option<bool>,
+    /// OpenAI-compatible effort selected by the public request field. Native
+    /// renderers may map this value into their model-specific effort buckets.
+    pub reasoning_effort: Option<&'a str>,
+    /// Explicit native `chat_template_kwargs.reasoning_effort`, kept separate
+    /// from the merged kwargs map so it can override the public request effort
+    /// without being confused with it.
+    pub template_reasoning_effort: Option<&'a serde_json::Value>,
 }
 
 /// JSON separator pair passed through HuggingFace's `tojson` filter.

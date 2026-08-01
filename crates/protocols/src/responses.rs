@@ -1515,26 +1515,21 @@ pub enum ComputerCallOutputContent {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseReasoningParam {
-    #[serde(default = "default_reasoning_effort")]
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
-}
-
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "serde default function must match field type Option<T>"
-)]
-fn default_reasoning_effort() -> Option<ReasoningEffort> {
-    Some(ReasoningEffort::Medium)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    None,
     Minimal,
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -3908,6 +3903,34 @@ impl ResponseReasoningContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_accepts_openai_compatible_union() {
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let parsed: ResponseReasoningParam =
+                serde_json::from_value(serde_json::json!({ "effort": effort }))
+                    .unwrap_or_else(|error| panic!("failed to deserialize {effort}: {error}"));
+            let serialized = serde_json::to_value(parsed).unwrap();
+            assert_eq!(
+                serialized.get("effort").and_then(Value::as_str),
+                Some(effort)
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_rejects_unknown_value() {
+        let result = serde_json::from_value::<ResponseReasoningParam>(
+            serde_json::json!({ "effort": "unlimited" }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_reasoning_object_leaves_effort_unspecified() {
+        let parsed: ResponseReasoningParam = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(parsed.effort.is_none());
+    }
 
     /// Lock `as_str()` to the canonical serde tag for the unit variants
     /// — drift between the two would produce inconsistent wire labels
