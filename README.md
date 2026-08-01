@@ -19,7 +19,7 @@
 Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
+  <img src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/architecture.svg" alt="SMG architecture: clients flow through the gateway layer and router layer to gRPC workers, HTTP workers, and external APIs" width="100%">
 </p>
 
 ## Why SMG?
