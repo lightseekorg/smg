@@ -29,6 +29,7 @@ use super::{
     MediaBatch, MultimodalIntermediate, PrecomputedMultimodalIntermediate, PromptBinding,
 };
 use crate::routers::grpc::{
+    backend_client::BackendClient,
     client::GrpcClient,
     context::WorkerSelection,
     proto_wrapper::{
@@ -44,7 +45,7 @@ use crate::routers::grpc::{
 /// Called in request_building after worker selection, when the backend is known.
 pub(crate) async fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
-    client: &GrpcClient,
+    client: &BackendClient,
     workers: Option<&WorkerSelection>,
 ) -> Result<MultimodalData> {
     assemble_multimodal_data_impl(intermediate, client, workers, false).await
@@ -54,7 +55,7 @@ pub(crate) async fn assemble_multimodal_data(
 /// arrive out-of-band from encode workers.
 pub(crate) async fn assemble_multimodal_data_after_encode(
     intermediate: MultimodalIntermediate,
-    client: &GrpcClient,
+    client: &BackendClient,
     workers: Option<&WorkerSelection>,
 ) -> Result<MultimodalData> {
     assemble_multimodal_data_impl(intermediate, client, workers, true).await
@@ -62,7 +63,7 @@ pub(crate) async fn assemble_multimodal_data_after_encode(
 
 async fn assemble_multimodal_data_impl(
     intermediate: MultimodalIntermediate,
-    client: &GrpcClient,
+    client: &BackendClient,
     workers: Option<&WorkerSelection>,
     omit_prefill_pixels: bool,
 ) -> Result<MultimodalData> {
@@ -72,19 +73,19 @@ async fn assemble_multimodal_data_impl(
     // so assembly can never silently mishandle a modality the backend lacks.
     ensure_client_supports_intermediate(client, &intermediate)?;
     match client {
-        GrpcClient::Sglang(_) => {
+        BackendClient::Grpc(GrpcClient::Sglang(_)) => {
             let batch = into_single_batch(intermediate, "SGLang")?;
             Ok(MultimodalData::Sglang(assemble_sglang(batch)?))
         }
-        GrpcClient::Vllm(_) => {
+        BackendClient::Grpc(GrpcClient::Vllm(_)) => {
             let batch = into_single_batch(intermediate, "vLLM")?;
             Ok(MultimodalData::Vllm(assemble_vllm(batch, workers)?))
         }
-        GrpcClient::Trtllm(_) => {
+        BackendClient::Grpc(GrpcClient::Trtllm(_)) => {
             let batch = into_single_batch(intermediate, "TRT-LLM")?;
             Ok(MultimodalData::Trtllm(assemble_trtllm(batch)?))
         }
-        GrpcClient::TokenSpeed(_) => {
+        BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => {
             let options = intermediate
                 .batches()
                 .iter()
@@ -104,7 +105,9 @@ async fn assemble_multimodal_data_impl(
             .context("TokenSpeed multimodal assembly task failed")??;
             Ok(MultimodalData::TokenSpeed(pending.into_inner()?))
         }
-        GrpcClient::Mlx(_) => anyhow::bail!("MLX does not support multimodal inputs"),
+        BackendClient::Grpc(GrpcClient::Mlx(_)) => {
+            anyhow::bail!("MLX does not support multimodal inputs")
+        }
     }
 }
 
@@ -161,7 +164,7 @@ fn into_single_batch(
 /// check, keyed on the concrete backend client. See
 /// [`crate::routers::grpc::multimodal::capability::ensure_backend_supports_modalities`].
 fn ensure_client_supports_intermediate(
-    client: &GrpcClient,
+    client: &BackendClient,
     intermediate: &MultimodalIntermediate,
 ) -> Result<()> {
     ensure_backend_supports_modalities(client.runtime_type(), intermediate)

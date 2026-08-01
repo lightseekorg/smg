@@ -11,7 +11,7 @@ use crate::{
     routers::{
         error,
         grpc::{
-            client::GrpcClient,
+            backend_client::BackendClient,
             context::{ClientSelection, RequestContext, WorkerSelection},
         },
     },
@@ -37,14 +37,14 @@ impl PipelineStage for ClientAcquisitionStage {
 
         let clients = match workers {
             WorkerSelection::Single { worker } => {
-                let client = get_grpc_client_from_worker(worker).await?;
+                let client = get_backend_client_from_worker(worker).await?;
                 ClientSelection::Single { client }
             }
             WorkerSelection::Disaggregated {
                 prefill, decode, ..
             } => {
-                let prefill_client = get_grpc_client_from_worker(prefill).await?;
-                let decode_client = get_grpc_client_from_worker(decode).await?;
+                let prefill_client = get_backend_client_from_worker(prefill).await?;
+                let decode_client = get_backend_client_from_worker(decode).await?;
 
                 ClientSelection::Disaggregated {
                     prefill: prefill_client,
@@ -62,25 +62,27 @@ impl PipelineStage for ClientAcquisitionStage {
     }
 }
 
-async fn get_grpc_client_from_worker(worker: &Arc<dyn Worker>) -> Result<GrpcClient, Response> {
+async fn get_backend_client_from_worker(
+    worker: &Arc<dyn Worker>,
+) -> Result<BackendClient, Response> {
     // Get cached client from worker (or create one if not cached yet)
     let client_arc = worker
-        .get_grpc_client()
+        .get_backend_client()
         .await
         .map_err(|e| {
             error!(
-                function = "get_grpc_client_from_worker",
+                function = "get_backend_client_from_worker",
                 error = %e,
                 "Failed to get gRPC client from worker"
             );
             error::internal_error(
-                "get_grpc_client_failed",
+                "get_backend_client_failed",
                 format!("Failed to get gRPC client: {e}"),
             )
         })?
         .ok_or_else(|| {
             error!(
-                function = "get_grpc_client_from_worker",
+                function = "get_backend_client_from_worker",
                 "Selected worker not configured for gRPC"
             );
             error::internal_error(

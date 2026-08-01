@@ -377,7 +377,7 @@ impl KvEventMonitor {
         }
 
         loop {
-            let grpc_client = match worker.get_grpc_client().await {
+            let backend_client = match worker.get_backend_client().await {
                 Ok(Some(client)) => client,
                 Ok(None) => {
                     // HTTP workers are filtered in on_worker_added, so this should
@@ -417,7 +417,7 @@ impl KvEventMonitor {
                 }
             };
 
-            let stream = match grpc_client.subscribe_kv_events(last_seq).await {
+            let stream = match backend_client.subscribe_kv_events(last_seq).await {
                 Ok(stream) => {
                     info!(
                         worker_url = %worker_url,

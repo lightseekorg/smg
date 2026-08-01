@@ -5,6 +5,7 @@ use openai_protocol::{chat::ChatCompletionRequest, common::StringOrArray};
 
 use crate::routers::error;
 
+pub mod backend_client; // Used by bindings (Worker trait impl)
 pub mod client; // Used by core/
 pub(crate) mod common;
 pub(crate) mod context;

@@ -8,6 +8,7 @@ use tracing::{debug, error};
 use crate::routers::{
     error,
     grpc::{
+        backend_client::BackendClient,
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
         context::{
@@ -116,7 +117,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
 
         // Build proto request based on backend type and request type
         let mut proto_request = match builder_client {
-            GrpcClient::Sglang(sglang_client) => {
+            BackendClient::Grpc(GrpcClient::Sglang(sglang_client)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -164,7 +165,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Sglang(Box::new(req))
             }
-            GrpcClient::Vllm(vllm_client) => {
+            BackendClient::Grpc(GrpcClient::Vllm(vllm_client)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -209,7 +210,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
-            GrpcClient::Trtllm(trtllm_client) => {
+            BackendClient::Grpc(GrpcClient::Trtllm(trtllm_client)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -254,7 +255,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Trtllm(Box::new(req))
             }
-            GrpcClient::Mlx(mlx_client) => {
+            BackendClient::Grpc(GrpcClient::Mlx(mlx_client)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -298,7 +299,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
-            GrpcClient::TokenSpeed(tokenspeed_client) => {
+            BackendClient::Grpc(GrpcClient::TokenSpeed(tokenspeed_client)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());

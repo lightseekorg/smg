@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::routers::{
     error,
     grpc::{
-        client::GrpcClient,
+        backend_client::BackendClient,
         common::stages::{helpers, PipelineStage},
         context::{
             ClientSelection, CompletionItem, ExecutionPlan, ExecutionPlanKind, PreparationOutput,
@@ -49,7 +49,7 @@ impl CompletionRequestBuildingStage {
     )]
     fn build_proto_request(
         &self,
-        builder_client: &GrpcClient,
+        builder_client: &BackendClient,
         request_id: String,
         item: &CompletionItem,
         completion_request: &CompletionRequest,

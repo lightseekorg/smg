@@ -27,7 +27,7 @@ use smg::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
     },
-    routers::grpc::{client::GrpcClient, utils::process_chat_messages},
+    routers::grpc::{backend_client::BackendClient, utils::process_chat_messages},
     worker::{
         circuit_breaker::{CircuitBreaker, CircuitState},
         resilience::ResolvedResilience,
@@ -217,7 +217,7 @@ impl Worker for GrpcWorker {
         &self.http_client
     }
 
-    async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
+    async fn get_backend_client(&self) -> WorkerResult<Option<Arc<BackendClient>>> {
         // Not used by policies — the FFI layer handles gRPC directly
         Ok(None)
     }

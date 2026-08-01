@@ -22,7 +22,7 @@ use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
 use super::{
-    client::GrpcClient,
+    backend_client::BackendClient,
     common::stages::encode::EncodeDispatchPlan,
     multimodal::{MultimodalComponents, MultimodalIntermediate},
     proto_wrapper::{
@@ -386,13 +386,13 @@ pub(crate) enum WorkerSelection {
 #[derive(Clone)]
 pub(crate) enum ClientSelection {
     Single {
-        client: GrpcClient,
+        client: BackendClient,
     },
     /// Disaggregated prefill/decode scheduler clients. EPD encode workers are
     /// contacted directly from `WorkerSelection::Disaggregated` assignments.
     Disaggregated {
-        prefill: GrpcClient,
-        decode: GrpcClient,
+        prefill: BackendClient,
+        decode: BackendClient,
     },
 }
 
@@ -855,49 +855,49 @@ impl WorkerSelection {
 /// Some methods are kept for API completeness even if currently unused.
 #[expect(dead_code)]
 impl ClientSelection {
-    pub fn single(&self) -> Option<&GrpcClient> {
+    pub fn single(&self) -> Option<&BackendClient> {
         match self {
             Self::Single { client } => Some(client),
             Self::Disaggregated { .. } => None,
         }
     }
 
-    pub fn single_mut(&mut self) -> Option<&mut GrpcClient> {
+    pub fn single_mut(&mut self) -> Option<&mut BackendClient> {
         match self {
             Self::Single { client } => Some(client),
             Self::Disaggregated { .. } => None,
         }
     }
 
-    pub fn disaggregated_mut(&mut self) -> Option<(&mut GrpcClient, &mut GrpcClient)> {
+    pub fn disaggregated_mut(&mut self) -> Option<(&mut BackendClient, &mut BackendClient)> {
         match self {
             Self::Disaggregated { prefill, decode } => Some((prefill, decode)),
             Self::Single { .. } => None,
         }
     }
 
-    pub fn prefill_client(&self) -> Option<&GrpcClient> {
+    pub fn prefill_client(&self) -> Option<&BackendClient> {
         match self {
             Self::Disaggregated { prefill, .. } => Some(prefill),
             Self::Single { .. } => None,
         }
     }
 
-    pub fn prefill_client_mut(&mut self) -> Option<&mut GrpcClient> {
+    pub fn prefill_client_mut(&mut self) -> Option<&mut BackendClient> {
         match self {
             Self::Disaggregated { prefill, .. } => Some(prefill),
             Self::Single { .. } => None,
         }
     }
 
-    pub fn decode_client(&self) -> Option<&GrpcClient> {
+    pub fn decode_client(&self) -> Option<&BackendClient> {
         match self {
             Self::Disaggregated { decode, .. } => Some(decode),
             Self::Single { .. } => None,
         }
     }
 
-    pub fn decode_client_mut(&mut self) -> Option<&mut GrpcClient> {
+    pub fn decode_client_mut(&mut self) -> Option<&mut BackendClient> {
         match self {
             Self::Disaggregated { decode, .. } => Some(decode),
             Self::Single { .. } => None,

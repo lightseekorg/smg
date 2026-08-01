@@ -614,7 +614,7 @@ impl WorkerMonitor {
     /// backends. Returns `None` on missing client, RPC error, or empty
     /// `loads` array.
     pub(crate) async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
-        let grpc_client = match worker.get_grpc_client().await {
+        let backend_client = match worker.get_backend_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 debug!("No gRPC client for worker {}", worker.url());
@@ -626,7 +626,7 @@ impl WorkerMonitor {
             }
         };
 
-        match grpc_client.get_loads().await {
+        match backend_client.get_loads().await {
             Ok(load) if !load.loads.is_empty() => Some(load),
             Ok(_) => None,
             Err(e) => {

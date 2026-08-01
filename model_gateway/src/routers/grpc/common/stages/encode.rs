@@ -29,6 +29,7 @@ use crate::{
     routers::{
         error,
         grpc::{
+            backend_client::BackendClient,
             client::GrpcClient,
             context::{ClientSelection, EncodeOutputs, RequestContext, WorkerSelection},
             multimodal::{
@@ -316,7 +317,7 @@ fn prepare_items(
     let clients = clients.ok_or_else(|| anyhow!("Client acquisition stage not completed"))?;
     match clients {
         ClientSelection::Disaggregated {
-            prefill: GrpcClient::TokenSpeed(_),
+            prefill: BackendClient::Grpc(GrpcClient::TokenSpeed(_)),
             ..
         } => prepare_tokenspeed_items(intermediate, workers),
         ClientSelection::Disaggregated { prefill, .. } => Err(anyhow!(
@@ -343,13 +344,13 @@ fn prepare_tokenspeed_items(
         .collect())
 }
 
-fn backend_name(client: &GrpcClient) -> &'static str {
+fn backend_name(client: &BackendClient) -> &'static str {
     match client {
-        GrpcClient::Sglang(_) => "SGLang",
-        GrpcClient::Vllm(_) => "vLLM",
-        GrpcClient::Trtllm(_) => "TRT-LLM",
-        GrpcClient::Mlx(_) => "MLX",
-        GrpcClient::TokenSpeed(_) => "TokenSpeed",
+        BackendClient::Grpc(GrpcClient::Sglang(_)) => "SGLang",
+        BackendClient::Grpc(GrpcClient::Vllm(_)) => "vLLM",
+        BackendClient::Grpc(GrpcClient::Trtllm(_)) => "TRT-LLM",
+        BackendClient::Grpc(GrpcClient::Mlx(_)) => "MLX",
+        BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => "TokenSpeed",
     }
 }
 

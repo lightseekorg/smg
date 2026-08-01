@@ -7,6 +7,7 @@ use tracing::error;
 use crate::routers::{
     error,
     grpc::{
+        backend_client::BackendClient,
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
         context::{ExecutionPlan, RequestContext, RequestType},
@@ -72,15 +73,15 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
         let token_ids = prep_output.token_ids().to_vec();
 
         let proto_req = match client {
-            GrpcClient::Sglang(c) => {
+            BackendClient::Grpc(GrpcClient::Sglang(c)) => {
                 let req = c.build_embed_request(request_id.clone(), original_text, token_ids);
                 ProtoEmbedRequest::Sglang(Box::new(req))
             }
-            GrpcClient::Vllm(c) => {
+            BackendClient::Grpc(GrpcClient::Vllm(c)) => {
                 let req = c.build_embed_request(request_id.clone(), original_text, token_ids);
                 ProtoEmbedRequest::Vllm(Box::new(req))
             }
-            GrpcClient::Trtllm(_) => {
+            BackendClient::Grpc(GrpcClient::Trtllm(_)) => {
                 error!(
                     function = "EmbeddingRequestBuildingStage::execute",
                     "TensorRT-LLM embedding not yet supported"
@@ -90,7 +91,7 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "TensorRT-LLM embedding is not yet supported via gRPC",
                 ));
             }
-            GrpcClient::Mlx(_) => {
+            BackendClient::Grpc(GrpcClient::Mlx(_)) => {
                 error!(
                     function = "EmbeddingRequestBuildingStage::execute",
                     "MLX embedding not supported"
@@ -100,7 +101,7 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "MLX embedding is not supported via gRPC",
                 ));
             }
-            GrpcClient::TokenSpeed(_) => {
+            BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => {
                 error!(
                     function = "EmbeddingRequestBuildingStage::execute",
                     "TokenSpeed backend does not support embeddings"
