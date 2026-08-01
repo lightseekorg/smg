@@ -9,18 +9,19 @@
 
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
+    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall},
     responses::{
         ReasoningEffort, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
         ResponseOutputItem, ResponseReasoningContent::ReasoningText, ResponseStatus,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig,
-        TextFormat,
+        ResponsesRequest, ResponsesResponse, StringOrContentParts, TextConfig, TextFormat,
     },
     UNKNOWN_MODEL_ID,
 };
 use tracing::warn;
 
-use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
+use crate::routers::grpc::common::responses::{
+    responses_usage_from_chat_usage, utils::extract_tools_from_response_tools,
+};
 
 /// Convert a ResponsesRequest to ChatCompletionRequest for processing through the chat pipeline
 ///
@@ -247,6 +248,8 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         tools,
         tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
+        separate_reasoning: true,
+        stream_reasoning: true,
         reasoning_effort: req
             .reasoning
             .as_ref()
@@ -418,20 +421,11 @@ pub(crate) fn chat_to_responses(
         _ => ResponseStatus::Completed, // Default to completed
     };
 
-    // Convert usage from Usage to UsageInfo, then wrap in ResponsesUsage
-    let usage = chat_resp.usage.as_ref().map(|u| {
-        let usage_info = UsageInfo {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-            reasoning_tokens: u
-                .completion_tokens_details
-                .as_ref()
-                .and_then(|d| d.reasoning_tokens),
-            prompt_tokens_details: u.prompt_tokens_details.clone(),
-        };
-        ResponsesUsage::Modern(usage_info.to_response_usage())
-    });
+    // Convert usage to the modern Responses API shape.
+    let usage = chat_resp
+        .usage
+        .as_ref()
+        .map(responses_usage_from_chat_usage);
 
     // Generate response
     let response_id = response_id_override.unwrap_or_else(|| chat_resp.id.clone());
@@ -552,6 +546,22 @@ mod tests {
         assert_eq!(chat_req.messages.len(), 2); // system + user
         assert_eq!(chat_req.model, "gpt-4");
         assert_eq!(chat_req.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn responses_requests_enable_reasoning_separation_for_streaming_and_non_streaming() {
+        for stream in [false, true] {
+            let request = ResponsesRequest {
+                input: ResponseInput::Text("reason about this".to_string()),
+                stream: Some(stream),
+                ..Default::default()
+            };
+
+            let chat_request = responses_to_chat(&request).expect("request should convert");
+
+            assert!(chat_request.separate_reasoning);
+            assert!(chat_request.stream_reasoning);
+        }
     }
 
     #[test]

@@ -23,10 +23,10 @@ use openai_protocol::{
         ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
         ChatCompletionStreamResponse,
     },
-    common::{FunctionCallResponse, ToolCall, Usage, UsageInfo},
+    common::{FunctionCallResponse, ToolCall, Usage},
     responses::{
         ResponseContentPart, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        ResponsesRequest, ResponsesResponse,
     },
 };
 use serde_json::{json, Value};
@@ -56,7 +56,8 @@ use crate::{
         },
         grpc::{
             common::responses::{
-                build_sse_response, persist_response_if_needed,
+                build_sse_response, persist_response_if_needed, response_completed_usage,
+                responses_usage_from_chat_usage,
                 streaming::{attach_mcp_server_label, OutputItemKind, ResponseStreamEventEmitter},
                 ResponsesContext,
             },
@@ -210,23 +211,7 @@ async fn process_and_transform_sse_stream(
     }
 
     // Emit final response.completed event with accumulated usage
-    let usage_json = accumulator.usage.as_ref().map(|u| {
-        let mut usage_obj = json!({
-            "input_tokens": u.prompt_tokens,
-            "output_tokens": u.completion_tokens,
-            "total_tokens": u.total_tokens
-        });
-
-        // Include reasoning_tokens if present
-        if let Some(details) = &u.completion_tokens_details {
-            if let Some(reasoning_tokens) = details.reasoning_tokens {
-                usage_obj["output_tokens_details"] =
-                    json!({ "reasoning_tokens": reasoning_tokens });
-            }
-        }
-
-        usage_obj
-    });
+    let usage_json = accumulator.usage.as_ref().map(response_completed_usage);
 
     let completed_event = event_emitter.emit_completed(usage_json.as_ref());
     event_emitter.send_event(&completed_event, &tx)?;
@@ -398,19 +383,7 @@ impl StreamingResponseAccumulator {
         };
 
         // Convert usage
-        let usage = self.usage.as_ref().map(|u| {
-            let usage_info = UsageInfo {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                reasoning_tokens: u
-                    .completion_tokens_details
-                    .as_ref()
-                    .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: u.prompt_tokens_details.clone(),
-            };
-            ResponsesUsage::Modern(usage_info.to_response_usage())
-        });
+        let usage = self.usage.as_ref().map(responses_usage_from_chat_usage);
 
         ResponsesResponse::builder(&self.response_id, &self.model)
             .copy_from_request(&self.original_request)
@@ -914,13 +887,10 @@ async fn execute_tool_loop_streaming_internal(
         // (OpenAI router approach - text only appears on final iteration when no tool calls)
 
         // Emit final response.completed event
-        let usage_json = accumulated_response.usage.as_ref().map(|u| {
-            json!({
-                "input_tokens": u.prompt_tokens,
-                "output_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens
-            })
-        });
+        let usage_json = accumulated_response
+            .usage
+            .as_ref()
+            .map(response_completed_usage);
         let event = emitter.emit_completed(usage_json.as_ref());
         emitter.send_event(&event, &tx)?;
 
@@ -1088,7 +1058,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn streaming_accumulator_serializes_responses_api_usage() {
+    fn response_completed_usage_preserves_modern_usage_details() {
+        let usage = response_completed_usage(
+            &Usage::from_counts(12, 7)
+                .with_cached_tokens(3)
+                .with_reasoning_tokens(2),
+        );
+
+        assert_eq!(usage.get("input_tokens"), Some(&json!(12)));
+        assert_eq!(usage.get("output_tokens"), Some(&json!(7)));
+        assert_eq!(usage.get("total_tokens"), Some(&json!(19)));
+        assert_eq!(
+            usage.pointer("/input_tokens_details/cached_tokens"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            usage.pointer("/output_tokens_details/reasoning_tokens"),
+            Some(&json!(2))
+        );
+        assert!(usage.get("prompt_tokens").is_none());
+        assert!(usage.get("completion_tokens").is_none());
+    }
+
+    #[test]
+    fn streaming_accumulator_serializes_modern_usage_with_token_details() {
         let request = ResponsesRequest::default();
         let mut accumulator = StreamingResponseAccumulator::new(&request);
         accumulator.usage = Some(
@@ -1101,16 +1094,16 @@ mod tests {
             .expect("streaming response should serialize");
         let usage = wire.get("usage").expect("usage should be present");
 
-        assert_eq!(usage.get("input_tokens"), Some(&serde_json::json!(12)));
-        assert_eq!(usage.get("output_tokens"), Some(&serde_json::json!(7)));
-        assert_eq!(usage.get("total_tokens"), Some(&serde_json::json!(19)));
+        assert_eq!(usage.get("input_tokens"), Some(&json!(12)));
+        assert_eq!(usage.get("output_tokens"), Some(&json!(7)));
+        assert_eq!(usage.get("total_tokens"), Some(&json!(19)));
         assert_eq!(
             usage.pointer("/input_tokens_details/cached_tokens"),
-            Some(&serde_json::json!(3))
+            Some(&json!(3))
         );
         assert_eq!(
             usage.pointer("/output_tokens_details/reasoning_tokens"),
-            Some(&serde_json::json!(2))
+            Some(&json!(2))
         );
         assert!(usage.get("prompt_tokens").is_none());
         assert!(usage.get("completion_tokens").is_none());
