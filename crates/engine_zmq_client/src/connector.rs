@@ -10,13 +10,7 @@
 // - No DP coordinator / wave protocol yet (single shared transport, DP=1).
 // - No utility RPC (deferred).
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::Stream;
 use parking_lot::Mutex;
@@ -163,7 +157,6 @@ impl ClientInner {
 pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     tasks: Vec<JoinHandle<()>>,
-    next_client_seq: AtomicU64,
 }
 
 impl EngineCoreClient {
@@ -203,7 +196,6 @@ impl EngineCoreClient {
         Self {
             inner,
             tasks: vec![output_task, dispatch_task],
-            next_client_seq: AtomicU64::new(0),
         }
     }
 
@@ -233,9 +225,7 @@ impl EngineCoreClient {
         let engine_id = self.inner.select_engine(request.data_parallel_rank)?;
 
         request.client_index = self.inner.client_index;
-        // Stamp a per-client monotonic arrival tiebreaker; wall-clock arrival is
-        // set by SMG upstream. current_wave stays 0 (no coordinator in scope).
-        let _seq = self.next_client_seq.fetch_add(1, Ordering::Relaxed);
+        // current_wave stays 0 (no DP coordinator in scope for the text path).
 
         let request_id = request.request_id.clone();
         let receiver = self.inner.registry.lock().register(request_id.clone())?;
@@ -281,6 +271,14 @@ impl Drop for EngineCoreClient {
 
 /// Route decoded outputs to per-request streams and forward auto-abort requests
 /// to their engines. Runs until the output channel closes or the engine dies.
+/// If the engine emits no output for this long while requests are in flight, the
+/// dispatcher treats it as dead. A hard engine death (SIGKILL/OOM) sends no
+/// `ENGINE_CORE_DEAD` sentinel, and a bound PULL socket never errors when its
+/// PUSH peer vanishes — so silence is the only available death signal. Generous
+/// so a slow first token never trips it, while still bounding an otherwise
+/// infinite hang.
+const ENGINE_SILENCE_DEATH_TIMEOUT: Duration = Duration::from_secs(300);
+
 async fn run_dispatcher(
     mut out_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
     mut abort_rx: mpsc::UnboundedReceiver<(EngineId, String)>,
@@ -323,6 +321,21 @@ async fn run_dispatcher(
                         warn!(%error, %request_id, "failed to send abort");
                     }
                 }
+            }
+            // Positive-liveness watchdog. select! rebuilds this sleep every
+            // iteration, so any output or abort resets it; it only fires after a
+            // full window of pure silence.
+            () = tokio::time::sleep(ENGINE_SILENCE_DEATH_TIMEOUT) => {
+                let mut registry = inner.registry.lock();
+                if !registry.requests.is_empty() {
+                    warn!(
+                        "no engine output for {ENGINE_SILENCE_DEATH_TIMEOUT:?} with in-flight \
+                         requests; treating engine as dead"
+                    );
+                    registry.fail_all(Arc::new(Error::EngineCoreDead));
+                    return;
+                }
+                // Idle with nothing in flight: silence is expected, keep waiting.
             }
         }
     }
