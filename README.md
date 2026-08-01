@@ -10,17 +10,17 @@
 
 <p align="center">
   <a href="https://github.com/smg-project/smg/releases/latest"><img src="https://img.shields.io/github/v/release/smg-project/smg?logo=github&label=Release" alt="Release"></a>
-  <a href="https://github.com/orgs/lightseekorg/packages/container/package/smg"><img src="https://img.shields.io/badge/ghcr.io-lightseekorg%2Fsmg-blue?logo=docker" alt="Docker"></a>
+  <a href="https://hub.docker.com/r/lightseekorg/smg"><img src="https://img.shields.io/docker/v/lightseekorg/smg?logo=docker&label=Docker" alt="Docker"></a>
   <a href="https://pypi.org/project/smg/"><img src="https://img.shields.io/pypi/v/smg?logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://smg-project.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
+  <a href="https://lightseek.org/smg/"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
   <a href="https://discord.lightseek.org"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://slack.lightseek.org"><img src="https://img.shields.io/badge/Slack-Join%20Us-4A154B?logo=slack&logoColor=white" alt="Slack"></a>
   <a href="https://deepwiki.com/smg-project/smg"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://pytorch.org/blog/lightseek-smg/"><img src="https://img.shields.io/badge/PyTorch-Technical%20Blog-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch Blog"></a>
 </p>
 
-Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
+Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. SMG centralizes worker lifecycle management, balances traffic across self-hosted engines and cloud providers, and gives you enterprise-grade control over multi-tenancy, chat-history storage, MCP tooling, and observability — behind one unified endpoint.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/smg-project/smg/main/assets/images/architecture.svg" alt="SMG architecture: clients flow through the gateway layer and router layer to gRPC workers, HTTP workers, and external APIs" width="100%">
@@ -30,13 +30,13 @@ Engine-agnostic, high-performance model-routing gateway for large-scale LLM depl
 
 |                                 |                                                                                                                                                                  |
 |:--------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, TensorRT-LLM, TokenSpeed, or SGLang—to reuse prefixes and reduce redundant computation. |
-| **🔌 One API, Any Backend**     | Route to self-hosted models (vLLM, TensorRT-LLM, TokenSpeed, SGLang) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint. |
-| **⚡ Built for Speed**           | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running.     |
-| **🔒 Enterprise Control**       | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure.   |
-| **📊 Full Observability**       | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer.                   |
+| **🚀 Maximize GPU Utilization** | Cache-aware routing tracks each worker's KV-cache state in radix trees to reuse prefixes across SGLang, vLLM, TensorRT-LLM, TokenSpeed, and MLX — with load modeling that accounts for queued token work and KV pressure. |
+| **🔌 One API, Any Backend**     | Route to self-hosted engines over HTTP or gRPC, or to OpenAI, Anthropic, Gemini, and xAI — plus any OpenAI-compatible endpoint — through a single unified gateway. |
+| **⚡ Built for Speed**           | Native Rust with streaming gRPC pipelines, cached tokenization with zero-copy cache hits, prefill/decode disaggregation (including a separate encode stage for vision), and DP-aware routing for data-parallel engines. |
+| **🔒 Enterprise Control**       | Priority admission scheduling with preemption and per-tenant controls, API-key auth with OIDC on the control plane, WebAssembly plugins for custom logic, and chat history that never leaves your infrastructure. |
+| **📊 Full Observability**       | 90+ Prometheus metrics, OpenTelemetry tracing with W3C trace context propagated into the engines over both HTTP and gRPC, and structured JSON logs with request correlation. |
 
-**API Coverage:** OpenAI Chat/Completions/Embeddings, Responses API for agents, Anthropic Messages, and MCP tool execution.
+**API Coverage:** OpenAI Chat Completions, Completions, Embeddings, Rerank, and Classify; Responses and Conversations APIs for agents; Anthropic Messages; Gemini Interactions; Realtime over WebSocket and WebRTC; audio transcription; tokenize/detokenize; and MCP tool execution with approval policies in the Responses and Messages APIs.
 
 ## Quick Start
 
@@ -46,10 +46,13 @@ Engine-agnostic, high-performance model-routing gateway for large-scale LLM depl
 # Docker
 docker pull lightseekorg/smg:latest
 
+# Kubernetes (Helm)
+helm install smg oci://ghcr.io/smg-project/charts/smg
+
 # Python
 pip install smg
 
-# Rust
+# Rust (needs protoc)
 cargo install smg
 ```
 
@@ -79,40 +82,40 @@ That's it. SMG is now load-balancing requests across your workers.
 
 ## Supported Backends
 
-| Self-Hosted | Cloud Providers                |
-|-------------|--------------------------------|
-| vLLM | OpenAI                         |
-| TensorRT-LLM | Anthropic                      |
-| TokenSpeed | Google Gemini                  |
-| SGLang | Oracle Generative AI Service   |
-| Ollama | Azure OpenAI                   |
-| Any OpenAI-compatible server | Any OpenAI-compatible provider |
+| | |
+|:--|:--|
+| **Self-Hosted Engines** | vLLM · SGLang · TokenSpeed · TensorRT-LLM · MLX (Apple Silicon) · any OpenAI-compatible server (e.g. Ollama) |
+| **Cloud Providers** | OpenAI · Anthropic · Google Gemini · xAI · OCI Generative AI · AWS Bedrock · Azure OpenAI · any OpenAI-compatible provider (Groq, Together, …) |
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| **[8 Routing Policies](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/routing/load-balancing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
-| **[gRPC Pipeline](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
-| **[MCP Integration](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/extensibility/mcp.md)** | Connect external tool servers via Model Context Protocol |
-| **[High Availability](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
-| **[Chat History](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/data/chat-history.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
-| **[WASM Plugins](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/extensibility/wasm-plugins.md)** | Extend with custom WebAssembly logic |
-| **[Resilience](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/reliability/index.md)** | Circuit breakers, retries with backoff, rate limiting |
+| **[10 Routing Policies](https://lightseek.org/smg/concepts/routing/load-balancing)** | cache_aware, least_load, power_of_two, consistent_hashing, prefix_hash, bucket, round_robin, random, manual, passthrough |
+| **[gRPC Pipeline](https://lightseek.org/smg/concepts/architecture/grpc-pipeline)** | Native streaming gRPC to the engines with prefill/decode and encode disaggregation and DP-aware routing |
+| **[Kubernetes Discovery](https://lightseek.org/smg/getting-started/service-discovery)** | Native pod watchers with label selectors, per-role prefill/decode/encode selectors, and router peer discovery |
+| **[Model Parsers](https://lightseek.org/smg/getting-started/tokenization-and-parsing)** | 21 tool-call parsers and 16 reasoning parsers with automatic model detection — DeepSeek, Qwen, Kimi, GLM, Llama, Mistral, Command, Nemotron, and more |
+| **[MCP Integration](https://lightseek.org/smg/concepts/extensibility/mcp)** | Tool discovery and execution over stdio, SSE, and streamable HTTP, with approval policies and audit logging |
+| **[High Availability](https://lightseek.org/smg/concepts/architecture/high-availability)** | Mesh networking with SWIM gossip and CRDT-replicated state for multi-node deployments |
+| **[Chat History](https://lightseek.org/smg/concepts/data/chat-history)** | Pluggable storage with schema migrations: PostgreSQL, Oracle, Redis, or in-memory |
+| **[WASM Plugins](https://lightseek.org/smg/concepts/extensibility/wasm-plugins)** | Extend request and response handling with custom WebAssembly middleware |
+| **[Resilience](https://lightseek.org/smg/concepts/reliability/index)** | Circuit breakers, retries with backoff and jitter, rate limiting, and priority admission scheduling |
 
 ## Documentation
 
+Full documentation lives at **[lightseek.org/smg](https://lightseek.org/smg/)**.
+
 | | |
 |:--|:--|
-| [Getting Started](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/getting-started/index.md) | Installation and first steps |
-| [Architecture](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/concepts/architecture/overview.md) | How SMG works |
-| [Configuration](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/reference/configuration.md) | CLI reference and options |
-| [API Reference](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/reference/api/openai.md) | OpenAI-compatible endpoints |
-| [Kubernetes Setup](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/getting-started/service-discovery.md) | In-cluster discovery and production setup |
+| [Getting Started](https://lightseek.org/smg/getting-started) | Installation and first steps |
+| [Architecture](https://lightseek.org/smg/concepts/architecture/overview) | How SMG works |
+| [Configuration](https://lightseek.org/smg/reference/configuration) | CLI reference and options |
+| [API Reference](https://lightseek.org/smg/reference/api/openai) | OpenAI-compatible endpoints |
+| [Kubernetes Setup](https://lightseek.org/smg/getting-started/service-discovery) | In-cluster discovery and production setup |
 
 ## Contributing
 
-We welcome contributions! See [Contributing Guide](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/index.md) for details.
+We welcome contributions! See the [Contributing Guide](https://lightseek.org/smg/contributing) for details.
 
-- [Development Setup](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/development.md)
-- [Code Style](https://github.com/smg-project/smg-docs/blob/main/src/lib/content/contributing/code-style.md)
+- [Development Setup](https://lightseek.org/smg/contributing/development)
+- [Code Style](https://lightseek.org/smg/contributing/code-style)
