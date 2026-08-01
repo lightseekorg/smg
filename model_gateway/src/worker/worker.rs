@@ -26,7 +26,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::header_utils::extract_routing_key,
-        grpc::{backend_client::BackendClient, client::GrpcClient},
+        grpc::{backend_client::BackendClient, client::GrpcClient, zmq_client::ZmqEngineClient},
     },
 };
 
@@ -41,6 +41,69 @@ const FLUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(45);
 /// a long time while the backend serializes large traces. Matches the
 /// gRPC client's profile deadline.
 const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
+
+/// Time to wait for a ZMQ engine to complete the startup handshake. Generous:
+/// the engine loads the model and profiles KV cache between INIT and READY.
+const ZMQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Loopback host for the TCP handshake. ZMQ direct connections are same-host
+/// only, so the handshake never leaves loopback.
+const ZMQ_HANDSHAKE_HOST: &str = "127.0.0.1";
+
+/// Derive a deterministic TCP handshake port from the ipc data-plane path.
+///
+/// vLLM's headless engine dials a *TCP* handshake (`--data-parallel-address` +
+/// `--data-parallel-rpc-port`); making the port a pure function of the worker
+/// URL lets the operator compute the same `--data-parallel-rpc-port` without a
+/// side channel. FNV-1a keeps it stable across processes and builds. Mapped
+/// into 20000..=39999 to avoid well-known and typical ephemeral ranges.
+fn derive_handshake_port(path: &str) -> u16 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // `hash % 20000` is always < 20000, so it fits u16 without truncation.
+    20000 + (hash % 20000) as u16
+}
+
+/// Derive the ZMQ socket addresses for a worker from its base URL.
+///
+/// Mirrors vLLM's headless topology: the **handshake is TCP** (the engine dials
+/// it, so it matches `vllm serve --headless --data-parallel-rpc-port`), while
+/// the **data plane is `ipc://`** for the same-host fast path (SMG chooses these
+/// and hands them to the engine during the handshake INIT). The operator gives a
+/// single `ipc://<path>` base; SMG binds the ipc input/output at
+/// `<path>-in.sock` / `-out.sock` and derives the TCP handshake port from the
+/// path. Returns `(handshake, input, output)`.
+fn zmq_socket_addresses(base_url: &str) -> WorkerResult<(String, String, String)> {
+    let path = base_url
+        .strip_prefix("ipc://")
+        .ok_or_else(|| WorkerError::ConnectionFailed {
+            url: base_url.to_string(),
+            reason: "ZMQ worker URL must be ipc://<path>".to_string(),
+        })?;
+    let handshake = format!("tcp://{ZMQ_HANDSHAKE_HOST}:{}", derive_handshake_port(path));
+    let input = format!("ipc://{path}-in.sock");
+    let output = format!("ipc://{path}-out.sock");
+    Ok((handshake, input, output))
+}
+
+/// Create the parent directory for a worker's `ipc://` sockets. Kept off the
+/// address computation (which is pure) and async so it doesn't block a runtime
+/// thread.
+async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
+    let path = base_url.strip_prefix("ipc://").unwrap_or(base_url);
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| WorkerError::ConnectionFailed {
+                url: base_url.to_string(),
+                reason: format!("failed to create ipc socket dir for {path}: {e}"),
+            })?;
+    }
+    Ok(())
+}
 
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
@@ -94,17 +157,6 @@ fn require_backend_client(
         operation: operation.to_string(),
         reason: "no backend client available".to_string(),
     })
-}
-
-/// Error for an admin op invoked on a ZMQ worker. ZMQ backend operations are
-/// wired in a follow-up; until then a ZMQ worker is recognized but its admin
-/// surface is unavailable (it never routes through the gRPC client).
-fn zmq_admin_unsupported(url: &str, operation: &str) -> WorkerError {
-    WorkerError::OperationFailed {
-        url: url.to_string(),
-        operation: operation.to_string(),
-        reason: "admin operations are not yet supported for ZMQ workers".to_string(),
-    }
 }
 
 /// Map a gRPC admin-op outcome (`success` flag plus message) to a
@@ -508,10 +560,14 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
 
     /// Reset the gRPC client connection (for reconnection scenarios)
     /// No-op for HTTP workers
-    async fn reset_backend_client(&self) -> WorkerResult<()> {
+    async fn reset_grpc_client(&self) -> WorkerResult<()> {
         Ok(())
     }
     async fn grpc_health_check(&self) -> WorkerResult<bool>;
+    /// Liveness check for a ZMQ worker. Unlike gRPC there is no health RPC on
+    /// the raw wire: liveness is local (handshake completed and the engine has
+    /// not signalled `ENGINE_CORE_DEAD`).
+    async fn zmq_health_check(&self) -> WorkerResult<bool>;
     async fn http_health_check(&self) -> WorkerResult<bool>;
 
     // ── Admin operations ────────────────────────────────────────────
@@ -536,7 +592,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc => {
+            ConnectionMode::Grpc | ConnectionMode::Zmq => {
                 let client = require_backend_client(
                     self.url(),
                     "flush_cache",
@@ -549,7 +605,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "flush_cache")),
         }
     }
 
@@ -573,7 +628,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc => {
+            ConnectionMode::Grpc | ConnectionMode::Zmq => {
                 let client = require_backend_client(
                     self.url(),
                     "start_profile",
@@ -595,7 +650,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "start_profile")),
         }
     }
 
@@ -614,7 +668,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
-            ConnectionMode::Grpc => {
+            ConnectionMode::Grpc | ConnectionMode::Zmq => {
                 let client = require_backend_client(
                     self.url(),
                     "stop_profile",
@@ -627,7 +681,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "stop_profile")),
         }
     }
 }
@@ -997,7 +1050,7 @@ impl fmt::Debug for BasicWorker {
             .field("status", &runtime.status())
             .field("revision", &runtime.revision())
             .field("circuit_breaker_state", &self.circuit_breaker_state())
-            .field("backend_client", &"<OnceCell>")
+            .field("grpc_client", &"<OnceCell>")
             .finish()
     }
 }
@@ -1078,9 +1131,7 @@ impl Worker for BasicWorker {
         let probe_ok = match &self.metadata.spec.connection_mode {
             ConnectionMode::Http => self.http_health_check().await?,
             ConnectionMode::Grpc => self.grpc_health_check().await?,
-            // ZMQ liveness lands with the backend client; until then a ZMQ
-            // worker is recognized but never becomes ready (not routable).
-            ConnectionMode::Zmq => false,
+            ConnectionMode::Zmq => self.zmq_health_check().await?,
         };
 
         if probe_ok {
@@ -1231,10 +1282,7 @@ impl Worker for BasicWorker {
 
     async fn get_backend_client(&self) -> WorkerResult<Option<Arc<BackendClient>>> {
         match self.metadata.spec.connection_mode {
-            // Neither HTTP nor ZMQ has a gRPC client. A ZMQ worker's backend
-            // client is a separate type wired in a follow-up; it is never a
-            // gRPC client.
-            ConnectionMode::Http | ConnectionMode::Zmq => Ok(None),
+            ConnectionMode::Http => Ok(None),
             ConnectionMode::Grpc => {
                 // OnceCell provides lock-free reads after initialization.
                 // get_or_try_init only acquires internal lock on first call.
@@ -1273,14 +1321,52 @@ impl Worker for BasicWorker {
                     .await?;
                 Ok(Some(Arc::clone(client)))
             }
+            ConnectionMode::Zmq => {
+                // SMG binds the handshake + data-plane sockets; the
+                // operator-launched engine dials them. The first acquisition
+                // completes the handshake (a liveness signal in itself).
+                let client = self
+                    .backend_client
+                    .get_or_try_init(|| async {
+                        let (handshake, input, output) =
+                            zmq_socket_addresses(self.metadata.base_url())?;
+                        ensure_ipc_socket_dir(self.metadata.base_url()).await?;
+                        // EngineCore does not report a served model name over the
+                        // wire, so the client reports the model resolved from
+                        // config at worker creation (see create_worker).
+                        let model_id = self.metadata.model_id().to_string();
+                        tracing::info!(
+                            "Lazily binding ZMQ client for worker {} (handshake={handshake})",
+                            self.metadata.spec.url
+                        );
+                        match ZmqEngineClient::connect(
+                            &handshake,
+                            &input,
+                            &output,
+                            1,
+                            model_id,
+                            ZMQ_CONNECT_TIMEOUT,
+                        )
+                        .await
+                        {
+                            Ok(client) => Ok(Arc::new(BackendClient::Zmq(client))),
+                            Err(e) => Err(WorkerError::ConnectionFailed {
+                                url: self.metadata.spec.url.clone(),
+                                reason: format!("Failed to connect ZMQ engine: {e}"),
+                            }),
+                        }
+                    })
+                    .await?;
+                Ok(Some(Arc::clone(client)))
+            }
         }
     }
 
-    async fn reset_backend_client(&self) -> WorkerResult<()> {
+    async fn reset_grpc_client(&self) -> WorkerResult<()> {
         // OnceCell doesn't support resetting. This is intentional for lock-free performance.
         // If a connection fails, the worker should be removed and re-added.
         tracing::debug!(
-            "reset_backend_client called for {} (no-op with OnceCell)",
+            "reset_grpc_client called for {} (no-op with OnceCell)",
             self.metadata.spec.url
         );
         Ok(())
@@ -1318,6 +1404,21 @@ impl Worker for BasicWorker {
                 Ok(false)
             }
         }
+    }
+
+    async fn zmq_health_check(&self) -> WorkerResult<bool> {
+        // Acquiring the backend client completes the handshake on the first call
+        // (an implicit liveness check). Thereafter liveness is local: the
+        // connector marks the client closed on ENGINE_CORE_DEAD or a transport
+        // failure. There is no health RPC to make over the raw ZMQ wire.
+        let Some(backend_client) = self.get_backend_client().await? else {
+            tracing::error!(
+                "Worker {} has connection mode ZMQ but no ZMQ client",
+                self.metadata.spec.url
+            );
+            return Ok(false);
+        };
+        Ok(backend_client.is_alive())
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {

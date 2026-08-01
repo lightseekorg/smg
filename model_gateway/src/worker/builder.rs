@@ -160,7 +160,7 @@ impl BasicWorkerBuilder {
         self
     }
 
-    /// Set gRPC client for gRPC workers
+    /// Set the backend client (gRPC or ZMQ) for a local worker.
     pub fn backend_client(mut self, client: BackendClient) -> Self {
         self.backend_client = Some(client);
         self

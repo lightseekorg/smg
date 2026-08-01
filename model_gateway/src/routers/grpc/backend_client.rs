@@ -1,31 +1,34 @@
 //! Backend client: the polymorphism point over a worker's transport.
 //!
-//! A worker's backend is reached via the [`GrpcClient`] multiplexer (over
-//! SGLang/vLLM/TRT-LLM/MLX/TokenSpeed). `BackendClient` is the seam the
-//! execution pipeline works against so that additional transports (a direct
-//! ZMQ connection to a same-host vLLM EngineCore) can be added as sibling
-//! variants without the pipeline — which operates on [`ProtoStream`] /
-//! [`ProtoGenerateRequest`] — having to change.
-//!
-//! Today it wraps only gRPC; every method delegates to the inner client, so
-//! this is a behavior-neutral seam.
+//! A worker's backend is reached either via gRPC (the [`GrpcClient`] multiplexer
+//! over SGLang/vLLM/TRT-LLM/MLX/TokenSpeed) or via a direct ZMQ connection to a
+//! same-host vLLM EngineCore ([`ZmqEngineClient`]). `BackendClient` keeps those
+//! first-class siblings — `GrpcClient` stays pure gRPC — while the execution
+//! pipeline (which works against [`ProtoStream`]/[`ProtoGenerateRequest`]) is
+//! shared unchanged.
 
 use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
-use smg_grpc_client::{common_proto, tokenizer_bundle::StreamBundle, SglangSchedulerClient};
+use smg_grpc_client::{
+    common_proto, tokenizer_bundle::StreamBundle, SglangSchedulerClient, VllmEngineClient,
+};
 
 use crate::routers::grpc::{
     client::{GenerateRequestBuildOptions, GrpcClient, HealthCheckResponse, ModelInfo, ServerInfo},
-    proto_wrapper::{ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream},
+    proto_wrapper::{
+        finish_vllm_request, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
+        ProtoStream,
+    },
+    zmq_client::ZmqEngineClient,
 };
 
-/// A worker's backend connection. Currently gRPC-only; a direct-ZMQ variant is
-/// added alongside `Grpc` in a follow-up.
+/// A backend connection: gRPC (any engine) or direct ZMQ (vLLM EngineCore).
 #[derive(Clone)]
 pub enum BackendClient {
     Grpc(GrpcClient),
+    Zmq(ZmqEngineClient),
 }
 
 impl BackendClient {
@@ -33,45 +36,72 @@ impl BackendClient {
     pub fn runtime_type(&self) -> crate::worker::RuntimeType {
         match self {
             Self::Grpc(client) => client.runtime_type(),
+            // ZMQ is the vLLM engine over a different transport.
+            Self::Zmq(_) => crate::worker::RuntimeType::Vllm,
         }
     }
 
-    /// True if this backend speaks the vLLM protocol.
+    /// True if this backend speaks the vLLM protocol (gRPC-vLLM or ZMQ).
     pub fn is_vllm(&self) -> bool {
         match self {
             Self::Grpc(client) => client.is_vllm(),
+            Self::Zmq(_) => true,
+        }
+    }
+
+    /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so
+    /// this reports `true` for gRPC; ZMQ reflects its connection liveness.
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::Grpc(_) => true,
+            Self::Zmq(client) => client.is_alive(),
         }
     }
 
     /// Mutable SGLang client accessor. Only valid for a gRPC-SGLang backend;
     /// callers guard with a runtime/sglang check.
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees an SGLang gRPC backend"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut SglangSchedulerClient {
         match self {
             Self::Grpc(client) => client.as_sglang_mut(),
+            Self::Zmq(_) => panic!("Expected SGLang client, got ZMQ backend"),
         }
     }
 
     pub async fn health_check(&self) -> Result<HealthCheckResponse, tonic::Status> {
         match self {
             Self::Grpc(client) => client.health_check().await,
+            Self::Zmq(client) => {
+                let resp = client.health_check();
+                Ok(HealthCheckResponse {
+                    healthy: resp.healthy,
+                    message: resp.message,
+                })
+            }
         }
     }
 
     pub async fn get_model_info(&self) -> Result<ModelInfo, tonic::Status> {
         match self {
             Self::Grpc(client) => client.get_model_info().await,
+            Self::Zmq(client) => Ok(ModelInfo::Vllm(client.get_model_info())),
         }
     }
 
     pub async fn get_server_info(&self) -> Result<ServerInfo, tonic::Status> {
         match self {
             Self::Grpc(client) => client.get_server_info().await,
+            Self::Zmq(client) => Ok(ServerInfo::Vllm(client.get_server_info())),
         }
     }
 
     pub async fn get_loads(&self) -> Result<WorkerLoadResponse, tonic::Status> {
         match self {
             Self::Grpc(client) => client.get_loads().await,
+            Self::Zmq(client) => Ok(client.get_loads()),
         }
     }
 
@@ -81,6 +111,9 @@ impl BackendClient {
     ) -> Result<common_proto::FlushCacheResponse, tonic::Status> {
         match self {
             Self::Grpc(client) => client.flush_cache(timeout_s).await,
+            Self::Zmq(_) => Err(tonic::Status::unimplemented(
+                "FlushCache not supported over ZMQ",
+            )),
         }
     }
 
@@ -90,12 +123,18 @@ impl BackendClient {
     ) -> Result<common_proto::ProfileResponse, tonic::Status> {
         match self {
             Self::Grpc(client) => client.start_profile(req).await,
+            Self::Zmq(_) => Err(tonic::Status::unimplemented(
+                "StartProfile not supported over ZMQ",
+            )),
         }
     }
 
     pub async fn stop_profile(&self) -> Result<common_proto::ProfileResponse, tonic::Status> {
         match self {
             Self::Grpc(client) => client.stop_profile().await,
+            Self::Zmq(_) => Err(tonic::Status::unimplemented(
+                "StopProfile not supported over ZMQ",
+            )),
         }
     }
 
@@ -105,6 +144,9 @@ impl BackendClient {
     ) -> Result<tonic::Streaming<common_proto::KvEventBatch>, tonic::Status> {
         match self {
             Self::Grpc(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Zmq(_) => Err(tonic::Status::unimplemented(
+                "SubscribeKvEvents not supported over ZMQ",
+            )),
         }
     }
 
@@ -113,6 +155,9 @@ impl BackendClient {
     ) -> Result<StreamBundle, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             Self::Grpc(client) => client.get_tokenizer().await,
+            // EngineCore does not serve tokenizer artifacts over ZMQ; the
+            // tokenizer is configured at worker registration instead.
+            Self::Zmq(_) => Err("ZMQ backend does not serve a tokenizer bundle".into()),
         }
     }
 
@@ -122,6 +167,14 @@ impl BackendClient {
     ) -> Result<ProtoStream, tonic::Status> {
         match self {
             Self::Grpc(client) => client.generate(req).await,
+            Self::Zmq(client) => match req {
+                ProtoGenerateRequest::Vllm(boxed_req) => {
+                    Ok(ProtoStream::Zmq(client.generate(*boxed_req).await?))
+                }
+                _ => Err(tonic::Status::internal(
+                    "ZMQ backend expects a vLLM generate request",
+                )),
+            },
         }
     }
 
@@ -131,6 +184,9 @@ impl BackendClient {
     ) -> Result<ProtoEmbedComplete, tonic::Status> {
         match self {
             Self::Grpc(client) => client.embed(req).await,
+            Self::Zmq(_) => Err(tonic::Status::unimplemented(
+                "ZMQ backend does not support embedding yet",
+            )),
         }
     }
 
@@ -145,6 +201,19 @@ impl BackendClient {
         match self {
             Self::Grpc(client) => {
                 client.build_chat_request(request_id, body, processed_text, token_ids, options)
+            }
+            Self::Zmq(_) => {
+                reject_zmq_multimodal(&options)?;
+                finish_vllm_request(None, |mm| {
+                    VllmEngineClient::build_generate_request_from_chat(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
             }
         }
     }
@@ -161,6 +230,19 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_messages_request(request_id, body, processed_text, token_ids, options)
             }
+            Self::Zmq(_) => {
+                reject_zmq_multimodal(&options)?;
+                finish_vllm_request(None, |mm| {
+                    VllmEngineClient::build_generate_request_from_messages(
+                        request_id,
+                        body,
+                        processed_text,
+                        token_ids,
+                        mm,
+                        options.tool_constraints,
+                    )
+                })
+            }
         }
     }
 
@@ -174,6 +256,15 @@ impl BackendClient {
         match self {
             Self::Grpc(client) => {
                 client.build_completion_request(request_id, body, original_text, token_ids)
+            }
+            Self::Zmq(_) => {
+                let req = VllmEngineClient::build_generate_request_from_completion(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
         }
     }
@@ -189,6 +280,23 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_generate_request(request_id, body, original_text, token_ids)
             }
+            Self::Zmq(_) => {
+                let req = VllmEngineClient::build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+            }
         }
     }
+}
+
+/// ZMQ text path does not carry multimodal inputs yet.
+fn reject_zmq_multimodal(options: &GenerateRequestBuildOptions) -> Result<(), String> {
+    if options.multimodal_inputs.is_some() {
+        return Err("ZMQ backend does not support multimodal inputs yet".to_string());
+    }
+    Ok(())
 }

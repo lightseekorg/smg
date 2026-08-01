@@ -218,11 +218,15 @@ impl Worker for GrpcWorker {
     }
 
     async fn get_backend_client(&self) -> WorkerResult<Option<Arc<BackendClient>>> {
-        // Not used by policies — the FFI layer handles gRPC directly
+        // Not used by policies — the FFI layer handles the backend directly.
         Ok(None)
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
+        Ok(self.is_healthy())
+    }
+
+    async fn zmq_health_check(&self) -> WorkerResult<bool> {
         Ok(self.is_healthy())
     }
 

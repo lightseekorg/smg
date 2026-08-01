@@ -12,7 +12,6 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use crate::{
     routers::grpc::harmony::{try_harmony_encoding, HarmonyDetector},
-    worker::ConnectionMode,
     workflow::data::{WorkerKind, WorkerWorkflowData},
 };
 
@@ -28,8 +27,13 @@ impl StepExecutor<WorkerWorkflowData> for EnsureHarmonyEncodingStep {
             return Ok(StepResult::Skip);
         }
 
-        // Only the gRPC pipeline serves Harmony natively; HTTP proxies to the backend.
-        if context.data.connection_mode != Some(ConnectionMode::Grpc) {
+        // Only the gRPC-router pipeline (gRPC + ZMQ) serves Harmony natively;
+        // HTTP proxies to the backend, which owns the encoding.
+        if !context
+            .data
+            .connection_mode
+            .is_some_and(|mode| mode.uses_grpc_pipeline())
+        {
             return Ok(StepResult::Skip);
         }
 

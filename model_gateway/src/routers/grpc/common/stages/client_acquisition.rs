@@ -73,21 +73,21 @@ async fn get_backend_client_from_worker(
             error!(
                 function = "get_backend_client_from_worker",
                 error = %e,
-                "Failed to get gRPC client from worker"
+                "Failed to get backend client from worker"
             );
             error::internal_error(
                 "get_backend_client_failed",
-                format!("Failed to get gRPC client: {e}"),
+                format!("Failed to get backend client: {e}"),
             )
         })?
         .ok_or_else(|| {
             error!(
                 function = "get_backend_client_from_worker",
-                "Selected worker not configured for gRPC"
+                "Selected worker has no gRPC/ZMQ backend client"
             );
             error::internal_error(
-                "worker_not_configured_for_grpc",
-                "Selected worker is not configured for gRPC",
+                "worker_not_configured_for_backend",
+                "Selected worker is not configured for a gRPC/ZMQ backend",
             )
         })?;
 

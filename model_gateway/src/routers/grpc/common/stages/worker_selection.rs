@@ -21,7 +21,8 @@ use crate::{
         },
     },
     worker::{
-        ConnectionMode, HashRing, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+        ConnectionModeExt, HashRing, RuntimeType, Worker, WorkerRegistry, WorkerType,
+        UNKNOWN_MODEL_ID,
     },
 };
 
@@ -228,18 +229,21 @@ impl WorkerSelectionStage {
             Some(model_id)
         };
 
-        // Get workers for the specified model, filtered by connection mode
+        // Get workers for the specified model. The gRPC router serves both gRPC
+        // and direct-ZMQ workers, so accept either transport (not HTTP).
         let workers = self.worker_registry.get_workers_filtered(
             model_filter,
             Some(WorkerType::Regular),
-            Some(ConnectionMode::Grpc),
+            None,  // grpc + zmq, filtered below
             None,  // any runtime type
             false, // get all workers, we'll filter by is_available() next
         );
 
         // Use into_iter() to take ownership of Arcs without cloning (avoids atomic inc/dec)
-        let available: Vec<Arc<dyn Worker>> =
-            workers.into_iter().filter(|w| w.is_available()).collect();
+        let available: Vec<Arc<dyn Worker>> = workers
+            .into_iter()
+            .filter(|w| w.connection_mode().uses_grpc_pipeline() && w.is_available())
+            .collect();
 
         if available.is_empty() {
             return None;
@@ -269,7 +273,7 @@ impl WorkerSelectionStage {
         // Record worker selection metric
         Metrics::record_worker_selection(
             metrics_labels::WORKER_REGULAR,
-            metrics_labels::CONNECTION_GRPC,
+            selected.connection_mode().as_metric_label(),
             model_id,
             policy.name(),
         );
@@ -291,11 +295,12 @@ impl WorkerSelectionStage {
             Some(model_id)
         };
 
+        // gRPC + direct-ZMQ workers both ride the gRPC router pipeline.
         let all_workers = self.worker_registry.get_workers_filtered(
             model_filter,
             None,
-            Some(ConnectionMode::Grpc), // Match any gRPC worker
-            None,                       // any runtime type
+            None, // grpc + zmq, filtered below
+            None, // any runtime type
             false,
         );
 
@@ -303,7 +308,7 @@ impl WorkerSelectionStage {
             all_workers
                 .into_iter()
                 .fold((Vec::new(), Vec::new()), |mut acc, w| {
-                    if w.is_available() {
+                    if w.connection_mode().uses_grpc_pipeline() && w.is_available() {
                         match w.metadata().spec.worker_type {
                             WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
@@ -433,18 +438,19 @@ impl WorkerSelectionStage {
             Some(model_id)
         };
 
+        // gRPC + direct-ZMQ workers both ride the gRPC router pipeline.
         let all_workers = self.worker_registry.get_workers_filtered(
             model_filter,
             None,
-            Some(ConnectionMode::Grpc), // Match any gRPC worker
-            None,                       // any runtime type
+            None, // grpc + zmq, filtered below
+            None, // any runtime type
             false,
         );
 
         let (all_encode, all_prefill, all_decode): (Vec<_>, Vec<_>, Vec<_>) = all_workers
             .into_iter()
             .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, w| {
-                if w.is_available() {
+                if w.connection_mode().uses_grpc_pipeline() && w.is_available() {
                     match w.metadata().spec.worker_type {
                         WorkerType::Encode => acc.0.push(w),
                         WorkerType::Prefill => acc.1.push(w),

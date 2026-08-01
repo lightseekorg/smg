@@ -614,7 +614,7 @@ impl WorkerMonitor {
     /// backends. Returns `None` on missing client, RPC error, or empty
     /// `loads` array.
     pub(crate) async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
-        let backend_client = match worker.get_backend_client().await {
+        let grpc_client = match worker.get_backend_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 debug!("No gRPC client for worker {}", worker.url());
@@ -626,7 +626,7 @@ impl WorkerMonitor {
             }
         };
 
-        match backend_client.get_loads().await {
+        match grpc_client.get_loads().await {
             Ok(load) if !load.loads.is_empty() => Some(load),
             Ok(_) => None,
             Err(e) => {
@@ -833,11 +833,9 @@ async fn group_monitor_loop(
                         ConnectionMode::Http => {
                             WorkerMonitor::fetch_http_load(&client, &worker).await
                         }
-                        ConnectionMode::Grpc => WorkerMonitor::fetch_grpc_load(&worker).await,
-                        // ZMQ load monitoring lands with the backend client; a
-                        // ZMQ worker reports no load until then (never via the
-                        // gRPC load path).
-                        ConnectionMode::Zmq => None,
+                        ConnectionMode::Grpc | ConnectionMode::Zmq => {
+                            WorkerMonitor::fetch_grpc_load(&worker).await
+                        }
                     };
                     (worker.url().to_string(), response)
                 }
