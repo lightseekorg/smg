@@ -409,7 +409,7 @@ impl StreamingResponseAccumulator {
                     .and_then(|d| d.reasoning_tokens),
                 prompt_tokens_details: None,
             };
-            ResponsesUsage::Classic(usage_info)
+            ResponsesUsage::Modern(usage_info.to_response_usage())
         });
 
         ResponsesResponse::builder(&self.response_id, &self.model)
@@ -1086,6 +1086,23 @@ impl ChatResponseAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_accumulator_serializes_responses_api_usage() {
+        let request = ResponsesRequest::default();
+        let mut accumulator = StreamingResponseAccumulator::new(&request);
+        accumulator.usage = Some(Usage::from_counts(12, 7));
+
+        let wire = serde_json::to_value(accumulator.finalize())
+            .expect("streaming response should serialize");
+        let usage = wire.get("usage").expect("usage should be present");
+
+        assert_eq!(usage.get("input_tokens"), Some(&serde_json::json!(12)));
+        assert_eq!(usage.get("output_tokens"), Some(&serde_json::json!(7)));
+        assert_eq!(usage.get("total_tokens"), Some(&serde_json::json!(19)));
+        assert!(usage.get("prompt_tokens").is_none());
+        assert!(usage.get("completion_tokens").is_none());
+    }
 
     #[test]
     fn streaming_accumulator_populates_call_id_from_tool_delta_id() {
