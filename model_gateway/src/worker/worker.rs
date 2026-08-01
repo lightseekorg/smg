@@ -2,7 +2,7 @@ use std::{
     any::Any,
     fmt,
     sync::{
-        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -118,6 +118,35 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
         }
     }
     Ok(())
+}
+
+/// Bind the SMG-side ZMQ sockets and complete the handshake with the engine.
+/// Shared by the lazy client accessor and the background handshake driver so
+/// both go through the exact same connect path. `base_url` is the `ipc://` URL;
+/// `model_id` is the config-resolved served model (EngineCore reports none).
+async fn connect_zmq_backend(
+    base_url: String,
+    model_id: String,
+) -> WorkerResult<Arc<BackendClient>> {
+    let (handshake, input, output) = zmq_socket_addresses(&base_url)?;
+    ensure_ipc_socket_dir(&base_url).await?;
+    tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
+    match ZmqEngineClient::connect(
+        &handshake,
+        &input,
+        &output,
+        1,
+        model_id,
+        ZMQ_CONNECT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(client) => Ok(Arc::new(BackendClient::Zmq(client))),
+        Err(e) => Err(WorkerError::ConnectionFailed {
+            url: base_url,
+            reason: format!("Failed to connect ZMQ engine: {e}"),
+        }),
+    }
 }
 
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
@@ -1045,9 +1074,13 @@ pub struct BasicWorker {
     pub metadata: WorkerMetadata,
     pub runtime: ArcSwap<WorkerRuntime>,
     pub circuit_breaker: ArcSwap<CircuitBreaker>,
-    /// Lazily initialized gRPC client for gRPC workers.
+    /// Lazily initialized backend client (gRPC or ZMQ) for local workers.
     /// Uses OnceCell for lock-free reads after initialization.
     pub backend_client: Arc<OnceCell<Arc<BackendClient>>>,
+    /// Guards the one-shot background ZMQ handshake driver so the health probe
+    /// never cancels a long (model-load) handshake. Self-clears on failure to
+    /// allow a retry. Unused for HTTP/gRPC.
+    pub zmq_connect_started: Arc<AtomicBool>,
     /// Runtime-mutable models override (for lazy discovery).
     /// When not `Wildcard`, overrides metadata.models for routing decisions.
     /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
@@ -1065,6 +1098,7 @@ impl Clone for BasicWorker {
             runtime: ArcSwap::from(self.runtime.load_full()),
             circuit_breaker: ArcSwap::from(self.circuit_breaker.load_full()),
             backend_client: Arc::clone(&self.backend_client),
+            zmq_connect_started: Arc::clone(&self.zmq_connect_started),
             models_override: Arc::clone(&self.models_override),
             http_client: self.http_client.clone(),
             resilience: self.resilience.clone(),
@@ -1354,38 +1388,14 @@ impl Worker for BasicWorker {
             ConnectionMode::Zmq => {
                 // SMG binds the handshake + data-plane sockets; the
                 // operator-launched engine dials them. The first acquisition
-                // completes the handshake (a liveness signal in itself).
+                // completes the handshake (a liveness signal in itself). The
+                // model id comes from config — EngineCore reports none on the
+                // wire (see create_worker).
+                let base_url = self.metadata.base_url().to_string();
+                let model_id = self.metadata.model_id().to_string();
                 let client = self
                     .backend_client
-                    .get_or_try_init(|| async {
-                        let (handshake, input, output) =
-                            zmq_socket_addresses(self.metadata.base_url())?;
-                        ensure_ipc_socket_dir(self.metadata.base_url()).await?;
-                        // EngineCore does not report a served model name over the
-                        // wire, so the client reports the model resolved from
-                        // config at worker creation (see create_worker).
-                        let model_id = self.metadata.model_id().to_string();
-                        tracing::info!(
-                            "Lazily binding ZMQ client for worker {} (handshake={handshake})",
-                            self.metadata.spec.url
-                        );
-                        match ZmqEngineClient::connect(
-                            &handshake,
-                            &input,
-                            &output,
-                            1,
-                            model_id,
-                            ZMQ_CONNECT_TIMEOUT,
-                        )
-                        .await
-                        {
-                            Ok(client) => Ok(Arc::new(BackendClient::Zmq(client))),
-                            Err(e) => Err(WorkerError::ConnectionFailed {
-                                url: self.metadata.spec.url.clone(),
-                                reason: format!("Failed to connect ZMQ engine: {e}"),
-                            }),
-                        }
-                    })
+                    .get_or_try_init(|| connect_zmq_backend(base_url, model_id))
                     .await?;
                 Ok(Some(Arc::clone(client)))
             }
@@ -1437,32 +1447,38 @@ impl Worker for BasicWorker {
     }
 
     async fn zmq_health_check(&self) -> WorkerResult<bool> {
-        // Acquiring the backend client completes the handshake on the first call
-        // (an implicit liveness check). Bound that by the configured health
-        // timeout — not the much longer handshake window (ZMQ_CONNECT_TIMEOUT) —
-        // so a worker whose engine has not dialed in yet reports not-ready and
-        // frees the probe slot; the next probe retries. Thereafter liveness is
-        // local: the connector marks the client closed on ENGINE_CORE_DEAD or a
-        // transport failure. There is no health RPC on the raw ZMQ wire.
-        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
-        let acquired = match time::timeout(timeout, self.get_backend_client()).await {
-            Ok(result) => result?,
-            Err(_) => {
-                tracing::debug!(
-                    "ZMQ handshake for {} not complete within health timeout",
-                    self.metadata.spec.url
-                );
-                return Ok(false);
-            }
-        };
-        let Some(backend_client) = acquired else {
-            tracing::error!(
-                "Worker {} has connection mode ZMQ but no ZMQ client",
-                self.metadata.spec.url
-            );
-            return Ok(false);
-        };
-        Ok(backend_client.is_alive())
+        // Never drive (or cancel) the handshake from the probe: model load can
+        // take far longer than the health timeout, and cancelling it mid-flight
+        // would rebind the sockets on every probe and never connect. Peek the
+        // cached client instead — if it isn't there yet, kick the handshake off
+        // once in the background and report not-ready until it lands. Thereafter
+        // liveness is local (the connector marks the client closed on
+        // ENGINE_CORE_DEAD or a transport failure); there is no health RPC on
+        // the raw ZMQ wire.
+        if let Some(backend_client) = self.backend_client.get() {
+            return Ok(backend_client.is_alive());
+        }
+        if !self.zmq_connect_started.swap(true, Ordering::SeqCst) {
+            let cell = Arc::clone(&self.backend_client);
+            let started = Arc::clone(&self.zmq_connect_started);
+            let base_url = self.metadata.base_url().to_string();
+            let model_id = self.metadata.model_id().to_string();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "detached one-shot handshake driver; the OnceCell dedupes with the request path and the guard self-clears on failure to allow a retry"
+            )]
+            // Detached: dropping the handle at scope end leaves the task running.
+            let _handle = tokio::spawn(async move {
+                if cell
+                    .get_or_try_init(|| connect_zmq_backend(base_url, model_id))
+                    .await
+                    .is_err()
+                {
+                    started.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+        Ok(false)
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {

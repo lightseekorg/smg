@@ -233,7 +233,7 @@ impl BasicWorkerBuilder {
 
     /// Build the BasicWorker instance
     pub fn build(mut self) -> BasicWorker {
-        use std::sync::Arc;
+        use std::sync::{atomic::AtomicBool, Arc};
 
         use tokio::sync::OnceCell;
 
@@ -303,6 +303,7 @@ impl BasicWorkerBuilder {
             )),
             metadata,
             backend_client,
+            zmq_connect_started: Arc::new(AtomicBool::new(false)),
             models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
             http_client,
             resilience,
