@@ -424,16 +424,15 @@ mod tests {
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
-    async fn connect() -> (EngineCoreClient, MockEngine) {
+    /// The returned [`IpcNamespace`] owns the socket tempdir; hold it for the
+    /// test duration so the ipc files outlive the client and are cleaned up.
+    async fn connect() -> (EngineCoreClient, MockEngine, IpcNamespace) {
         let ns = IpcNamespace::new().unwrap();
         let (handshake, input, output) = (
             ns.handshake_endpoint(),
             ns.input_endpoint(),
             ns.output_endpoint(),
         );
-        // Leak the namespace so its tempdir (and the ipc socket files) outlive
-        // the test body.
-        std::mem::forget(ns);
         let (transport, engine) = tokio::join!(
             connect_handshake(
                 &handshake,
@@ -449,7 +448,11 @@ mod tests {
                 default_ready_response()
             ),
         );
-        (EngineCoreClient::new(transport.unwrap()), engine.unwrap())
+        (
+            EngineCoreClient::new(transport.unwrap()),
+            engine.unwrap(),
+            ns,
+        )
     }
 
     fn batch(engine_index: u32, output: EngineCoreOutput) -> Vec<bytes::Bytes> {
@@ -469,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_streams_tokens_until_finish() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
 
         let request = EngineCoreRequest {
             request_id: "req-1".to_string(),
@@ -520,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_stats_surface_as_load_signal() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let mut stream = client
             .submit(EngineCoreRequest {
                 request_id: "r".into(),
@@ -560,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_stream_sends_abort() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let stream = client
             .submit(EngineCoreRequest {
                 request_id: "req-abort".into(),
@@ -582,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_dead_fails_inflight_requests() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let mut stream = client
             .submit(EngineCoreRequest {
                 request_id: "r".into(),

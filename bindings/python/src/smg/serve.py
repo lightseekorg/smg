@@ -26,7 +26,10 @@ logger = logging.getLogger("smg.serve")
 # Directory for the per-worker ipc:// sockets when connection_mode == "zmq".
 # SMG derives its data-plane socket paths and the tcp handshake port from the
 # ipc:// worker URL, so the engine and the router only need to agree on this URL.
-_ZMQ_SOCKET_DIR = "/tmp/smg-zmq"
+# Per-user directory for the ZMQ ipc:// sockets. Scoped to the current uid and
+# created 0700 (single-owner) so a shared /tmp cannot leak another user's
+# sockets into this router. Override with SMG_ZMQ_SOCKET_DIR.
+_ZMQ_SOCKET_DIR = os.environ.get("SMG_ZMQ_SOCKET_DIR", f"/tmp/smg-zmq-{os.getuid()}")
 
 
 def _zmq_ipc_url(port: int) -> str:
@@ -47,6 +50,27 @@ def _zmq_handshake_port(ipc_url: str) -> int:
         h ^= b
         h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return 20000 + (h % 10000)
+
+
+def _reject_handshake_port_collisions(ports: list[int]) -> None:
+    """Fail before launch if two workers derive the same ZMQ handshake port.
+
+    The handshake port is an FNV-1a hash of the ipc:// path folded into a
+    10000-wide band, so distinct workers can collide. Two engines dialing the
+    same tcp port would cross their handshakes, so reject it up front with a
+    message naming the colliding URLs instead of failing opaquely at bind time.
+    """
+    seen: dict[int, str] = {}
+    for port in ports:
+        ipc_url = _zmq_ipc_url(port)
+        handshake_port = _zmq_handshake_port(ipc_url)
+        if handshake_port in seen:
+            raise ValueError(
+                f"ZMQ handshake port collision on {handshake_port}: "
+                f"{seen[handshake_port]} and {ipc_url} derive the same port. "
+                "Adjust --worker-base-port so the worker ipc paths differ."
+            )
+        seen[handshake_port] = ipc_url
 
 
 # ---------------------------------------------------------------------------
@@ -124,18 +148,23 @@ class WorkerLauncher(ABC):
     def _filter_backend_args(self, backend_args: list[str], filter_args: list[str]) -> list[str]:
         """Filter out args from backend_args that are already set by the launcher.
 
-        Handles both ``--key value`` and ``--key=value`` syntax.
+        Handles ``--key=value``, ``--key value``, and boolean flags. A filtered
+        key in ``--key value`` form only consumes the following token when it
+        actually looks like a value (not another ``-``-prefixed flag), so a
+        filtered boolean flag does not swallow the argument after it.
         """
         filtered = []
         skip_next = False
-        for arg in backend_args:
+        for i, arg in enumerate(backend_args):
             if skip_next:
                 skip_next = False
                 continue
             key = arg.split("=", 1)[0]
             if key in filter_args:
                 if "=" not in arg:
-                    skip_next = True  # value is the next token
+                    nxt = backend_args[i + 1] if i + 1 < len(backend_args) else None
+                    if nxt is not None and not nxt.startswith("-"):
+                        skip_next = True  # value is the next token
                 continue
             filtered.append(arg)
         return filtered
@@ -542,7 +571,10 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         "--connection-mode",
         default="grpc",
         choices=["grpc", "http", "zmq"],
-        help="Connection mode for workers (default: grpc). Note: trtllm only support grpc",
+        help=(
+            "Connection mode for workers (default: grpc). Note: trtllm only "
+            "supports grpc, and zmq is only supported for the vllm backend"
+        ),
     )
     # Router host/port - may be overridden by backend (e.g. sglang)
     group.add_argument(
@@ -684,6 +716,8 @@ class ServeOrchestrator:
 
     def _launch_workers(self) -> None:
         ports = _find_available_ports(self.args.worker_base_port, self.args.data_parallel_size)
+        if getattr(self.args, "connection_mode", "grpc") == "zmq":
+            _reject_handshake_port_collisions(ports)
         host = self.args.worker_host
         for dp_rank, port in enumerate(ports):
             env = self.launcher.gpu_env(self.args, dp_rank)

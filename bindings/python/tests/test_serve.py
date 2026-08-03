@@ -26,6 +26,9 @@ from smg.serve import (
     _http_health_check,
     _import_backend_args,
     _is_port_available,
+    _reject_handshake_port_collisions,
+    _zmq_handshake_port,
+    _zmq_ipc_url,
     add_serve_args,
     parse_serve_args,
 )
@@ -618,6 +621,58 @@ class TestFilterBackendArgs:
         launcher = SglangWorkerLauncher()
         backend_args = ["--foo", "bar"]
         assert launcher._filter_backend_args(backend_args, []) == ["--foo", "bar"]
+
+    def test_filtered_boolean_flag_does_not_swallow_next_flag(self):
+        # A filtered boolean flag has no value; the following flag must survive.
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--trust-remote-code", "--tp-size", "2"]
+        result = launcher._filter_backend_args(backend_args, ["--trust-remote-code"])
+        assert result == ["--tp-size", "2"]
+
+    def test_filtered_boolean_flag_at_end_of_args(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--tp-size", "2", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--trust-remote-code"])
+        assert result == ["--tp-size", "2"]
+
+    def test_filtered_key_value_keeps_following_flag(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--model-path", "/tmp/m", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--model-path"])
+        assert result == ["--trust-remote-code"]
+
+
+class TestZmqHandshakePort:
+    """Handshake-port derivation must mirror derive_handshake_port in worker.rs."""
+
+    def test_matches_pinned_rust_vectors(self):
+        # These MUST equal derive_handshake_port() in worker.rs for the same path.
+        assert _zmq_handshake_port("ipc:///tmp/smg-zmq/ts0.ipc") == 25152
+        assert _zmq_handshake_port("ipc:///tmp/smg-zmq/ts1.ipc") == 22735
+        assert _zmq_handshake_port("ts0.ipc") == 23912
+
+    def test_always_in_band(self):
+        for port in range(30000, 30050):
+            hp = _zmq_handshake_port(_zmq_ipc_url(port))
+            assert 20000 <= hp <= 29999
+
+    def test_reject_collisions_passes_for_distinct_ports(self):
+        # A normal contiguous port range must not raise.
+        _reject_handshake_port_collisions([30000, 30001, 30002])
+
+    def test_reject_collisions_raises_and_names_urls(self):
+        # Two ports whose ipc paths derive the same handshake port must be
+        # rejected before launch, naming both colliding URLs.
+        base = 30000
+        collider = next(
+            p
+            for p in range(base + 1, base + 20000)
+            if _zmq_handshake_port(_zmq_ipc_url(p)) == _zmq_handshake_port(_zmq_ipc_url(base))
+        )
+        with pytest.raises(ValueError) as exc:
+            _reject_handshake_port_collisions([base, collider])
+        assert _zmq_ipc_url(base) in str(exc.value)
+        assert _zmq_ipc_url(collider) in str(exc.value)
 
 
 class TestSglangWorkerLauncher:

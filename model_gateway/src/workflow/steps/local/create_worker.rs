@@ -147,18 +147,7 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                 .dp_info
                 .as_ref()
                 .ok_or_else(|| WorkflowError::ContextValueNotFound("dp_info".to_string()))?;
-            // A ZMQ worker binds a single EngineCore connection (engine_count=1);
-            // DP>1 needs the coordinator + wave protocol (not yet implemented), so
-            // fail loudly rather than silently under-connecting.
-            if *connection_mode == ConnectionMode::Zmq && dp_info.dp_size > 1 {
-                return Err(WorkflowError::StepFailed {
-                    step_id: StepId::new("create_worker"),
-                    message: format!(
-                        "ZMQ worker {} cannot run data-parallel (dp_size={}); DP>1 over ZMQ is not yet supported",
-                        config.url, dp_info.dp_size
-                    ),
-                });
-            }
+            validate_zmq_dp(*connection_mode, dp_info.dp_size, &config.url)?;
             (0..dp_info.dp_size)
                 .map(|r| Some((r, dp_info.dp_size)))
                 .collect()
@@ -376,6 +365,29 @@ fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
     }
 }
 
+/// Reject a data-parallel worker the ZMQ path cannot serve.
+///
+/// A ZMQ worker binds a single EngineCore connection (engine_count=1); DP>1
+/// needs the coordinator + wave protocol (not yet implemented), so fail loudly
+/// rather than silently under-connecting. Only ZMQ with `dp_size > 1` is
+/// rejected; gRPC/HTTP data parallelism and single-engine ZMQ are fine.
+fn validate_zmq_dp(
+    connection_mode: ConnectionMode,
+    dp_size: usize,
+    url: &str,
+) -> Result<(), WorkflowError> {
+    if connection_mode == ConnectionMode::Zmq && dp_size > 1 {
+        return Err(WorkflowError::StepFailed {
+            step_id: StepId::new("create_worker"),
+            message: format!(
+                "ZMQ worker {url} cannot run data-parallel (dp_size={dp_size}); \
+                 DP>1 over ZMQ is not yet supported"
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +491,33 @@ mod tests {
         let card = build_model_card("GLM-5.2", &spec, &HashMap::new(), &aliases);
 
         assert!(card.aliases.is_empty());
+    }
+
+    #[test]
+    fn zmq_data_parallel_is_rejected_as_a_create_worker_failure() {
+        // dp_size > 1 over ZMQ is the only rejected combination, and it must
+        // surface as a create_worker StepFailed.
+        let err = validate_zmq_dp(ConnectionMode::Zmq, 2, "ipc:///tmp/smg-zmq/ts0.ipc")
+            .expect_err("dp_size > 1 over ZMQ must be rejected");
+        match err {
+            WorkflowError::StepFailed { step_id, message } => {
+                assert_eq!(step_id, StepId::new("create_worker"));
+                assert!(message.contains("dp_size=2"), "message was: {message}");
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_engine_zmq_and_data_parallel_grpc_are_accepted() {
+        // Single-engine ZMQ is the supported ZMQ shape; gRPC/HTTP data
+        // parallelism is untouched by the ZMQ guard.
+        validate_zmq_dp(ConnectionMode::Zmq, 1, "ipc:///tmp/smg-zmq/ts0.ipc")
+            .expect("single-engine ZMQ must be accepted");
+        validate_zmq_dp(ConnectionMode::Grpc, 4, "grpc://worker:8080")
+            .expect("gRPC data parallelism must be accepted");
+        validate_zmq_dp(ConnectionMode::Http, 4, "http://worker:8080")
+            .expect("HTTP data parallelism must be accepted");
     }
 
     #[test]
