@@ -54,6 +54,7 @@ class RouterArgs:
     prefill_policy: str | None = None  # Specific policy for prefill nodes in PD mode
     decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
+    worker_startup_delay: int = 0
     worker_startup_check_interval: int = 30
     load_monitor_interval: int = 10
     cache_threshold: float = 0.3
@@ -553,6 +554,12 @@ class RouterArgs:
                 "Timeout in seconds for worker startup and registration (default: 1800 / 30 minutes)."
                 " Large models can take significant time to load into GPU memory."
             ),
+        )
+        pd_group.add_argument(
+            f"--{prefix}worker-startup-delay",
+            type=int,
+            default=RouterArgs.worker_startup_delay,
+            help="Grace period in seconds before the first worker startup check (default: 0)",
         )
         pd_group.add_argument(
             f"--{prefix}worker-startup-check-interval",

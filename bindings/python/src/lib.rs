@@ -378,6 +378,7 @@ struct Router {
     worker_urls: Vec<String>,
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
+    worker_startup_delay: u64,
     worker_startup_check_interval: u64,
     load_monitor_interval: u64,
     cache_threshold: f32,
@@ -769,6 +770,7 @@ impl Router {
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
+            .worker_startup_delay_secs(self.worker_startup_delay)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
@@ -867,6 +869,7 @@ impl Router {
         host = String::from("0.0.0.0"),
         port = 3001,
         worker_startup_timeout_secs = 600,
+        worker_startup_delay = 0,
         worker_startup_check_interval = 30,
         load_monitor_interval = 10,
         cache_threshold = 0.3,
@@ -995,6 +998,7 @@ impl Router {
         host: String,
         port: u16,
         worker_startup_timeout_secs: u64,
+        worker_startup_delay: u64,
         worker_startup_check_interval: u64,
         load_monitor_interval: u64,
         cache_threshold: f32,
@@ -1139,6 +1143,7 @@ impl Router {
             worker_urls,
             policy,
             worker_startup_timeout_secs,
+            worker_startup_delay,
             worker_startup_check_interval,
             load_monitor_interval,
             cache_threshold,

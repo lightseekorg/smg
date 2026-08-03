@@ -206,6 +206,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn worker_startup_delay_secs(mut self, delay: u64) -> Self {
+        self.config.worker_startup_delay_secs = delay;
+        self
+    }
+
     pub fn worker_startup_check_interval_secs(mut self, interval: u64) -> Self {
         self.config.worker_startup_check_interval_secs = interval;
         self
