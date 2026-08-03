@@ -14,7 +14,7 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -146,7 +146,7 @@ pub struct WorkerRegistry {
     /// Receiver drained by the manager's health loop. Taken once via
     /// [`Self::take_connect_signal_receiver`]; `None` thereafter (and when
     /// no manager runs, e.g. health checks globally disabled).
-    connect_signal_rx: Mutex<Option<mpsc::UnboundedReceiver<WorkerConnected>>>,
+    connect_signal_rx: parking_lot::Mutex<Option<mpsc::UnboundedReceiver<WorkerConnected>>>,
 }
 
 impl WorkerRegistry {
@@ -180,7 +180,7 @@ impl WorkerRegistry {
             // counts. ~100 B per slot; fixed cost ~100 KB.
             event_tx: broadcast::Sender::new(1024),
             connect_signal_tx,
-            connect_signal_rx: Mutex::new(Some(connect_signal_rx)),
+            connect_signal_rx: parking_lot::Mutex::new(Some(connect_signal_rx)),
         }
     }
 
@@ -212,10 +212,17 @@ impl WorkerRegistry {
     /// manager takes it at startup); `None` on any later call. Holds the
     /// receiver lock briefly.
     pub fn take_connect_signal_receiver(&self) -> Option<mpsc::UnboundedReceiver<WorkerConnected>> {
-        self.connect_signal_rx
-            .lock()
-            .expect("connect_signal_rx mutex poisoned")
-            .take()
+        self.connect_signal_rx.lock().take()
+    }
+
+    /// True if any registered worker is Pending and depends on the connect
+    /// signal (rather than health polling) to reach Ready. Such a worker is
+    /// promoted only by the manager consuming [`WorkerConnected`], so the
+    /// manager must run even when health checks are otherwise disabled.
+    pub fn has_workers_awaiting_connect_signal(&self) -> bool {
+        self.get_by_connection(ConnectionMode::Zmq)
+            .iter()
+            .any(|w| w.status() == WorkerStatus::Pending)
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -1915,6 +1922,42 @@ mod tests {
         let got = rx.recv().await.expect("a delivered signal");
         assert_eq!(got.url, "ipc:///tmp/w.ipc");
         assert_eq!(got.revision, 7);
+    }
+
+    #[test]
+    fn has_workers_awaiting_connect_signal_tracks_pending_zmq_workers() {
+        let registry = WorkerRegistry::new();
+        assert!(
+            !registry.has_workers_awaiting_connect_signal(),
+            "empty registry awaits nothing"
+        );
+
+        // An HTTP worker never waits on the connect signal.
+        let http: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:1")
+                .connection_mode(ConnectionMode::Http)
+                .build(),
+        );
+        registry.register(http).unwrap();
+        assert!(!registry.has_workers_awaiting_connect_signal());
+
+        // A Pending ZMQ worker is promoted only by the connect signal.
+        let zmq: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("ipc:///tmp/w.ipc")
+                .connection_mode(ConnectionMode::Zmq)
+                .build(),
+        );
+        assert_eq!(zmq.status(), WorkerStatus::Pending);
+        let zmq_url = zmq.url().to_string();
+        registry.register(zmq).unwrap();
+        assert!(registry.has_workers_awaiting_connect_signal());
+
+        // Once promoted to Ready it no longer awaits the signal.
+        registry
+            .get_by_url(&zmq_url)
+            .unwrap()
+            .set_status(WorkerStatus::Ready);
+        assert!(!registry.has_workers_awaiting_connect_signal());
     }
 
     #[test]

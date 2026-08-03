@@ -38,13 +38,18 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for ActivateWorke
             .get_actual_workers()
             .ok_or_else(|| WorkflowError::ContextValueNotFound("workers".to_string()))?;
 
+        let mut activated = 0;
         for worker in workers {
             if let Some(status) = activation_status(worker) {
                 worker.set_status(status);
+                activated += 1;
             }
         }
 
-        info!("Activated {} worker(s)", workers.len());
+        info!(
+            "Activated {activated} of {} worker(s) (others left as-is: already ready or awaiting connect signal)",
+            workers.len()
+        );
 
         Ok(StepResult::Success)
     }

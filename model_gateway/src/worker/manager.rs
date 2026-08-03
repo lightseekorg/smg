@@ -136,6 +136,37 @@ pub struct WorkerManagerConfig {
 }
 
 impl WorkerManager {
+    /// Start the manager only if the background loop has work to do.
+    ///
+    /// The loop serves two roles: health polling and consuming the connect
+    /// signal that promotes workers waiting on a backend handshake (the
+    /// manager is that signal's sole consumer). When health checks are
+    /// globally disabled AND no worker is awaiting the connect signal, the
+    /// loop would idle with nothing to service, so it is skipped and `None` is
+    /// returned. Whenever a worker still depends on the connect signal for
+    /// promotion, the loop starts regardless of the health-check flag — health
+    /// polling continues to honor each worker's own disable flag.
+    pub fn maybe_start(
+        registry: Arc<WorkerRegistry>,
+        config: WorkerManagerConfig,
+        job_queue: Option<Arc<JobQueue>>,
+        health_checks_enabled: bool,
+    ) -> Option<Self> {
+        if !health_checks_enabled && !registry.has_workers_awaiting_connect_signal() {
+            info!(
+                "Global health checks disabled and no workers await the connect signal; \
+                 skipping WorkerManager"
+            );
+            return None;
+        }
+        let default_check_interval_secs = config.default_check_interval_secs;
+        let manager = Self::start(registry, config, job_queue);
+        debug!(
+            "Started WorkerManager loop with {default_check_interval_secs}s default interval"
+        );
+        Some(manager)
+    }
+
     /// Create and start the WorkerManager background loop.
     ///
     /// Spawns a single task that:
@@ -1096,7 +1127,9 @@ mod tests {
     use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, Worker, WorkerError, WorkerRegistry, WorkerType};
+    use crate::worker::{
+        BasicWorkerBuilder, ConnectionMode, Worker, WorkerError, WorkerRegistry, WorkerType,
+    };
 
     fn make_worker(url: &str, success_threshold: u32, failure_threshold: u32) -> Arc<dyn Worker> {
         Arc::new(
@@ -1112,6 +1145,77 @@ mod tests {
                 })
                 .build(),
         )
+    }
+
+    fn make_zmq_worker(url: &str) -> Arc<dyn Worker> {
+        Arc::new(
+            BasicWorkerBuilder::new(url)
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Zmq)
+                .build(),
+        )
+    }
+
+    #[tokio::test]
+    async fn maybe_start_skips_when_health_disabled_and_no_pending_zmq() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker = make_worker("http://w:1", 2, 3);
+        worker.set_status(WorkerStatus::Ready);
+        registry.register(worker).unwrap();
+
+        let manager = WorkerManager::maybe_start(
+            registry,
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+            false,
+        );
+        assert!(
+            manager.is_none(),
+            "no health polling and no connect-signal consumers needed"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_start_runs_when_health_disabled_but_zmq_pending() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let zmq = make_zmq_worker("ipc:///tmp/w.ipc");
+        assert_eq!(zmq.status(), WorkerStatus::Pending);
+        registry.register(zmq).unwrap();
+
+        let mut manager = WorkerManager::maybe_start(
+            registry,
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+            false,
+        )
+        .expect("manager must run to consume the connect signal for the pending ZMQ worker");
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn maybe_start_runs_when_health_enabled() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker = make_worker("http://w:1", 2, 3);
+        worker.set_status(WorkerStatus::Ready);
+        registry.register(worker).unwrap();
+
+        let mut manager = WorkerManager::maybe_start(
+            registry,
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+            true,
+        )
+        .expect("manager must run when health checks are enabled");
+        manager.shutdown().await;
     }
 
     fn make_dp_worker(base: &str, rank: usize, size: usize) -> Arc<dyn Worker> {

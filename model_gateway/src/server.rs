@@ -1227,25 +1227,18 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // WorkerManager owns the background health check loop. Its handle must
     // outlive the server to keep the task alive — bind it here so its Drop
-    // (which aborts the task) runs at server shutdown.
-    let _worker_manager = if config.router_config.health_check.disable_health_check {
-        info!("Global health checks disabled via CLI/config; skipping WorkerManager");
-        None
-    } else {
-        let manager = WorkerManager::start(
-            app_context.worker_registry.clone(),
-            WorkerManagerConfig {
-                default_check_interval_secs: config.router_config.health_check.check_interval_secs,
-                remove_unhealthy: config.router_config.health_check.remove_unhealthy_workers,
-            },
-            app_context.worker_job_queue.get().cloned(),
-        );
-        debug!(
-            "Started WorkerManager health check loop with {}s default interval",
-            config.router_config.health_check.check_interval_secs
-        );
-        Some(manager)
-    };
+    // (which aborts the task) runs at server shutdown. `maybe_start` decides
+    // whether the loop has any work to do (health polling and/or promoting
+    // workers that wait on the connect signal) and skips it otherwise.
+    let _worker_manager = WorkerManager::maybe_start(
+        app_context.worker_registry.clone(),
+        WorkerManagerConfig {
+            default_check_interval_secs: config.router_config.health_check.check_interval_secs,
+            remove_unhealthy: config.router_config.health_check.remove_unhealthy_workers,
+        },
+        app_context.worker_job_queue.get().cloned(),
+        !config.router_config.health_check.disable_health_check,
+    );
 
     // WorkerMonitor subscribes to registry events. Starting its event
     // loop here (after the synchronous worker population in
