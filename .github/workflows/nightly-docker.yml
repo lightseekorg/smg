@@ -40,12 +40,14 @@ jobs:
 
       - name: Compute image tags
         id: tags
+        env:
+          OWNER: ${{ github.repository_owner }}
         run: |
           SUFFIX="$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
           {
             echo "list<<EOF"
-            echo "ghcr.io/lightseekorg/smg:nightly"
-            echo "ghcr.io/lightseekorg/smg:nightly-${SUFFIX}"
+            echo "ghcr.io/${OWNER}/smg:nightly"
+            echo "ghcr.io/${OWNER}/smg:nightly-${SUFFIX}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

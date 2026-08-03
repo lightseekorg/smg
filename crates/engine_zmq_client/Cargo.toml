@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Engine-agnostic ZMQ transport + per-engine protocol modules for same-host SMG backend connections"
 license = "Apache-2.0"
-repository = "https://github.com/lightseekorg/smg"
+repository = "https://github.com/smg-project/smg"
 
 # The vLLM EngineCore protocol module is a clean-room port of vLLM's Apache-2.0
 # `vllm-engine-core-client` crate (vllm-project/vllm, rust/src/engine-core-client).
