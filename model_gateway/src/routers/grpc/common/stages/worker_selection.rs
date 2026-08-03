@@ -658,3 +658,120 @@ fn hex_encode(bytes: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use openai_protocol::worker::HealthCheckConfig;
+
+    use super::*;
+    use crate::{
+        config::types::PolicyConfig,
+        policies::PolicyFactory,
+        worker::{BasicWorkerBuilder, ModelCard},
+    };
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
+
+    fn register_pd_workers(
+        registry: &WorkerRegistry,
+        model_id: &str,
+        n: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut prefill_urls = Vec::with_capacity(n);
+        let mut decode_urls = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let url = format!("grpc://127.0.0.1:{}", 8000 + i);
+            prefill_urls.push(url.clone());
+            registry
+                .register(Arc::new(
+                    BasicWorkerBuilder::new(url)
+                        .model(ModelCard::new(model_id))
+                        .worker_type(WorkerType::Prefill)
+                        .connection_mode(ConnectionMode::Grpc)
+                        .health_config(no_health_check())
+                        .build(),
+                ))
+                .unwrap();
+        }
+
+        for i in 0..n {
+            let url = format!("grpc://127.0.0.1:{}", 8100 + i);
+            decode_urls.push(url.clone());
+            registry
+                .register(Arc::new(
+                    BasicWorkerBuilder::new(url)
+                        .model(ModelCard::new(model_id))
+                        .worker_type(WorkerType::Decode)
+                        .connection_mode(ConnectionMode::Grpc)
+                        .health_config(no_health_check())
+                        .build(),
+                ))
+                .unwrap();
+        }
+
+        (prefill_urls, decode_urls)
+    }
+
+    #[test]
+    fn select_pd_pair_round_robin_covers_all_workers_with_independent_policies() {
+        let model_id = "test-model";
+        let worker_registry = Arc::new(WorkerRegistry::new());
+        let (prefill_urls, decode_urls) = register_pd_workers(&worker_registry, model_id, 4);
+
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
+        // Mirror production PD startup: create two independent RoundRobin instances.
+        policy_registry.set_prefill_policy(PolicyFactory::create_from_config(
+            &PolicyConfig::RoundRobin,
+        ));
+        policy_registry
+            .set_decode_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
+
+        let prefill_policy = policy_registry.get_prefill_policy();
+        let decode_policy = policy_registry.get_decode_policy();
+        assert_eq!(prefill_policy.name(), "round_robin");
+        assert_eq!(decode_policy.name(), "round_robin");
+        assert!(
+            !Arc::ptr_eq(&prefill_policy, &decode_policy),
+            "prefill/decode must not share one RoundRobinPolicy counter"
+        );
+
+        let stage = WorkerSelectionStage::new(
+            worker_registry,
+            policy_registry,
+            WorkerSelectionMode::PrefillDecode,
+        );
+
+        let mut prefill_hits: HashMap<String, usize> = HashMap::new();
+        let mut decode_hits: HashMap<String, usize> = HashMap::new();
+        for _ in 0..40 {
+            let (prefill, decode, _) = stage
+                .select_pd_pair(model_id, None, None, None)
+                .expect("select_pd_pair should return a pair");
+            *prefill_hits.entry(prefill.url().to_string()).or_default() += 1;
+            *decode_hits.entry(decode.url().to_string()).or_default() += 1;
+        }
+
+        for url in &prefill_urls {
+            assert_eq!(
+                prefill_hits.get(url).copied().unwrap_or(0),
+                10,
+                "prefill worker {url} should receive 10 of 40 selections"
+            );
+        }
+        for url in &decode_urls {
+            assert_eq!(
+                decode_hits.get(url).copied().unwrap_or(0),
+                10,
+                "decode worker {url} should receive 10 of 40 selections"
+            );
+        }
+    }
+}
