@@ -21,7 +21,7 @@ use openai_protocol::worker::{
     WorkerLoadsResult, WorkerStatus,
 };
 use tokio::{
-    sync::{broadcast, Notify},
+    sync::{broadcast, mpsc, Notify},
     task::JoinHandle,
 };
 use tracing::{debug, error, info, warn};
@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     worker::{
-        event::WorkerEvent,
+        event::{WorkerConnected, WorkerEvent},
         metrics_aggregator::{self, MetricPack},
         monitor::WorkerMonitor,
         registry::{WorkerDescriptor, WorkerId},
@@ -172,6 +172,11 @@ impl WorkerManager {
         let mut next_check: HashMap<WorkerId, tokio::time::Instant> = HashMap::new();
         reconcile_from_registry(&registry, &mut next_check, &config);
 
+        // Drain the connect-readiness signal (workers wake us the instant
+        // their backend handshake lands). Taken once — a second manager on
+        // the same registry would simply run poll-only.
+        let connect_rx = registry.take_connect_signal_receiver();
+
         let job_queue = if config.remove_unhealthy {
             job_queue
         } else {
@@ -186,6 +191,7 @@ impl WorkerManager {
             run_health_loop(
                 registry,
                 events_rx,
+                connect_rx,
                 next_check,
                 config,
                 job_queue,
@@ -256,6 +262,7 @@ type ProbeFutures = FuturesUnordered<Pin<Box<dyn Future<Output = ProbeCompletion
 async fn run_health_loop(
     registry: Arc<WorkerRegistry>,
     mut events_rx: broadcast::Receiver<WorkerEvent>,
+    mut connect_rx: Option<mpsc::UnboundedReceiver<WorkerConnected>>,
     mut next_check: HashMap<WorkerId, tokio::time::Instant>,
     config: WorkerManagerConfig,
     job_queue: Option<Arc<JobQueue>>,
@@ -305,6 +312,15 @@ async fn run_health_loop(
                 }
             }
             () = tokio::time::sleep_until(sleep_until) => {}
+            signal = recv_connect_signal(&mut connect_rx) => {
+                match signal {
+                    Some(connected) => apply_connect_signal(&registry, connected),
+                    // Every sender lives on the registry (Arc), so recv() only
+                    // returns None if the registry itself is gone. Drop the
+                    // branch so the loop stops polling a dead channel.
+                    None => connect_rx = None,
+                }
+            }
             event = events_rx.recv() => {
                 match event {
                     Ok(WorkerEvent::Registered { worker_id, worker }) => {
@@ -522,6 +538,40 @@ async fn apply_probe_completion(
     }
 
     ProbeApplyResult::Applied(transition)
+}
+
+/// Await the next connect-readiness signal, or park forever when there is no
+/// receiver (health checks disabled, or a second manager already took it). The
+/// `pending()` arm keeps this `select!` branch dormant instead of busy-looping.
+async fn recv_connect_signal(
+    rx: &mut Option<mpsc::UnboundedReceiver<WorkerConnected>>,
+) -> Option<WorkerConnected> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Promote a worker whose backend handshake just completed, without waiting
+/// for its next scheduled poll. Resolves the URL to a live worker id and flips
+/// the status through the revision-checked setter, so a signal that lost a race
+/// with a same-URL replacement — or a worker already removed — is discarded.
+fn apply_connect_signal(registry: &Arc<WorkerRegistry>, connected: WorkerConnected) {
+    let WorkerConnected { url, revision } = connected;
+    let Some(worker_id) = registry.get_id_by_url(&url) else {
+        debug!(worker_url = %url, "Connect signal for an unknown worker; ignoring");
+        return;
+    };
+    match registry.transition_status_if_revision(&worker_id, revision, WorkerStatus::Ready) {
+        Some((old, new)) => {
+            debug!(worker_url = %url, ?old, ?new, "Promoted worker on connect signal");
+        }
+        None => {
+            // No transition: already Ready (idempotent), or a stale revision
+            // after a same-URL replacement. Polling covers either case.
+            debug!(worker_url = %url, "Connect signal applied no transition");
+        }
+    }
 }
 
 fn resolved_interval_secs(health_config: &HealthCheckConfig, default_interval_secs: u64) -> u64 {
@@ -1073,6 +1123,73 @@ mod tests {
         }))
         .expect("dp worker spec");
         Arc::new(BasicWorkerBuilder::from_spec(spec).build())
+    }
+
+    #[test]
+    fn apply_connect_signal_promotes_pending_worker() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker = make_worker("http://w:1", 2, 3);
+        assert_eq!(worker.status(), WorkerStatus::Pending);
+        let revision = worker.revision();
+        registry.register(worker.clone()).unwrap();
+
+        apply_connect_signal(
+            &registry,
+            WorkerConnected {
+                url: "http://w:1".to_string(),
+                revision,
+            },
+        );
+
+        assert_eq!(
+            worker.status(),
+            WorkerStatus::Ready,
+            "a matching connect signal must promote a Pending worker immediately"
+        );
+    }
+
+    #[test]
+    fn apply_connect_signal_ignores_stale_revision() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker = make_worker("http://w:1", 2, 3);
+        let stale_revision = worker.revision();
+        let worker_id = registry.register(worker).unwrap();
+
+        // A same-URL replace bumps the revision; a handshake that started
+        // against the old worker must not promote its replacement.
+        let replacement = make_worker("http://w:1", 2, 3);
+        assert!(registry.replace(&worker_id, replacement));
+        let current = registry.get(&worker_id).unwrap();
+        assert_eq!(current.revision(), stale_revision + 1);
+        assert_eq!(current.status(), WorkerStatus::Pending);
+
+        apply_connect_signal(
+            &registry,
+            WorkerConnected {
+                url: "http://w:1".to_string(),
+                revision: stale_revision,
+            },
+        );
+
+        assert_eq!(
+            registry.get(&worker_id).unwrap().status(),
+            WorkerStatus::Pending,
+            "a stale connect signal must not promote a replaced worker"
+        );
+    }
+
+    #[test]
+    fn apply_connect_signal_ignores_unknown_url() {
+        // A signal for a worker that was removed before its handshake landed
+        // must be a silent no-op, not a panic.
+        let registry = Arc::new(WorkerRegistry::new());
+        apply_connect_signal(
+            &registry,
+            WorkerConnected {
+                url: "http://ghost:1".to_string(),
+                revision: 0,
+            },
+        );
     }
 
     /// Tiny HTTP stub counting GET /metrics hits; returns its base URL.

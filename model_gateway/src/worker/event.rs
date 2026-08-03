@@ -44,3 +44,19 @@ pub enum WorkerEvent {
         new_status: WorkerStatus,
     },
 }
+
+/// One-shot signal a worker fires the instant its backend connection
+/// completes, so the manager can promote it to `Ready` immediately instead
+/// of waiting for the next health poll.
+///
+/// Unlike [`WorkerEvent`] this is a point-to-point signal to the manager, not
+/// a broadcast — the connect completes inside a detached handshake task that
+/// has no registry handle, so it carries the worker's URL and the revision it
+/// captured when the handshake began. The manager resolves the URL to a
+/// worker id and applies the promotion only if that revision still matches,
+/// discarding the signal if a same-URL replacement raced ahead.
+#[derive(Debug, Clone)]
+pub struct WorkerConnected {
+    pub url: String,
+    pub revision: u64,
+}

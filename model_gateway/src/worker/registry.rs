@@ -14,12 +14,12 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use openai_protocol::worker::WorkerStatus;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
     observability::metrics::Metrics,
     worker::{
         circuit_breaker::CircuitState,
-        event::WorkerEvent,
+        event::{WorkerConnected, WorkerEvent},
         hash_ring::HashRing,
         worker::{RuntimeType, WorkerType},
         ConnectionMode, Worker, DEFAULT_SAMPLING_PARAMS_LABEL, UNKNOWN_MODEL_ID,
@@ -136,6 +136,17 @@ pub struct WorkerRegistry {
 
     /// Broadcast channel for worker state change events.
     event_tx: broadcast::Sender<WorkerEvent>,
+
+    /// Sender handed to workers so a completed backend connection can wake
+    /// the manager for immediate promotion (see [`WorkerConnected`]). Lives
+    /// on the registry because workers are built before the manager starts,
+    /// and dynamically-registered workers need it long after.
+    connect_signal_tx: mpsc::UnboundedSender<WorkerConnected>,
+
+    /// Receiver drained by the manager's health loop. Taken once via
+    /// [`Self::take_connect_signal_receiver`]; `None` thereafter (and when
+    /// no manager runs, e.g. health checks globally disabled).
+    connect_signal_rx: Mutex<Option<mpsc::UnboundedReceiver<WorkerConnected>>>,
 }
 
 impl WorkerRegistry {
@@ -148,6 +159,10 @@ impl WorkerRegistry {
     /// Initialises all indexes and a broadcast channel with capacity 1024
     /// for `WorkerEvent` delivery. Holds no locks. Emits no events.
     pub fn new() -> Self {
+        // Unbounded so a worker's detached handshake task never blocks on a
+        // busy manager; signals are one-per-connect and rare, so the queue
+        // cannot grow without bound in practice.
+        let (connect_signal_tx, connect_signal_rx) = mpsc::unbounded_channel();
         Self {
             workers: Arc::new(DashMap::new()),
             model_index: Arc::new(DashMap::new()),
@@ -164,6 +179,8 @@ impl WorkerRegistry {
             // the capacity should comfortably exceed realistic worker
             // counts. ~100 B per slot; fixed cost ~100 KB.
             event_tx: broadcast::Sender::new(1024),
+            connect_signal_tx,
+            connect_signal_rx: Mutex::new(Some(connect_signal_rx)),
         }
     }
 
@@ -183,6 +200,22 @@ impl WorkerRegistry {
     /// and on `RecvError::Lagged`. Holds no locks. Emits no events.
     pub fn subscribe_events(&self) -> broadcast::Receiver<WorkerEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Clone the connect-signal sender for a worker to fire once its backend
+    /// connection completes. See [`WorkerConnected`]. Holds no locks.
+    pub fn connect_signal_sender(&self) -> mpsc::UnboundedSender<WorkerConnected> {
+        self.connect_signal_tx.clone()
+    }
+
+    /// Take the connect-signal receiver. Returns `Some` exactly once (the
+    /// manager takes it at startup); `None` on any later call. Holds the
+    /// receiver lock briefly.
+    pub fn take_connect_signal_receiver(&self) -> Option<mpsc::UnboundedReceiver<WorkerConnected>> {
+        self.connect_signal_rx
+            .lock()
+            .expect("connect_signal_rx mutex poisoned")
+            .take()
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -1850,6 +1883,38 @@ mod tests {
             registry.sampling_defaults_values_for_group(model_id, worker_type),
             expected
         );
+    }
+
+    #[test]
+    fn connect_signal_receiver_is_taken_exactly_once() {
+        let registry = WorkerRegistry::new();
+        assert!(
+            registry.take_connect_signal_receiver().is_some(),
+            "first take (the manager) must get the receiver"
+        );
+        assert!(
+            registry.take_connect_signal_receiver().is_none(),
+            "a second take must return None so a second manager runs poll-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_signal_sender_delivers_to_the_receiver() {
+        let registry = WorkerRegistry::new();
+        let tx = registry.connect_signal_sender();
+        let mut rx = registry
+            .take_connect_signal_receiver()
+            .expect("receiver present");
+
+        tx.send(WorkerConnected {
+            url: "ipc:///tmp/w.ipc".to_string(),
+            revision: 7,
+        })
+        .expect("send on a live channel");
+
+        let got = rx.recv().await.expect("a delivered signal");
+        assert_eq!(got.url, "ipc:///tmp/w.ipc");
+        assert_eq!(got.revision, 7);
     }
 
     #[test]
