@@ -365,8 +365,9 @@ impl WorkerSelectionStage {
             return None;
         }
 
-        // Select using policies
-        let policy = self.policy_registry.get_policy_or_default(model_id);
+        // Independent P/D policies so stateful ones (e.g. round_robin) don't share a counter.
+        let prefill_policy = self.policy_registry.get_prefill_policy();
+        let decode_policy = self.policy_registry.get_decode_policy();
 
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
@@ -380,29 +381,32 @@ impl WorkerSelectionStage {
             hash_ring,
             leg: WorkerLeg::Prefill,
         };
-        let prefill_idx = self
-            .policy_registry
-            .select_worker(&policy, &available_prefill, &info)?;
+        let prefill_idx = self.policy_registry.select_worker(
+            &prefill_policy,
+            &available_prefill,
+            &info,
+        )?;
         info.leg = WorkerLeg::Decode;
-        let decode_idx = self
-            .policy_registry
-            .select_worker(&policy, &available_decode, &info)?;
+        let decode_idx = self.policy_registry.select_worker(
+            &decode_policy,
+            &available_decode,
+            &info,
+        )?;
 
         let model = model_id;
-        let policy_name = policy.name();
 
         // Record worker selection metrics for both prefill and decode
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,
             model,
-            policy_name,
+            prefill_policy.name(),
         );
         Metrics::record_worker_selection(
             metrics_labels::WORKER_DECODE,
             metrics_labels::CONNECTION_GRPC,
             model,
-            policy_name,
+            decode_policy.name(),
         );
 
         Some((

@@ -165,4 +165,53 @@ mod tests {
         policy.reset();
         assert_eq!(policy.select_worker(&workers, &info), Some(0));
     }
+
+    #[test]
+    fn test_independent_policies_cover_all_workers_across_two_pools() {
+        fn make_workers(prefix: &str, n: usize) -> Vec<Arc<dyn Worker>> {
+            (0..n)
+                .map(|i| {
+                    Arc::new(
+                        BasicWorkerBuilder::new(format!("http://{prefix}{i}:8000"))
+                            .worker_type(WorkerType::Regular)
+                            .health_config(no_health_check())
+                            .build(),
+                    ) as Arc<dyn Worker>
+                })
+                .collect()
+        }
+
+        let prefill_workers = make_workers("p", 4);
+        let decode_workers = make_workers("d", 4);
+        let info = SelectWorkerInfo::default();
+
+        let shared = RoundRobinPolicy::new();
+        let mut shared_prefill = [0usize; 4];
+        let mut shared_decode = [0usize; 4];
+        for _ in 0..40 {
+            let p = shared.select_worker(&prefill_workers, &info).unwrap();
+            let d = shared.select_worker(&decode_workers, &info).unwrap();
+            shared_prefill[p] += 1;
+            shared_decode[d] += 1;
+        }
+        assert_eq!(shared_prefill, [20, 0, 20, 0]);
+        assert_eq!(shared_decode, [0, 20, 0, 20]);
+
+        let prefill_policy = RoundRobinPolicy::new();
+        let decode_policy = RoundRobinPolicy::new();
+        let mut indep_prefill = [0usize; 4];
+        let mut indep_decode = [0usize; 4];
+        for _ in 0..40 {
+            let p = prefill_policy
+                .select_worker(&prefill_workers, &info)
+                .unwrap();
+            let d = decode_policy
+                .select_worker(&decode_workers, &info)
+                .unwrap();
+            indep_prefill[p] += 1;
+            indep_decode[d] += 1;
+        }
+        assert_eq!(indep_prefill, [10, 10, 10, 10]);
+        assert_eq!(indep_decode, [10, 10, 10, 10]);
+    }
 }
