@@ -493,6 +493,7 @@ struct Router {
     multimodal_tensor_transport: Option<String>,
     multimodal_shm_min_bytes: Option<usize>,
     model_aliases: HashMap<String, String>,
+    worker_startup_delay: u64,
 }
 
 impl Router {
@@ -769,6 +770,7 @@ impl Router {
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
+            .worker_startup_delay_secs(self.worker_startup_delay)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
             .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
@@ -983,6 +985,7 @@ impl Router {
         multimodal_tensor_transport = None,
         multimodal_shm_min_bytes = None,
         model_aliases = HashMap::new(),
+        worker_startup_delay = 0,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1110,6 +1113,7 @@ impl Router {
         multimodal_tensor_transport: Option<String>,
         multimodal_shm_min_bytes: Option<usize>,
         model_aliases: HashMap<String, String>,
+        worker_startup_delay: u64,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1251,6 +1255,7 @@ impl Router {
             multimodal_tensor_transport,
             multimodal_shm_min_bytes,
             model_aliases,
+            worker_startup_delay,
         })
     }
 

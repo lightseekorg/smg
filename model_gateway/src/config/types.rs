@@ -46,6 +46,11 @@ pub struct RouterConfig {
     pub max_payload_size: usize,
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
+    /// Grace period before the first worker-startup check fires. The engine is
+    /// left alone for this long, then polled every
+    /// `worker_startup_check_interval_secs`.
+    #[serde(default)]
+    pub worker_startup_delay_secs: u64,
     pub worker_startup_check_interval_secs: u64,
     #[serde(default = "default_load_monitor_interval_secs")]
     pub load_monitor_interval_secs: u64,
@@ -800,6 +805,7 @@ impl Default for RouterConfig {
             max_payload_size: 536_870_912,     // 512MB
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
+            worker_startup_delay_secs: 0,
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
             engine_metrics: false,
