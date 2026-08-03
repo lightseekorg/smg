@@ -54,7 +54,6 @@ class RouterArgs:
     prefill_policy: str | None = None  # Specific policy for prefill nodes in PD mode
     decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
-    worker_startup_delay: int = 0
     worker_startup_check_interval: int = 30
     load_monitor_interval: int = 10
     cache_threshold: float = 0.3
@@ -203,6 +202,7 @@ class RouterArgs:
     mesh_peer_urls: list[str] = dataclasses.field(default_factory=list)
     # Append new fields here to preserve positional callers.
     model_aliases: dict[str, str] = dataclasses.field(default_factory=dict)
+    worker_startup_delay: int = 0
 
     @staticmethod
     def add_cli_args(

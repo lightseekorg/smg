@@ -378,7 +378,6 @@ struct Router {
     worker_urls: Vec<String>,
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
-    worker_startup_delay: u64,
     worker_startup_check_interval: u64,
     load_monitor_interval: u64,
     cache_threshold: f32,
@@ -494,6 +493,7 @@ struct Router {
     multimodal_tensor_transport: Option<String>,
     multimodal_shm_min_bytes: Option<usize>,
     model_aliases: HashMap<String, String>,
+    worker_startup_delay: u64,
 }
 
 impl Router {
@@ -869,7 +869,6 @@ impl Router {
         host = String::from("0.0.0.0"),
         port = 3001,
         worker_startup_timeout_secs = 600,
-        worker_startup_delay = 0,
         worker_startup_check_interval = 30,
         load_monitor_interval = 10,
         cache_threshold = 0.3,
@@ -986,6 +985,7 @@ impl Router {
         multimodal_tensor_transport = None,
         multimodal_shm_min_bytes = None,
         model_aliases = HashMap::new(),
+        worker_startup_delay = 0,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -998,7 +998,6 @@ impl Router {
         host: String,
         port: u16,
         worker_startup_timeout_secs: u64,
-        worker_startup_delay: u64,
         worker_startup_check_interval: u64,
         load_monitor_interval: u64,
         cache_threshold: f32,
@@ -1114,6 +1113,7 @@ impl Router {
         multimodal_tensor_transport: Option<String>,
         multimodal_shm_min_bytes: Option<usize>,
         model_aliases: HashMap<String, String>,
+        worker_startup_delay: u64,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1143,7 +1143,6 @@ impl Router {
             worker_urls,
             policy,
             worker_startup_timeout_secs,
-            worker_startup_delay,
             worker_startup_check_interval,
             load_monitor_interval,
             cache_threshold,
@@ -1256,6 +1255,7 @@ impl Router {
             multimodal_tensor_transport,
             multimodal_shm_min_bytes,
             model_aliases,
+            worker_startup_delay,
         })
     }
 
