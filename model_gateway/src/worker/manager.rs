@@ -141,29 +141,38 @@ impl WorkerManager {
     /// The loop serves two roles: health polling and consuming the connect
     /// signal that promotes workers waiting on a backend handshake (the
     /// manager is that signal's sole consumer). When health checks are
-    /// globally disabled AND no worker is awaiting the connect signal, the
-    /// loop would idle with nothing to service, so it is skipped and `None` is
-    /// returned. Whenever a worker still depends on the connect signal for
-    /// promotion, the loop starts regardless of the health-check flag — health
-    /// polling continues to honor each worker's own disable flag.
+    /// globally disabled AND the ZMQ transport is off AND no worker is already
+    /// awaiting the connect signal, the loop would idle with nothing to
+    /// service, so it is skipped and `None` is returned.
+    ///
+    /// `zmq_transport_enabled` is decided from configuration up front, not from
+    /// the registry, because config workers register in the background after
+    /// this call — the registry snapshot here cannot be trusted to already show
+    /// them. When ZMQ is configured the loop starts regardless of the
+    /// health-check flag so it is ready to consume the connect signal the
+    /// instant a ZMQ worker's handshake lands. Health polling continues to
+    /// honor each worker's own disable flag, so starting the loop with global
+    /// health checks off does not resurrect polling for other transports.
     pub fn maybe_start(
         registry: Arc<WorkerRegistry>,
         config: WorkerManagerConfig,
         job_queue: Option<Arc<JobQueue>>,
         health_checks_enabled: bool,
+        zmq_transport_enabled: bool,
     ) -> Option<Self> {
-        if !health_checks_enabled && !registry.has_workers_awaiting_connect_signal() {
+        if !health_checks_enabled
+            && !zmq_transport_enabled
+            && !registry.has_workers_awaiting_connect_signal()
+        {
             info!(
-                "Global health checks disabled and no workers await the connect signal; \
-                 skipping WorkerManager"
+                "Global health checks disabled, ZMQ transport off, and no workers await the \
+                 connect signal; skipping WorkerManager"
             );
             return None;
         }
         let default_check_interval_secs = config.default_check_interval_secs;
         let manager = Self::start(registry, config, job_queue);
-        debug!(
-            "Started WorkerManager loop with {default_check_interval_secs}s default interval"
-        );
+        debug!("Started WorkerManager loop with {default_check_interval_secs}s default interval");
         Some(manager)
     }
 
@@ -1171,6 +1180,7 @@ mod tests {
             },
             None,
             false,
+            false,
         );
         assert!(
             manager.is_none(),
@@ -1193,6 +1203,7 @@ mod tests {
             },
             None,
             false,
+            false,
         )
         .expect("manager must run to consume the connect signal for the pending ZMQ worker");
         manager.shutdown().await;
@@ -1213,8 +1224,75 @@ mod tests {
             },
             None,
             true,
+            false,
         )
         .expect("manager must run when health checks are enabled");
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn maybe_start_runs_when_zmq_transport_enabled_even_with_empty_registry() {
+        // Config workers register in the background after startup, so the
+        // registry is empty when maybe_start runs. With ZMQ configured the
+        // manager must still start — otherwise those late ZMQ workers would
+        // fire the connect signal at a manager that never took the receiver.
+        let registry = Arc::new(WorkerRegistry::new());
+        let mut manager = WorkerManager::maybe_start(
+            registry,
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+            false,
+            true,
+        )
+        .expect("manager must run when the ZMQ transport is configured");
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn manager_loop_promotes_zmq_worker_on_connect_signal() {
+        // End-to-end promotion through the running loop: the signal travels the
+        // registry sender -> manager select! -> apply_connect_signal, flipping
+        // the pending ZMQ worker to Ready. The worker starts Pending and its
+        // health probe (against a socket with no backend) can only fail, so the
+        // connect signal is the sole path to Ready under test.
+        let registry = Arc::new(WorkerRegistry::new());
+        let zmq = make_zmq_worker("ipc:///tmp/connect.ipc");
+        let revision = zmq.revision();
+        registry.register(zmq.clone()).unwrap();
+        assert_eq!(zmq.status(), WorkerStatus::Pending);
+
+        let mut manager = WorkerManager::maybe_start(
+            registry.clone(),
+            WorkerManagerConfig {
+                default_check_interval_secs: 3600,
+                remove_unhealthy: false,
+            },
+            None,
+            false,
+            true,
+        )
+        .expect("manager must run to consume the connect signal");
+
+        registry
+            .connect_signal_sender()
+            .send(WorkerConnected {
+                url: "ipc:///tmp/connect.ipc".to_string(),
+                revision,
+            })
+            .expect("connect signal must reach the manager loop");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while zmq.status() != WorkerStatus::Ready {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "manager loop did not promote the ZMQ worker in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         manager.shutdown().await;
     }
 

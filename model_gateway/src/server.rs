@@ -60,7 +60,10 @@ use crate::{
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    worker::manager::{WorkerManager, WorkerManagerConfig},
+    worker::{
+        manager::{WorkerManager, WorkerManagerConfig},
+        ConnectionMode,
+    },
     workflow::{
         job_queue::{JobQueue, JobQueueConfig},
         Job, TokenizerConfigRequest, WorkflowEngines,
@@ -1229,7 +1232,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // outlive the server to keep the task alive — bind it here so its Drop
     // (which aborts the task) runs at server shutdown. `maybe_start` decides
     // whether the loop has any work to do (health polling and/or promoting
-    // workers that wait on the connect signal) and skips it otherwise.
+    // workers that wait on the connect signal) and skips it otherwise. ZMQ
+    // workers are promoted only by the connect signal, so pass the configured
+    // transport up front: config workers register in the background after this
+    // point, so the registry cannot yet reveal them.
     let _worker_manager = WorkerManager::maybe_start(
         app_context.worker_registry.clone(),
         WorkerManagerConfig {
@@ -1238,6 +1244,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         },
         app_context.worker_job_queue.get().cloned(),
         !config.router_config.health_check.disable_health_check,
+        config.router_config.connection_mode == ConnectionMode::Zmq,
     );
 
     // WorkerMonitor subscribes to registry events. Starting its event
