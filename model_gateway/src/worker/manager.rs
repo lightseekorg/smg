@@ -955,7 +955,7 @@ impl WorkerManager {
                             WorkerMonitor::fetch_http_load(&client, &worker).await
                         }
                         ConnectionMode::Grpc | ConnectionMode::Zmq => {
-                            WorkerMonitor::fetch_grpc_load(&worker).await
+                            WorkerMonitor::fetch_backend_load(&worker).await
                         }
                     };
                     // `load` is the absolute used-token count. Report it only

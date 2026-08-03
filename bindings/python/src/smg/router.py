@@ -45,6 +45,10 @@ def backend_from_str(backend_str: str | None) -> BackendType:
         "sglang": BackendType.Sglang,
         "openai": BackendType.Openai,
         "anthropic": BackendType.Anthropic,
+        # Engine backends: routing behaves like the default; over ZMQ they pin
+        # the startup workers' wire protocol (vLLM EngineCore vs TokenSpeed).
+        "vllm": BackendType.Vllm,
+        "tokenspeed": BackendType.Tokenspeed,
     }
     backend_lower = backend_str.lower()
     if backend_lower not in backend_map:

@@ -39,7 +39,7 @@ use smg_grpc_client::{
 };
 use smg_mm_rdma::RdmaExporter;
 
-use crate::routers::grpc::multimodal::mm_rdma_exporter;
+use crate::routers::grpc::{multimodal::mm_rdma_exporter, zmq_client::ZmqGenerateStream};
 
 /// Backend-neutral encode->prefill bootstrap info for one multimodal item.
 ///
@@ -1942,6 +1942,9 @@ pub enum ProtoStream {
     Trtllm(TrtllmStream),
     Mlx(MlxStream),
     TokenSpeed(TokenSpeedStream),
+    /// ZMQ backend: a custom stream yielding vLLM-proto responses built from
+    /// EngineCore outputs. Auto-aborts on drop, so `mark_completed` is a no-op.
+    Zmq(ZmqGenerateStream),
 }
 
 impl ProtoStream {
@@ -1968,6 +1971,10 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(|r| ProtoGenerateResponse::TokenSpeed(Box::new(r)))),
+            Self::Zmq(stream) => stream
+                .next()
+                .await
+                .map(|result| result.map(|r| ProtoGenerateResponse::Vllm(Box::new(r)))),
         }
     }
 
@@ -1979,6 +1986,7 @@ impl ProtoStream {
             Self::Trtllm(stream) => stream.mark_completed(),
             Self::Mlx(stream) => stream.mark_completed(),
             Self::TokenSpeed(stream) => stream.mark_completed(),
+            Self::Zmq(stream) => stream.mark_completed(),
         }
     }
 }

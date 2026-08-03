@@ -111,6 +111,12 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "TokenSpeed backend does not support embeddings",
                 ));
             }
+            BackendClient::Zmq(_) => {
+                return Err(error::not_implemented(
+                    "unsupported_backend",
+                    "ZMQ backend does not support embeddings yet",
+                ));
+            }
         };
 
         ctx.state.execution_plan = Some(ExecutionPlan::embed(proto_req));

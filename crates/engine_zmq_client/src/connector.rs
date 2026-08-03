@@ -12,6 +12,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use futures::Stream;
 use parking_lot::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -19,30 +20,45 @@ use tracing::{trace, warn};
 use zeromq::RouterSendHalf;
 
 use crate::{
-    codec::encode_msgpack,
     error::{Error, Result},
-    protocol::vllm::{
-        output::{EngineCoreOutput, EngineCoreOutputs},
-        request::{EngineCoreRequest, EngineCoreRequestType},
-        stats::SchedulerStats,
+    protocol::{
+        tokenspeed::TokenSpeedProtocol, vllm::VllmProtocol, EngineBatch, EngineLoad, EngineOutput,
+        EngineProtocol,
     },
     transport::{run_output_loop, send_message, ConnectedEngine, ConnectedTransport, EngineId},
 };
 
-type OutputSender = mpsc::UnboundedSender<Result<EngineCoreOutput>>;
-type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreOutput>>;
+/// The vLLM EngineCore connector (the original engine surface).
+pub type EngineCoreClient = Client<VllmProtocol>;
+/// The per-request output stream for the vLLM EngineCore connector.
+pub type EngineCoreStream = RequestStream<VllmProtocol>;
+/// The TokenSpeed connector.
+pub type TokenSpeedClient = Client<TokenSpeedProtocol>;
+/// The per-request output stream for the TokenSpeed connector.
+pub type TokenSpeedStream = RequestStream<TokenSpeedProtocol>;
+
+type OutputSender<O> = mpsc::UnboundedSender<Result<O>>;
+type OutputReceiver<O> = mpsc::UnboundedReceiver<Result<O>>;
 
 /// Routes engine outputs to per-request streams and tracks in-flight requests.
 /// Keyed by `request_id`; the value is that request's output channel sender.
-#[derive(Default)]
-struct RequestRegistry {
+struct RequestRegistry<O> {
     closed: bool,
-    requests: HashMap<String, OutputSender>,
+    requests: HashMap<String, OutputSender<O>>,
 }
 
-impl RequestRegistry {
+impl<O> Default for RequestRegistry<O> {
+    fn default() -> Self {
+        Self {
+            closed: false,
+            requests: HashMap::new(),
+        }
+    }
+}
+
+impl<O: EngineOutput> RequestRegistry<O> {
     /// Register a new request, returning the receiver for its output stream.
-    fn register(&mut self, request_id: String) -> Result<OutputReceiver> {
+    fn register(&mut self, request_id: String) -> Result<OutputReceiver<O>> {
         if self.closed {
             return Err(Error::ClientClosed {
                 message: "client is shutting down".to_string(),
@@ -57,8 +73,8 @@ impl RequestRegistry {
     }
 
     /// Deliver one output to its request stream; drop the entry when terminal.
-    fn route(&mut self, output: EngineCoreOutput) {
-        let request_id = output.request_id.clone();
+    fn route(&mut self, output: O) {
+        let request_id = output.request_id().to_string();
         let Some(sender) = self.requests.get(&request_id) else {
             trace!(%request_id, "output for unknown/finished request; dropping");
             return;
@@ -86,19 +102,18 @@ impl RequestRegistry {
     }
 }
 
-struct ClientInner {
+struct ClientInner<P: EngineProtocol> {
     /// Shared input ROUTER send half (serialized across concurrent submits).
     input_send: tokio::sync::Mutex<RouterSendHalf>,
     engines: Vec<ConnectedEngine>,
-    registry: Mutex<RequestRegistry>,
-    /// Latest per-rank scheduler load, keyed by engine index. SMG's DP load signal.
-    load: Mutex<HashMap<u32, SchedulerStats>>,
+    registry: Mutex<RequestRegistry<P::Output>>,
+    /// Latest per-rank load, keyed by engine index. SMG's DP load signal.
+    load: Mutex<HashMap<u32, EngineLoad>>,
     /// Auto-abort channel fed by dropped streams.
     abort_tx: mpsc::UnboundedSender<(EngineId, String)>,
-    client_index: u32,
 }
 
-impl ClientInner {
+impl<P: EngineProtocol> ClientInner<P> {
     /// Pick the engine for a request: by `data_parallel_rank` if set, else the
     /// sole engine. SMG routing is authoritative for rank selection. The rank is
     /// matched against the engine's ZMQ index (Python `EngineCoreProc`'s 2-byte
@@ -129,15 +144,15 @@ impl ClientInner {
     async fn send_to_engine(
         &self,
         engine_id: &EngineId,
-        request_type: EngineCoreRequestType,
+        request_type: Bytes,
         payload: Vec<u8>,
-        aux_frames: Vec<bytes::Bytes>,
+        aux_frames: Vec<Bytes>,
     ) -> Result<()> {
         let mut input_send = self.input_send.lock().await;
         send_message(
             &mut input_send,
             engine_id,
-            request_type.to_frame(),
+            request_type,
             payload.into(),
             aux_frames,
         )
@@ -146,20 +161,20 @@ impl ClientInner {
 
     /// Send an Abort for one request id to its engine.
     async fn abort(&self, engine_id: &EngineId, request_id: &str) -> Result<()> {
-        let payload = encode_msgpack(&[request_id.to_string()])?;
-        self.send_to_engine(engine_id, EngineCoreRequestType::Abort, payload, Vec::new())
+        let payload = P::encode_abort(request_id)?;
+        self.send_to_engine(engine_id, P::abort_frame(), payload, Vec::new())
             .await
     }
 }
 
-/// Direct ZMQ connection to a same-host vLLM EngineCore (one or more DP ranks
-/// behind one shared transport).
-pub struct EngineCoreClient {
-    inner: Arc<ClientInner>,
+/// Direct ZMQ connection to a same-host engine (one or more DP ranks behind one
+/// shared transport), generic over the engine's wire protocol `P`.
+pub struct Client<P: EngineProtocol> {
+    inner: Arc<ClientInner<P>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
-impl EngineCoreClient {
+impl<P: EngineProtocol> Client<P> {
     /// Build a client over a connected transport, spawning the output loop and
     /// dispatcher. Background tasks are aborted when the client is dropped.
     pub fn new(transport: ConnectedTransport) -> Self {
@@ -177,21 +192,20 @@ impl EngineCoreClient {
             registry: Mutex::new(RequestRegistry::default()),
             load: Mutex::new(HashMap::new()),
             abort_tx,
-            client_index: 0,
         });
 
-        // Transport output loop: decode raw frames -> EngineCoreOutputs channel.
+        // Transport output loop: decode raw frames -> EngineBatch channel.
         let (out_tx, out_rx) = mpsc::channel(256);
         #[expect(
             clippy::disallowed_methods,
             reason = "background tasks are aborted on client drop"
         )]
-        let output_task = tokio::spawn(run_output_loop(output_socket, out_tx));
+        let output_task = tokio::spawn(run_output_loop::<P>(output_socket, out_tx));
         #[expect(
             clippy::disallowed_methods,
             reason = "background tasks are aborted on client drop"
         )]
-        let dispatch_task = tokio::spawn(run_dispatcher(out_rx, abort_rx, inner.clone()));
+        let dispatch_task = tokio::spawn(run_dispatcher::<P>(out_rx, abort_rx, inner.clone()));
 
         Self {
             inner,
@@ -211,30 +225,26 @@ impl EngineCoreClient {
         !self.inner.registry.lock().closed
     }
 
-    /// The latest scheduler load for one engine index (DP routing signal), if
+    /// The latest per-rank load for one engine index (DP routing signal), if
     /// any batch has been seen from it yet.
-    pub fn scheduler_stats(&self, engine_index: u32) -> Option<SchedulerStats> {
-        self.inner.load.lock().get(&engine_index).cloned()
+    pub fn engine_load(&self, engine_index: u32) -> Option<EngineLoad> {
+        self.inner.load.lock().get(&engine_index).copied()
     }
 
     /// Submit a request and return a stream of its outputs. The request is
     /// routed by `data_parallel_rank` (SMG-pinned) or to the sole engine.
     /// Dropping the returned stream before it finishes aborts the request.
-    pub async fn submit(&self, mut request: EngineCoreRequest) -> Result<EngineCoreStream> {
-        request.validate()?;
-        let engine_id = self.inner.select_engine(request.data_parallel_rank)?;
+    pub async fn submit(&self, request: P::Request) -> Result<RequestStream<P>> {
+        P::validate(&request)?;
+        let engine_id = self.inner.select_engine(P::data_parallel_rank(&request))?;
 
-        request.client_index = self.inner.client_index;
-        // current_wave stays 0 (no DP coordinator in scope for the text path).
-
-        let request_id = request.request_id.clone();
+        let request_id = P::request_id(&request).to_string();
         let receiver = self.inner.registry.lock().register(request_id.clone())?;
 
-        let payload = encode_msgpack(&request)?;
-        // Text path carries no aux tensor frames.
+        let (payload, aux_frames) = P::encode_add(&request)?;
         if let Err(error) = self
             .inner
-            .send_to_engine(&engine_id, EngineCoreRequestType::Add, payload, Vec::new())
+            .send_to_engine(&engine_id, P::add_frame(), payload, aux_frames)
             .await
         {
             // Roll back the registry entry so a failed send doesn't leak it.
@@ -242,7 +252,7 @@ impl EngineCoreClient {
             return Err(error);
         }
 
-        Ok(EngineCoreStream {
+        Ok(RequestStream {
             request_id,
             engine_id,
             receiver,
@@ -261,7 +271,7 @@ impl EngineCoreClient {
     }
 }
 
-impl Drop for EngineCoreClient {
+impl<P: EngineProtocol> Drop for Client<P> {
     fn drop(&mut self) {
         for task in &self.tasks {
             task.abort();
@@ -279,29 +289,25 @@ impl Drop for EngineCoreClient {
 /// infinite hang.
 const ENGINE_SILENCE_DEATH_TIMEOUT: Duration = Duration::from_secs(300);
 
-async fn run_dispatcher(
-    mut out_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
+async fn run_dispatcher<P: EngineProtocol>(
+    mut out_rx: mpsc::Receiver<Result<EngineBatch<P::Output>>>,
     mut abort_rx: mpsc::UnboundedReceiver<(EngineId, String)>,
-    inner: Arc<ClientInner>,
+    inner: Arc<ClientInner<P>>,
 ) {
     loop {
         tokio::select! {
             output = out_rx.recv() => {
                 match output {
-                    Some(Ok(EngineCoreOutputs::RequestBatch(batch))) => {
-                        if let Some(stats) = batch.scheduler_stats {
-                            inner.load.lock().insert(batch.engine_index, *stats);
+                    Some(Ok(batch)) => {
+                        if let Some(load) = batch.load {
+                            inner.load.lock().insert(batch.engine_index, load);
                         }
                         let mut registry = inner.registry.lock();
                         for output in batch.outputs {
                             registry.route(output);
                         }
-                        if let Some(finished) = &batch.finished_requests {
-                            registry.remove_all(finished);
-                        }
+                        registry.remove_all(&batch.finished_request_ids);
                     }
-                    // DP control / utility outputs are out of scope for now.
-                    Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         if matches!(error, Error::EngineCoreDead | Error::Transport(_)) {
                             warn!(%error, "engine transport failed; failing all in-flight requests");
@@ -349,23 +355,23 @@ async fn run_dispatcher(
 
 /// Stream of outputs for one submitted request. Dropping it before the terminal
 /// output aborts the request on the engine.
-pub struct EngineCoreStream {
+pub struct RequestStream<P: EngineProtocol> {
     request_id: String,
     engine_id: EngineId,
-    receiver: OutputReceiver,
+    receiver: OutputReceiver<P::Output>,
     abort_tx: mpsc::UnboundedSender<(EngineId, String)>,
     finished: bool,
 }
 
-impl EngineCoreStream {
+impl<P: EngineProtocol> RequestStream<P> {
     /// The request id this stream tracks.
     pub fn request_id(&self) -> &str {
         &self.request_id
     }
 }
 
-impl Stream for EngineCoreStream {
-    type Item = Result<EngineCoreOutput>;
+impl<P: EngineProtocol> Stream for RequestStream<P> {
+    type Item = Result<P::Output>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -395,7 +401,7 @@ impl Stream for EngineCoreStream {
     }
 }
 
-impl Drop for EngineCoreStream {
+impl<P: EngineProtocol> Drop for RequestStream<P> {
     fn drop(&mut self) {
         if !self.finished {
             // Best-effort auto-abort; the dispatcher sends the Abort frame.
@@ -416,24 +422,27 @@ mod tests {
     use crate::{
         codec::{decode_msgpack, encode_msgpack},
         mock_engine::{connect_to_frontend, default_ready_response, IpcNamespace, MockEngine},
-        protocol::vllm::output::{
-            EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+        protocol::vllm::{
+            output::{
+                EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+            },
+            request::EngineCoreRequest,
+            stats::SchedulerStats,
         },
         transport::{connect_handshake, ENGINE_CORE_DEAD_SENTINEL},
     };
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
-    async fn connect() -> (EngineCoreClient, MockEngine) {
+    /// The returned [`IpcNamespace`] owns the socket tempdir; hold it for the
+    /// test duration so the ipc files outlive the client and are cleaned up.
+    async fn connect() -> (EngineCoreClient, MockEngine, IpcNamespace) {
         let ns = IpcNamespace::new().unwrap();
         let (handshake, input, output) = (
             ns.handshake_endpoint(),
             ns.input_endpoint(),
             ns.output_endpoint(),
         );
-        // Leak the namespace so its tempdir (and the ipc socket files) outlive
-        // the test body.
-        std::mem::forget(ns);
         let (transport, engine) = tokio::join!(
             connect_handshake(
                 &handshake,
@@ -449,10 +458,14 @@ mod tests {
                 default_ready_response()
             ),
         );
-        (EngineCoreClient::new(transport.unwrap()), engine.unwrap())
+        (
+            EngineCoreClient::new(transport.unwrap()),
+            engine.unwrap(),
+            ns,
+        )
     }
 
-    fn batch(engine_index: u32, output: EngineCoreOutput) -> Vec<bytes::Bytes> {
+    fn batch(engine_index: u32, output: EngineCoreOutput) -> Vec<Bytes> {
         let finished = output.finish_reason.map(|_| {
             let mut set = std::collections::BTreeSet::new();
             set.insert(output.request_id.clone());
@@ -464,12 +477,12 @@ mod tests {
             finished_requests: finished,
             ..RequestBatchOutputs::default()
         });
-        vec![bytes::Bytes::from(encode_msgpack(&outputs).unwrap())]
+        vec![Bytes::from(encode_msgpack(&outputs).unwrap())]
     }
 
     #[tokio::test]
     async fn submit_streams_tokens_until_finish() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
 
         let request = EngineCoreRequest {
             request_id: "req-1".to_string(),
@@ -520,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_stats_surface_as_load_signal() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let mut stream = client
             .submit(EngineCoreRequest {
                 request_id: "r".into(),
@@ -547,20 +560,20 @@ mod tests {
             ..Default::default()
         });
         engine
-            .send_output(vec![bytes::Bytes::from(encode_msgpack(&outputs).unwrap())])
+            .send_output(vec![Bytes::from(encode_msgpack(&outputs).unwrap())])
             .await
             .unwrap();
 
         // Drain the stream so the batch is processed.
         while stream.next().await.is_some() {}
-        let stats = client.scheduler_stats(0).expect("load recorded");
-        assert_eq!(stats.num_running_reqs, 3);
-        assert_eq!(stats.num_waiting_reqs, 5);
+        let load = client.engine_load(0).expect("load recorded");
+        assert_eq!(load.num_running, 3);
+        assert_eq!(load.num_waiting, 5);
     }
 
     #[tokio::test]
     async fn dropping_stream_sends_abort() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let stream = client
             .submit(EngineCoreRequest {
                 request_id: "req-abort".into(),
@@ -582,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_dead_fails_inflight_requests() {
-        let (client, mut engine) = connect().await;
+        let (client, mut engine, _ns) = connect().await;
         let mut stream = client
             .submit(EngineCoreRequest {
                 request_id: "r".into(),
@@ -593,11 +606,109 @@ mod tests {
         engine.recv_request().await.unwrap();
 
         engine
-            .send_output(vec![bytes::Bytes::from_static(ENGINE_CORE_DEAD_SENTINEL)])
+            .send_output(vec![Bytes::from_static(ENGINE_CORE_DEAD_SENTINEL)])
             .await
             .unwrap();
 
         let result = stream.next().await.expect("an error item");
         assert!(matches!(result, Err(Error::Shared(_))));
+    }
+
+    /// The generic connector drives the TokenSpeed protocol over the same shared
+    /// transport: it frames a tagged `TokenizedGenerateReqInput` and streams
+    /// `BatchTokenIDOutSlim` batches back until a finish reason is seen.
+    #[tokio::test]
+    async fn tokenspeed_client_submits_and_streams() {
+        use crate::protocol::tokenspeed::{
+            output::BatchTokenIDOutSlim,
+            request::{TokenSpeedRequestType, TokenizedGenerateReqInput},
+            sampling::SamplingParams,
+        };
+
+        let ns = IpcNamespace::new().unwrap();
+        let (handshake, input, output) = (
+            ns.handshake_endpoint(),
+            ns.input_endpoint(),
+            ns.output_endpoint(),
+        );
+        std::mem::forget(ns);
+        let (transport, engine) = tokio::join!(
+            connect_handshake(
+                &handshake,
+                1,
+                "127.0.0.1",
+                Some(&input),
+                Some(&output),
+                TIMEOUT
+            ),
+            connect_to_frontend(
+                &handshake,
+                EngineId::from_engine_index(0),
+                default_ready_response()
+            ),
+        );
+        let client = TokenSpeedClient::new(transport.unwrap());
+        let mut engine = engine.unwrap();
+
+        let request = TokenizedGenerateReqInput {
+            rid: "ts-1".to_string(),
+            input_ids: vec![1, 2, 3],
+            sampling_params: SamplingParams {
+                max_new_tokens: Some(4),
+                ..SamplingParams::default()
+            },
+            stream: true,
+            ..TokenizedGenerateReqInput::default()
+        };
+        let mut stream = client.submit(request).await.unwrap();
+
+        // Engine sees the Add frame + the positional-array payload.
+        let frames = engine.recv_request().await.unwrap();
+        assert_eq!(
+            TokenSpeedRequestType::from_frame(frames[0].as_ref()),
+            Some(TokenSpeedRequestType::Add)
+        );
+        let received: TokenizedGenerateReqInput = decode_msgpack(frames[1].as_ref()).unwrap();
+        assert_eq!(received.rid, "ts-1");
+        assert_eq!(received.input_ids, vec![1, 2, 3]);
+
+        let chunk = BatchTokenIDOutSlim {
+            rids: vec!["ts-1".into()],
+            output_ids: vec![vec![10]],
+            finished_reasons: vec![String::new()],
+            prompt_tokens: vec![3],
+            completion_tokens: vec![1],
+            cached_tokens: vec![0],
+            output_token_logprobs_val: vec![vec![]],
+            output_token_logprobs_idx: vec![vec![]],
+        };
+        let done = BatchTokenIDOutSlim {
+            rids: vec!["ts-1".into()],
+            output_ids: vec![vec![11]],
+            finished_reasons: vec!["stop".into()],
+            prompt_tokens: vec![3],
+            completion_tokens: vec![2],
+            cached_tokens: vec![0],
+            output_token_logprobs_val: vec![vec![]],
+            output_token_logprobs_idx: vec![vec![]],
+        };
+        engine
+            .send_output(vec![Bytes::from(encode_msgpack(&chunk).unwrap())])
+            .await
+            .unwrap();
+        engine
+            .send_output(vec![Bytes::from(encode_msgpack(&done).unwrap())])
+            .await
+            .unwrap();
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.output_ids, vec![10]);
+        assert!(!first.finished());
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.output_ids, vec![11]);
+        assert_eq!(second.finish_reason.as_deref(), Some("stop"));
+        assert!(second.finished());
+        // Terminal output ends the stream.
+        assert!(stream.next().await.is_none());
     }
 }

@@ -610,18 +610,18 @@ impl WorkerMonitor {
         }
     }
 
-    /// Fetch load via the gRPC `GetLoads` RPC. Only supported for SGLang
-    /// backends. Returns `None` on missing client, RPC error, or empty
-    /// `loads` array.
-    pub(crate) async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
+    /// Fetch load via the backend client's `GetLoads` (gRPC RPC or the ZMQ
+    /// engine's pushed scheduler stats). Returns `None` on missing client,
+    /// error, or empty `loads` array.
+    pub(crate) async fn fetch_backend_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
         let backend_client = match worker.get_backend_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
-                debug!("No gRPC client for worker {}", worker.url());
+                debug!("No backend client for worker {}", worker.url());
                 return None;
             }
             Err(e) => {
-                debug!("Failed to get gRPC client for {}: {e}", worker.url());
+                debug!("Failed to get backend client for {}: {e}", worker.url());
                 return None;
             }
         };
@@ -630,7 +630,7 @@ impl WorkerMonitor {
             Ok(load) if !load.loads.is_empty() => Some(load),
             Ok(_) => None,
             Err(e) => {
-                debug!("gRPC GetLoads failed for {}: {e}", worker.url());
+                debug!("backend GetLoads failed for {}: {e}", worker.url());
                 None
             }
         }
@@ -833,11 +833,9 @@ async fn group_monitor_loop(
                         ConnectionMode::Http => {
                             WorkerMonitor::fetch_http_load(&client, &worker).await
                         }
-                        ConnectionMode::Grpc => WorkerMonitor::fetch_grpc_load(&worker).await,
-                        // ZMQ load monitoring lands with the backend client; a
-                        // ZMQ worker reports no load until then (never via the
-                        // gRPC load path).
-                        ConnectionMode::Zmq => None,
+                        ConnectionMode::Grpc | ConnectionMode::Zmq => {
+                            WorkerMonitor::fetch_backend_load(&worker).await
+                        }
                     };
                     (worker.url().to_string(), response)
                 }

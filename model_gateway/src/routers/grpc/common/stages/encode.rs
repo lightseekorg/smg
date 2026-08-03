@@ -42,7 +42,7 @@ use crate::{
             },
         },
     },
-    worker::DEFAULT_BOOTSTRAP_PORT,
+    worker::{RuntimeType, DEFAULT_BOOTSTRAP_PORT},
 };
 
 /// No-op unless the request is multimodal and worker selection produced encode
@@ -344,13 +344,19 @@ fn prepare_tokenspeed_items(
         .collect())
 }
 
+/// Display name of the engine runtime behind a client, for diagnostics. Keyed on
+/// the runtime, not the transport: a ZMQ worker reports its engine runtime
+/// (vLLM or TokenSpeed) the same as a gRPC worker for that engine.
 fn backend_name(client: &BackendClient) -> &'static str {
-    match client {
-        BackendClient::Grpc(GrpcClient::Sglang(_)) => "SGLang",
-        BackendClient::Grpc(GrpcClient::Vllm(_)) => "vLLM",
-        BackendClient::Grpc(GrpcClient::Trtllm(_)) => "TRT-LLM",
-        BackendClient::Grpc(GrpcClient::Mlx(_)) => "MLX",
-        BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => "TokenSpeed",
+    match client.runtime_type() {
+        RuntimeType::Sglang => "SGLang",
+        RuntimeType::Vllm => "vLLM",
+        RuntimeType::Trtllm => "TRT-LLM",
+        RuntimeType::Mlx => "MLX",
+        RuntimeType::TokenSpeed => "TokenSpeed",
+        // A gRPC/ZMQ worker is always a local runtime; External (an upstream
+        // OpenAI-compatible API, HTTP-proxied) and Unspecified never reach here.
+        RuntimeType::External | RuntimeType::Unspecified => "unknown",
     }
 }
 

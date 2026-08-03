@@ -79,6 +79,7 @@ smg-mm-rdma.workspace = true
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true
+engine-zmq-client.workspace = true
 
 # External dependencies (not in workspace)
 bincode = "1.3"
@@ -87,7 +88,7 @@ axum-server = { version = "0.8.0", default-features = false, features = ["tls-ru
 ndarray = "0.17"
 memmap2 = "0.9"
 rayon = "1.12"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.7", features = ["trace", "compression-gzip", "cors", "timeout", "limit", "request-id", "util"] }
 serde_json = { version = "1.0", default-features = false, features = ["std", "preserve_order"] }
@@ -136,6 +137,8 @@ chrono = { version = "0.4", features = ["clock"] }
 toml = "1.1"
 
 [dev-dependencies]
+# Enable the mock engine for the ZMQ client's loopback tests.
+engine-zmq-client = { workspace = true, features = ["mock-engine"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
 # Used by PD metrics integration tests to capture metric emission via a

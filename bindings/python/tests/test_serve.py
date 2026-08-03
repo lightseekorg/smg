@@ -18,6 +18,7 @@ from smg.serve import (
     DEFAULT_BACKEND,
     ServeOrchestrator,
     SglangWorkerLauncher,
+    TokenspeedWorkerLauncher,
     TrtllmWorkerLauncher,
     VllmWorkerLauncher,
     _add_trtllm_stub_args,
@@ -26,6 +27,9 @@ from smg.serve import (
     _http_health_check,
     _import_backend_args,
     _is_port_available,
+    _reject_handshake_port_collisions,
+    _zmq_handshake_port,
+    _zmq_ipc_url,
     add_serve_args,
     parse_serve_args,
 )
@@ -44,6 +48,7 @@ class TestBackendRegistry:
         assert "sglang" in BACKEND_ARG_ADDERS
         assert "vllm" in BACKEND_ARG_ADDERS
         assert "trtllm" in BACKEND_ARG_ADDERS
+        assert "tokenspeed" in BACKEND_ARG_ADDERS
 
     def test_registry_values_are_callable(self):
         for name, adder in BACKEND_ARG_ADDERS.items():
@@ -57,6 +62,7 @@ class TestBackendLauncherRegistry:
         assert "sglang" in BACKEND_LAUNCHERS
         assert "vllm" in BACKEND_LAUNCHERS
         assert "trtllm" in BACKEND_LAUNCHERS
+        assert "tokenspeed" in BACKEND_LAUNCHERS
 
     def test_launcher_classes(self):
         assert BACKEND_LAUNCHERS["sglang"] is SglangWorkerLauncher
@@ -619,6 +625,61 @@ class TestFilterBackendArgs:
         backend_args = ["--foo", "bar"]
         assert launcher._filter_backend_args(backend_args, []) == ["--foo", "bar"]
 
+    def test_filtered_boolean_flag_does_not_swallow_next_flag(self):
+        # A filtered boolean flag has no value; the following flag must survive.
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--trust-remote-code", "--tp-size", "2"]
+        result = launcher._filter_backend_args(backend_args, ["--trust-remote-code"])
+        assert result == ["--tp-size", "2"]
+
+    def test_filtered_boolean_flag_at_end_of_args(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--tp-size", "2", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--trust-remote-code"])
+        assert result == ["--tp-size", "2"]
+
+    def test_filtered_key_value_keeps_following_flag(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--model-path", "/tmp/m", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--model-path"])
+        assert result == ["--trust-remote-code"]
+
+
+class TestZmqHandshakePort:
+    """Handshake-port derivation must mirror derive_handshake_port in worker.rs."""
+
+    def test_matches_pinned_rust_vectors(self):
+        # These MUST equal derive_handshake_port() in worker.rs for the same path.
+        assert _zmq_handshake_port("ipc:///tmp/smg-zmq/ts0.ipc") == 25152
+        assert _zmq_handshake_port("ipc:///tmp/smg-zmq/ts1.ipc") == 22735
+        assert _zmq_handshake_port("ipc:///tmp/smg-zmq/engine-31000") == 22714
+        # The path after ipc:// is what gets hashed, so the bare path matches.
+        assert _zmq_handshake_port("/tmp/smg-zmq/ts0.ipc") == 25152
+        assert _zmq_handshake_port("ts0.ipc") == 23912
+
+    def test_always_in_band(self):
+        for port in range(30000, 30050):
+            hp = _zmq_handshake_port(_zmq_ipc_url(port))
+            assert 20000 <= hp <= 29999
+
+    def test_reject_collisions_passes_for_distinct_ports(self):
+        # A normal contiguous port range must not raise.
+        _reject_handshake_port_collisions([30000, 30001, 30002])
+
+    def test_reject_collisions_raises_and_names_urls(self):
+        # Two ports whose ipc paths derive the same handshake port must be
+        # rejected before launch, naming both colliding URLs.
+        base = 30000
+        collider = next(
+            p
+            for p in range(base + 1, base + 20000)
+            if _zmq_handshake_port(_zmq_ipc_url(p)) == _zmq_handshake_port(_zmq_ipc_url(base))
+        )
+        with pytest.raises(ValueError) as exc:
+            _reject_handshake_port_collisions([base, collider])
+        assert _zmq_ipc_url(base) in str(exc.value)
+        assert _zmq_ipc_url(collider) in str(exc.value)
+
 
 class TestSglangWorkerLauncher:
     """Test SglangWorkerLauncher.build_command()."""
@@ -748,6 +809,111 @@ class TestVllmWorkerLauncher:
         for arg in backend_args:
             assert arg in cmd
         assert "--enable-prompt-tokens-details" in cmd
+
+
+class TestTokenspeedWorkerLauncher:
+    """Test TokenspeedWorkerLauncher (ZMQ direct-backend only)."""
+
+    def test_build_zmq_command(self):
+        launcher = TokenspeedWorkerLauncher()
+        args = argparse.Namespace(model="/tmp/model", connection_mode="zmq")
+        backend_args = ["--mem-fraction-static", "0.8"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+
+        assert "tokenspeed.cli" in cmd
+        assert "serve" in cmd
+        assert "--headless" in cmd
+        assert "--model" in cmd
+        assert "/tmp/model" in cmd
+        assert "--data-parallel-address" in cmd
+        assert "127.0.0.1" in cmd
+        # The engine dials the handshake port SMG derives from the worker's
+        # ipc:// URL; both sides must agree without a side channel.
+        expected_port = _zmq_handshake_port(_zmq_ipc_url(31000))
+        assert "--data-parallel-rpc-port" in cmd
+        assert str(expected_port) in cmd
+        assert "--zmq-engine-index" in cmd
+        assert "0" in cmd
+        for arg in backend_args:
+            assert arg in cmd
+
+    def test_build_zmq_command_filters_launcher_owned_flags(self):
+        launcher = TokenspeedWorkerLauncher()
+        args = argparse.Namespace(model="/tmp/model", connection_mode="zmq")
+        backend_args = [
+            "--model",
+            "/tmp/other-model",
+            "--data-parallel-rpc-port",
+            "1234",
+            "--zmq-engine-index",
+            "7",
+            "--mem-fraction-static",
+            "0.8",
+        ]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+
+        # Launcher-owned flags from backend_args must not duplicate/override.
+        assert "/tmp/other-model" not in cmd
+        assert "1234" not in cmd
+        assert "7" not in cmd
+        assert "--mem-fraction-static" in cmd
+        assert "0.8" in cmd
+
+    def test_build_command_rejects_non_zmq_modes(self):
+        launcher = TokenspeedWorkerLauncher()
+        for mode in ("grpc", "http"):
+            args = argparse.Namespace(model="/tmp/model", connection_mode=mode)
+            with pytest.raises(ValueError, match="only supports --connection-mode zmq"):
+                launcher.build_command(args, [], "127.0.0.1", 31000)
+
+    def test_worker_url_is_ipc(self):
+        launcher = TokenspeedWorkerLauncher()
+        args = argparse.Namespace(connection_mode="zmq")
+        url = launcher.worker_url(args, "127.0.0.1", 31000)
+        assert url == _zmq_ipc_url(31000)
+        assert url.startswith("ipc://")
+
+    def test_health_check_zmq_always_proceeds(self):
+        # SMG binds the sockets and the engine dials in; there is nothing to
+        # probe, the router's own health checker gates readiness.
+        launcher = TokenspeedWorkerLauncher()
+        args = argparse.Namespace(connection_mode="zmq")
+        assert launcher.health_check(args, "127.0.0.1", 31000, 5.0) is True
+
+    def test_get_tp_size(self):
+        launcher = TokenspeedWorkerLauncher()
+        assert launcher._get_tp_size(argparse.Namespace(tensor_parallel_size=4)) == 4
+        assert launcher._get_tp_size(argparse.Namespace()) == 1
+
+
+class TestTokenspeedServeParsing:
+    """parse_serve_args for the tokenspeed backend (stub args, zmq guard)."""
+
+    def test_tokenspeed_zmq_parses(self):
+        backend, args, backend_args = parse_serve_args(
+            [
+                "--backend",
+                "tokenspeed",
+                "--connection-mode",
+                "zmq",
+                "--model",
+                "/tmp/model",
+                "--mem-fraction-static",
+                "0.8",
+            ]
+        )
+        assert backend == "tokenspeed"
+        assert args.connection_mode == "zmq"
+        assert args.model == "/tmp/model"
+        # Unknown engine flags stay in backend_args for verbatim passthrough.
+        assert "--mem-fraction-static" in backend_args
+        assert "0.8" in backend_args
+
+    def test_zmq_still_rejected_for_sglang_and_trtllm(self):
+        for backend in ("sglang", "trtllm"):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_serve_args(["--backend", backend, "--connection-mode", "zmq"])
+            assert exc_info.value.code == 2
 
 
 class TestTrtllmWorkerLauncher:
@@ -1102,6 +1268,48 @@ class TestServeOrchestrator:
             "grpc://127.0.0.1:32000",
             "grpc://127.0.0.1:32003",
         ]
+
+    def test_build_router_args_zmq_forwards_backend(self):
+        """ZMQ workers cannot be runtime-probed: serve's --backend must reach
+        RouterArgs so the Rust side stamps the startup workers' runtime."""
+        from types import SimpleNamespace
+
+        for backend in ("vllm", "tokenspeed"):
+            args = _make_args(backend=backend, data_parallel_size=1, connection_mode="zmq")
+            orch = ServeOrchestrator(backend, args, [])
+            orch.workers = [(MagicMock(), 31000)]
+
+            router_args = SimpleNamespace(
+                backend="sglang",
+                disable_retries=True,
+                disable_circuit_breaker=True,
+                policy="passthrough",
+            )
+            with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+                result = orch._build_router_args()
+
+            assert result.backend == backend
+            assert result.worker_urls == [_zmq_ipc_url(31000)]
+
+    def test_build_router_args_grpc_keeps_router_backend(self):
+        """Off the ZMQ path the router backend stays whatever --router-backend
+        chose (gRPC/HTTP workers keep runtime auto-detection)."""
+        from types import SimpleNamespace
+
+        args = _make_args(backend="vllm", data_parallel_size=1, connection_mode="grpc")
+        orch = ServeOrchestrator("vllm", args, [])
+        orch.workers = [(MagicMock(), 31000)]
+
+        router_args = SimpleNamespace(
+            backend="sglang",
+            disable_retries=True,
+            disable_circuit_breaker=True,
+            policy="passthrough",
+        )
+        with patch("smg.serve.RouterArgs.from_cli_args", return_value=router_args):
+            result = orch._build_router_args()
+
+        assert result.backend == "sglang"
 
     def test_build_router_args_dp1_disables_retries_and_cb(self):
         """With dp<=1, router-level retries and circuit breaker are auto-disabled."""

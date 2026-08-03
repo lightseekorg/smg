@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use smg_grpc_client::SglangGenerateRequestOptions;
+use smg_grpc_client::{SglangGenerateRequestOptions, VllmEngineClient};
 use tracing::{debug, error};
 
 use crate::routers::{
@@ -165,12 +165,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Sglang(Box::new(req))
             }
-            BackendClient::Grpc(GrpcClient::Vllm(vllm_client)) => {
+            BackendClient::Grpc(GrpcClient::Vllm(_)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
-                        vllm_client
-                            .build_generate_request_from_chat(
+                        VllmEngineClient::build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
@@ -183,8 +182,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
-                    RequestType::Responses(request) => vllm_client
-                        .build_generate_request_from_responses(
+                    RequestType::Responses(request) => {
+                        VllmEngineClient::build_generate_request_from_responses(
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
@@ -194,7 +193,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request from responses");
                             error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
-                        })?,
+                        })?
+                    }
                     RequestType::Embedding(_) => {
                         return Err(error::bad_request(
                             "harmony_embedding_not_supported",
@@ -343,6 +343,55 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     }
                 };
                 ProtoGenerateRequest::TokenSpeed(Box::new(req))
+            }
+            BackendClient::Zmq(_) => {
+                // A ZMQ worker is a vLLM engine, so it uses the same vLLM request
+                // builders and supports the same request types (Chat + Responses).
+                let req = match &ctx.input.request_type {
+                    RequestType::Chat(request) => {
+                        let body = modified_request
+                            .as_deref()
+                            .unwrap_or_else(|| request.as_ref());
+                        VllmEngineClient::build_generate_request_from_chat(
+                            request_id,
+                            body,
+                            placeholder_processed_text,
+                            token_ids,
+                            None, // No multimodal in Harmony pipeline
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build ZMQ generate request");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?
+                    }
+                    RequestType::Responses(request) => {
+                        VllmEngineClient::build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            token_ids,
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build ZMQ generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?
+                    }
+                    RequestType::Embedding(_) => {
+                        return Err(error::bad_request(
+                            "harmony_embedding_not_supported",
+                            "Embedding requests are not supported with Harmony models".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
+                };
+                ProtoGenerateRequest::Vllm(Box::new(req))
             }
         };
 

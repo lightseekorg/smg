@@ -499,13 +499,13 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
-            Self::Vllm(client) => {
+            Self::Vllm(_) => {
                 let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_vllm_request(vllm_mm, |mm| {
-                    client.build_generate_request_from_chat(
+                    VllmEngineClient::build_generate_request_from_chat(
                         request_id,
                         body,
                         processed_text,
@@ -591,13 +591,13 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
-            Self::Vllm(client) => {
+            Self::Vllm(_) => {
                 let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::Vllm(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_vllm_request(vllm_mm, |mm| {
-                    client.build_generate_request_from_messages(
+                    VllmEngineClient::build_generate_request_from_messages(
                         request_id,
                         body,
                         processed_text,
@@ -669,8 +669,8 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
-            Self::Vllm(client) => {
-                let req = client.build_generate_request_from_completion(
+            Self::Vllm(_) => {
+                let req = VllmEngineClient::build_generate_request_from_completion(
                     request_id,
                     body,
                     original_text,
@@ -725,8 +725,8 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
-            Self::Vllm(client) => {
-                let req = client.build_plain_generate_request(
+            Self::Vllm(_) => {
+                let req = VllmEngineClient::build_plain_generate_request(
                     request_id,
                     body,
                     original_text,

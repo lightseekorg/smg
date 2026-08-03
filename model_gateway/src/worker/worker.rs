@@ -2,7 +2,7 @@ use std::{
     any::Any,
     fmt,
     sync::{
-        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -26,7 +26,11 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::header_utils::extract_routing_key,
-        grpc::{backend_client::BackendClient, client::GrpcClient},
+        grpc::{
+            backend_client::BackendClient,
+            client::GrpcClient,
+            zmq_client::{ZmqEngineClient, ZMQ_LOOPBACK_HOST},
+        },
     },
 };
 
@@ -41,6 +45,174 @@ const FLUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(45);
 /// a long time while the backend serializes large traces. Matches the
 /// gRPC client's profile deadline.
 const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
+
+/// Time to wait for a ZMQ engine to complete the startup handshake. Generous:
+/// the engine loads the model and profiles KV cache between INIT and READY.
+const ZMQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Derive a deterministic TCP handshake port from the ipc data-plane path.
+///
+/// vLLM's headless engine dials a *TCP* handshake (`--data-parallel-address` +
+/// `--data-parallel-rpc-port`); making the port a pure function of the worker
+/// URL lets the operator compute the same `--data-parallel-rpc-port` without a
+/// side channel. FNV-1a keeps it stable across processes and builds. Mapped
+/// into 20000..=29999 to avoid well-known and typical ephemeral ranges.
+///
+/// `_zmq_handshake_port` in `bindings/python/src/smg/serve.py` mirrors this
+/// function — keep them in sync.
+fn derive_handshake_port(path: &str) -> u16 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Map into 20000..=29999: below the Linux default ephemeral range
+    // (`net.ipv4.ip_local_port_range` = 32768..60999) so an outbound socket
+    // can't already hold the port. `hash % 10000` always fits u16.
+    20000 + (hash % 10000) as u16
+}
+
+/// Derive the ZMQ socket addresses for a worker from its base URL.
+///
+/// Mirrors vLLM's headless topology: the **handshake is TCP** (the engine dials
+/// it, so it matches `vllm serve --headless --data-parallel-rpc-port`), while
+/// the **data plane is `ipc://`** for the same-host fast path (SMG chooses these
+/// and hands them to the engine during the handshake INIT). The operator gives a
+/// single `ipc://<path>` base; SMG binds the ipc input/output at
+/// `<path>-in.sock` / `-out.sock` and derives the TCP handshake port from the
+/// path. A `WorkerSpec.zmq_handshake_address` override replaces the derived
+/// handshake address verbatim (it must be `tcp://`), for engines that dial a
+/// fixed, pre-agreed address — e.g. TokenSpeed's default dial target is
+/// `tcp://127.0.0.1:30500` (its `--data-parallel-address`/
+/// `--data-parallel-rpc-port` defaults, outside the derived 20000..=29999
+/// band), so setting the override to that value pairs a bare
+/// `ts serve --headless` with a manually registered worker.
+/// Returns `(handshake, input, output)`.
+fn zmq_socket_addresses(
+    base_url: &str,
+    handshake_override: Option<&str>,
+) -> WorkerResult<(String, String, String)> {
+    let path = base_url
+        .strip_prefix("ipc://")
+        .ok_or_else(|| WorkerError::ConnectionFailed {
+            url: base_url.to_string(),
+            reason: "ZMQ worker URL must be ipc://<path>".to_string(),
+        })?;
+    let handshake = match handshake_override {
+        Some(address) => {
+            if !address.starts_with("tcp://") {
+                return Err(WorkerError::ConnectionFailed {
+                    url: base_url.to_string(),
+                    reason: format!(
+                        "zmq_handshake_address must be a tcp:// address \
+                         (the engine dials a TCP handshake), got '{address}'"
+                    ),
+                });
+            }
+            address.to_string()
+        }
+        None => format!("tcp://{ZMQ_LOOPBACK_HOST}:{}", derive_handshake_port(path)),
+    };
+    let input = format!("ipc://{path}-in.sock");
+    let output = format!("ipc://{path}-out.sock");
+    Ok((handshake, input, output))
+}
+
+/// Create the parent directory for a worker's `ipc://` sockets. Kept off the
+/// address computation (which is pure) and async so it doesn't block a runtime
+/// thread.
+///
+/// The ipc:// data-plane sockets SMG binds here carry no authentication, so the
+/// directory must be owner-controlled: when this call creates it, it is created
+/// 0700 (mode applied at mkdir time — no chmod window); when it already exists,
+/// its permissions are left untouched (never chmod a shared dir like `/tmp`)
+/// and it is rejected unless it is a real directory owned by the current user.
+async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
+    let path = base_url.strip_prefix("ipc://").unwrap_or(base_url);
+    let Some(parent) = std::path::Path::new(path).parent() else {
+        return Ok(());
+    };
+    let fail = |reason: String| WorkerError::ConnectionFailed {
+        url: base_url.to_string(),
+        reason,
+    };
+    // symlink_metadata: a symlinked parent must not redirect the checks (or the
+    // sockets) into a directory we did not verify.
+    let meta = match tokio::fs::symlink_metadata(parent).await {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            builder.mode(0o700);
+            builder
+                .create(parent)
+                .await
+                .map_err(|e| fail(format!("failed to create ipc socket dir for {path}: {e}")))?;
+            tokio::fs::symlink_metadata(parent)
+                .await
+                .map_err(|e| fail(format!("failed to stat ipc socket dir for {path}: {e}")))?
+        }
+        Err(e) => {
+            return Err(fail(format!(
+                "failed to stat ipc socket dir for {path}: {e}"
+            )))
+        }
+    };
+    if !meta.is_dir() {
+        return Err(fail(format!(
+            "ipc socket dir {} exists but is not a directory",
+            parent.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = rustix::process::geteuid().as_raw();
+        if meta.uid() != uid {
+            return Err(fail(format!(
+                "ipc socket dir {} is owned by uid {} (expected {uid}); refusing to bind \
+                 unauthenticated ZMQ sockets in a directory owned by another user",
+                parent.display(),
+                meta.uid()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Bind the SMG-side ZMQ sockets and complete the handshake with the engine.
+/// Shared by the lazy client accessor and the background handshake driver so
+/// both go through the exact same connect path. `base_url` is the `ipc://` URL;
+/// `model_id` is the config-resolved served model (EngineCore reports none).
+async fn connect_zmq_backend(
+    base_url: String,
+    model_id: String,
+    runtime: RuntimeType,
+    handshake_override: Option<String>,
+) -> WorkerResult<Arc<BackendClient>> {
+    let (handshake, input, output) =
+        zmq_socket_addresses(&base_url, handshake_override.as_deref())?;
+    ensure_ipc_socket_dir(&base_url).await?;
+    tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
+    match ZmqEngineClient::connect(
+        &handshake,
+        &input,
+        &output,
+        1,
+        model_id,
+        runtime,
+        ZMQ_CONNECT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(client) => Ok(Arc::new(BackendClient::Zmq(client))),
+        Err(e) => Err(WorkerError::ConnectionFailed {
+            url: base_url,
+            reason: format!("Failed to connect ZMQ engine: {e}"),
+        }),
+    }
+}
 
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
@@ -96,14 +268,15 @@ fn require_backend_client(
     })
 }
 
-/// Error for an admin op invoked on a ZMQ worker. ZMQ backend operations are
-/// wired in a follow-up; until then a ZMQ worker is recognized but its admin
-/// surface is unavailable (it never routes through the gRPC client).
+/// EngineCore exposes no admin RPCs over ZMQ, so these ops can never succeed for
+/// a ZMQ worker. Reject them up front rather than dispatching to client
+/// acquisition, which would otherwise drive the (up to 10-minute) lazy handshake
+/// only to return `unimplemented`.
 fn zmq_admin_unsupported(url: &str, operation: &str) -> WorkerError {
     WorkerError::OperationFailed {
         url: url.to_string(),
         operation: operation.to_string(),
-        reason: "admin operations are not yet supported for ZMQ workers".to_string(),
+        reason: format!("{operation} is not supported over ZMQ"),
     }
 }
 
@@ -508,10 +681,14 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
 
     /// Reset the gRPC client connection (for reconnection scenarios)
     /// No-op for HTTP workers
-    async fn reset_backend_client(&self) -> WorkerResult<()> {
+    async fn reset_grpc_client(&self) -> WorkerResult<()> {
         Ok(())
     }
     async fn grpc_health_check(&self) -> WorkerResult<bool>;
+    /// Liveness check for a ZMQ worker. Unlike gRPC there is no health RPC on
+    /// the raw wire: liveness is local (handshake completed and the engine has
+    /// not signalled `ENGINE_CORE_DEAD`).
+    async fn zmq_health_check(&self) -> WorkerResult<bool>;
     async fn http_health_check(&self) -> WorkerResult<bool>;
 
     // ── Admin operations ────────────────────────────────────────────
@@ -536,6 +713,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "flush_cache")),
             ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
@@ -549,7 +727,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "flush_cache")),
         }
     }
 
@@ -573,6 +750,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "start_profile")),
             ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
@@ -595,7 +773,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "start_profile")),
         }
     }
 
@@ -614,6 +791,7 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                 )
                 .await
             }
+            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "stop_profile")),
             ConnectionMode::Grpc => {
                 let client = require_backend_client(
                     self.url(),
@@ -627,7 +805,6 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
                     result.map(|r| (r.success, r.message)),
                 )
             }
-            ConnectionMode::Zmq => Err(zmq_admin_unsupported(self.url(), "stop_profile")),
         }
     }
 }
@@ -962,9 +1139,16 @@ pub struct BasicWorker {
     pub metadata: WorkerMetadata,
     pub runtime: ArcSwap<WorkerRuntime>,
     pub circuit_breaker: ArcSwap<CircuitBreaker>,
-    /// Lazily initialized gRPC client for gRPC workers.
-    /// Uses OnceCell for lock-free reads after initialization.
-    pub backend_client: Arc<OnceCell<Arc<BackendClient>>>,
+    /// Lazily initialized backend client (gRPC or ZMQ) for local workers.
+    /// The inner `OnceCell` keeps reads lock-free after initialization and
+    /// dedupes concurrent connects; the outer `ArcSwap` lets the ZMQ health
+    /// probe evict a dead client by swapping in a fresh cell (gRPC never
+    /// swaps — a failed gRPC worker is removed and re-added instead).
+    pub backend_client: Arc<ArcSwap<OnceCell<Arc<BackendClient>>>>,
+    /// Guards the one-shot background ZMQ handshake driver so the health probe
+    /// never cancels a long (model-load) handshake. Self-clears on failure to
+    /// allow a retry. Unused for HTTP/gRPC.
+    pub zmq_connect_started: Arc<AtomicBool>,
     /// Runtime-mutable models override (for lazy discovery).
     /// When not `Wildcard`, overrides metadata.models for routing decisions.
     /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
@@ -982,6 +1166,7 @@ impl Clone for BasicWorker {
             runtime: ArcSwap::from(self.runtime.load_full()),
             circuit_breaker: ArcSwap::from(self.circuit_breaker.load_full()),
             backend_client: Arc::clone(&self.backend_client),
+            zmq_connect_started: Arc::clone(&self.zmq_connect_started),
             models_override: Arc::clone(&self.models_override),
             http_client: self.http_client.clone(),
             resilience: self.resilience.clone(),
@@ -997,7 +1182,7 @@ impl fmt::Debug for BasicWorker {
             .field("status", &runtime.status())
             .field("revision", &runtime.revision())
             .field("circuit_breaker_state", &self.circuit_breaker_state())
-            .field("backend_client", &"<OnceCell>")
+            .field("grpc_client", &"<OnceCell>")
             .finish()
     }
 }
@@ -1078,9 +1263,7 @@ impl Worker for BasicWorker {
         let probe_ok = match &self.metadata.spec.connection_mode {
             ConnectionMode::Http => self.http_health_check().await?,
             ConnectionMode::Grpc => self.grpc_health_check().await?,
-            // ZMQ liveness lands with the backend client; until then a ZMQ
-            // worker is recognized but never becomes ready (not routable).
-            ConnectionMode::Zmq => false,
+            ConnectionMode::Zmq => self.zmq_health_check().await?,
         };
 
         if probe_ok {
@@ -1231,15 +1414,12 @@ impl Worker for BasicWorker {
 
     async fn get_backend_client(&self) -> WorkerResult<Option<Arc<BackendClient>>> {
         match self.metadata.spec.connection_mode {
-            // Neither HTTP nor ZMQ has a gRPC client. A ZMQ worker's backend
-            // client is a separate type wired in a follow-up; it is never a
-            // gRPC client.
-            ConnectionMode::Http | ConnectionMode::Zmq => Ok(None),
+            ConnectionMode::Http => Ok(None),
             ConnectionMode::Grpc => {
                 // OnceCell provides lock-free reads after initialization.
                 // get_or_try_init only acquires internal lock on first call.
-                let client = self
-                    .backend_client
+                let cell = self.backend_client.load_full();
+                let client = cell
                     .get_or_try_init(|| async {
                         let runtime_str = self.metadata.spec.runtime_type.to_string();
                         tracing::info!(
@@ -1273,14 +1453,33 @@ impl Worker for BasicWorker {
                     .await?;
                 Ok(Some(Arc::clone(client)))
             }
+            ConnectionMode::Zmq => {
+                // SMG binds the handshake + data-plane sockets; the
+                // operator-launched engine dials them. The first acquisition
+                // completes the handshake (a liveness signal in itself). The
+                // model id comes from config — EngineCore reports none on the
+                // wire (see create_worker).
+                let base_url = self.metadata.base_url().to_string();
+                let model_id = self.metadata.model_id().to_string();
+                let runtime = self.metadata.spec.runtime_type;
+                let handshake_override = self.metadata.spec.zmq_handshake_address.clone();
+                let cell = self.backend_client.load_full();
+                let client = cell
+                    .get_or_try_init(|| {
+                        connect_zmq_backend(base_url, model_id, runtime, handshake_override)
+                    })
+                    .await?;
+                Ok(Some(Arc::clone(client)))
+            }
         }
     }
 
-    async fn reset_backend_client(&self) -> WorkerResult<()> {
-        // OnceCell doesn't support resetting. This is intentional for lock-free performance.
-        // If a connection fails, the worker should be removed and re-added.
+    async fn reset_grpc_client(&self) -> WorkerResult<()> {
+        // Intentional no-op: a failed gRPC worker is removed and re-added rather
+        // than reconnected in place. (The ZMQ path differs: its health probe
+        // evicts a dead client and reconnects — see zmq_health_check.)
         tracing::debug!(
-            "reset_backend_client called for {} (no-op with OnceCell)",
+            "reset_grpc_client called for {} (no-op for gRPC workers)",
             self.metadata.spec.url
         );
         Ok(())
@@ -1318,6 +1517,66 @@ impl Worker for BasicWorker {
                 Ok(false)
             }
         }
+    }
+
+    async fn zmq_health_check(&self) -> WorkerResult<bool> {
+        // Never drive (or cancel) the handshake from the probe: model load can
+        // take far longer than the health timeout, and cancelling it mid-flight
+        // would rebind the sockets on every probe and never connect. Peek the
+        // cached client instead — if it isn't there yet, kick the handshake off
+        // once in the background and report not-ready until it lands. Thereafter
+        // liveness is local (the connector marks the client closed on
+        // ENGINE_CORE_DEAD or a transport failure); there is no health RPC on
+        // the raw ZMQ wire.
+        let cell = self.backend_client.load_full();
+        if let Some(backend_client) = cell.get() {
+            if backend_client.is_alive() {
+                return Ok(true);
+            }
+            // The engine behind this client died, and a ZMQ client cannot
+            // reconnect in place (liveness is latched). Evict the dead client
+            // and reset the handshake guard so the next probe re-runs
+            // connect_zmq_backend, rebinding the sockets for a replacement
+            // engine to dial into. Eviction cannot race an in-flight connect:
+            // a cell only becomes non-empty once its connect finished, and
+            // compare_and_swap keeps a lagging probe from clobbering a fresh
+            // cell another probe already swapped in.
+            tracing::warn!(
+                "ZMQ engine for {} is no longer alive; evicting the dead client and rebinding on a later probe",
+                self.metadata.spec.url
+            );
+            self.backend_client
+                .compare_and_swap(&cell, Arc::new(OnceCell::new()));
+            self.zmq_connect_started.store(false, Ordering::SeqCst);
+            return Ok(false);
+        }
+        if !self.zmq_connect_started.swap(true, Ordering::SeqCst) {
+            let started = Arc::clone(&self.zmq_connect_started);
+            let base_url = self.metadata.base_url().to_string();
+            let model_id = self.metadata.model_id().to_string();
+            let url = self.metadata.spec.url.clone();
+            let runtime = self.metadata.spec.runtime_type;
+            let handshake_override = self.metadata.spec.zmq_handshake_address.clone();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "detached one-shot handshake driver; the OnceCell dedupes with the request path and the guard self-clears on failure to allow a retry"
+            )]
+            // Detached: dropping the handle at scope end leaves the task running.
+            let _handle = tokio::spawn(async move {
+                if let Err(e) = cell
+                    .get_or_try_init(|| {
+                        connect_zmq_backend(base_url, model_id, runtime, handshake_override)
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        "ZMQ backend handshake failed for {url}: {e}; will retry on the next health probe"
+                    );
+                    started.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+        Ok(false)
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
@@ -1488,6 +1747,56 @@ mod tests {
         assert_eq!(WorkerType::Regular.to_string(), "regular");
         assert_eq!(WorkerType::Prefill.to_string(), "prefill");
         assert_eq!(WorkerType::Decode.to_string(), "decode");
+    }
+
+    #[test]
+    fn derive_handshake_port_matches_pinned_vectors() {
+        // Fixed vectors shared with `_zmq_handshake_port` in
+        // bindings/python/src/smg/serve.py — a change on either side breaks the
+        // engine/router port agreement, so these must stay in sync.
+        assert_eq!(derive_handshake_port("/tmp/smg-zmq/ts0.ipc"), 25152);
+        assert_eq!(derive_handshake_port("/tmp/smg-zmq/engine-31000"), 22714);
+        // Range invariant: every path maps into 20000..=29999.
+        for p in ["", "a", "/x/y/z.ipc", "very/long/path/with/segments.sock"] {
+            let port = derive_handshake_port(p);
+            assert!(
+                (20000..=29999).contains(&port),
+                "port {port} out of band for {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zmq_socket_addresses_derive_handshake_by_default() {
+        let (handshake, input, output) =
+            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", None).unwrap();
+        assert_eq!(handshake, "tcp://127.0.0.1:25152");
+        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
+        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
+    }
+
+    #[test]
+    fn zmq_socket_addresses_honor_handshake_override() {
+        // TokenSpeed's default dial target — outside the derived band; the
+        // override must be bound verbatim while the data plane stays derived.
+        let (handshake, input, output) =
+            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("tcp://127.0.0.1:30500"))
+                .unwrap();
+        assert_eq!(handshake, "tcp://127.0.0.1:30500");
+        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
+        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
+    }
+
+    #[test]
+    fn zmq_socket_addresses_reject_non_tcp_override() {
+        // The engine dials a TCP handshake; a non-tcp override is a config
+        // error and must fail loudly rather than bind something unexpected.
+        let err = zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("ipc:///tmp/hs.sock"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("tcp://"),
+            "error must name the required scheme: {err}"
+        );
     }
 
     #[test]
@@ -2430,5 +2739,128 @@ mod tests {
         assert!(worker.supports_model("text-embedding-3-small"));
         assert!(!worker.supports_model("non-existent-model"));
         assert!(worker.has_models_discovered());
+    }
+
+    #[tokio::test]
+    async fn ensure_ipc_socket_dir_creates_a_private_owner_only_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("sockets");
+        let url = format!("ipc://{}/x.ipc", dir.display());
+        ensure_ipc_socket_dir(&url).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "created socket dir must be 0700");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_ipc_socket_dir_leaves_an_existing_owned_dir_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let url = format!("ipc://{}/x.ipc", dir.path().display());
+        ensure_ipc_socket_dir(&url).await.unwrap();
+        let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "an existing dir must not be chmod'd");
+    }
+
+    #[tokio::test]
+    async fn ensure_ipc_socket_dir_rejects_a_non_directory_parent() {
+        let base = tempfile::tempdir().unwrap();
+        let file = base.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let url = format!("ipc://{}/x.ipc", file.display());
+        assert!(ensure_ipc_socket_dir(&url).await.is_err());
+    }
+
+    /// A ZMQ client whose engine dies must be evicted by the health probe (the
+    /// connection can't reconnect in place — liveness is latched), and the
+    /// handshake guard reset so a later probe rebinds the sockets for a
+    /// replacement engine. A live client stays cached across probes.
+    #[tokio::test]
+    async fn zmq_health_check_evicts_a_dead_client_and_resets_the_guard() {
+        use engine_zmq_client::{
+            mock_engine::{connect_to_frontend, default_ready_response},
+            EngineId, ENGINE_CORE_DEAD_SENTINEL,
+        };
+
+        let base = tempfile::tempdir().unwrap();
+        let ep = |name: &str| format!("ipc://{}", base.path().join(name).display());
+        let (handshake, input, output) = (ep("hs.sock"), ep("in.sock"), ep("out.sock"));
+
+        let (client, engine) = tokio::join!(
+            ZmqEngineClient::connect(
+                &handshake,
+                &input,
+                &output,
+                1,
+                "m".to_string(),
+                RuntimeType::Vllm,
+                Duration::from_secs(10)
+            ),
+            connect_to_frontend(
+                &handshake,
+                EngineId::from_engine_index(0),
+                default_ready_response()
+            ),
+        );
+        let client = client.expect("adapter connect");
+        let mut engine = engine.expect("mock engine");
+
+        let worker = BasicWorkerBuilder::new(ep("ts0.ipc"))
+            .connection_mode(ConnectionMode::Zmq)
+            .health_config(no_health_check())
+            .build();
+
+        // Inject a completed connect and mark the one-shot guard as set.
+        let cell = worker.backend_client.load_full();
+        cell.set(Arc::new(BackendClient::Zmq(client)))
+            .ok()
+            .expect("cell empty");
+        worker.zmq_connect_started.store(true, Ordering::SeqCst);
+
+        // A live client stays cached and reports healthy.
+        assert!(worker.zmq_health_check().await.unwrap());
+        assert!(worker.backend_client.load().get().is_some());
+
+        // Kill the engine and wait for the dispatcher to latch the client closed.
+        engine
+            .send_output(vec![bytes::Bytes::from_static(ENGINE_CORE_DEAD_SENTINEL)])
+            .await
+            .unwrap();
+        let observed_dead = time::timeout(Duration::from_secs(5), async {
+            loop {
+                let alive = worker
+                    .backend_client
+                    .load()
+                    .get()
+                    .map(|c| c.is_alive())
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+                time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            observed_dead.is_ok(),
+            "client never observed ENGINE_CORE_DEAD"
+        );
+
+        // The next probe evicts the dead client and resets the guard so a later
+        // probe re-runs the handshake for a replacement engine.
+        assert!(!worker.zmq_health_check().await.unwrap());
+        assert!(
+            worker.backend_client.load().get().is_none(),
+            "dead client must be evicted from the cell"
+        );
+        assert!(
+            !worker.zmq_connect_started.load(Ordering::SeqCst),
+            "handshake guard must reset to allow a reconnect"
+        );
     }
 }

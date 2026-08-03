@@ -985,8 +985,11 @@ class RouterArgs:
             f"--{prefix}backend",
             type=str,
             default=RouterArgs.backend,
-            choices=["sglang", "openai", "anthropic"],
-            help="Backend runtime to use (default: sglang)",
+            choices=["sglang", "openai", "anthropic", "vllm", "tokenspeed"],
+            help=(
+                "Backend runtime to use (default: sglang). For ZMQ workers, vllm/"
+                "tokenspeed also pin the wire protocol (it cannot be auto-detected)"
+            ),
         )
         backend_group.add_argument(
             f"--{prefix}enable-wasm",

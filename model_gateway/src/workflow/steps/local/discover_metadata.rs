@@ -373,9 +373,11 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverMetadataStep {
                     .await
                     .map(|(labels, rt)| (labels, Some(rt)))
             }
-            // EngineCore does not report model/tokenizer metadata over ZMQ; it is
-            // configured at worker registration. The runtime is always vLLM.
-            ConnectionMode::Zmq => Ok((HashMap::new(), Some("vllm".to_string()))),
+            // An EngineCore worker does not report model/tokenizer metadata over
+            // ZMQ; it is configured at worker registration. Return `None` for the
+            // runtime so the explicitly configured / detected runtime is preserved
+            // (the handshake is shared across engines, so it cannot be probed here).
+            ConnectionMode::Zmq => Ok((HashMap::new(), None)),
         }
         .unwrap_or_else(|e| {
             warn!("Failed to fetch metadata for {}: {}", config.url, e);

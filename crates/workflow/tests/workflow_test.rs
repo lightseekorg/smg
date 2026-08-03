@@ -990,6 +990,109 @@ async fn test_run_if_context_based() {
     assert_eq!(executed_clone.load(Ordering::SeqCst), 1);
 }
 
+/// Regression test: instantly-skipped run_if steps feeding a dependent chain
+/// must not trigger a spurious "Workflow deadlocked" failure. The skip signal
+/// must be sent in the same tracker lock scope as the removal from `running`,
+/// otherwise the scheduler can observe running == 0 with the completion unsent.
+#[tokio::test]
+async fn test_run_if_skip_chain_no_spurious_deadlock() {
+    for i in 0..50 {
+        let engine: WorkflowEngine<TestWorkflowData> = WorkflowEngine::new();
+
+        let workflow = WorkflowDefinition::new(
+            "run_if_skip_chain_workflow",
+            "Run If Skip Chain Deadlock Regression",
+        )
+        .add_step(
+            StepDefinition::new("root", "Root", Arc::new(AlwaysSucceedStep)).run_if(|_ctx| false),
+        )
+        .add_step(
+            StepDefinition::new("mid", "Mid", Arc::new(AlwaysSucceedStep))
+                .depends_on(&["root"])
+                .run_if(|_ctx| false),
+        )
+        .add_step(
+            StepDefinition::new("leaf", "Leaf", Arc::new(AlwaysSucceedStep)).depends_on(&["mid"]),
+        );
+
+        let workflow_id = workflow.id.clone();
+        engine.register_workflow(workflow).unwrap();
+
+        let instance_id = engine
+            .start_workflow(workflow_id, TestWorkflowData::default())
+            .await
+            .unwrap();
+
+        let result = engine
+            .wait_for_completion(instance_id, "skip-chain", Duration::from_secs(5))
+            .await;
+        assert!(result.is_ok(), "iteration {i} failed: {result:?}");
+    }
+}
+
+/// A -> B(run_if=false) -> C: the chain completes with B skipped and C executed.
+#[tokio::test]
+async fn test_run_if_false_mid_chain_completes() {
+    use tokio::time::sleep;
+
+    let engine: WorkflowEngine<TestWorkflowData> = WorkflowEngine::new();
+
+    let executed = Arc::new(AtomicU32::new(0));
+    let executed_clone = Arc::clone(&executed);
+
+    struct TrackingStep {
+        counter: Arc<AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl StepExecutor<TestWorkflowData> for TrackingStep {
+        async fn execute(
+            &self,
+            _context: &mut WorkflowContext<TestWorkflowData>,
+        ) -> WorkflowResult<StepResult> {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            Ok(StepResult::Success)
+        }
+    }
+
+    let workflow = WorkflowDefinition::new("run_if_mid_chain_workflow", "Run If Mid Chain Test")
+        .add_step(StepDefinition::new("a", "A", Arc::new(AlwaysSucceedStep)))
+        .add_step(
+            StepDefinition::new("b", "B", Arc::new(AlwaysSucceedStep))
+                .depends_on(&["a"])
+                .run_if(|_ctx| false),
+        )
+        .add_step(
+            StepDefinition::new("c", "C", Arc::new(TrackingStep { counter: executed }))
+                .depends_on(&["b"]),
+        );
+
+    let workflow_id = workflow.id.clone();
+    engine.register_workflow(workflow).unwrap();
+
+    let instance_id = engine
+        .start_workflow(workflow_id, TestWorkflowData::default())
+        .await
+        .unwrap();
+
+    // Poll instead of wait_for_completion so step states survive for inspection.
+    let mut state = engine.get_status(instance_id).await.unwrap();
+    for _ in 0..100 {
+        if state.status != WorkflowStatus::Running && state.status != WorkflowStatus::Pending {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+        state = engine.get_status(instance_id).await.unwrap();
+    }
+
+    assert_eq!(state.status, WorkflowStatus::Completed);
+    assert_eq!(
+        state.step_states.get(&StepId::new("b")).unwrap().status,
+        StepStatus::Skipped
+    );
+    assert_eq!(executed_clone.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn test_depends_on_any() {
     // DAG: A and B run in parallel, C waits for ANY (not both)

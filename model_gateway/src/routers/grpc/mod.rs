@@ -5,7 +5,7 @@ use openai_protocol::{chat::ChatCompletionRequest, common::StringOrArray};
 
 use crate::routers::error;
 
-pub mod backend_client; // Used by bindings (Worker trait impl)
+pub mod backend_client; // Polymorphism over gRPC vs ZMQ transports
 pub mod client; // Used by core/
 pub(crate) mod common;
 pub(crate) mod context;
@@ -17,6 +17,7 @@ pub(crate) mod proto_wrapper;
 pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
+pub mod zmq_client; // ZMQ backend adapter behind the vLLM client surface
 
 // Re-export for convenience
 pub use proto_wrapper::{MultimodalData, TensorBytes};

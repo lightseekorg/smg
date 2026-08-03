@@ -113,12 +113,7 @@ impl VllmEngineClient {
     }
 
     /// Build a single vLLM GenerateRequest from OpenAI ChatCompletionRequest
-    #[expect(
-        clippy::unused_self,
-        reason = "method receiver kept for consistent public API across gRPC backends"
-    )]
     pub fn build_generate_request_from_chat(
-        &self,
         request_id: String,
         body: &ChatCompletionRequest,
         processed_text: String,
@@ -152,12 +147,7 @@ impl VllmEngineClient {
     }
 
     /// Build a basic GenerateRequest from the vLLM spec GenerateRequest
-    #[expect(
-        clippy::unused_self,
-        reason = "method receiver kept for consistent public API across gRPC backends"
-    )]
     pub fn build_plain_generate_request(
-        &self,
         request_id: String,
         body: &GenerateRequest,
         original_text: Option<String>,
@@ -189,12 +179,7 @@ impl VllmEngineClient {
     ///
     /// NOTE: This is used by the Harmony router only. The Regular router uses
     /// responses_to_chat() conversion and goes through the chat pipeline.
-    #[expect(
-        clippy::unused_self,
-        reason = "method receiver kept for consistent public API across gRPC backends"
-    )]
     pub fn build_generate_request_from_responses(
-        &self,
         request_id: String,
         body: &ResponsesRequest,
         processed_text: String,
@@ -405,12 +390,7 @@ impl VllmEngineClient {
     }
 
     /// Build a GenerateRequest from CreateMessageRequest (Anthropic Messages API)
-    #[expect(
-        clippy::unused_self,
-        reason = "method receiver kept for consistent public API across gRPC backends"
-    )]
     pub fn build_generate_request_from_messages(
-        &self,
         request_id: String,
         body: &CreateMessageRequest,
         processed_text: String,
@@ -472,12 +452,7 @@ impl VllmEngineClient {
     }
 
     /// Build a GenerateRequest from CompletionRequest (`/v1/completions`)
-    #[expect(
-        clippy::unused_self,
-        reason = "method receiver kept for consistent public API"
-    )]
     pub fn build_generate_request_from_completion(
-        &self,
         request_id: String,
         body: &CompletionRequest,
         original_text: String,

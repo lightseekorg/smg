@@ -20,10 +20,12 @@ use zeromq::{
 
 use crate::{
     codec::{decode_msgpack, dtype::ModelDtype, encode_msgpack},
-    protocol::vllm::{
+    protocol::{
         handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage},
-        output::EngineCoreOutputs,
-        request::{EngineCoreRequest, EngineCoreRequestType},
+        vllm::{
+            output::EngineCoreOutputs,
+            request::{EngineCoreRequest, EngineCoreRequestType},
+        },
     },
     transport::EngineId,
     Error, Result,

@@ -108,6 +108,7 @@ async fn assemble_multimodal_data_impl(
         BackendClient::Grpc(GrpcClient::Mlx(_)) => {
             anyhow::bail!("MLX does not support multimodal inputs")
         }
+        BackendClient::Zmq(_) => anyhow::bail!("ZMQ backend does not support multimodal inputs"),
     }
 }
 

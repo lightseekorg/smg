@@ -3,6 +3,11 @@
 // Ported from the Apache-2.0 reference `vllm-engine-core-client`
 // (vllm-project/vllm): protocol/handshake.rs.
 
+//! Startup-handshake messages shared by every engine family. The wire shapes
+//! originate from vLLM's EngineCore, but the handshake itself is engine-neutral:
+//! TokenSpeed speaks the same HELLO/INIT/READY protocol, so the transport uses
+//! these types for both.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -82,9 +87,11 @@ pub struct EngineCoreReadyResponse {
     /// Scheduler cap on concurrently running sequences.
     #[serde(default)]
     pub max_num_seqs: u64,
-    /// Scheduler cap on batched tokens per step.
+    /// Scheduler cap on batched tokens per step. Signed because TokenSpeed
+    /// sends its `chunked_prefill_size` verbatim, where `-1` means "chunked
+    /// prefill disabled". SMG does not consume this value.
     #[serde(default)]
-    pub max_num_batched_tokens: u64,
+    pub max_num_batched_tokens: i64,
     /// Unique identifier for this server instance.
     #[serde(default)]
     pub instance_id: String,
@@ -166,5 +173,25 @@ mod tests {
         assert_eq!(resp.data_parallel_rank, 0);
         // Optional trailing field defaults when omitted.
         assert!(resp.kv_events_config.is_none());
+    }
+
+    #[test]
+    fn ready_response_decodes_negative_max_num_batched_tokens() {
+        // TokenSpeed sends chunked_prefill_size verbatim; -1 = disabled. The
+        // strict msgpack decoder must accept it (a u64 field would fail here).
+        let json = serde_json::json!({
+            "max_model_len": 4096u64,
+            "num_gpu_blocks": 1000u64,
+            "block_size": 16u64,
+            "dp_stats_address": serde_json::Value::Null,
+            "dtype": "bfloat16",
+            "vllm_version": "tokenspeed",
+            "world_size": 1u64,
+            "data_parallel_size": 1u64,
+            "max_num_batched_tokens": -1i64,
+        });
+        let bytes = rmp_serde::to_vec_named(&json).unwrap();
+        let resp: EngineCoreReadyResponse = decode_msgpack(&bytes).unwrap();
+        assert_eq!(resp.max_num_batched_tokens, -1);
     }
 }
