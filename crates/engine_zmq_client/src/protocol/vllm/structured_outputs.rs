@@ -107,7 +107,7 @@ impl StructuredOutputsParams {
 /// `true` when a boolean is `false`; used to drop default-`false` flags from the
 /// serialized map to match the sparse `omit_defaults` wire shape. Takes `&bool`
 /// because serde's `skip_serializing_if` requires a by-reference predicate.
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[expect(clippy::trivially_copy_pass_by_ref)]
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -268,7 +268,9 @@ mod tests {
         let error =
             serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({})).unwrap_err();
 
-        assert!(error.to_string().contains("missing structured output constraint"));
+        assert!(error
+            .to_string()
+            .contains("missing structured output constraint"));
     }
 
     #[test]
@@ -279,11 +281,9 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("multiple structured output constraints specified: json, regex")
-        );
+        assert!(error
+            .to_string()
+            .contains("multiple structured output constraints specified: json, regex"));
     }
 
     #[test]

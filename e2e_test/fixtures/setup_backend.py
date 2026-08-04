@@ -287,9 +287,7 @@ def _setup_local(
     # spawn returned immediately), so that gate must cover model load.
     gateway_config = {
         **gateway_config,
-        "timeout": _gateway_readiness_timeout(
-            connection_mode, model_id, gateway_config["timeout"]
-        ),
+        "timeout": _gateway_readiness_timeout(connection_mode, model_id, gateway_config["timeout"]),
     }
     try:
         _start_gateway(
@@ -553,9 +551,7 @@ def backend_router(request: pytest.FixtureRequest):
             model_path=model_path,
             backend=engine if is_zmq else None,
             # ZMQ loads the model inside the gateway's readiness gate; cover it.
-            timeout=_gateway_readiness_timeout(
-                connection_mode, model_id, DEFAULT_ROUTER_TIMEOUT
-            ),
+            timeout=_gateway_readiness_timeout(connection_mode, model_id, DEFAULT_ROUTER_TIMEOUT),
         )
         yield gateway
     finally:

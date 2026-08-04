@@ -848,7 +848,9 @@ fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
 /// Map the proto `constraint` oneof onto typed structured-output params. The
 /// backend defaults to guidance engine-side; `json_object=false` selects no
 /// constraint (the caller opted out), so it maps to `None`.
-fn translate_constraint(constraint: vllm::sampling_params::Constraint) -> Option<StructuredOutputsParams> {
+fn translate_constraint(
+    constraint: vllm::sampling_params::Constraint,
+) -> Option<StructuredOutputsParams> {
     use vllm::sampling_params::Constraint;
     match constraint {
         Constraint::JsonSchema(schema) => Some(StructuredOutputsParams::json(
