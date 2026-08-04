@@ -1410,6 +1410,7 @@ impl CliArgs {
             match self.backend {
                 Some(Backend::Vllm) => Some(RuntimeType::Vllm),
                 Some(Backend::Tokenspeed) => Some(RuntimeType::TokenSpeed),
+                Some(Backend::Sglang) => Some(RuntimeType::Sglang),
                 _ => None,
             }
         } else {

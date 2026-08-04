@@ -11,12 +11,58 @@
 //! provides one implementation.
 
 use bytes::Bytes;
+use serde::de::{Deserialize, Error as _, IgnoredAny, SeqAccess};
 
 use crate::Result;
 
 pub mod handshake;
+pub mod sglang;
 pub mod tokenspeed;
 pub mod vllm;
+
+/// Read the next positional element of a msgspec `array_like` struct, failing
+/// loudly when the array is shorter than the modeled prefix (every modeled field
+/// is required on decode).
+pub(crate) fn next_field<'de, A, T>(
+    seq: &mut A,
+    name: &'static str,
+) -> std::result::Result<T, A::Error>
+where
+    A: SeqAccess<'de>,
+    T: Deserialize<'de>,
+{
+    seq.next_element::<T>()?
+        .ok_or_else(|| A::Error::custom(format!("missing positional field `{name}`")))
+}
+
+/// Validate the msgspec tag string at element 0. A wrong tag means the payload
+/// is a different message type — fail loudly instead of misreading fields.
+pub(crate) fn expect_tag<'de, A>(
+    seq: &mut A,
+    expected: &'static str,
+) -> std::result::Result<(), A::Error>
+where
+    A: SeqAccess<'de>,
+{
+    let tag: String = next_field(seq, "_tag")?;
+    if tag != expected {
+        return Err(A::Error::custom(format!(
+            "wrong msgspec tag: expected `{expected}`, got `{tag}`"
+        )));
+    }
+    Ok(())
+}
+
+/// Drain positional elements beyond the modeled prefix. Engines append new
+/// fields at the end of their structs over time, so unknown trailing elements
+/// are skipped rather than treated as a decode error.
+pub(crate) fn drain_trailing<'de, A>(seq: &mut A) -> std::result::Result<(), A::Error>
+where
+    A: SeqAccess<'de>,
+{
+    while seq.next_element::<IgnoredAny>()?.is_some() {}
+    Ok(())
+}
 
 /// Engine-neutral per-rank load signal. Each protocol maps its native scheduler
 /// stats into this shape (vLLM maps `SchedulerStats`; TokenSpeed carries none
@@ -79,10 +125,12 @@ pub trait EngineProtocol: Send + Sync + 'static {
     /// The typed per-request output streamed back.
     type Output: EngineOutput + Send + 'static;
 
-    /// The single-byte request-type frame prepended to an add-request.
-    fn add_frame() -> Bytes;
-    /// The single-byte request-type frame prepended to an abort.
-    fn abort_frame() -> Bytes;
+    /// The single-byte request-type frame prepended to an add-request, or
+    /// `None` for protocols that dispatch by payload tag alone (no type frame).
+    fn add_frame() -> Option<Bytes>;
+    /// The single-byte request-type frame prepended to an abort, or `None` for
+    /// protocols with no type frame.
+    fn abort_frame() -> Option<Bytes>;
 
     /// The request's id (the registry routing key).
     fn request_id(request: &Self::Request) -> &str;

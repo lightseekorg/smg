@@ -2,8 +2,8 @@
 //
 // ZMQ backend adapter (gateway glue): presents the vLLM engine surface (the same
 // proto request/response types as `VllmEngineClient`) but speaks ZMQ directly to
-// a same-host engine (vLLM EngineCore or TokenSpeed) via `engine-zmq-client`,
-// bypassing the gRPC Python servicer.
+// a same-host engine (vLLM EngineCore, TokenSpeed, or SGLang) via
+// `engine-zmq-client`, bypassing the gRPC Python servicer.
 //
 // This bridges the gateway's proto request-execution pipeline to the raw ZMQ
 // transport, so it lives with the router (which owns `GrpcClient`/`ProtoStream`),
@@ -19,9 +19,18 @@ use std::{
 };
 
 use engine_zmq_client::{
-    connect_handshake,
-    connector::{EngineCoreClient, EngineCoreStream, TokenSpeedClient, TokenSpeedStream},
+    connect_handshake, connect_push_pull,
+    connector::{
+        EngineCoreClient, EngineCoreStream, SglangClient, SglangStream, TokenSpeedClient,
+        TokenSpeedStream,
+    },
     protocol::{
+        sglang::{
+            output::SglangOutput,
+            request::TokenizedGenerateReqInput as SglangGenerateReqInput,
+            sampling::{SamplingParams as SglangSamplingParams, TOP_K_ALL as SGLANG_TOP_K_ALL},
+            token_ids::TokenIdArray,
+        },
         tokenspeed::{
             output::TokenSpeedOutput, request::TokenizedGenerateReqInput,
             sampling::SamplingParams as TokenSpeedSamplingParams,
@@ -45,15 +54,18 @@ use crate::worker::RuntimeType;
 /// binds). Shared with the worker-side socket derivation.
 pub(crate) const ZMQ_LOOPBACK_HOST: &str = "127.0.0.1";
 
-/// The engine protocol a ZMQ backend speaks. Both share the transport and
-/// handshake; only the request/output struct shapes and the translation to/from
-/// SMG proto differ.
+/// The engine protocol a ZMQ backend speaks. vLLM and TokenSpeed share the
+/// handshake transport; SGLang uses the no-handshake PUSH/PULL transport. Only
+/// the request/output struct shapes and the translation to/from SMG proto
+/// differ.
 #[derive(Clone)]
 enum ZmqBackend {
     /// vLLM EngineCore.
     Vllm(Arc<EngineCoreClient>),
     /// TokenSpeed.
     TokenSpeed(Arc<TokenSpeedClient>),
+    /// SGLang (no handshake; tag-dispatched PUSH/PULL).
+    Sglang(Arc<SglangClient>),
 }
 
 /// Direct ZMQ connection to a same-host engine (vLLM EngineCore or TokenSpeed),
@@ -67,13 +79,16 @@ pub struct ZmqEngineClient {
 }
 
 impl ZmqEngineClient {
-    /// Bind the frontend sockets and complete the handshake with the engine(s),
-    /// which must already be running and dialing `handshake_address`.
+    /// Bind the frontend sockets and connect to the engine(s). For the handshake
+    /// wires (vLLM EngineCore, TokenSpeed) the engines must already be running and
+    /// dialing `handshake_address`; for SGLang there is no handshake — SMG binds
+    /// the PUSH/PULL data plane and the scheduler connects in (`handshake_address`
+    /// is unused).
     ///
     /// `input_address`/`output_address` are the `ipc://` data-plane endpoints the
     /// engines connect to (chosen by SMG). `engine_count` is the number of DP
-    /// ranks to await. `runtime` selects the wire protocol spoken over the shared
-    /// transport (vLLM EngineCore vs TokenSpeed).
+    /// ranks to await. `runtime` selects the wire protocol (vLLM EngineCore,
+    /// TokenSpeed, or SGLang).
     pub async fn connect(
         handshake_address: &str,
         input_address: &str,
@@ -83,29 +98,47 @@ impl ZmqEngineClient {
         runtime: RuntimeType,
         timeout: Duration,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Single-engine scope for TokenSpeed: its wire carries no DP-rank routing
-        // yet (`data_parallel_rank` is always `None`), so more than one engine
-        // would silently send all traffic to engine 0. Reject it loudly until
-        // DP>1 lands. The engine count is known here (the handshake awaits it).
-        if matches!(runtime, RuntimeType::TokenSpeed) && engine_count > 1 {
+        // Single-engine scope for TokenSpeed and SGLang: their wires carry no
+        // DP-rank routing yet (`data_parallel_rank` is always `None`), so more
+        // than one engine would silently send all traffic to engine 0. Reject it
+        // loudly until DP>1 lands.
+        if matches!(runtime, RuntimeType::TokenSpeed | RuntimeType::Sglang) && engine_count > 1 {
             return Err(format!(
-                "TokenSpeed ZMQ backend supports a single engine only (got \
+                "{runtime} ZMQ backend supports a single engine only (got \
                  engine_count={engine_count}); DP>1 is not yet supported"
             )
             .into());
         }
         // No silent fallback: any other runtime has no ZMQ engine adapter.
-        // Reject before the handshake — no such engine ever dials in, so the
-        // handshake would just block for the full timeout.
+        // Reject before connecting — for the handshake wires no such engine ever
+        // dials in, so the handshake would just block for the full timeout.
         if !matches!(
             runtime,
-            RuntimeType::Vllm | RuntimeType::TokenSpeed | RuntimeType::Unspecified
+            RuntimeType::Vllm
+                | RuntimeType::TokenSpeed
+                | RuntimeType::Sglang
+                | RuntimeType::Unspecified
         ) {
             return Err(format!(
                 "ZMQ direct backend has no engine implementation for runtime \
-                 {runtime}; only vllm and tokenspeed are supported"
+                 {runtime}; only vllm, tokenspeed, and sglang are supported"
             )
             .into());
+        }
+
+        // SGLang speaks the no-handshake PUSH/PULL transport: SMG binds the input
+        // and output sockets and the scheduler connects in. There is no TCP
+        // handshake, so `handshake_address` is unused for this runtime.
+        if matches!(runtime, RuntimeType::Sglang) {
+            let transport = connect_push_pull(
+                ZMQ_LOOPBACK_HOST,
+                Some(input_address),
+                Some(output_address),
+                timeout,
+            )
+            .await?;
+            let backend = ZmqBackend::Sglang(Arc::new(SglangClient::new(transport)));
+            return Ok(Self { backend, model_id });
         }
 
         let transport = connect_handshake(
@@ -135,15 +168,18 @@ impl ZmqEngineClient {
         match &self.backend {
             ZmqBackend::Vllm(_) => RuntimeType::Vllm,
             ZmqBackend::TokenSpeed(_) => RuntimeType::TokenSpeed,
+            ZmqBackend::Sglang(_) => RuntimeType::Sglang,
         }
     }
 
-    /// The engines connected on the shared transport (same handshake for both
-    /// protocols).
+    /// The engines connected on the transport. The handshake wires register a
+    /// per-rank `ready_response`; SGLang's no-handshake wire synthesizes a single
+    /// engine with none.
     fn engines(&self) -> &[ConnectedEngine] {
         match &self.backend {
             ZmqBackend::Vllm(client) => client.engines(),
             ZmqBackend::TokenSpeed(client) => client.engines(),
+            ZmqBackend::Sglang(client) => client.engines(),
         }
     }
 
@@ -184,6 +220,16 @@ impl ZmqEngineClient {
                 }
                 Ok(ZmqGenerateStream::TokenSpeed(streams))
             }
+            ZmqBackend::Sglang(client) => {
+                let mut streams = SelectAll::new();
+                for (index, sub) in subs.into_iter().enumerate() {
+                    let request =
+                        translate_request_sglang(sub).map_err(tonic::Status::invalid_argument)?;
+                    let stream = client.submit(request).await.map_err(zmq_status)?;
+                    streams.push(SglangGenerateStream::new(stream, index as u32));
+                }
+                Ok(ZmqGenerateStream::Sglang(streams))
+            }
         }
     }
 
@@ -193,6 +239,7 @@ impl ZmqEngineClient {
         match &self.backend {
             ZmqBackend::Vllm(client) => client.is_alive(),
             ZmqBackend::TokenSpeed(client) => client.is_alive(),
+            ZmqBackend::Sglang(client) => client.is_alive(),
         }
     }
 
@@ -210,17 +257,20 @@ impl ZmqEngineClient {
     }
 
     /// Latest per-rank load for one engine index, if the backend carries it.
-    /// vLLM piggybacks it on every batch; TokenSpeed does not (always `None`).
+    /// vLLM piggybacks it on every batch; TokenSpeed and SGLang do not (always
+    /// `None`).
     fn engine_load(&self, engine_index: u32) -> Option<EngineLoad> {
         match &self.backend {
             ZmqBackend::Vllm(client) => client.engine_load(engine_index),
             ZmqBackend::TokenSpeed(client) => client.engine_load(engine_index),
+            ZmqBackend::Sglang(client) => client.engine_load(engine_index),
         }
     }
 
     /// Per-rank load from the piggybacked `scheduler_stats` (SMG's DP routing
-    /// signal), in the same shape as the gRPC `GetLoads` response. TokenSpeed
-    /// carries no piggybacked load, so its response has no per-rank entries.
+    /// signal), in the same shape as the gRPC `GetLoads` response. TokenSpeed and
+    /// SGLang carry no piggybacked load, so their responses have no per-rank
+    /// entries.
     pub fn get_loads(&self) -> WorkerLoadResponse {
         let loads: Vec<SchedulerLoadSnapshot> = self
             .engines()
@@ -246,12 +296,14 @@ impl ZmqEngineClient {
 
     /// Model info derived from the handshake `EngineCoreReadyResponse` plus the
     /// configured model id (the engine does not report tokenizer/vocab metadata,
-    /// so those come from worker config).
+    /// so those come from worker config). SGLang's no-handshake wire has no ready
+    /// response, so the context length falls back to `0` (unknown).
     pub fn get_model_info(&self) -> vllm::GetModelInfoResponse {
         let max_context_length = self
             .engines()
             .first()
-            .map(|e| e.ready_response.max_model_len)
+            .and_then(|e| e.ready_response.as_ref())
+            .map(|ready| ready.max_model_len)
             .unwrap_or(0);
         vllm::GetModelInfoResponse {
             model_path: self.model_id.clone(),
@@ -263,16 +315,19 @@ impl ZmqEngineClient {
         }
     }
 
-    /// Server info derived from the handshake response.
+    /// Server info derived from the handshake response. SGLang's no-handshake
+    /// wire has no ready response, so the DP size falls back to `1`.
     pub fn get_server_info(&self) -> vllm::GetServerInfoResponse {
         let data_parallel_size = self
             .engines()
             .first()
-            .map(|e| e.ready_response.data_parallel_size)
+            .and_then(|e| e.ready_response.as_ref())
+            .map(|ready| ready.data_parallel_size)
             .unwrap_or(1);
         let server_type = match &self.backend {
             ZmqBackend::Vllm(_) => "vllm",
             ZmqBackend::TokenSpeed(_) => "tokenspeed",
+            ZmqBackend::Sglang(_) => "sglang",
         };
         vllm::GetServerInfoResponse {
             data_parallel_size: i32::try_from(data_parallel_size).unwrap_or(i32::MAX),
@@ -295,6 +350,8 @@ pub enum ZmqGenerateStream {
     Vllm(SelectAll<VllmGenerateStream>),
     /// TokenSpeed outputs.
     TokenSpeed(SelectAll<TokenSpeedGenerateStream>),
+    /// SGLang outputs.
+    Sglang(SelectAll<SglangGenerateStream>),
 }
 
 impl ZmqGenerateStream {
@@ -303,6 +360,7 @@ impl ZmqGenerateStream {
         match self {
             Self::Vllm(streams) => streams.next().await,
             Self::TokenSpeed(streams) => streams.next().await,
+            Self::Sglang(streams) => streams.next().await,
         }
     }
 
@@ -476,11 +534,59 @@ impl Stream for VllmGenerateStream {
     }
 }
 
-/// Streaming generate output for one TokenSpeed sub-request, mapping each
-/// `TokenSpeedOutput` to a vLLM-proto `GenerateResponse`, tagged with this
-/// sub's choice `index`.
-pub struct TokenSpeedGenerateStream {
-    inner: TokenSpeedStream,
+/// One tick of a "slim batch" backend's per-request output, reduced to the
+/// fields the shared stream mapper consumes. TokenSpeed and SGLang both report
+/// cumulative per-request token counts and per-tick sampled-token logprobs in
+/// this same shape, so one mapper serves both.
+struct SlimTick {
+    prompt_tokens: u32,
+    cached_tokens: u32,
+    completion_tokens: u32,
+    output_ids: Vec<u32>,
+    finish_reason: Option<String>,
+    output_logprobs_val: Vec<f64>,
+    output_logprobs_idx: Vec<u32>,
+}
+
+/// A "slim batch" per-request output (TokenSpeed or SGLang), reducible to the
+/// shared [`SlimTick`] the stream mapper consumes.
+trait SlimOutput {
+    fn into_tick(self) -> SlimTick;
+}
+
+impl SlimOutput for TokenSpeedOutput {
+    fn into_tick(self) -> SlimTick {
+        SlimTick {
+            prompt_tokens: self.prompt_tokens,
+            cached_tokens: self.cached_tokens,
+            completion_tokens: self.completion_tokens,
+            output_ids: self.output_ids,
+            finish_reason: self.finish_reason,
+            output_logprobs_val: self.output_logprobs_val,
+            output_logprobs_idx: self.output_logprobs_idx,
+        }
+    }
+}
+
+impl SlimOutput for SglangOutput {
+    fn into_tick(self) -> SlimTick {
+        SlimTick {
+            prompt_tokens: self.prompt_tokens,
+            cached_tokens: self.cached_tokens,
+            completion_tokens: self.completion_tokens,
+            output_ids: self.output_ids,
+            finish_reason: self.finish_reason,
+            output_logprobs_val: self.output_logprobs_val,
+            output_logprobs_idx: self.output_logprobs_idx,
+        }
+    }
+}
+
+/// Streaming generate output for one sub-request of a "slim batch" backend
+/// (TokenSpeed or SGLang), mapping each output tick to a vLLM-proto
+/// `GenerateResponse`, tagged with this sub's choice `index`.
+pub struct SlimGenerateStream<S> {
+    inner: S,
     state: StreamState,
     /// Choice index stamped on every chunk/complete (0 for n=1; the fan-out
     /// position for n>1) — the proto field the pipeline demuxes choices by.
@@ -491,8 +597,8 @@ pub struct TokenSpeedGenerateStream {
     pending: Option<vllm::GenerateResponse>,
 }
 
-impl TokenSpeedGenerateStream {
-    fn new(inner: TokenSpeedStream, index: u32) -> Self {
+impl<S> SlimGenerateStream<S> {
+    fn new(inner: S, index: u32) -> Self {
         Self {
             inner,
             state: StreamState::default(),
@@ -500,91 +606,104 @@ impl TokenSpeedGenerateStream {
             pending: None,
         }
     }
+}
 
-    fn map_output(&mut self, output: TokenSpeedOutput) -> vllm::GenerateResponse {
-        let state = &mut self.state;
-        // TokenSpeed reports per-request token counts directly (cumulative for
-        // completions), rather than vLLM's per-output prefill-stats deltas.
-        if output.prompt_tokens > 0 {
-            state.prompt_tokens = output.prompt_tokens;
-        }
-        if output.cached_tokens > 0 {
-            state.cached_tokens = output.cached_tokens;
-        }
-        state.completion_tokens = output.completion_tokens;
-        state.output_ids.extend(output.output_ids.iter().copied());
+/// TokenSpeed's per-sub output stream.
+pub type TokenSpeedGenerateStream = SlimGenerateStream<TokenSpeedStream>;
+/// SGLang's per-sub output stream.
+pub type SglangGenerateStream = SlimGenerateStream<SglangStream>;
 
-        // Sampled-token logprobs, if requested. The proto column is `float`, so
-        // downcast the wire's `f64` values. Chunks carry this tick's increment;
-        // the terminal `Complete` carries the cumulative set, so accumulate
-        // into `state` and drain it on finish.
-        let chunk_logprobs =
-            (!output.output_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
-                token_logprobs: output
-                    .output_logprobs_val
-                    .iter()
-                    .map(|&lp| lp as f32)
-                    .collect(),
-                token_ids: output.output_logprobs_idx.clone(),
-                ..Default::default()
-            });
-        state
+/// Map one "slim batch" output tick to a vLLM-proto response. These backends
+/// report per-request token counts directly (cumulative for completions), rather
+/// than vLLM's per-output prefill-stats deltas.
+fn map_slim_tick(
+    state: &mut StreamState,
+    index: u32,
+    pending: &mut Option<vllm::GenerateResponse>,
+    tick: SlimTick,
+) -> vllm::GenerateResponse {
+    if tick.prompt_tokens > 0 {
+        state.prompt_tokens = tick.prompt_tokens;
+    }
+    if tick.cached_tokens > 0 {
+        state.cached_tokens = tick.cached_tokens;
+    }
+    state.completion_tokens = tick.completion_tokens;
+    state.output_ids.extend(tick.output_ids.iter().copied());
+
+    // Sampled-token logprobs, if requested. The proto column is `float`, so
+    // downcast the wire's `f64` values. Chunks carry this tick's increment; the
+    // terminal `Complete` carries the cumulative set, so accumulate into `state`
+    // and drain it on finish.
+    let chunk_logprobs = (!tick.output_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
+        token_logprobs: tick
             .output_logprobs_val
-            .extend(output.output_logprobs_val.iter().map(|&lp| lp as f32));
-        state
-            .output_logprobs_idx
-            .extend(output.output_logprobs_idx.iter().copied());
+            .iter()
+            .map(|&lp| lp as f32)
+            .collect(),
+        token_ids: tick.output_logprobs_idx.clone(),
+        ..Default::default()
+    });
+    state
+        .output_logprobs_val
+        .extend(tick.output_logprobs_val.iter().map(|&lp| lp as f32));
+    state
+        .output_logprobs_idx
+        .extend(tick.output_logprobs_idx.iter().copied());
 
-        let response = match output.finish_reason {
-            Some(reason) => {
-                let complete = vllm::GenerateResponse {
-                    response: Some(vllm::generate_response::Response::Complete(
-                        vllm::GenerateComplete {
-                            output_ids: std::mem::take(&mut state.output_ids),
-                            finish_reason: normalize_finish_reason(&reason).to_string(),
-                            prompt_tokens: state.prompt_tokens,
-                            completion_tokens: state.completion_tokens,
-                            cached_tokens: state.cached_tokens,
-                            output_logprobs: state.take_complete_logprobs(),
-                            index: self.index,
-                            ..Default::default()
-                        },
-                    )),
-                };
-                if output.output_ids.is_empty() {
-                    return complete;
-                }
-                // The finish tick carried new tokens: emit them as a `Chunk`
-                // first and hold the `Complete` for the next poll.
-                let chunk = vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                    token_ids: output.output_ids,
-                    prompt_tokens: state.prompt_tokens,
-                    completion_tokens: state.completion_tokens,
-                    cached_tokens: state.cached_tokens,
-                    output_logprobs: chunk_logprobs,
-                    index: self.index,
-                    ..Default::default()
-                });
-                self.pending = Some(complete);
-                chunk
+    let response = match tick.finish_reason {
+        Some(reason) => {
+            let complete = vllm::GenerateResponse {
+                response: Some(vllm::generate_response::Response::Complete(
+                    vllm::GenerateComplete {
+                        output_ids: std::mem::take(&mut state.output_ids),
+                        finish_reason: normalize_finish_reason(&reason).to_string(),
+                        prompt_tokens: state.prompt_tokens,
+                        completion_tokens: state.completion_tokens,
+                        cached_tokens: state.cached_tokens,
+                        output_logprobs: state.take_complete_logprobs(),
+                        index,
+                        ..Default::default()
+                    },
+                )),
+            };
+            if tick.output_ids.is_empty() {
+                return complete;
             }
-            None => vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                token_ids: output.output_ids,
+            // The finish tick carried new tokens: emit them as a `Chunk` first
+            // and hold the `Complete` for the next poll.
+            let chunk = vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
+                token_ids: tick.output_ids,
                 prompt_tokens: state.prompt_tokens,
                 completion_tokens: state.completion_tokens,
                 cached_tokens: state.cached_tokens,
                 output_logprobs: chunk_logprobs,
-                index: self.index,
+                index,
                 ..Default::default()
-            }),
-        };
-        vllm::GenerateResponse {
-            response: Some(response),
+            });
+            *pending = Some(complete);
+            chunk
         }
+        None => vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
+            token_ids: tick.output_ids,
+            prompt_tokens: state.prompt_tokens,
+            completion_tokens: state.completion_tokens,
+            cached_tokens: state.cached_tokens,
+            output_logprobs: chunk_logprobs,
+            index,
+            ..Default::default()
+        }),
+    };
+    vllm::GenerateResponse {
+        response: Some(response),
     }
 }
 
-impl Stream for TokenSpeedGenerateStream {
+impl<S, O> Stream for SlimGenerateStream<S>
+where
+    S: Stream<Item = engine_zmq_client::Result<O>> + Unpin,
+    O: SlimOutput,
+{
     type Item = Result<vllm::GenerateResponse, tonic::Status>;
 
     fn poll_next(
@@ -597,7 +716,12 @@ impl Stream for TokenSpeedGenerateStream {
             return Poll::Ready(Some(Ok(pending)));
         }
         match std::pin::Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(output))) => Poll::Ready(Some(Ok(this.map_output(output)))),
+            Poll::Ready(Some(Ok(output))) => Poll::Ready(Some(Ok(map_slim_tick(
+                &mut this.state,
+                this.index,
+                &mut this.pending,
+                output.into_tick(),
+            )))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(zmq_status(error)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -769,6 +893,156 @@ fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSampling
     params
 }
 
+/// Translate a vLLM-proto generate request into an SGLang
+/// `TokenizedGenerateReqInput`. ZMQ mode requires pre-tokenized input (SMG
+/// tokenizes upstream).
+fn translate_request_sglang(req: vllm::GenerateRequest) -> Result<SglangGenerateReqInput, String> {
+    let input_ids = match req.input {
+        Some(vllm::generate_request::Input::Tokenized(tokenized)) => tokenized.input_ids,
+        Some(vllm::generate_request::Input::Text(_)) => {
+            return Err("ZMQ mode requires pre-tokenized input (TokenizedInput)".to_string());
+        }
+        None => {
+            return Err("ZMQ mode requires pre-tokenized input; no input provided".to_string());
+        }
+    };
+    let stream = req.stream;
+    // Single-engine SGLang: a pinned DP rank other than 0 cannot be honored (the
+    // tag-dispatched wire carries no DP-rank routing).
+    if req.data_parallel_rank.is_some_and(|rank| rank != 0) {
+        return Err(format!(
+            "invalid data_parallel_rank {:?}: the SGLang ZMQ backend is single-engine",
+            req.data_parallel_rank
+        ));
+    }
+    if let Some(sp) = req.sampling_params.as_ref() {
+        // The output wire (`BatchTokenIDOutput`) materializes only the sampled
+        // token's logprob, so a top-k request (count above 1, or `-1` = "all")
+        // cannot be honored — reject it rather than silently return fewer. Counts
+        // of 0 or 1 are the plain sampled-token logprob and are wired end-to-end.
+        if sp.logprobs.is_some_and(|n| !(0..=1).contains(&n)) {
+            return Err("top_logprobs are not supported over the SGLang ZMQ backend".to_string());
+        }
+        // Prompt logprobs are not decoded from the output wire.
+        if sp.prompt_logprobs.is_some() {
+            return Err(
+                "prompt logprobs are not supported over the SGLang ZMQ backend".to_string(),
+            );
+        }
+        // The response_format / forced-tool-choice constraint oneof is not
+        // translated onto the SGLang structured-output fields yet; dropping it
+        // would return unconstrained text.
+        if sp.constraint.is_some() {
+            return Err(
+                "structured output constraints are not supported over the ZMQ backend yet"
+                    .to_string(),
+            );
+        }
+        // Stop strings are not forwarded: skip-tokenizer-init mode runs the
+        // scheduler without a tokenizer, so it cannot match stop strings, and the
+        // gateway's stop decoder does not enforce them — they would be ignored and
+        // the request would run to max_tokens.
+        if !sp.stop.is_empty() {
+            return Err(
+                "stop strings are not supported over the SGLang ZMQ backend yet; \
+                 use stop_token_ids"
+                    .to_string(),
+            );
+        }
+        // logit_bias is not translated onto the SGLang wire.
+        if !sp.logit_bias.is_empty() {
+            return Err("logit_bias is not supported over the SGLang ZMQ backend".to_string());
+        }
+    }
+    let return_logprob = req
+        .sampling_params
+        .as_ref()
+        .is_some_and(|sp| sp.logprobs.is_some());
+    Ok(SglangGenerateReqInput {
+        rid: req.request_id,
+        input_ids: TokenIdArray(input_ids),
+        sampling_params: req
+            .sampling_params
+            .map(translate_sampling_sglang)
+            .unwrap_or_else(sglang_default_sampling),
+        return_logprob,
+        stream,
+        // The remaining fields keep their neutral defaults; SMG owns the
+        // tokenizer on this path, so the sampling params it sends are already
+        // normalized (see `translate_sampling_sglang`).
+        ..SglangGenerateReqInput::default()
+    })
+}
+
+/// SGLang treats a temperature this close to zero as a request for greedy
+/// (argmax) decoding. Mirrors `_SAMPLING_EPS` in SGLang's sampling params.
+const SGLANG_SAMPLING_EPS: f64 = 1e-6;
+
+/// SGLang's own defaults, presented already-normalized (see
+/// [`translate_sampling_sglang`] for why SMG normalizes). Used for requests that
+/// carry no sampling params at all.
+fn sglang_default_sampling() -> SglangSamplingParams {
+    SglangSamplingParams {
+        // The direct path skips the scheduler's tokenizer-manager normalization,
+        // so present the tokenizer-derived stop fields as an empty (resolved)
+        // list rather than the unresolved `None`, and mark the struct normalized.
+        stop_strs: Some(Vec::new()),
+        stop_regex_strs: Some(Vec::new()),
+        is_normalized: true,
+        ..SglangSamplingParams::default()
+    }
+}
+
+/// Map vLLM-proto sampling params onto SGLang's native `SamplingParams`. The
+/// engine struct rides the wire as a full positional array, so every field
+/// carries a value; the ones SMG does not drive keep their SGLang defaults (via
+/// `..default()`). The gateway's vLLM builder already resolves the proto defaults
+/// (temperature/top_p → 1.0), so the resolved values are forwarded. `n > 1` is
+/// fanned out before translation, so `n` is left at its default of 1
+/// (single-sample on the wire).
+///
+/// SMG owns the tokenizer on this direct path, so the scheduler never runs its
+/// tokenizer-manager normalization (`SamplingParams.normalize`). SMG therefore
+/// presents params the scheduler can consume as-is: the tokenizer-derived stop
+/// lists are emitted resolved (empty — SMG applies stop strings upstream),
+/// `is_normalized` is set, and greedy decoding is resolved here rather than in
+/// the engine's skipped `__post_init__`.
+fn translate_sampling_sglang(sp: vllm::SamplingParams) -> SglangSamplingParams {
+    let mut temperature = f64::from(sp.temperature.unwrap_or(1.0));
+    // vLLM proto uses `0` for "all tokens"; forward SGLang's own "all tokens"
+    // sentinel in that case, otherwise the explicit positive cutoff.
+    let mut top_k = if sp.top_k == 0 {
+        SGLANG_TOP_K_ALL
+    } else {
+        i32::try_from(sp.top_k).unwrap_or(i32::MAX)
+    };
+    // Greedy: SGLang collapses a ~zero temperature to argmax (temperature 1.0,
+    // top_k 1). Normally done in `__post_init__`, which the normalized struct
+    // skips, so resolve it here.
+    if (0.0..SGLANG_SAMPLING_EPS).contains(&temperature) {
+        temperature = 1.0;
+        top_k = 1;
+    }
+    SglangSamplingParams {
+        max_new_tokens: sp.max_tokens,
+        stop_token_ids: (!sp.stop_token_ids.is_empty()).then_some(sp.stop_token_ids),
+        temperature,
+        top_p: f64::from(sp.top_p),
+        top_k,
+        min_p: f64::from(sp.min_p),
+        frequency_penalty: f64::from(sp.frequency_penalty),
+        presence_penalty: f64::from(sp.presence_penalty),
+        repetition_penalty: f64::from(sp.repetition_penalty),
+        // Proto `0` is "no floor" — which is also the SGLang default.
+        min_new_tokens: sp.min_tokens,
+        ignore_eos: sp.ignore_eos,
+        // A negative seed is a "no seed" sentinel; drop it (the engine then
+        // derives one so all ranks agree).
+        sampling_seed: sp.seed.and_then(|seed| u64::try_from(seed).ok()),
+        ..sglang_default_sampling()
+    }
+}
+
 /// Translate a vLLM-proto generate request into an `EngineCoreRequest`. ZMQ mode
 /// requires pre-tokenized input (SMG tokenizes upstream).
 fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, String> {
@@ -868,11 +1142,12 @@ fn finish_reason_str(reason: EngineCoreFinishReason) -> &'static str {
     }
 }
 
-/// Normalize a TokenSpeed wire finish-reason string into the canonical set the
-/// gateway's response layer exact-matches (`stop`, `length`, `abort`, `error`) —
-/// the same set the vLLM path emits via [`finish_reason_str`]. TokenSpeed emits
-/// `stop`/`length`/`abort`; an unknown value falls back to `stop` with a warning
-/// so a non-canonical string never mis-renders downstream.
+/// Normalize a "slim batch" (TokenSpeed / SGLang) wire finish-reason string into
+/// the canonical set the gateway's response layer exact-matches (`stop`,
+/// `length`, `abort`, `error`) — the same set the vLLM path emits via
+/// [`finish_reason_str`]. Both engines emit `stop`/`length`/`abort`; an unknown
+/// value falls back to `stop` with a warning so a non-canonical string never
+/// mis-renders downstream.
 fn normalize_finish_reason(reason: &str) -> &'static str {
     match reason {
         "stop" => "stop",
@@ -882,7 +1157,7 @@ fn normalize_finish_reason(reason: &str) -> &'static str {
         other => {
             tracing::warn!(
                 finish_reason = other,
-                "unknown TokenSpeed finish_reason; defaulting to \"stop\""
+                "unknown ZMQ engine finish_reason; defaulting to \"stop\""
             );
             "stop"
         }
@@ -1219,6 +1494,142 @@ mod tests {
         engine_task.await.unwrap();
     }
 
+    /// End-to-end over ipc:// for an SGLang backend on the no-handshake
+    /// PUSH/PULL topology: the adapter frames a tag-dispatched
+    /// `TokenizedGenerateReqInput` (no identity or type frame), and maps
+    /// `BatchTokenIDOutput` batches back to vLLM-proto responses. The mock
+    /// scheduler replies with the pinned Python wire vectors, exercising the real
+    /// bytes end to end (the output struct is decode-only, so it cannot be
+    /// re-encoded in-process).
+    #[tokio::test]
+    async fn generate_e2e_translates_and_streams_sglang() {
+        use engine_zmq_client::{
+            codec::decode_msgpack, mock_engine::MockPushPullEngine,
+            protocol::sglang::request::TokenizedGenerateReqInput as WireReq,
+        };
+
+        // Pinned Python `BatchTokenIDOutput` vectors for rid "req-00000001",
+        // output_ids [[15496]] — still-generating (finish nil) then finished
+        // (`{"type":"stop"}`). Captured in `protocol::sglang::output` tests.
+        const OUTPUT_STILL_GENERATING: &str =
+            "dc0032b24261746368546f6b656e49444f757470757491ac7265712d3030303030303031c091\
+             c091a09192a171c408883c00000000000091009192a171c408883c00000000000091c391c391\
+             c29103910091019100c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0\
+             c0c0c0c0c0c0";
+        const OUTPUT_FINISHED: &str =
+            "dc0032b24261746368546f6b656e49444f757470757491ac7265712d3030303030303031c091\
+             82a474797065a473746f70a76d6174636865640291a09192a171c408883c0000000000009100\
+             9192a171c408883c00000000000091c391c391c29103910091019100c0c0c0c0c0c0c0c0c0c0\
+             c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+        fn from_hex(hex: &str) -> bytes::Bytes {
+            let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+            bytes::Bytes::from(
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect::<Vec<u8>>(),
+            )
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let ep = |name: &str| format!("ipc://{}", dir.path().join(name).display());
+        // SGLang binds no handshake socket; the adapter ignores the handshake
+        // argument on this runtime and binds only the PUSH input + PULL output.
+        let (input, output) = (ep("in.sock"), ep("out.sock"));
+
+        let (client, engine) = tokio::join!(
+            ZmqEngineClient::connect(
+                "ipc:///unused",
+                &input,
+                &output,
+                1,
+                "m".to_string(),
+                RuntimeType::Sglang,
+                Duration::from_secs(10)
+            ),
+            MockPushPullEngine::connect(&input, &output),
+        );
+        let client = client.expect("adapter connect");
+        let mut engine = engine.expect("mock engine");
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "engine task ends after responding"
+        )]
+        let engine_task = tokio::spawn(async move {
+            // The scheduler sees a single-frame payload: no identity, no type frame.
+            let frames = engine.recv_request().await.unwrap();
+            assert_eq!(frames.len(), 1);
+            let request: WireReq = decode_msgpack(frames[0].as_ref()).unwrap();
+            assert_eq!(request.rid, "req-00000001");
+            assert_eq!(request.input_ids.0, vec![1, 2, 3]);
+            assert_eq!(request.sampling_params.max_new_tokens, Some(2));
+            // No logprobs requested -> the flag stays false.
+            assert!(!request.return_logprob);
+
+            engine
+                .send_output(vec![from_hex(OUTPUT_STILL_GENERATING)])
+                .await
+                .unwrap();
+            engine
+                .send_output(vec![from_hex(OUTPUT_FINISHED)])
+                .await
+                .unwrap();
+        });
+
+        let req = vllm::GenerateRequest {
+            request_id: "req-00000001".to_string(),
+            input: Some(vllm::generate_request::Input::Tokenized(
+                vllm::TokenizedInput {
+                    original_text: String::new(),
+                    input_ids: vec![1, 2, 3],
+                },
+            )),
+            sampling_params: Some(vllm::SamplingParams {
+                max_tokens: Some(2),
+                ..Default::default()
+            }),
+            stream: true,
+            ..Default::default()
+        };
+        let mut stream = client.generate(req).await.expect("generate");
+
+        let first = stream.next().await.expect("chunk item").expect("chunk ok");
+        match first.response {
+            Some(vllm::generate_response::Response::Chunk(chunk)) => {
+                assert_eq!(chunk.token_ids, vec![15496]);
+                assert_eq!(chunk.prompt_tokens, 3);
+            }
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        // The finish tick carried a new token, so its delta is emitted as a
+        // chunk before the (cumulative) terminal complete.
+        let second = stream.next().await.expect("chunk item").expect("chunk ok");
+        match second.response {
+            Some(vllm::generate_response::Response::Chunk(chunk)) => {
+                assert_eq!(chunk.token_ids, vec![15496]);
+            }
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        let third = stream
+            .next()
+            .await
+            .expect("complete item")
+            .expect("complete ok");
+        match third.response {
+            Some(vllm::generate_response::Response::Complete(complete)) => {
+                assert_eq!(complete.output_ids, vec![15496, 15496]);
+                assert_eq!(complete.finish_reason, "stop");
+                assert_eq!(complete.prompt_tokens, 3);
+            }
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert!(stream.next().await.is_none());
+
+        engine_task.await.unwrap();
+    }
+
     #[test]
     fn finish_reasons_map_to_vllm_strings() {
         assert_eq!(finish_reason_str(EngineCoreFinishReason::Length), "length");
@@ -1368,6 +1779,159 @@ mod tests {
         let mut req = tokenized_req(vllm::SamplingParams::default());
         req.data_parallel_rank = Some(0);
         assert!(translate_request_tokenspeed(req).is_ok());
+    }
+
+    #[test]
+    fn sglang_sampling_maps_defaults_and_seed() {
+        // Proto top_k=0 ("all tokens") maps to the engine's own "all" sentinel;
+        // a negative seed is dropped.
+        let mapped = translate_sampling_sglang(vllm::SamplingParams {
+            top_k: 0,
+            seed: Some(-1),
+            max_tokens: Some(8),
+            ..Default::default()
+        });
+        assert_eq!(mapped.top_k, SGLANG_TOP_K_ALL);
+        assert_eq!(mapped.sampling_seed, None);
+        assert_eq!(mapped.max_new_tokens, Some(8));
+        // Unset temperature resolves to the proto default 1.0 (forwarded).
+        assert_eq!(mapped.temperature, 1.0);
+        // SMG owns the tokenizer, so it presents already-normalized params: the
+        // tokenizer-derived stop lists are resolved (empty) and the struct is
+        // flagged normalized so the scheduler consumes it as-is.
+        assert!(mapped.is_normalized);
+        assert_eq!(mapped.stop_strs, Some(Vec::new()));
+        assert_eq!(mapped.stop_regex_strs, Some(Vec::new()));
+
+        // An explicit positive cutoff and non-negative seed ride through.
+        let mapped = translate_sampling_sglang(vllm::SamplingParams {
+            top_k: 40,
+            seed: Some(7),
+            ..Default::default()
+        });
+        assert_eq!(mapped.top_k, 40);
+        assert_eq!(mapped.sampling_seed, Some(7));
+
+        // Empty stop_token_ids ride as None; min_tokens=0 is the default floor.
+        let mapped = translate_sampling_sglang(vllm::SamplingParams::default());
+        assert_eq!(mapped.stop_token_ids, None);
+        assert_eq!(mapped.min_new_tokens, 0);
+
+        // A real min_tokens floor is forwarded.
+        let mapped = translate_sampling_sglang(vllm::SamplingParams {
+            min_tokens: 3,
+            ..Default::default()
+        });
+        assert_eq!(mapped.min_new_tokens, 3);
+    }
+
+    #[test]
+    fn sglang_sampling_resolves_greedy_decoding() {
+        // A ~zero temperature is greedy: SGLang expects temperature 1.0 + top_k 1
+        // (argmax). The normalized struct skips the engine's `__post_init__`, so
+        // the translation resolves it here.
+        let mapped = translate_sampling_sglang(vllm::SamplingParams {
+            temperature: Some(0.0),
+            top_k: 50,
+            ..Default::default()
+        });
+        assert_eq!(mapped.temperature, 1.0);
+        assert_eq!(mapped.top_k, 1);
+
+        // A normal temperature leaves the explicit cutoff untouched (the proto
+        // field is f32, so compare against the widened value).
+        let mapped = translate_sampling_sglang(vllm::SamplingParams {
+            temperature: Some(0.7),
+            top_k: 50,
+            ..Default::default()
+        });
+        assert_eq!(mapped.temperature, f64::from(0.7_f32));
+        assert_eq!(mapped.top_k, 50);
+    }
+
+    #[test]
+    fn sglang_plain_logprobs_set_return_logprob() {
+        // Counts 0 and 1 are the plain sampled-token case; both accepted.
+        for count in [0, 1] {
+            let req = translate_request_sglang(tokenized_req(vllm::SamplingParams {
+                logprobs: Some(count),
+                ..Default::default()
+            }))
+            .expect("plain logprobs accepted");
+            assert!(req.return_logprob);
+        }
+
+        // No logprobs -> the flag stays false.
+        let req = translate_request_sglang(tokenized_req(vllm::SamplingParams::default()))
+            .expect("no logprobs accepted");
+        assert!(!req.return_logprob);
+    }
+
+    #[test]
+    fn sglang_rejects_top_logprobs_and_prompt_logprobs() {
+        // Top-k logprobs (count > 1) cannot be materialized from the output wire.
+        assert!(
+            translate_request_sglang(tokenized_req(vllm::SamplingParams {
+                logprobs: Some(5),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        // "all" (count -1) cannot be honored.
+        assert!(
+            translate_request_sglang(tokenized_req(vllm::SamplingParams {
+                logprobs: Some(-1),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        // Prompt logprobs are not decoded from the output wire.
+        assert!(
+            translate_request_sglang(tokenized_req(vllm::SamplingParams {
+                prompt_logprobs: Some(1),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sglang_rejects_unsupported_sampling_features() {
+        // Structured-output constraints are not translated onto the wire.
+        let err = translate_request_sglang(tokenized_req(vllm::SamplingParams {
+            constraint: Some(vllm::sampling_params::Constraint::JsonObject(true)),
+            ..Default::default()
+        }))
+        .expect_err("constraint rejected");
+        assert!(err.contains("structured output"), "{err}");
+
+        // Stop strings cannot be matched without a tokenizer on this backend.
+        let err = translate_request_sglang(tokenized_req(vllm::SamplingParams {
+            stop: vec!["</s>".to_string()],
+            ..Default::default()
+        }))
+        .expect_err("stop strings rejected");
+        assert!(err.contains("stop_token_ids"), "{err}");
+
+        // logit_bias has no wire slot.
+        let err = translate_request_sglang(tokenized_req(vllm::SamplingParams {
+            logit_bias: HashMap::from([(7, 1.0)]),
+            ..Default::default()
+        }))
+        .expect_err("logit_bias rejected");
+        assert!(err.contains("logit_bias"), "{err}");
+    }
+
+    #[test]
+    fn sglang_rejects_nonzero_dp_rank() {
+        // Single-engine backend: only rank 0 (or none) is valid.
+        let mut req = tokenized_req(vllm::SamplingParams::default());
+        req.data_parallel_rank = Some(1);
+        assert!(translate_request_sglang(req).is_err());
+
+        let mut req = tokenized_req(vllm::SamplingParams::default());
+        req.data_parallel_rank = Some(0);
+        assert!(translate_request_sglang(req).is_ok());
     }
 
     #[test]

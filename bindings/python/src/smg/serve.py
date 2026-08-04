@@ -37,6 +37,17 @@ def _zmq_ipc_url(port: int) -> str:
     return f"ipc://{_ZMQ_SOCKET_DIR}/engine-{port}"
 
 
+def _zmq_data_addresses(ipc_url: str) -> tuple[str, str]:
+    """The ipc:// data-plane sockets SMG binds for a worker: (input, output).
+
+    Mirrors `zmq_socket_addresses` in model_gateway/src/worker/worker.rs: SMG
+    binds `<path>-in.sock` for requests and `<path>-out.sock` for outputs. An
+    engine that connects directly (no TCP handshake, e.g. SGLang) must dial these
+    exact endpoints.
+    """
+    return f"{ipc_url}-in.sock", f"{ipc_url}-out.sock"
+
+
 def _zmq_handshake_port(ipc_url: str) -> int:
     """The tcp handshake port SMG derives from an ipc:// URL.
 
@@ -189,11 +200,23 @@ class SglangWorkerLauncher(WorkerLauncher):
     """Launcher for sglang inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tensor_parallel_size", 1)
+        # sglang's ServerArgs registers --tp-size with dest `tp_size` (the alias
+        # --tensor-parallel-size shares that dest), so read tp_size first, then
+        # fall back to the alias and finally a single-GPU default. The default
+        # applies only when neither attribute is set; an explicit value (even a
+        # non-positive one) is preserved so gpu_env can reject it.
+        if hasattr(args, "tp_size"):
+            return int(args.tp_size)
+        if hasattr(args, "tensor_parallel_size"):
+            return int(args.tensor_parallel_size)
+        return 1
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
     ) -> list[str]:
+        if getattr(args, "connection_mode", "grpc") == "zmq":
+            return self._build_zmq_command(args, backend_args, port)
+
         cmd = [
             sys.executable,
             "-m",
@@ -214,6 +237,37 @@ class SglangWorkerLauncher(WorkerLauncher):
             cmd.append("--enable-cache-report")
 
         cmd.extend(self._filter_backend_args(backend_args, ["--model-path", "--host", "--port"]))
+        return cmd
+
+    def _build_zmq_command(
+        self, args: argparse.Namespace, backend_args: list[str], port: int
+    ) -> list[str]:
+        """Launch a headless SGLang scheduler wired to SMG's ZMQ sockets.
+
+        Unmodified SGLang exposes no CLI to point a bare scheduler at
+        externally-chosen sockets, so this dispatches the `_sglang_zmq_launcher`
+        module, which drives SGLang's own scheduler-launch primitives on the two
+        ipc endpoints SMG binds. Each worker is one standalone scheduler; running
+        several is dense data parallelism as N independent ZMQ workers.
+        """
+        input_ipc, output_ipc = _zmq_data_addresses(_zmq_ipc_url(port))
+        cmd = [
+            sys.executable,
+            "-m",
+            "smg._sglang_zmq_launcher",
+            "--smg-input-ipc",
+            input_ipc,
+            "--smg-output-ipc",
+            output_ipc,
+            "--model-path",
+            getattr(args, "model_path", ""),
+        ]
+        cmd.extend(
+            self._filter_backend_args(
+                backend_args,
+                ["--smg-input-ipc", "--smg-output-ipc", "--model-path", "--host", "--port"],
+            )
+        )
         return cmd
 
 
@@ -654,7 +708,7 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Connection mode for workers (default: grpc). Note: trtllm only "
             "supports grpc, tokenspeed only supports zmq, and zmq is otherwise "
-            "only supported for the vllm backend"
+            "only supported for the vllm and sglang backends"
         ),
     )
     # Router host/port - may be overridden by backend (e.g. sglang)
@@ -735,10 +789,14 @@ def parse_serve_args(
 
     # ZMQ direct-backend is a same-host engine connection; only vLLM EngineCore
     # and TokenSpeed speak a supported ZMQ wire protocol.
-    if serve_router_args.connection_mode == "zmq" and backend not in ("vllm", "tokenspeed"):
+    if serve_router_args.connection_mode == "zmq" and backend not in (
+        "vllm",
+        "tokenspeed",
+        "sglang",
+    ):
         pre_parser.error(
-            "connection-mode zmq is only supported for the vllm and tokenspeed "
-            f"backends, not {backend}"
+            "connection-mode zmq is only supported for the vllm, tokenspeed, and "
+            f"sglang backends, not {backend}"
         )
 
     # Pass 2: full parser with backend-specific args; resolve so backend can override
@@ -759,6 +817,12 @@ def parse_serve_args(
         args, _ = parser.parse_known_args(argv)
     else:
         args = parser.parse_args(argv)
+
+    # Some backends declare data parallelism under their own dest (sglang uses
+    # dp_size), which resolves over the serve-level --data-parallel-size. Give
+    # the orchestrator one canonical field regardless of backend.
+    if not hasattr(args, "data_parallel_size"):
+        args.data_parallel_size = getattr(args, "dp_size", 1)
 
     return backend, args, backend_args
 

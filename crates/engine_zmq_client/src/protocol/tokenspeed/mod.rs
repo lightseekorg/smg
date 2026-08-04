@@ -23,8 +23,10 @@ pub mod request;
 pub mod sampling;
 
 use bytes::Bytes;
-use serde::de::{Deserialize, Error as _, IgnoredAny, SeqAccess};
 
+// The msgspec `array_like` decode helpers are shared across engine protocols;
+// re-exported here so this module's submodules keep importing them unchanged.
+pub(crate) use crate::protocol::{drain_trailing, expect_tag, next_field};
 use crate::{
     codec::{decode_msgpack, encode_msgpack},
     error::Result,
@@ -37,49 +39,6 @@ use crate::{
     },
 };
 
-/// Read the next positional element, failing loudly when the array is shorter
-/// than the modeled prefix (every modeled field is required on decode).
-pub(crate) fn next_field<'de, A, T>(
-    seq: &mut A,
-    name: &'static str,
-) -> std::result::Result<T, A::Error>
-where
-    A: SeqAccess<'de>,
-    T: Deserialize<'de>,
-{
-    seq.next_element::<T>()?
-        .ok_or_else(|| A::Error::custom(format!("missing positional field `{name}`")))
-}
-
-/// Validate the msgspec tag string at element 0. A wrong tag means the payload
-/// is a different message type — fail loudly instead of misreading fields.
-pub(crate) fn expect_tag<'de, A>(
-    seq: &mut A,
-    expected: &'static str,
-) -> std::result::Result<(), A::Error>
-where
-    A: SeqAccess<'de>,
-{
-    let tag: String = next_field(seq, "_tag")?;
-    if tag != expected {
-        return Err(A::Error::custom(format!(
-            "wrong msgspec tag: expected `{expected}`, got `{tag}`"
-        )));
-    }
-    Ok(())
-}
-
-/// Drain positional elements beyond the modeled prefix. TokenSpeed appends new
-/// fields at the end of its structs, so unknown trailing elements are skipped
-/// rather than treated as a decode error.
-pub(crate) fn drain_trailing<'de, A>(seq: &mut A) -> std::result::Result<(), A::Error>
-where
-    A: SeqAccess<'de>,
-{
-    while seq.next_element::<IgnoredAny>()?.is_some() {}
-    Ok(())
-}
-
 /// The TokenSpeed engine protocol: drives [`TokenizedGenerateReqInput`] over
 /// the shared ZMQ transport and decodes [`BatchTokenIDOutSlim`] back.
 pub struct TokenSpeedProtocol;
@@ -88,12 +47,12 @@ impl EngineProtocol for TokenSpeedProtocol {
     type Request = TokenizedGenerateReqInput;
     type Output = TokenSpeedOutput;
 
-    fn add_frame() -> Bytes {
-        TokenSpeedRequestType::Add.to_frame()
+    fn add_frame() -> Option<Bytes> {
+        Some(TokenSpeedRequestType::Add.to_frame())
     }
 
-    fn abort_frame() -> Bytes {
-        TokenSpeedRequestType::Abort.to_frame()
+    fn abort_frame() -> Option<Bytes> {
+        Some(TokenSpeedRequestType::Abort.to_frame())
     }
 
     fn request_id(request: &Self::Request) -> &str {
@@ -192,8 +151,14 @@ mod tests {
 
     #[test]
     fn request_type_frames_match_wire_contract() {
-        assert_eq!(TokenSpeedProtocol::add_frame().as_ref(), b"\x00");
-        assert_eq!(TokenSpeedProtocol::abort_frame().as_ref(), b"\x01");
+        assert_eq!(
+            TokenSpeedProtocol::add_frame().as_deref(),
+            Some(&b"\x00"[..])
+        );
+        assert_eq!(
+            TokenSpeedProtocol::abort_frame().as_deref(),
+            Some(&b"\x01"[..])
+        );
     }
 
     #[test]

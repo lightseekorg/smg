@@ -36,11 +36,12 @@ pub mod transport;
 pub mod mock_engine;
 
 pub use connector::{
-    Client, EngineCoreClient, EngineCoreStream, RequestStream, TokenSpeedClient, TokenSpeedStream,
+    Client, EngineCoreClient, EngineCoreStream, RequestStream, SglangClient, SglangStream,
+    TokenSpeedClient, TokenSpeedStream,
 };
 pub use error::{Error, Result};
 pub use protocol::{EngineBatch, EngineOutput, EngineProtocol};
 pub use transport::{
-    connect_handshake, run_output_loop, send_message, ConnectedEngine, ConnectedTransport,
-    EngineId, ENGINE_CORE_DEAD_SENTINEL,
+    connect_handshake, connect_push_pull, run_output_loop, send_message, ConnectedEngine,
+    ConnectedTransport, EngineId, InputSocket, ENGINE_CORE_DEAD_SENTINEL,
 };
