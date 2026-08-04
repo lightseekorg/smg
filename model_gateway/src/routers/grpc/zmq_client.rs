@@ -177,10 +177,19 @@ impl ZmqEngineClient {
                     .ok_or_else(|| tonic::Status::unavailable("no connected ZMQ engine"))?;
                 let mut streams = SelectAll::new();
                 for (index, sub) in subs.into_iter().enumerate() {
+                    // The engine returns the sampled logprob plus up to
+                    // `logprobs` ranked candidates per position; carry the
+                    // requested count so the stream can shape `top_logprobs`.
+                    let top_logprobs = sub
+                        .sampling_params
+                        .as_ref()
+                        .and_then(|sp| sp.logprobs)
+                        .filter(|&n| n > 0)
+                        .map_or(0, |n| n as usize);
                     let request = translate_request(sub, max_model_len)
                         .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
-                    streams.push(VllmGenerateStream::new(stream, index as u32));
+                    streams.push(VllmGenerateStream::new(stream, index as u32, top_logprobs));
                 }
                 Ok(ZmqGenerateStream::Vllm(streams))
             }
@@ -337,6 +346,9 @@ struct StreamState {
     /// `Complete`, so accumulate here and drain into `Complete`.
     output_logprobs_val: Vec<f32>,
     output_logprobs_idx: Vec<u32>,
+    /// Cumulative per-position ranked candidates (`top_logprobs`), accumulated
+    /// alongside the sampled logprobs and drained into the terminal `Complete`.
+    output_top_logprobs: Vec<vllm::TopLogProbs>,
 }
 
 impl StreamState {
@@ -346,7 +358,7 @@ impl StreamState {
         (!self.output_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
             token_logprobs: std::mem::take(&mut self.output_logprobs_val),
             token_ids: std::mem::take(&mut self.output_logprobs_idx),
-            ..Default::default()
+            top_logprobs: std::mem::take(&mut self.output_top_logprobs),
         })
     }
 }
@@ -360,6 +372,10 @@ pub struct VllmGenerateStream {
     /// Choice index stamped on every chunk/complete (0 for n=1; the fan-out
     /// position for n>1) — the proto field the pipeline demuxes choices by.
     index: u32,
+    /// Number of ranked candidates the client requested per position; `0` when
+    /// only the sampled logprob (or nothing) was asked for, in which case no
+    /// `top_logprobs` are emitted.
+    top_logprobs: usize,
     /// Terminal `Complete` held back when the finish tick also carried new
     /// tokens: streaming frontends decode text/logprobs from chunks only, so
     /// the tick's delta goes out as a `Chunk` first.
@@ -367,11 +383,12 @@ pub struct VllmGenerateStream {
 }
 
 impl VllmGenerateStream {
-    fn new(inner: EngineCoreStream, index: u32) -> Self {
+    fn new(inner: EngineCoreStream, index: u32, top_logprobs: usize) -> Self {
         Self {
             inner,
             state: StreamState::default(),
             index,
+            top_logprobs,
             pending: None,
         }
     }
@@ -380,6 +397,7 @@ impl VllmGenerateStream {
         &mut self,
         output: EngineCoreOutput,
     ) -> Result<vllm::GenerateResponse, tonic::Status> {
+        let top_k = self.top_logprobs;
         let state = &mut self.state;
         if let Some(stats) = &output.prefill_stats {
             state.prompt_tokens = stats.num_prompt_tokens;
@@ -389,11 +407,13 @@ impl VllmGenerateStream {
         state.completion_tokens += token_ids.len() as u32;
         state.output_ids.extend(token_ids.iter().copied());
 
-        // Sampled-token logprobs (entry 0 per position), if requested. Chunks
-        // carry this tick's increment; the terminal `Complete` carries the
-        // cumulative set, so accumulate into `state` and drain it on finish.
+        // Sampled-token logprobs (entry 0 per position) plus the requested
+        // ranked candidates (`top_logprobs`). Chunks carry this tick's
+        // increment; the terminal `Complete` carries the cumulative set, so
+        // accumulate into `state` and drain it on finish.
         let mut tick_logprobs_val = Vec::new();
         let mut tick_logprobs_idx = Vec::new();
+        let mut tick_top_logprobs = Vec::new();
         if let Some(logprobs) = &output.new_logprobs {
             let decoded = logprobs.as_direct().ok_or_else(|| {
                 // The protocol layer resolves wire logprobs during decode, so
@@ -401,19 +421,31 @@ impl VllmGenerateStream {
                 tonic::Status::internal("unresolved wire logprobs in engine output")
             })?;
             for position in &decoded.positions {
-                if let Some(sampled) = position.entries.first() {
-                    tick_logprobs_val.push(sampled.logprob);
-                    tick_logprobs_idx.push(sampled.token_id);
+                let Some(sampled) = position.entries.first() else {
+                    continue;
+                };
+                tick_logprobs_val.push(sampled.logprob);
+                tick_logprobs_idx.push(sampled.token_id);
+                // The entries arrive sampled-first then rank-ordered; take the
+                // requested count so one ranked list lands per sampled token.
+                if top_k > 0 {
+                    let mut top = vllm::TopLogProbs::default();
+                    for entry in position.entries.iter().take(top_k) {
+                        top.values.push(entry.logprob);
+                        top.token_ids.push(entry.token_id);
+                    }
+                    tick_top_logprobs.push(top);
                 }
             }
         }
         let chunk_logprobs = (!tick_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
             token_logprobs: tick_logprobs_val.clone(),
             token_ids: tick_logprobs_idx.clone(),
-            ..Default::default()
+            top_logprobs: tick_top_logprobs.clone(),
         });
         state.output_logprobs_val.extend(tick_logprobs_val);
         state.output_logprobs_idx.extend(tick_logprobs_idx);
+        state.output_top_logprobs.extend(tick_top_logprobs);
 
         let response = match output.finish_reason {
             Some(reason) => {
@@ -1094,6 +1126,140 @@ mod tests {
                 let logprobs = complete.output_logprobs.expect("complete logprobs");
                 assert_eq!(logprobs.token_logprobs, vec![-0.5, -1.25]);
                 assert_eq!(logprobs.token_ids, vec![10, 11]);
+            }
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert!(stream.next().await.is_none());
+
+        engine_task.await.unwrap();
+    }
+
+    /// With `logprobs=k`, each position's ranked candidates are shaped into
+    /// `top_logprobs`, taking the sampled entry plus the leading candidates up
+    /// to the requested count (matching the gRPC servicer's `islice` behaviour).
+    #[tokio::test]
+    async fn generate_shapes_top_logprobs_to_requested_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let ep = |name: &str| format!("ipc://{}", dir.path().join(name).display());
+        let (handshake, input, output) = (ep("hs.sock"), ep("in.sock"), ep("out.sock"));
+
+        let (client, engine) = tokio::join!(
+            ZmqEngineClient::connect(
+                &handshake,
+                &input,
+                &output,
+                1,
+                "m".to_string(),
+                RuntimeType::Vllm,
+                Duration::from_secs(10)
+            ),
+            connect_to_frontend(
+                &handshake,
+                EngineId::from_engine_index(0),
+                default_ready_response()
+            ),
+        );
+        let client = client.expect("adapter connect");
+        let engine = engine.expect("mock engine");
+
+        // One position with the sampled token (actual vocab rank) first, then
+        // the engine's ranked candidates. The wire carries `k + 1` entries.
+        let position = PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: 10,
+                    logprob: -0.5,
+                    rank: 5,
+                },
+                TokenLogprob {
+                    token_id: 20,
+                    logprob: -0.1,
+                    rank: 1,
+                },
+                TokenLogprob {
+                    token_id: 30,
+                    logprob: -0.3,
+                    rank: 2,
+                },
+            ],
+        };
+        let outputs = EngineCoreOutputs::RequestBatch(RequestBatchOutputs {
+            engine_index: 0,
+            outputs: vec![EngineCoreOutput {
+                request_id: "r1".to_string(),
+                new_token_ids: vec![10],
+                new_logprobs: Some(MaybeWireLogprobs::Direct(Logprobs {
+                    positions: vec![position],
+                })),
+                finish_reason: Some(EngineCoreFinishReason::Length),
+                ..Default::default()
+            }],
+            finished_requests: Some(std::collections::BTreeSet::from(["r1".to_string()])),
+            ..Default::default()
+        });
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "engine task ends after responding"
+        )]
+        let engine_task = tokio::spawn(async move {
+            let (mut input, mut output) = engine.split();
+            let inbound = input.recv().await.unwrap();
+            let request = match inbound {
+                EngineInbound::Add(request) => request,
+                other => panic!("expected Add, got {other:?}"),
+            };
+            assert_eq!(request.sampling_params.as_ref().unwrap().logprobs, Some(2));
+            output.send_outputs(&outputs).await.unwrap();
+        });
+
+        let req = vllm::GenerateRequest {
+            request_id: "r1".to_string(),
+            input: Some(vllm::generate_request::Input::Tokenized(
+                vllm::TokenizedInput {
+                    original_text: String::new(),
+                    input_ids: vec![1, 2, 3],
+                },
+            )),
+            sampling_params: Some(vllm::SamplingParams {
+                max_tokens: Some(1),
+                logprobs: Some(2),
+                ..Default::default()
+            }),
+            stream: true,
+            ..Default::default()
+        };
+        let mut stream = client.generate(req).await.expect("generate");
+
+        // The requested count is 2, so `top_logprobs` keeps the sampled entry
+        // plus the leading candidate (the third entry is dropped).
+        let expected_top = vec![vllm::TopLogProbs {
+            values: vec![-0.5, -0.1],
+            token_ids: vec![10, 20],
+        }];
+
+        // The finish tick carried a token, so the delta streams as a chunk.
+        let chunk = stream.next().await.expect("chunk item").expect("chunk ok");
+        match chunk.response {
+            Some(vllm::generate_response::Response::Chunk(chunk)) => {
+                let logprobs = chunk.output_logprobs.expect("chunk logprobs");
+                assert_eq!(logprobs.token_logprobs, vec![-0.5]);
+                assert_eq!(logprobs.token_ids, vec![10]);
+                assert_eq!(logprobs.top_logprobs, expected_top);
+            }
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        let complete = stream
+            .next()
+            .await
+            .expect("complete item")
+            .expect("complete ok");
+        match complete.response {
+            Some(vllm::generate_response::Response::Complete(complete)) => {
+                let logprobs = complete.output_logprobs.expect("complete logprobs");
+                assert_eq!(logprobs.token_logprobs, vec![-0.5]);
+                assert_eq!(logprobs.token_ids, vec![10]);
+                assert_eq!(logprobs.top_logprobs, expected_top);
             }
             other => panic!("expected complete, got {other:?}"),
         }
