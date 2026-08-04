@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // Adapted from the Apache-2.0 reference `vllm-engine-core-client`
 // (vllm-project/vllm): protocol/dtype.rs and protocol/logprobs/array.rs.
 

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // Live wire-validation probe: play the SMG frontend against a real headless
 // vLLM EngineCore over ZMQ. Binds the handshake/input/output sockets, drives the
 // handshake, submits one tokenized generate request, and prints the streamed

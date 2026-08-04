@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // ZMQ backend adapter (gateway glue): presents the vLLM engine surface (the same
 // proto request/response types as `VllmEngineClient`) but speaks ZMQ directly to
 // a same-host engine (vLLM EngineCore or TokenSpeed) via `engine-zmq-client`,

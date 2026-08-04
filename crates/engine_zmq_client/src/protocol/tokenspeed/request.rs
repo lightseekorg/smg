@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // TokenSpeed tokenized generate request — the native `TokenizedGenerateReqInput`
 // from `io_struct.py`, a tagged `msgspec.Struct(array_like=True)`: on the wire
 // it is a positional msgpack array with the class-name tag string as element 0.

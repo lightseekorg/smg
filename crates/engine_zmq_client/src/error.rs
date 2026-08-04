@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // Error variants for the vLLM EngineCore protocol are adapted from the
 // Apache-2.0 reference `vllm-engine-core-client` (vllm-project/vllm,
 // rust/src/engine-core-client/src/error.rs). See crate root for provenance.

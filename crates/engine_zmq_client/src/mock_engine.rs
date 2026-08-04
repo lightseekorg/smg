@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // Test-only mock engine, adapted from the Apache-2.0 reference
 // `vllm-engine-core-client` (vllm-project/vllm): mock_engine.rs + test_utils.rs.
 //

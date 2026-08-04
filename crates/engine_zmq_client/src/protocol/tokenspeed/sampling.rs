@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // TokenSpeed `SamplingParams` — a Python `msgspec.Struct(kw_only=True,
 // array_like=True)` (runtime/sampling/sampling_params.py), so it rides the
 // wire as an untagged positional msgpack array nested inside the tokenized

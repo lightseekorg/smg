@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // The connector: the frontend-side request/response layer over a
 // [`ConnectedTransport`]. Adapted from the Apache-2.0 reference
 // `vllm-engine-core-client` (vllm-project/vllm) client, scoped to SMG's needs:

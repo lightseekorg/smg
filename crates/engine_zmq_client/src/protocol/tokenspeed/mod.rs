@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 //! TokenSpeed wire protocol.
 //!
 //! Clean-room port of TokenSpeed's native engine-IPC messages
