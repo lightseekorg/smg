@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 //! Per-engine wire protocol modules plus the engine-neutral seam the transport
 //! and connector are generic over.
 //!

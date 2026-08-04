@@ -19,9 +19,15 @@ use openai_protocol::{
     worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec, WorkerStatus},
 };
 use smg_grpc_client::common_proto;
-use tokio::{sync::OnceCell, time};
+use tokio::{
+    sync::{mpsc, OnceCell},
+    time,
+};
 
-use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
+use super::{
+    event::WorkerConnected, CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult,
+    UNKNOWN_MODEL_ID,
+};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -1149,6 +1155,11 @@ pub struct BasicWorker {
     /// never cancels a long (model-load) handshake. Self-clears on failure to
     /// allow a retry. Unused for HTTP/gRPC.
     pub zmq_connect_started: Arc<AtomicBool>,
+    /// Wakes the manager the instant the ZMQ handshake completes so it can
+    /// promote the worker without waiting for the next health poll. Set only
+    /// for ZMQ workers built through the registration path; `None` elsewhere
+    /// (HTTP/gRPC, tests), where promotion stays poll-driven.
+    pub connect_signal_tx: Option<mpsc::UnboundedSender<WorkerConnected>>,
     /// Runtime-mutable models override (for lazy discovery).
     /// When not `Wildcard`, overrides metadata.models for routing decisions.
     /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
@@ -1167,6 +1178,7 @@ impl Clone for BasicWorker {
             circuit_breaker: ArcSwap::from(self.circuit_breaker.load_full()),
             backend_client: Arc::clone(&self.backend_client),
             zmq_connect_started: Arc::clone(&self.zmq_connect_started),
+            connect_signal_tx: self.connect_signal_tx.clone(),
             models_override: Arc::clone(&self.models_override),
             http_client: self.http_client.clone(),
             resilience: self.resilience.clone(),
@@ -1557,22 +1569,38 @@ impl Worker for BasicWorker {
             let url = self.metadata.spec.url.clone();
             let runtime = self.metadata.spec.runtime_type;
             let handshake_override = self.metadata.spec.zmq_handshake_address.clone();
+            // Capture the readiness signal and the revision at hand-off. The
+            // manager only promotes if this revision still matches, so a
+            // same-URL replacement racing the handshake is discarded.
+            let signal_tx = self.connect_signal_tx.clone();
+            let revision = self.revision();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "detached one-shot handshake driver; the OnceCell dedupes with the request path and the guard self-clears on failure to allow a retry"
             )]
             // Detached: dropping the handle at scope end leaves the task running.
             let _handle = tokio::spawn(async move {
-                if let Err(e) = cell
+                match cell
                     .get_or_try_init(|| {
                         connect_zmq_backend(base_url, model_id, runtime, handshake_override)
                     })
                     .await
                 {
-                    tracing::warn!(
-                        "ZMQ backend handshake failed for {url}: {e}; will retry on the next health probe"
-                    );
-                    started.store(false, Ordering::SeqCst);
+                    Ok(_) => {
+                        // Handshake landed: wake the manager to promote now
+                        // rather than on the next poll. A dropped signal (no
+                        // manager, or receiver gone) is harmless — polling
+                        // still promotes on the success threshold.
+                        if let Some(tx) = &signal_tx {
+                            let _ = tx.send(WorkerConnected { url, revision });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "ZMQ backend handshake failed for {url}: {e}; will retry on the next health probe"
+                        );
+                        started.store(false, Ordering::SeqCst);
+                    }
                 }
             });
         }

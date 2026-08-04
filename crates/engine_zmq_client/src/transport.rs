@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-//
 // Ported from the Apache-2.0 reference `vllm-engine-core-client`
 // (vllm-project/vllm): transport.rs.
 //

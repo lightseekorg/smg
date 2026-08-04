@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 //! vLLM EngineCore wire protocol.
 //!
 //! Clean-room port of vLLM's Apache-2.0 `vllm-engine-core-client`

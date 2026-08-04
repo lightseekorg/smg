@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
 //! Engine-agnostic ZMQ transport + per-engine protocol modules for same-host
 //! SMG backend connections.
 //!
