@@ -23,6 +23,7 @@ import pytest
 from infra import (
     DEFAULT_MODEL,
     DEFAULT_ROUTER_TIMEOUT,
+    DEFAULT_STARTUP_TIMEOUT,
     ENV_MODEL,
     ENV_SKIP_BACKEND_SETUP,
     RUNTIME_LABELS,
@@ -109,6 +110,25 @@ def _start_gateway(gateway: Gateway, gateway_config: dict, **mode_kwargs) -> Non
         log_level=gateway_config.get("log_level"),
         log_dir=gateway_config.get("log_dir"),
     )
+
+
+def _gateway_readiness_timeout(
+    connection_mode: ConnectionMode, model_id: str, base_timeout: float
+) -> float:
+    """Effective gateway readiness timeout for the given connection mode.
+
+    gRPC/HTTP workers are health-checked (model fully loaded) by the pool
+    before the gateway starts, so the gateway only has to connect — the short
+    router timeout suffices. ZMQ engines instead spawn and return immediately;
+    their model load happens *inside* the gateway's readiness gate, so that gate
+    must cover model load too. Use the model's ``startup_timeout`` (what the
+    worker gate would have applied), never shrinking an explicitly larger
+    gateway timeout.
+    """
+    if connection_mode != ConnectionMode.ZMQ:
+        return base_timeout
+    startup_timeout = get_model_spec(model_id).get("startup_timeout", DEFAULT_STARTUP_TIMEOUT)
+    return max(base_timeout, startup_timeout)
 
 
 def _make_openai_client(gateway: Gateway) -> openai.OpenAI:
@@ -263,6 +283,14 @@ def _setup_local(
     # caller owns their teardown (like the PD path). gRPC/HTTP workers stay
     # in the pool and outlive the gateway.
     is_zmq = connection_mode == ConnectionMode.ZMQ
+    # ZMQ engines load the model inside the gateway's readiness gate (the worker
+    # spawn returned immediately), so that gate must cover model load.
+    gateway_config = {
+        **gateway_config,
+        "timeout": _gateway_readiness_timeout(
+            connection_mode, model_id, gateway_config["timeout"]
+        ),
+    }
     try:
         _start_gateway(
             gateway,
@@ -524,6 +552,10 @@ def backend_router(request: pytest.FixtureRequest):
             worker_urls=[w.base_url for w in workers],
             model_path=model_path,
             backend=engine if is_zmq else None,
+            # ZMQ loads the model inside the gateway's readiness gate; cover it.
+            timeout=_gateway_readiness_timeout(
+                connection_mode, model_id, DEFAULT_ROUTER_TIMEOUT
+            ),
         )
         yield gateway
     finally:
