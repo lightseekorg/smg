@@ -54,6 +54,11 @@ on:
         type: string
         default: "nixl"
         description: "KV transfer backend for vLLM PD workers: nixl or mooncake"
+      connection_mode:
+        required: false
+        type: string
+        default: ""
+        description: "Wire override for local backends: zmq runs the local cases over ZMQ"
 
 jobs:
   run:
@@ -66,6 +71,7 @@ jobs:
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
       E2E_VLLM_KV_BACKEND: ${{ inputs.vllm_kv_backend }}
+      E2E_CONNECTION_MODE: ${{ inputs.connection_mode }}
       ROUTER_LOCAL_MODEL_PATH: /models
     steps:
       - name: Checkout code

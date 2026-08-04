@@ -30,6 +30,7 @@ from infra import (
     ConnectionMode,
     Gateway,
     WorkerType,
+    get_connection_mode_override,
     get_runtime,
     launch_cloud_gateway,
 )
@@ -145,6 +146,11 @@ def setup_backend(request: pytest.FixtureRequest):
     is_pd = backend_name.startswith("pd_")
     protocol = backend_name.replace("epd_", "").replace("pd_", "")
     connection_mode = ConnectionMode(protocol)
+    # A lane can override the local wire (e.g. run grpc/http cases over ZMQ);
+    # PD/EPD keep their own wire since they are excluded from those lanes.
+    mode_override = get_connection_mode_override()
+    if mode_override is not None and not is_pd and not is_epd:
+        connection_mode = mode_override
     engine = get_runtime()
     model_path = get_model_spec(model_id)["model"]
     workers_config = get_marker_kwargs(request, "workers", defaults=_WORKER_DEFAULTS)
@@ -232,18 +238,30 @@ def _setup_local(
         gpus=workers_config.get("gpus"),
         extra_engine_args=workers_config.get("extra_engine_args"),
     )
+    # ZMQ engines dial this gateway's handshake sockets, so they cannot be
+    # reused by a later class's gateway — the pool starts them fresh and the
+    # caller owns their teardown (like the PD path). gRPC/HTTP workers stay
+    # in the pool and outlive the gateway.
+    is_zmq = connection_mode == ConnectionMode.ZMQ
     try:
         _start_gateway(
             gateway,
             gateway_config,
             worker_urls=[w.base_url for w in workers],
             model_path=model_path,
+            backend=engine if is_zmq else None,
         )
         logger.info("%s backend ready at %s", backend_name, gateway.base_url)
         yield backend_name, model_path, _make_openai_client(gateway), gateway
     finally:
-        logger.info("Tearing down %s backend (workers stay in pool)", backend_name)
+        logger.info(
+            "Tearing down %s backend (%s)",
+            backend_name,
+            "stopping ZMQ workers" if is_zmq else "workers stay in pool",
+        )
         gateway.shutdown()
+        if is_zmq:
+            stop_workers(workers)
 
 
 # ---------------------------------------------------------------------------
@@ -463,20 +481,31 @@ def backend_router(request: pytest.FixtureRequest):
     backend_name = request.param
     model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
     connection_mode = ConnectionMode(backend_name)
+    mode_override = get_connection_mode_override()
+    if mode_override is not None:
+        connection_mode = mode_override
+    engine = get_runtime()
     model_path = get_model_spec(model_id)["model"]
+    is_zmq = connection_mode == ConnectionMode.ZMQ
 
     # Route through the pool so we evict any cached class-scope worker
-    # holding the GPUs we need. The pool retains ownership; we don't stop
-    # the workers ourselves.
+    # holding the GPUs we need. The pool retains ownership of gRPC/HTTP
+    # workers; ZMQ engines are bound to this gateway, so we stop them here.
     workers = get_pool().acquire(
         model_id=model_id,
-        engine=get_runtime(),
+        engine=engine,
         mode=connection_mode,
         count=1,
     )
     gateway = Gateway()
     try:
-        gateway.start(worker_urls=[w.base_url for w in workers], model_path=model_path)
+        gateway.start(
+            worker_urls=[w.base_url for w in workers],
+            model_path=model_path,
+            backend=engine if is_zmq else None,
+        )
         yield gateway
     finally:
         gateway.shutdown()
+        if is_zmq:
+            stop_workers(workers)
