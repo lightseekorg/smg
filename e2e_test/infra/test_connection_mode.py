@@ -30,11 +30,11 @@ def test_valid_values_are_case_insensitive(monkeypatch, value, expected):
 
 
 @pytest.mark.parametrize("value", ["", "   "])
-def test_set_but_empty_raises(monkeypatch, value):
-    # A set-but-blank var is a misconfiguration, not "unset".
+def test_set_but_blank_returns_none(monkeypatch, value):
+    # The workflow always exports E2E_CONNECTION_MODE and leaves it empty for
+    # non-override lanes, so a blank value must mean "no override", not an error.
     monkeypatch.setenv(ENV_CONNECTION_MODE, value)
-    with pytest.raises(ValueError, match="set but empty"):
-        get_connection_mode_override()
+    assert get_connection_mode_override() is None
 
 
 def test_invalid_value_raises(monkeypatch):
