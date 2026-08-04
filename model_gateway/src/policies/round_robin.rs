@@ -205,9 +205,7 @@ mod tests {
             let p = prefill_policy
                 .select_worker(&prefill_workers, &info)
                 .unwrap();
-            let d = decode_policy
-                .select_worker(&decode_workers, &info)
-                .unwrap();
+            let d = decode_policy.select_worker(&decode_workers, &info).unwrap();
             indep_prefill[p] += 1;
             indep_decode[d] += 1;
         }

@@ -386,17 +386,13 @@ impl WorkerSelectionStage {
             hash_ring,
             leg: WorkerLeg::Prefill,
         };
-        let prefill_idx = self.policy_registry.select_worker(
-            &prefill_policy,
-            &available_prefill,
-            &info,
-        )?;
+        let prefill_idx =
+            self.policy_registry
+                .select_worker(&prefill_policy, &available_prefill, &info)?;
         info.leg = WorkerLeg::Decode;
-        let decode_idx = self.policy_registry.select_worker(
-            &decode_policy,
-            &available_decode,
-            &info,
-        )?;
+        let decode_idx =
+            self.policy_registry
+                .select_worker(&decode_policy, &available_decode, &info)?;
 
         let model = model_id;
 
@@ -734,9 +730,8 @@ mod tests {
 
         let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
         // Mirror production PD startup: create two independent RoundRobin instances.
-        policy_registry.set_prefill_policy(PolicyFactory::create_from_config(
-            &PolicyConfig::RoundRobin,
-        ));
+        policy_registry
+            .set_prefill_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
         policy_registry
             .set_decode_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
 
