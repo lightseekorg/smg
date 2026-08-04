@@ -166,10 +166,19 @@ impl ZmqEngineClient {
         // error, which auto-aborts their engine-side requests.
         match &self.backend {
             ZmqBackend::Vllm(client) => {
+                // EngineCore needs a concrete `max_tokens`; vLLM's OpenAI frontend
+                // (which the ZMQ path bypasses) defaults an unset value to
+                // `max_model_len - prompt_len`. The context length comes from the
+                // engine's ready handshake, so a connected engine is required.
+                let max_model_len = client
+                    .engines()
+                    .first()
+                    .map(|e| e.ready_response.max_model_len)
+                    .ok_or_else(|| tonic::Status::unavailable("no connected ZMQ engine"))?;
                 let mut streams = SelectAll::new();
                 for (index, sub) in subs.into_iter().enumerate() {
-                    let request =
-                        translate_request(sub).map_err(tonic::Status::invalid_argument)?;
+                    let request = translate_request(sub, max_model_len)
+                        .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
                     streams.push(VllmGenerateStream::new(stream, index as u32));
                 }
@@ -772,7 +781,10 @@ fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSampling
 
 /// Translate a vLLM-proto generate request into an `EngineCoreRequest`. ZMQ mode
 /// requires pre-tokenized input (SMG tokenizes upstream).
-fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, String> {
+fn translate_request(
+    req: vllm::GenerateRequest,
+    max_model_len: u64,
+) -> Result<EngineCoreRequest, String> {
     let prompt_token_ids = match req.input {
         Some(vllm::generate_request::Input::Tokenized(tokenized)) => Some(tokenized.input_ids),
         Some(vllm::generate_request::Input::Text(_)) => {
@@ -795,17 +807,27 @@ fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, St
             return Err("prompt logprobs are not supported over the ZMQ backend".to_string());
         }
     }
+    // vLLM's frontend defaults an unset `max_tokens` to the remaining context
+    // (`max_model_len - prompt_len`).
+    let prompt_len = prompt_token_ids.as_ref().map_or(0, |ids| ids.len()) as u64;
+    let default_max_tokens =
+        u32::try_from(max_model_len.saturating_sub(prompt_len)).unwrap_or(u32::MAX);
     Ok(EngineCoreRequest {
         request_id: req.request_id,
         prompt_token_ids,
-        sampling_params: req.sampling_params.map(translate_sampling),
+        sampling_params: req
+            .sampling_params
+            .map(|sp| translate_sampling(sp, default_max_tokens)),
         arrival_time: now_secs(),
         data_parallel_rank,
         ..EngineCoreRequest::default()
     })
 }
 
-fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
+fn translate_sampling(
+    sp: vllm::SamplingParams,
+    default_max_tokens: u32,
+) -> EngineCoreSamplingParams {
     let logit_bias = if sp.logit_bias.is_empty() {
         None
     } else {
@@ -832,7 +854,7 @@ fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
         frequency_penalty: sp.frequency_penalty,
         presence_penalty: sp.presence_penalty,
         repetition_penalty: sp.repetition_penalty,
-        max_tokens: sp.max_tokens.unwrap_or(16),
+        max_tokens: sp.max_tokens.unwrap_or(default_max_tokens),
         min_tokens: sp.min_tokens,
         stop_token_ids: sp.stop_token_ids,
         seed: sp.seed.map(i64::from),
@@ -1388,12 +1410,41 @@ mod tests {
     #[test]
     fn vllm_rejects_unsupported_sampling_features() {
         // Prompt logprobs have no renderer merge on the ZMQ path.
-        let err = translate_request(tokenized_req(vllm::SamplingParams {
-            prompt_logprobs: Some(1),
-            ..Default::default()
-        }))
+        let err = translate_request(
+            tokenized_req(vllm::SamplingParams {
+                prompt_logprobs: Some(1),
+                ..Default::default()
+            }),
+            4096,
+        )
         .expect_err("prompt logprobs rejected");
         assert!(err.contains("prompt logprobs"), "{err}");
+    }
+
+    #[test]
+    fn vllm_defaults_unset_max_tokens_to_remaining_context() {
+        let max_tokens = |sampling, max_model_len| {
+            translate_request(tokenized_req(sampling), max_model_len)
+                .expect("request translated")
+                .sampling_params
+                .expect("sampling params present")
+                .max_tokens
+        };
+
+        // Unset max_tokens defaults to `max_model_len - prompt_len` (prompt is
+        // 3 tokens), mirroring vLLM's bypassed OpenAI frontend.
+        assert_eq!(max_tokens(vllm::SamplingParams::default(), 100), 97);
+        // An explicit value is always honored.
+        assert_eq!(
+            max_tokens(
+                vllm::SamplingParams {
+                    max_tokens: Some(8),
+                    ..Default::default()
+                },
+                100,
+            ),
+            8,
+        );
     }
 
     #[test]
@@ -1403,10 +1454,13 @@ mod tests {
         };
 
         let translate = |constraint| {
-            translate_request(tokenized_req(vllm::SamplingParams {
-                constraint: Some(constraint),
-                ..Default::default()
-            }))
+            translate_request(
+                tokenized_req(vllm::SamplingParams {
+                    constraint: Some(constraint),
+                    ..Default::default()
+                }),
+                4096,
+            )
             .expect("constraint translated")
             .sampling_params
             .expect("sampling params present")
