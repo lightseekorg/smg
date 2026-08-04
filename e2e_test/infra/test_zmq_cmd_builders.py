@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import pytest
-
-# The builders delegate to smg.serve, so the wheel must be importable.
-serve = pytest.importorskip("smg.serve")
-
-from infra.constants import ConnectionMode  # noqa: E402
-from infra.worker import Worker  # noqa: E402
+from infra.constants import ConnectionMode
+from infra.worker import Worker
 
 _VLLM_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 _TS_MODEL = "Qwen/Qwen3.5-9B"
+
+
+@pytest.fixture
+def serve():
+    # The ZMQ builders delegate to smg.serve, so the wheel must be importable.
+    # Scoped to a fixture (not module import) so the gRPC test below still runs
+    # when the wheel is absent.
+    return pytest.importorskip("smg.serve")
 
 
 def _worker(engine, port=50111):
@@ -24,13 +28,13 @@ def _worker(engine, port=50111):
     )
 
 
-def test_zmq_base_url_matches_serve_helper():
+def test_zmq_base_url_matches_serve_helper(serve):
     w = _worker("vllm", port=50123)
     assert w.base_url == serve._zmq_ipc_url(50123)
     assert w.base_url.startswith("ipc://")
 
 
-def test_vllm_zmq_cmd_is_headless_with_derived_handshake_port():
+def test_vllm_zmq_cmd_is_headless_with_derived_handshake_port(serve):
     w = _worker("vllm")
     cmd = w._build_vllm_zmq_cmd("/models/llama", 1, {"vllm_args": ["--max-model-len", "2048"]})
     assert "serve" in cmd
@@ -43,7 +47,7 @@ def test_vllm_zmq_cmd_is_headless_with_derived_handshake_port():
     assert cmd[cmd.index("--max-model-len") + 1] == "2048"
 
 
-def test_tokenspeed_zmq_cmd_is_headless_with_derived_handshake_port():
+def test_tokenspeed_zmq_cmd_is_headless_with_derived_handshake_port(serve):
     w = _worker("tokenspeed")
     cmd = w._build_tokenspeed_zmq_cmd(
         "/models/qwen", 1, {"tokenspeed_args": ["--attention-backend", "fa3"]}

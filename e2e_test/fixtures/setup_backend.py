@@ -29,6 +29,7 @@ from infra import (
     THIRD_PARTY_MODELS,
     ConnectionMode,
     Gateway,
+    Runtime,
     WorkerType,
     get_connection_mode_override,
     get_runtime,
@@ -61,6 +62,24 @@ _WORKER_DEFAULTS = {
 # Track worker startup failures — fail fast after repeated failures
 _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
+
+# Engines that speak the direct-ZMQ backend wire in e2e. Pairing ZMQ with any
+# other engine can't work, so we reject it up front instead of timing out on a
+# worker that never becomes ready.
+ZMQ_CAPABLE_ENGINES = frozenset({Runtime.VLLM.value, Runtime.TOKENSPEED.value})
+
+
+def _validate_connection_mode(connection_mode: ConnectionMode, engine: str) -> None:
+    """Reject connection-mode/engine pairings that cannot start.
+
+    Raises ``ValueError`` when a lane selects ZMQ for an engine that does not
+    support the direct-ZMQ backend.
+    """
+    if connection_mode == ConnectionMode.ZMQ and engine not in ZMQ_CAPABLE_ENGINES:
+        raise ValueError(
+            f"ConnectionMode.ZMQ is only supported for engines "
+            f"{sorted(ZMQ_CAPABLE_ENGINES)}, not {engine!r}"
+        )
 
 
 def _start_workers_tracked(**kwargs) -> list:
@@ -152,6 +171,7 @@ def setup_backend(request: pytest.FixtureRequest):
     if mode_override is not None and not is_pd and not is_epd:
         connection_mode = mode_override
     engine = get_runtime()
+    _validate_connection_mode(connection_mode, engine)
     model_path = get_model_spec(model_id)["model"]
     workers_config = get_marker_kwargs(request, "workers", defaults=_WORKER_DEFAULTS)
     log_dir = os.environ.get("E2E_LOG_DIR") or gateway_config.get("log_dir")
@@ -485,6 +505,7 @@ def backend_router(request: pytest.FixtureRequest):
     if mode_override is not None:
         connection_mode = mode_override
     engine = get_runtime()
+    _validate_connection_mode(connection_mode, engine)
     model_path = get_model_spec(model_id)["model"]
     is_zmq = connection_mode == ConnectionMode.ZMQ
 

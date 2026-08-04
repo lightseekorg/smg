@@ -172,6 +172,12 @@ jobs:
           if [ "${{ inputs.engine }}" = "vllm" ]; then
             SUFFIX="-${{ inputs.vllm_kv_backend }}"
           fi
+          # gRPC and ZMQ chat legs share engine/GPU/test-dir and differ only by
+          # wire mode; fold it in so their log artifacts don't collide.
+          MODE="${{ inputs.connection_mode }}"
+          if [ -n "$MODE" ]; then
+            SUFFIX="${SUFFIX}-${MODE}"
+          fi
           ARTIFACT="e2e-worker-logs-${{ inputs.engine }}-gpu${{ inputs.gpu_tier }}-${LABEL}${SUFFIX}"
           bash scripts/ci_dump_worker_logs.sh e2e-logs "$ARTIFACT"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"

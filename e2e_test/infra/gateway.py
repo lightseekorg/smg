@@ -234,7 +234,7 @@ class Gateway:
             # ZMQ workers share one wire across engine runtimes, so the router
             # cannot probe the backend from the ipc:// URL — pin it explicitly.
             if backend is not None:
-                mode_args += ["--router-backend", backend]
+                mode_args += ["--backend", backend]
             self._launch(
                 mode_args=mode_args,
                 timeout=timeout,

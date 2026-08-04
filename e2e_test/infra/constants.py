@@ -135,10 +135,22 @@ def get_connection_mode_override() -> "ConnectionMode | None":
     Set ``E2E_CONNECTION_MODE`` to run the existing local test cases over a
     different wire (like ``E2E_RUNTIME`` picks the engine): a ``grpc``/``http``
     case then runs over that mode without a separate parametrize value. PD/EPD
-    backends keep their own wire. Returns ``None`` when unset.
+    backends keep their own wire. Returns ``None`` when the var is unset; a
+    set-but-empty or unrecognized value is a misconfiguration and raises.
     """
     value = os.environ.get(ENV_CONNECTION_MODE)
-    return ConnectionMode(value.lower()) if value else None
+    if value is None:
+        return None
+    value = value.strip()
+    valid = [mode.value for mode in ConnectionMode]
+    if not value:
+        raise ValueError(f"{ENV_CONNECTION_MODE} is set but empty; unset it or use one of {valid}")
+    try:
+        return ConnectionMode(value.lower())
+    except ValueError:
+        raise ValueError(
+            f"{ENV_CONNECTION_MODE}={value!r} is not a valid connection mode; use one of {valid}"
+        ) from None
 
 
 ENV_VLLM_KV_BACKEND = "E2E_VLLM_KV_BACKEND"
