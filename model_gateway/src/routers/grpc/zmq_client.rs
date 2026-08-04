@@ -13,7 +13,8 @@
 // the request-execution stage is reused unchanged.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -57,6 +58,58 @@ enum ZmqBackend {
     TokenSpeed(Arc<TokenSpeedClient>),
 }
 
+/// The model's EOS stop set, resolved from its local directory. EngineCore
+/// has no tokenizer or model config — stopping at EOS is the frontend's job
+/// (the ids ride each request), and without them generation only ends at
+/// `max_tokens`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EosTokenIds {
+    /// Primary EOS id, carried as the request's `_eos_token_id`.
+    primary: Option<u32>,
+    /// Extra EOS ids (multi-EOS models), merged into `stop_token_ids`.
+    extra: Vec<u32>,
+}
+
+impl EosTokenIds {
+    pub fn new(primary: Option<u32>, extra: Vec<u32>) -> Self {
+        Self { primary, extra }
+    }
+
+    /// Resolve from `config.json` + `generation_config.json` in a local model
+    /// directory: primary = the model config's first id, extras = every other
+    /// listed id. Missing files or fields degrade to fewer ids.
+    pub fn from_model_dir(dir: &Path) -> Self {
+        let model_ids = eos_ids_from_file(&dir.join("config.json"));
+        let gen_ids = eos_ids_from_file(&dir.join("generation_config.json"));
+        let primary = model_ids.first().copied().or(gen_ids.first().copied());
+        let mut extra = Vec::new();
+        for id in model_ids.into_iter().chain(gen_ids) {
+            if Some(id) != primary && !extra.contains(&id) {
+                extra.push(id);
+            }
+        }
+        Self { primary, extra }
+    }
+}
+
+/// Read a config file's `eos_token_id`, which is a single id or a list.
+fn eos_ids_from_file(path: &Path) -> Vec<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .map(|config| eos_ids_from_value(config.get("eos_token_id")))
+        .unwrap_or_default()
+}
+
+fn eos_ids_from_value(value: Option<&serde_json::Value>) -> Vec<u32> {
+    let as_id = |v: &serde_json::Value| v.as_u64().and_then(|id| u32::try_from(id).ok());
+    match value {
+        Some(serde_json::Value::Array(ids)) => ids.iter().filter_map(as_id).collect(),
+        Some(id) => as_id(id).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Direct ZMQ connection to a same-host engine (vLLM EngineCore or TokenSpeed),
 /// presented behind the vLLM gRPC client surface.
 #[derive(Clone)]
@@ -65,6 +118,9 @@ pub struct ZmqEngineClient {
     /// Model id advertised for metadata (the engine does not report it on the
     /// wire; it is configured at worker registration).
     model_id: String,
+    /// EOS ids attached to every vLLM request (the engine can't stop at EOS
+    /// without them).
+    eos: EosTokenIds,
 }
 
 impl ZmqEngineClient {
@@ -81,6 +137,7 @@ impl ZmqEngineClient {
         output_address: &str,
         engine_count: usize,
         model_id: String,
+        eos: EosTokenIds,
         runtime: RuntimeType,
         timeout: Duration,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -127,7 +184,11 @@ impl ZmqEngineClient {
             // runtimes were rejected before the handshake.
             _ => ZmqBackend::Vllm(Arc::new(EngineCoreClient::new(transport))),
         };
-        Ok(Self { backend, model_id })
+        Ok(Self {
+            backend,
+            model_id,
+            eos,
+        })
     }
 
     /// The engine runtime behind this connection (the wire protocol chosen at
@@ -186,7 +247,7 @@ impl ZmqEngineClient {
                         .and_then(|sp| sp.logprobs)
                         .filter(|&n| n > 0)
                         .map_or(0, |n| n as usize);
-                    let request = translate_request(sub, max_model_len)
+                    let request = translate_request(sub, max_model_len, &self.eos)
                         .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
                     streams.push(VllmGenerateStream::new(stream, index as u32, top_logprobs));
@@ -810,6 +871,7 @@ fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSampling
 fn translate_request(
     req: vllm::GenerateRequest,
     max_model_len: u64,
+    eos: &EosTokenIds,
 ) -> Result<EngineCoreRequest, String> {
     let prompt_token_ids = match req.input {
         Some(vllm::generate_request::Input::Tokenized(tokenized)) => Some(tokenized.input_ids),
@@ -843,7 +905,7 @@ fn translate_request(
         prompt_token_ids,
         sampling_params: req
             .sampling_params
-            .map(|sp| translate_sampling(sp, default_max_tokens)),
+            .map(|sp| translate_sampling(sp, default_max_tokens, eos)),
         arrival_time: now_secs(),
         data_parallel_rank,
         ..EngineCoreRequest::default()
@@ -853,7 +915,23 @@ fn translate_request(
 fn translate_sampling(
     sp: vllm::SamplingParams,
     default_max_tokens: u32,
+    eos: &EosTokenIds,
 ) -> EngineCoreSamplingParams {
+    // Stopping at EOS is the frontend's duty here: the primary id rides
+    // `_eos_token_id`, extra ids merge into `stop_token_ids`, and the union
+    // feeds `_all_stop_token_ids` (engine-side `min_tokens` masking, built
+    // regardless of `ignore_eos`).
+    let mut stop_token_ids = sp.stop_token_ids;
+    if !sp.ignore_eos {
+        for id in &eos.extra {
+            if !stop_token_ids.contains(id) {
+                stop_token_ids.push(*id);
+            }
+        }
+    }
+    let mut all_stop_token_ids: BTreeSet<u32> = stop_token_ids.iter().copied().collect();
+    all_stop_token_ids.extend(eos.primary);
+    all_stop_token_ids.extend(eos.extra.iter().copied());
     let logit_bias = if sp.logit_bias.is_empty() {
         None
     } else {
@@ -882,7 +960,9 @@ fn translate_sampling(
         repetition_penalty: sp.repetition_penalty,
         max_tokens: sp.max_tokens.unwrap_or(default_max_tokens),
         min_tokens: sp.min_tokens,
-        stop_token_ids: sp.stop_token_ids,
+        stop_token_ids,
+        eos_token_id: (!sp.ignore_eos).then_some(eos.primary).flatten(),
+        all_stop_token_ids,
         seed: sp.seed.map(i64::from),
         logprobs: sp.logprobs,
         // prompt_logprobs is rejected in `translate_request` (no renderer
@@ -1026,6 +1106,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
@@ -1144,6 +1225,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
@@ -1288,6 +1370,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::TokenSpeed,
                 Duration::from_secs(10)
             ),
@@ -1582,6 +1665,7 @@ mod tests {
                 ..Default::default()
             }),
             4096,
+            &EosTokenIds::default(),
         )
         .expect_err("prompt logprobs rejected");
         assert!(err.contains("prompt logprobs"), "{err}");
@@ -1590,11 +1674,15 @@ mod tests {
     #[test]
     fn vllm_defaults_unset_max_tokens_to_remaining_context() {
         let max_tokens = |sampling, max_model_len| {
-            translate_request(tokenized_req(sampling), max_model_len)
-                .expect("request translated")
-                .sampling_params
-                .expect("sampling params present")
-                .max_tokens
+            translate_request(
+                tokenized_req(sampling),
+                max_model_len,
+                &EosTokenIds::default(),
+            )
+            .expect("request translated")
+            .sampling_params
+            .expect("sampling params present")
+            .max_tokens
         };
 
         // Unset max_tokens defaults to `max_model_len - prompt_len` (prompt is
@@ -1614,6 +1702,60 @@ mod tests {
     }
 
     #[test]
+    fn vllm_attaches_eos_stop_ids() {
+        let eos = EosTokenIds::new(Some(5), vec![7]);
+        let sampling = |sp| {
+            translate_request(tokenized_req(sp), 4096, &eos)
+                .expect("request translated")
+                .sampling_params
+                .expect("sampling params present")
+        };
+
+        // Primary rides `_eos_token_id`, extras merge into `stop_token_ids`
+        // without duplicating, and the union lands in `_all_stop_token_ids`.
+        let sp = sampling(vllm::SamplingParams {
+            stop_token_ids: vec![7, 9],
+            ..Default::default()
+        });
+        assert_eq!(sp.eos_token_id, Some(5));
+        assert_eq!(sp.stop_token_ids, vec![7, 9]);
+        assert_eq!(sp.all_stop_token_ids, BTreeSet::from([5, 7, 9]));
+
+        // ignore_eos drops the EOS stops from the wire but keeps the
+        // bookkeeping set (mirrors the reference frontend).
+        let sp = sampling(vllm::SamplingParams {
+            stop_token_ids: vec![9],
+            ignore_eos: true,
+            ..Default::default()
+        });
+        assert_eq!(sp.eos_token_id, None);
+        assert_eq!(sp.stop_token_ids, vec![9]);
+        assert_eq!(sp.all_stop_token_ids, BTreeSet::from([5, 7, 9]));
+    }
+
+    #[test]
+    fn eos_token_ids_resolve_from_model_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"eos_token_id": 5}"#).unwrap();
+        std::fs::write(
+            dir.path().join("generation_config.json"),
+            r#"{"eos_token_id": [5, 7, 9]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            EosTokenIds::from_model_dir(dir.path()),
+            EosTokenIds::new(Some(5), vec![7, 9]),
+        );
+
+        // Missing files degrade to no ids, not an error.
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            EosTokenIds::from_model_dir(empty.path()),
+            EosTokenIds::default(),
+        );
+    }
+
+    #[test]
     fn vllm_translates_structured_output_constraints() {
         use engine_zmq_client::protocol::vllm::structured_outputs::{
             StructuredOutputBackend, StructuredOutputConstraint,
@@ -1626,6 +1768,7 @@ mod tests {
                     ..Default::default()
                 }),
                 4096,
+                &EosTokenIds::default(),
             )
             .expect("constraint translated")
             .sampling_params
@@ -1739,6 +1882,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
@@ -1836,6 +1980,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::TokenSpeed,
                 Duration::from_secs(10)
             ),
@@ -1934,6 +2079,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
