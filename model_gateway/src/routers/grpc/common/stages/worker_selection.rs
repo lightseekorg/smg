@@ -675,7 +675,7 @@ mod tests {
     use crate::{
         config::types::PolicyConfig,
         policies::PolicyFactory,
-        worker::{BasicWorkerBuilder, ModelCard},
+        worker::{BasicWorkerBuilder, ConnectionMode, ModelCard},
     };
 
     fn no_health_check() -> HealthCheckConfig {
