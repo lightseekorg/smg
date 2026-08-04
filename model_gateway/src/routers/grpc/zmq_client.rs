@@ -736,17 +736,11 @@ fn translate_request_tokenspeed(
         }
         // The TokenSpeed wire has no per-sample demux; n>1 is fanned out into
         // single-sample sub-requests by `generate` before translation.
-        // Stop strings are not forwarded: the direct ZMQ path sends token ids
-        // only (the engine-side transport normalizes without a tokenizer) and
-        // the gateway's stop decoder does not enforce them, so they would be
-        // ignored and the request would run to max_tokens.
-        if !sp.stop.is_empty() {
-            return Err(
-                "stop strings are not supported over the TokenSpeed ZMQ backend yet; \
-                 use stop_token_ids"
-                    .to_string(),
-            );
-        }
+        // String `stop` sequences are resolved upstream in request building
+        // (`resolve_string_stops`): the strings are dropped and single-token
+        // stops become `stop_token_ids`, while the router-side stop decoder
+        // trims the text. Any residual strings here are harmless — the decoder
+        // still enforces them — so this path forwards token ids only.
         // logit_bias is not translated onto the TokenSpeed wire either.
         if !sp.logit_bias.is_empty() {
             return Err("logit_bias is not supported over the TokenSpeed ZMQ backend".to_string());
@@ -1544,14 +1538,6 @@ mod tests {
         .expect_err("constraint rejected");
         assert!(err.contains("structured output"), "{err}");
 
-        // Stop strings have no wire slot and are not enforced by the gateway.
-        let err = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-            stop: vec!["</s>".to_string()],
-            ..Default::default()
-        }))
-        .expect_err("stop strings rejected");
-        assert!(err.contains("stop_token_ids"), "{err}");
-
         // logit_bias has no wire slot.
         let err = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
             logit_bias: HashMap::from([(7, 1.0)]),
@@ -1559,6 +1545,20 @@ mod tests {
         }))
         .expect_err("logit_bias rejected");
         assert!(err.contains("logit_bias"), "{err}");
+    }
+
+    #[test]
+    fn tokenspeed_ignores_residual_stop_strings() {
+        // String stops are resolved upstream (`resolve_string_stops`); any that
+        // reach here are harmless — the translator forwards token ids only and
+        // the router-side decoder trims the text.
+        let req = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
+            stop: vec!["</s>".to_string()],
+            stop_token_ids: vec![13],
+            ..Default::default()
+        }))
+        .expect("residual stop strings must not be rejected");
+        assert_eq!(req.sampling_params.stop_token_ids, Some(vec![13]));
     }
 
     #[test]

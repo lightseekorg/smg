@@ -50,6 +50,12 @@ impl BackendClient {
         }
     }
 
+    /// True if this is a direct-ZMQ backend (the engine receives token ids only
+    /// and cannot match string stops itself).
+    pub fn is_zmq(&self) -> bool {
+        matches!(self, Self::Zmq(_))
+    }
+
     /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so
     /// this reports `true` for gRPC; ZMQ reflects its connection liveness.
     pub fn is_alive(&self) -> bool {

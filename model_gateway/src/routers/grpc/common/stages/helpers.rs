@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use llm_tokenizer::traits::Tokenizer;
 use rand::RngExt;
 use smg_grpc_client::{
     mlx_proto,
@@ -291,6 +292,102 @@ fn apply_tokenspeed_sampling_defaults(
     apply_opt!(repetition_penalty);
 }
 
+/// Convert single-token stop strings into `stop_token_ids` entries so the engine
+/// can halt generation early for the common case (e.g. `["."]`, `["\n"]`).
+///
+/// The proto `stop_token_ids` field is a flat list of single token ids, so a
+/// multi-token stop string cannot be represented there — pushing its sub-tokens
+/// would stop far too eagerly (on any one of them). Multi-token, empty, and
+/// unknown stops are therefore left to the router-side `StopSequenceDecoder`,
+/// which detokenizes worker output and trims the stop text. Existing
+/// `stop_token_ids` are preserved and deduped.
+fn encode_single_token_stops(
+    stops: Vec<String>,
+    stop_token_ids: &mut Vec<u32>,
+    tokenizer: Option<&Arc<dyn Tokenizer>>,
+) {
+    // Without a tokenizer we cannot encode (not expected on paths that resolve
+    // one to tokenize the prompt). Safe: the strings are already dropped by the
+    // caller, so the router-side decoder remains the source of truth.
+    let Some(tokenizer) = tokenizer else {
+        if !stops.is_empty() {
+            warn!(
+                "No tokenizer available to encode string stop sequences; \
+                 relying on router-side stop decoder only"
+            );
+        }
+        return;
+    };
+
+    for stop in stops {
+        if stop.is_empty() {
+            continue;
+        }
+        // add_special_tokens=false: we want the literal token(s) for the stop
+        // string, not a BOS/EOS-wrapped encoding.
+        match tokenizer.encode(&stop, false) {
+            Ok(encoding) => match encoding.token_ids() {
+                [id] => {
+                    if !stop_token_ids.contains(id) {
+                        stop_token_ids.push(*id);
+                    }
+                }
+                ids => debug!(
+                    stop = %stop,
+                    token_count = ids.len(),
+                    "string stop is not single-token; handled by router-side stop decoder"
+                ),
+            },
+            Err(e) => warn!(
+                stop = %stop,
+                error = %e,
+                "Failed to encode string stop sequence; relying on router-side stop decoder"
+            ),
+        }
+    }
+}
+
+/// Router-authoritative string-`stop` resolution for backends whose engine
+/// cannot match string stops itself.
+///
+/// vLLM over gRPC detokenizes server-side (`detokenize=bool(stop)`), TRT-LLM
+/// tokenizes stop words server-side, and MLX has no string-`stop` field — those
+/// keep their strings untouched. Two paths cannot:
+///   - SGLang gRPC workers run with `skip_tokenizer_init=True` and reject string
+///     stops outright (a 400 for any request carrying `stop`); and
+///   - every direct-ZMQ backend (vLLM EngineCore, TokenSpeed) receives token ids
+///     only, so the engine never sees — and cannot match — a stop string.
+///
+/// For both, the router owns the tokenizer and already matches string stops via
+/// `StopSequenceDecoder` (it detokenizes worker output and trims), so the worker
+/// never needs the raw strings. This drops the string `stop` list and forwards
+/// any single-token stop as a `stop_token_ids` entry for early stopping; the
+/// router-side decoder handles the rest. This is the single resolution point
+/// shared by SGLang gRPC and every ZMQ backend.
+pub(crate) fn resolve_string_stops(
+    request: &mut ProtoGenerateRequest,
+    tokenizer: Option<&Arc<dyn Tokenizer>>,
+    is_zmq: bool,
+) {
+    // SGLang always needs it; other protos only when talking to a ZMQ backend
+    // (which, on this path, always carries the vLLM proto).
+    match request {
+        ProtoGenerateRequest::Sglang(req) => {
+            if let Some(params) = req.sampling_params.as_mut() {
+                let stops = std::mem::take(&mut params.stop);
+                encode_single_token_stops(stops, &mut params.stop_token_ids, tokenizer);
+            }
+        }
+        ProtoGenerateRequest::Vllm(req) if is_zmq => {
+            if let Some(params) = req.sampling_params.as_mut() {
+                let stops = std::mem::take(&mut params.stop);
+                encode_single_token_stops(stops, &mut params.stop_token_ids, tokenizer);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Inject PD bootstrap metadata for SGLang if needed.
 ///
 /// SGLang uses DisaggregatedParams with bootstrap host/port/room.
@@ -432,5 +529,137 @@ mod request_id_tests {
 
         let id = resolve_request_id(&request_type, Some(&meta), "chatcmpl-", false);
         assert!(id.starts_with("chatcmpl-"));
+    }
+}
+
+#[cfg(test)]
+mod stop_resolution_tests {
+    use std::sync::Arc;
+
+    use llm_tokenizer::{mock::MockTokenizer, traits::Tokenizer};
+    use smg_grpc_client::{sglang_proto, vllm_proto};
+
+    use super::{resolve_string_stops, ProtoGenerateRequest};
+
+    fn mock_tokenizer() -> Arc<dyn Tokenizer> {
+        // MockTokenizer vocab: "." => 6, "Hello" => 1, "world" => 2. `encode`
+        // splits on whitespace, so "." => [6] (single) and "Hello world" =>
+        // [1, 2] (multi); unknown words encode to [].
+        Arc::new(MockTokenizer::new())
+    }
+
+    fn sglang_request(stop: Vec<&str>, stop_token_ids: Vec<u32>) -> ProtoGenerateRequest {
+        ProtoGenerateRequest::Sglang(Box::new(sglang_proto::GenerateRequest {
+            sampling_params: Some(sglang_proto::SamplingParams {
+                stop: stop.into_iter().map(str::to_string).collect(),
+                stop_token_ids,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    fn vllm_request(stop: Vec<&str>, stop_token_ids: Vec<u32>) -> ProtoGenerateRequest {
+        ProtoGenerateRequest::Vllm(Box::new(vllm_proto::GenerateRequest {
+            sampling_params: Some(vllm_proto::SamplingParams {
+                stop: stop.into_iter().map(str::to_string).collect(),
+                stop_token_ids,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    fn sglang_params(req: &ProtoGenerateRequest) -> &sglang_proto::SamplingParams {
+        match req {
+            ProtoGenerateRequest::Sglang(r) => r.sampling_params.as_ref().unwrap(),
+            _ => panic!("expected SGLang request"),
+        }
+    }
+
+    fn vllm_params(req: &ProtoGenerateRequest) -> &vllm_proto::SamplingParams {
+        match req {
+            ProtoGenerateRequest::Vllm(r) => r.sampling_params.as_ref().unwrap(),
+            _ => panic!("expected vLLM request"),
+        }
+    }
+
+    #[test]
+    fn sglang_single_token_becomes_stop_token_id() {
+        let mut req = sglang_request(vec!["."], vec![]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), false);
+
+        let params = sglang_params(&req);
+        assert!(params.stop.is_empty(), "string stop should be cleared");
+        assert_eq!(params.stop_token_ids, vec![6]);
+    }
+
+    #[test]
+    fn sglang_multi_token_relies_on_router_decoder() {
+        // "Hello world" => [1, 2]: can't be a flat stop_token_id, so it must not
+        // be forwarded (would over-eagerly stop on any subtoken).
+        let mut req = sglang_request(vec!["Hello world"], vec![]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), false);
+
+        let params = sglang_params(&req);
+        assert!(params.stop.is_empty());
+        assert!(params.stop_token_ids.is_empty());
+    }
+
+    #[test]
+    fn sglang_mixed_only_single_token_forwarded_and_dedups() {
+        let mut req = sglang_request(vec![".", "Hello world"], vec![6, 42]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), false);
+
+        let params = sglang_params(&req);
+        assert!(params.stop.is_empty());
+        assert_eq!(
+            params.stop_token_ids,
+            vec![6, 42],
+            "existing ids kept, no dup"
+        );
+    }
+
+    #[test]
+    fn sglang_without_tokenizer_still_clears_strings() {
+        let mut req = sglang_request(vec!["."], vec![]);
+        resolve_string_stops(&mut req, None, false);
+
+        let params = sglang_params(&req);
+        assert!(
+            params.stop.is_empty(),
+            "strings dropped so worker won't 400"
+        );
+        assert!(params.stop_token_ids.is_empty());
+    }
+
+    #[test]
+    fn vllm_resolved_only_over_zmq() {
+        // gRPC vLLM keeps its strings (the servicer detokenizes engine-side).
+        let mut grpc = vllm_request(vec!["."], vec![]);
+        resolve_string_stops(&mut grpc, Some(&mock_tokenizer()), false);
+        let params = vllm_params(&grpc);
+        assert_eq!(
+            params.stop,
+            vec![".".to_string()],
+            "gRPC vLLM stop preserved"
+        );
+        assert!(params.stop_token_ids.is_empty());
+
+        // ZMQ vLLM (EngineCore sees token ids only) resolves like SGLang.
+        let mut zmq = vllm_request(vec!["."], vec![]);
+        resolve_string_stops(&mut zmq, Some(&mock_tokenizer()), true);
+        let params = vllm_params(&zmq);
+        assert!(params.stop.is_empty(), "ZMQ vLLM stop cleared");
+        assert_eq!(params.stop_token_ids, vec![6]);
+    }
+
+    #[test]
+    fn noop_when_no_string_stops() {
+        let mut req = sglang_request(vec![], vec![7]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), false);
+
+        let params = sglang_params(&req);
+        assert_eq!(params.stop_token_ids, vec![7], "unrelated ids untouched");
     }
 }
