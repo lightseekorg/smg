@@ -53,6 +53,8 @@ pub enum Error {
         context: &'static str,
         field: &'static str,
     },
+    #[error("invalid structured outputs params: {message}")]
+    InvalidStructuredOutputsParams { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error("data parallel rank {rank} is out of range for {num_engines} engine(s)")]
