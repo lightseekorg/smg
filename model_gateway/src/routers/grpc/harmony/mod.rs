@@ -35,6 +35,7 @@ pub(crate) mod parser;
 pub(crate) mod processor;
 pub(crate) mod responses;
 pub(crate) mod stages;
+pub(crate) mod stop;
 pub(crate) mod streaming;
 pub(crate) mod types;
 

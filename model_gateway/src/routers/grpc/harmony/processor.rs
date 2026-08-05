@@ -16,6 +16,7 @@ use tracing::error;
 
 use super::{
     builder::{convert_harmony_logprobs, try_harmony_encoding},
+    stop::TextStopScanner,
     HarmonyParserAdapter,
 };
 use crate::routers::{
@@ -39,11 +40,16 @@ impl HarmonyResponseProcessor {
     }
 
     /// Process a non-streaming Harmony chat response
+    ///
+    /// `router_stop_strings` is non-empty only when the router must enforce
+    /// string `stop` sequences itself (direct-ZMQ backends: the engine sees
+    /// token ids only).
     pub async fn process_non_streaming_chat_response(
         &self,
         execution_result: ExecutionResult,
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: DispatchMetadata,
+        router_stop_strings: &[String],
     ) -> Result<ChatCompletionResponse, Response> {
         let request_logprobs = chat_request.logprobs;
 
@@ -103,15 +109,46 @@ impl HarmonyResponseProcessor {
                 None
             };
 
+            let mut analysis = parsed.analysis;
+            let mut final_text = parsed.final_text;
+            let mut tool_calls = parsed.commentary;
+            let mut finish_reason = parsed.finish_reason;
+            let mut matched_stop = matched_stop;
+
+            // Router-enforced string stops: scan channel text in emission
+            // order (analysis before final), truncate after the first match
+            // (retaining the stop as suffix, like the token-forwarding gRPC
+            // path), and drop everything generated past it.
+            if !router_stop_strings.is_empty() {
+                let mut scanner = TextStopScanner::new(router_stop_strings.to_vec());
+                if let Some(text) = analysis.take() {
+                    let (out, stopped) = scanner.scan_complete(&text);
+                    analysis = (!out.is_empty()).then_some(out);
+                    if stopped {
+                        final_text.clear();
+                        tool_calls = None;
+                    }
+                }
+                if scanner.matched().is_none() && !final_text.is_empty() {
+                    let (out, stopped) = scanner.scan_complete(&final_text);
+                    final_text = out;
+                    if stopped {
+                        tool_calls = None;
+                    }
+                }
+                if let Some(stop) = scanner.matched() {
+                    finish_reason = "stop".to_string();
+                    matched_stop = Some(serde_json::Value::String(stop.to_string()));
+                }
+            }
+
             // Build response message (assistant)
             let message = ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: (!parsed.final_text.is_empty()).then_some(parsed.final_text),
-                tool_calls: parsed.commentary,
-                reasoning_content: parsed.analysis,
+                content: (!final_text.is_empty()).then_some(final_text),
+                tool_calls,
+                reasoning_content: analysis,
             };
-
-            let finish_reason = parsed.finish_reason;
 
             // Accumulate reasoning tokens across all responses
             total_reasoning_tokens += parsed.reasoning_token_count;
