@@ -35,9 +35,15 @@ use engine_zmq_client::{
 };
 use futures::{stream::SelectAll, Stream, StreamExt};
 use openai_protocol::worker::{SchedulerLoadSnapshot, WorkerLoadResponse};
-use smg_grpc_client::vllm_proto as vllm;
+use smg_grpc_client::{tokenspeed_proto, vllm_proto as vllm};
 
-use crate::worker::RuntimeType;
+use crate::{
+    routers::grpc::{
+        client::{ModelInfo, ServerInfo},
+        proto_wrapper::ProtoGenerateRequest,
+    },
+    worker::RuntimeType,
+};
 
 /// Loopback host for the same-host ZMQ transport (TCP handshake and local
 /// binds). Shared with the worker-side socket derivation.
@@ -146,7 +152,10 @@ impl ZmqEngineClient {
     }
 
     /// Submit a generate request and return a stream of vLLM-proto responses.
-    /// The request is translated into the backend's wire protocol.
+    /// The request is the engine's native proto (vLLM for a vLLM backend,
+    /// TokenSpeed for a TokenSpeed backend — the [`BackendClient`] builders emit
+    /// the matching variant per runtime); it is translated into the backend's
+    /// wire protocol here.
     ///
     /// Over gRPC the engine-side frontend (e.g. vLLM's AsyncLLM) fans `n` out
     /// itself and multiplexes the choices onto one stream. The raw ZMQ wire has
@@ -154,27 +163,56 @@ impl ZmqEngineClient {
     /// single-sample engine requests (see [`fan_out_requests`]); their outputs
     /// are merged back into one stream with each sub tagged via the proto
     /// `index` field, exactly like the gRPC contract.
+    ///
+    /// [`BackendClient`]: crate::routers::grpc::backend_client::BackendClient
     pub async fn generate(
         &self,
-        req: vllm::GenerateRequest,
+        req: ProtoGenerateRequest,
     ) -> Result<ZmqGenerateStream, tonic::Status> {
-        let subs = fan_out_requests(req);
         // Sub-streams submitted before a mid-loop failure are dropped with the
         // error, which auto-aborts their engine-side requests.
         match &self.backend {
             ZmqBackend::Vllm(client) => {
+                let ProtoGenerateRequest::Vllm(req) = req else {
+                    return Err(tonic::Status::internal(
+                        "vLLM ZMQ backend expects a vLLM generate request",
+                    ));
+                };
+                // EngineCore needs a concrete `max_tokens`; vLLM's OpenAI frontend
+                // (which the ZMQ path bypasses) defaults an unset value to
+                // `max_model_len - prompt_len`. The context length comes from the
+                // engine's ready handshake, so a connected engine is required.
+                let max_model_len = client
+                    .engines()
+                    .first()
+                    .map(|e| e.ready_response.max_model_len)
+                    .ok_or_else(|| tonic::Status::unavailable("no connected ZMQ engine"))?;
                 let mut streams = SelectAll::new();
-                for (index, sub) in subs.into_iter().enumerate() {
-                    let request =
-                        translate_request(sub).map_err(tonic::Status::invalid_argument)?;
+                for (index, sub) in fan_out_requests(*req).into_iter().enumerate() {
+                    // The engine returns the sampled logprob plus up to
+                    // `logprobs` ranked candidates per position; carry the
+                    // requested count so the stream can shape `top_logprobs`.
+                    let top_logprobs = sub
+                        .sampling_params
+                        .as_ref()
+                        .and_then(|sp| sp.logprobs)
+                        .filter(|&n| n > 0)
+                        .map_or(0, |n| n as usize);
+                    let request = translate_request(sub, max_model_len)
+                        .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
-                    streams.push(VllmGenerateStream::new(stream, index as u32));
+                    streams.push(VllmGenerateStream::new(stream, index as u32, top_logprobs));
                 }
                 Ok(ZmqGenerateStream::Vllm(streams))
             }
             ZmqBackend::TokenSpeed(client) => {
+                let ProtoGenerateRequest::TokenSpeed(req) = req else {
+                    return Err(tonic::Status::internal(
+                        "TokenSpeed ZMQ backend expects a TokenSpeed generate request",
+                    ));
+                };
                 let mut streams = SelectAll::new();
-                for (index, sub) in subs.into_iter().enumerate() {
+                for (index, sub) in fan_out_tokenspeed_requests(*req).into_iter().enumerate() {
                     let request = translate_request_tokenspeed(sub)
                         .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
@@ -244,38 +282,55 @@ impl ZmqEngineClient {
 
     /// Model info derived from the handshake `EngineCoreReadyResponse` plus the
     /// configured model id (the engine does not report tokenizer/vocab metadata,
-    /// so those come from worker config).
-    pub fn get_model_info(&self) -> vllm::GetModelInfoResponse {
+    /// so those come from worker config). Returned as the runtime's native
+    /// metadata variant so the label mapping matches the gRPC path.
+    pub fn get_model_info(&self) -> ModelInfo {
         let max_context_length = self
             .engines()
             .first()
             .map(|e| e.ready_response.max_model_len)
             .unwrap_or(0);
-        vllm::GetModelInfoResponse {
-            model_path: self.model_id.clone(),
-            served_model_name: self.model_id.clone(),
-            tokenizer_path: self.model_id.clone(),
-            is_generation: true,
-            max_context_length: u32::try_from(max_context_length).unwrap_or(u32::MAX),
-            ..Default::default()
+        match &self.backend {
+            ZmqBackend::Vllm(_) => ModelInfo::Vllm(vllm::GetModelInfoResponse {
+                model_path: self.model_id.clone(),
+                served_model_name: self.model_id.clone(),
+                tokenizer_path: self.model_id.clone(),
+                is_generation: true,
+                max_context_length: u32::try_from(max_context_length).unwrap_or(u32::MAX),
+                ..Default::default()
+            }),
+            ZmqBackend::TokenSpeed(_) => {
+                ModelInfo::TokenSpeed(Box::new(tokenspeed_proto::GetModelInfoResponse {
+                    model_path: self.model_id.clone(),
+                    served_model_name: self.model_id.clone(),
+                    tokenizer_path: self.model_id.clone(),
+                    max_context_length: i32::try_from(max_context_length).unwrap_or(i32::MAX),
+                    ..Default::default()
+                }))
+            }
         }
     }
 
-    /// Server info derived from the handshake response.
-    pub fn get_server_info(&self) -> vllm::GetServerInfoResponse {
+    /// Server info derived from the handshake response, as the runtime's native
+    /// metadata variant.
+    pub fn get_server_info(&self) -> ServerInfo {
         let data_parallel_size = self
             .engines()
             .first()
             .map(|e| e.ready_response.data_parallel_size)
             .unwrap_or(1);
-        let server_type = match &self.backend {
-            ZmqBackend::Vllm(_) => "vllm",
-            ZmqBackend::TokenSpeed(_) => "tokenspeed",
-        };
-        vllm::GetServerInfoResponse {
-            data_parallel_size: i32::try_from(data_parallel_size).unwrap_or(i32::MAX),
-            server_type: server_type.to_string(),
-            ..Default::default()
+        match &self.backend {
+            ZmqBackend::Vllm(_) => ServerInfo::Vllm(vllm::GetServerInfoResponse {
+                data_parallel_size: i32::try_from(data_parallel_size).unwrap_or(i32::MAX),
+                server_type: "vllm".to_string(),
+                ..Default::default()
+            }),
+            // TokenSpeed's server-info proto carries no data-parallel size or
+            // server-type field; the ZMQ handshake supplies no `server_args`
+            // either, so only the fields it does expose are surfaced.
+            ZmqBackend::TokenSpeed(_) => {
+                ServerInfo::TokenSpeed(Box::<tokenspeed_proto::GetServerInfoResponse>::default())
+            }
         }
     }
 }
@@ -325,6 +380,9 @@ struct StreamState {
     /// `Complete`, so accumulate here and drain into `Complete`.
     output_logprobs_val: Vec<f32>,
     output_logprobs_idx: Vec<u32>,
+    /// Cumulative per-position ranked candidates (`top_logprobs`), accumulated
+    /// alongside the sampled logprobs and drained into the terminal `Complete`.
+    output_top_logprobs: Vec<vllm::TopLogProbs>,
 }
 
 impl StreamState {
@@ -334,7 +392,7 @@ impl StreamState {
         (!self.output_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
             token_logprobs: std::mem::take(&mut self.output_logprobs_val),
             token_ids: std::mem::take(&mut self.output_logprobs_idx),
-            ..Default::default()
+            top_logprobs: std::mem::take(&mut self.output_top_logprobs),
         })
     }
 }
@@ -348,6 +406,10 @@ pub struct VllmGenerateStream {
     /// Choice index stamped on every chunk/complete (0 for n=1; the fan-out
     /// position for n>1) — the proto field the pipeline demuxes choices by.
     index: u32,
+    /// Number of ranked candidates the client requested per position; `0` when
+    /// only the sampled logprob (or nothing) was asked for, in which case no
+    /// `top_logprobs` are emitted.
+    top_logprobs: usize,
     /// Terminal `Complete` held back when the finish tick also carried new
     /// tokens: streaming frontends decode text/logprobs from chunks only, so
     /// the tick's delta goes out as a `Chunk` first.
@@ -355,11 +417,12 @@ pub struct VllmGenerateStream {
 }
 
 impl VllmGenerateStream {
-    fn new(inner: EngineCoreStream, index: u32) -> Self {
+    fn new(inner: EngineCoreStream, index: u32, top_logprobs: usize) -> Self {
         Self {
             inner,
             state: StreamState::default(),
             index,
+            top_logprobs,
             pending: None,
         }
     }
@@ -368,6 +431,7 @@ impl VllmGenerateStream {
         &mut self,
         output: EngineCoreOutput,
     ) -> Result<vllm::GenerateResponse, tonic::Status> {
+        let top_k = self.top_logprobs;
         let state = &mut self.state;
         if let Some(stats) = &output.prefill_stats {
             state.prompt_tokens = stats.num_prompt_tokens;
@@ -377,11 +441,13 @@ impl VllmGenerateStream {
         state.completion_tokens += token_ids.len() as u32;
         state.output_ids.extend(token_ids.iter().copied());
 
-        // Sampled-token logprobs (entry 0 per position), if requested. Chunks
-        // carry this tick's increment; the terminal `Complete` carries the
-        // cumulative set, so accumulate into `state` and drain it on finish.
+        // Sampled-token logprobs (entry 0 per position) plus the requested
+        // ranked candidates (`top_logprobs`). Chunks carry this tick's
+        // increment; the terminal `Complete` carries the cumulative set, so
+        // accumulate into `state` and drain it on finish.
         let mut tick_logprobs_val = Vec::new();
         let mut tick_logprobs_idx = Vec::new();
+        let mut tick_top_logprobs = Vec::new();
         if let Some(logprobs) = &output.new_logprobs {
             let decoded = logprobs.as_direct().ok_or_else(|| {
                 // The protocol layer resolves wire logprobs during decode, so
@@ -389,21 +455,41 @@ impl VllmGenerateStream {
                 tonic::Status::internal("unresolved wire logprobs in engine output")
             })?;
             for position in &decoded.positions {
-                if let Some(sampled) = position.entries.first() {
-                    tick_logprobs_val.push(sampled.logprob);
-                    tick_logprobs_idx.push(sampled.token_id);
+                let Some(sampled) = position.entries.first() else {
+                    continue;
+                };
+                tick_logprobs_val.push(sampled.logprob);
+                tick_logprobs_idx.push(sampled.token_id);
+                // The entries arrive sampled-first then rank-ordered; take the
+                // requested count so one ranked list lands per sampled token.
+                if top_k > 0 {
+                    let mut top = vllm::TopLogProbs::default();
+                    for entry in position.entries.iter().take(top_k) {
+                        top.values.push(entry.logprob);
+                        top.token_ids.push(entry.token_id);
+                    }
+                    tick_top_logprobs.push(top);
                 }
             }
         }
         let chunk_logprobs = (!tick_logprobs_val.is_empty()).then(|| vllm::OutputLogProbs {
             token_logprobs: tick_logprobs_val.clone(),
             token_ids: tick_logprobs_idx.clone(),
-            ..Default::default()
+            top_logprobs: tick_top_logprobs.clone(),
         });
         state.output_logprobs_val.extend(tick_logprobs_val);
         state.output_logprobs_idx.extend(tick_logprobs_idx);
+        state.output_top_logprobs.extend(tick_top_logprobs);
 
         let response = match output.finish_reason {
+            // An engine-side request failure (e.g. grammar compilation) must
+            // surface as an error, not as a normal completion with empty
+            // output — that would produce a 200 with no content.
+            Some(EngineCoreFinishReason::Error) => {
+                return Err(tonic::Status::internal(
+                    "engine finished the request with an error (see engine logs)",
+                ));
+            }
             Some(reason) => {
                 let complete = vllm::GenerateResponse {
                     response: Some(vllm::generate_response::Response::Complete(
@@ -637,81 +723,68 @@ fn fan_out_requests(req: vllm::GenerateRequest) -> Vec<vllm::GenerateRequest> {
         .collect()
 }
 
-/// Translate a vLLM-proto generate request into a TokenSpeed
+/// Split an `n > 1` TokenSpeed proto request into `n` single-sample
+/// sub-requests, the TokenSpeed analogue of [`fan_out_requests`] (the wire has
+/// no per-sample demux, so `generate` fans out here). An `n <= 1` request passes
+/// through untouched. The TokenSpeed proto carries no seed, so the samples
+/// differ by the engine's per-rid seeding alone — the suffixed request ids are
+/// unique, so each rid seeds independently.
+fn fan_out_tokenspeed_requests(
+    req: tokenspeed_proto::GenerateRequest,
+) -> Vec<tokenspeed_proto::GenerateRequest> {
+    let n = req.sampling_params.as_ref().map_or(1, |sp| sp.n.max(1));
+    if n <= 1 {
+        return vec![req];
+    }
+    (0..n)
+        .map(|i| {
+            let mut sub = req.clone();
+            sub.request_id = format!("{}-{i}", req.request_id);
+            if let Some(sp) = sub.sampling_params.as_mut() {
+                sp.n = 1;
+            }
+            sub
+        })
+        .collect()
+}
+
+/// Translate a TokenSpeed proto `GenerateRequest` into the wire
 /// `TokenizedGenerateReqInput`. ZMQ mode requires pre-tokenized input (SMG
 /// tokenizes upstream).
 fn translate_request_tokenspeed(
-    req: vllm::GenerateRequest,
+    req: tokenspeed_proto::GenerateRequest,
 ) -> Result<TokenizedGenerateReqInput, String> {
-    let input_ids = match req.input {
-        Some(vllm::generate_request::Input::Tokenized(tokenized)) => tokenized.input_ids,
-        Some(vllm::generate_request::Input::Text(_)) => {
-            return Err("ZMQ mode requires pre-tokenized input (TokenizedInput)".to_string());
-        }
+    // The response_format / forced-tool-choice constraint oneof is not
+    // translated onto the TokenSpeed structured-output fields yet; dropping it
+    // would return unconstrained text.
+    if req
+        .sampling_params
+        .as_ref()
+        .is_some_and(|sp| sp.constraint.is_some())
+    {
+        return Err(
+            "structured output constraints are not supported over the ZMQ backend yet".to_string(),
+        );
+    }
+    let input_ids = match req.tokenized {
+        Some(tokenized) => tokenized.input_ids,
         None => {
             return Err("ZMQ mode requires pre-tokenized input; no input provided".to_string());
         }
     };
-    let stream = req.stream;
-    // Single-engine TokenSpeed: a pinned DP rank other than 0 cannot be honored.
-    if req.data_parallel_rank.is_some_and(|rank| rank != 0) {
-        return Err(format!(
-            "invalid data_parallel_rank {:?}: the TokenSpeed ZMQ backend is single-engine",
-            req.data_parallel_rank
-        ));
+    // Over the ZMQ wire TokenSpeed returns only the single sampled-token logprob
+    // per token: no top-k candidates (`top_logprobs_num > 1`) and no prompt
+    // logprobs (`token_ids_logprob`). Reject both rather than silently return
+    // fewer than asked. A bare `logprobs: true` (count 0/1) is the plain
+    // sampled-token logprob and is wired end-to-end via `return_logprob`.
+    if req.top_logprobs_num > 1 {
+        return Err("top_logprobs are not supported over the TokenSpeed ZMQ backend".to_string());
     }
-    // TokenSpeed returns only the single sampled-token logprob per token
-    // (`top_logprobs_num = 0` on its wire) and no prompt logprobs. The vLLM
-    // sampling `logprobs` field is a count: the chat frontend maps a bare
-    // `logprobs: true` to `1` and `top_logprobs = k` to `k`, so a count above 1
-    // (or `-1` = "all") is a top-k request that cannot be honored — reject it
-    // rather than silently return fewer. Counts of 0 or 1 are the plain
-    // sampled-token logprob and are wired end-to-end. Note the flip side: at
-    // this proto boundary a chat `top_logprobs: 1` is indistinguishable from a
-    // bare `logprobs: true` (both arrive as count 1), so it is accepted and its
-    // `top_logprobs` list simply stays empty.
-    if let Some(sp) = req.sampling_params.as_ref() {
-        if sp.logprobs.is_some_and(|n| !(0..=1).contains(&n)) {
-            return Err(
-                "top_logprobs are not supported over the TokenSpeed ZMQ backend".to_string(),
-            );
-        }
-        if sp.prompt_logprobs.is_some() {
-            return Err(
-                "prompt logprobs are not supported over the TokenSpeed ZMQ backend".to_string(),
-            );
-        }
-        // The response_format / forced-tool-choice constraint oneof is not
-        // translated onto the TokenSpeed structured-output fields yet; dropping
-        // it would return unconstrained text.
-        if sp.constraint.is_some() {
-            return Err(
-                "structured output constraints are not supported over the ZMQ backend yet"
-                    .to_string(),
-            );
-        }
-        // The TokenSpeed wire has no per-sample demux; n>1 is fanned out into
-        // single-sample sub-requests by `generate` before translation.
-        // Stop strings are not forwarded: the direct ZMQ path sends token ids
-        // only (the engine-side transport normalizes without a tokenizer) and
-        // the gateway's stop decoder does not enforce them, so they would be
-        // ignored and the request would run to max_tokens.
-        if !sp.stop.is_empty() {
-            return Err(
-                "stop strings are not supported over the TokenSpeed ZMQ backend yet; \
-                 use stop_token_ids"
-                    .to_string(),
-            );
-        }
-        // logit_bias is not translated onto the TokenSpeed wire either.
-        if !sp.logit_bias.is_empty() {
-            return Err("logit_bias is not supported over the TokenSpeed ZMQ backend".to_string());
-        }
+    if !req.token_ids_logprob.is_empty() {
+        return Err(
+            "prompt logprobs are not supported over the TokenSpeed ZMQ backend".to_string(),
+        );
     }
-    let return_logprob = req
-        .sampling_params
-        .as_ref()
-        .is_some_and(|sp| sp.logprobs.is_some());
     Ok(TokenizedGenerateReqInput {
         rid: req.request_id,
         input_ids,
@@ -723,43 +796,41 @@ fn translate_request_tokenspeed(
                 params.normalize();
                 params
             }),
-        return_logprob,
-        stream,
+        return_logprob: req.return_logprob,
+        stream: req.stream,
         // Every other field keeps its neutral default (the fields after
         // `stream` are not even emitted; the engine fills them from defaults).
         ..TokenizedGenerateReqInput::default()
     })
 }
 
-/// Map vLLM-proto sampling params onto TokenSpeed's native `SamplingParams`,
-/// in the normalized form: the engine skips its decode-time re-derivation once
+/// Map TokenSpeed proto sampling params onto the wire `SamplingParams`, in the
+/// normalized form: the engine skips its decode-time re-derivation once
 /// `is_normalized` is set, so [`TokenSpeedSamplingParams::normalize`] resolves
 /// the derived fields (top_k sentinel, greedy collapse) before encoding.
-fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSamplingParams {
+///
+/// String `stop` sequences are not forwarded — the token-only engine cannot
+/// match them; the router-side stop decoder trims them from the text instead.
+fn translate_sampling_tokenspeed(sp: tokenspeed_proto::SamplingParams) -> TokenSpeedSamplingParams {
     let mut params = TokenSpeedSamplingParams {
-        max_new_tokens: sp.max_tokens,
+        max_new_tokens: sp.max_new_tokens,
         stop_token_ids: (!sp.stop_token_ids.is_empty()).then_some(sp.stop_token_ids),
         temperature: f64::from(sp.temperature.unwrap_or(1.0)),
-        top_p: f64::from(sp.top_p),
-        // vLLM proto uses `0` for "all tokens"; TokenSpeed's API form is `-1`
-        // (`normalize` resolves it to the engine's disabled sentinel).
-        top_k: if sp.top_k == 0 {
-            -1
-        } else {
-            i32::try_from(sp.top_k).unwrap_or(-1)
-        },
-        min_p: f64::from(sp.min_p),
-        frequency_penalty: f64::from(sp.frequency_penalty),
-        presence_penalty: f64::from(sp.presence_penalty),
-        repetition_penalty: f64::from(sp.repetition_penalty),
-        min_new_tokens: sp.min_tokens,
+        top_p: f64::from(sp.top_p.unwrap_or(1.0)),
+        // The proto keeps the API convention `-1` = "all tokens" (and unset);
+        // `normalize` resolves it to the engine's disabled sentinel.
+        top_k: sp.top_k.unwrap_or(-1),
+        min_p: f64::from(sp.min_p.unwrap_or(0.0)),
+        frequency_penalty: f64::from(sp.frequency_penalty.unwrap_or(0.0)),
+        presence_penalty: f64::from(sp.presence_penalty.unwrap_or(0.0)),
+        repetition_penalty: f64::from(sp.repetition_penalty.unwrap_or(1.0)),
+        min_new_tokens: sp.min_new_tokens,
         ignore_eos: sp.ignore_eos,
-        // A negative seed is a "no seed" sentinel; drop it rather than wrap
-        // (the engine then derives a per-rid seed).
-        seed: sp.seed.and_then(|seed| u64::try_from(seed).ok()),
+        skip_special_tokens: sp.skip_special_tokens,
+        spaces_between_special_tokens: sp.spaces_between_special_tokens,
+        no_stop_trim: sp.no_stop_trim,
         // Proto `0` means unspecified; TokenSpeed expects at least one sample.
-        // The engine stores n without acting on it — n>1 is fanned out before
-        // translation, so this is always 1 on the wire.
+        // n>1 is fanned out before translation, so this is always 1 on the wire.
         n: sp.n.max(1),
         ..TokenSpeedSamplingParams::default()
     };
@@ -769,7 +840,10 @@ fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSampling
 
 /// Translate a vLLM-proto generate request into an `EngineCoreRequest`. ZMQ mode
 /// requires pre-tokenized input (SMG tokenizes upstream).
-fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, String> {
+fn translate_request(
+    req: vllm::GenerateRequest,
+    max_model_len: u64,
+) -> Result<EngineCoreRequest, String> {
     let prompt_token_ids = match req.input {
         Some(vllm::generate_request::Input::Tokenized(tokenized)) => Some(tokenized.input_ids),
         Some(vllm::generate_request::Input::Text(_)) => {
@@ -801,17 +875,28 @@ fn translate_request(req: vllm::GenerateRequest) -> Result<EngineCoreRequest, St
             return Err("prompt logprobs are not supported over the ZMQ backend".to_string());
         }
     }
+    // vLLM's frontend defaults an unset `max_tokens` to the remaining context
+    // (`max_model_len - prompt_len`).
+    let prompt_len = prompt_token_ids.as_ref().map_or(0, |ids| ids.len()) as u64;
+    let default_max_tokens =
+        u32::try_from(max_model_len.saturating_sub(prompt_len)).unwrap_or(u32::MAX);
     Ok(EngineCoreRequest {
         request_id: req.request_id,
         prompt_token_ids,
-        sampling_params: req.sampling_params.map(translate_sampling),
+        mm_features: None,
+        sampling_params: req
+            .sampling_params
+            .map(|sp| translate_sampling(sp, default_max_tokens)),
         arrival_time: now_secs(),
         data_parallel_rank,
         ..EngineCoreRequest::default()
     })
 }
 
-fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
+fn translate_sampling(
+    sp: vllm::SamplingParams,
+    default_max_tokens: u32,
+) -> EngineCoreSamplingParams {
     let logit_bias = if sp.logit_bias.is_empty() {
         None
     } else {
@@ -838,7 +923,7 @@ fn translate_sampling(sp: vllm::SamplingParams) -> EngineCoreSamplingParams {
         frequency_penalty: sp.frequency_penalty,
         presence_penalty: sp.presence_penalty,
         repetition_penalty: sp.repetition_penalty,
-        max_tokens: sp.max_tokens.unwrap_or(16),
+        max_tokens: sp.max_tokens.unwrap_or(default_max_tokens),
         min_tokens: sp.min_tokens,
         stop_token_ids: sp.stop_token_ids,
         seed: sp.seed.map(i64::from),
@@ -903,6 +988,8 @@ fn zmq_status(error: engine_zmq_client::Error) -> tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use engine_zmq_client::{
         mock_engine::{connect_to_frontend, default_ready_response, EngineInbound},
         protocol::vllm::{
@@ -920,7 +1007,7 @@ mod tests {
         logprob: Option<f32>,
         finish: Option<EngineCoreFinishReason>,
     ) -> EngineCoreOutputs {
-        let finished = finish.map(|_| std::collections::BTreeSet::from([request_id.to_string()]));
+        let finished = finish.map(|_| BTreeSet::from([request_id.to_string()]));
         let new_logprobs = logprob.map(|lp| {
             MaybeWireLogprobs::Direct(Logprobs {
                 positions: vec![PositionLogprobs {
@@ -1018,7 +1105,10 @@ mod tests {
             stream: true,
             ..Default::default()
         };
-        let mut stream = client.generate(req).await.expect("generate");
+        let mut stream = client
+            .generate(ProtoGenerateRequest::Vllm(Box::new(req)))
+            .await
+            .expect("generate");
 
         let first = stream.next().await.expect("chunk item").expect("chunk ok");
         match first.response {
@@ -1055,6 +1145,143 @@ mod tests {
                 let logprobs = complete.output_logprobs.expect("complete logprobs");
                 assert_eq!(logprobs.token_logprobs, vec![-0.5, -1.25]);
                 assert_eq!(logprobs.token_ids, vec![10, 11]);
+            }
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert!(stream.next().await.is_none());
+
+        engine_task.await.unwrap();
+    }
+
+    /// With `logprobs=k`, each position's ranked candidates are shaped into
+    /// `top_logprobs`, taking the sampled entry plus the leading candidates up
+    /// to the requested count (matching the gRPC servicer's `islice` behaviour).
+    #[tokio::test]
+    async fn generate_shapes_top_logprobs_to_requested_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let ep = |name: &str| format!("ipc://{}", dir.path().join(name).display());
+        let (handshake, input, output) = (ep("hs.sock"), ep("in.sock"), ep("out.sock"));
+
+        let (client, engine) = tokio::join!(
+            ZmqEngineClient::connect(
+                &handshake,
+                &input,
+                &output,
+                1,
+                "m".to_string(),
+                RuntimeType::Vllm,
+                Duration::from_secs(10)
+            ),
+            connect_to_frontend(
+                &handshake,
+                EngineId::from_engine_index(0),
+                default_ready_response()
+            ),
+        );
+        let client = client.expect("adapter connect");
+        let engine = engine.expect("mock engine");
+
+        // One position with the sampled token (actual vocab rank) first, then
+        // the engine's ranked candidates. The wire carries `k + 1` entries.
+        let position = PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: 10,
+                    logprob: -0.5,
+                    rank: 5,
+                },
+                TokenLogprob {
+                    token_id: 20,
+                    logprob: -0.1,
+                    rank: 1,
+                },
+                TokenLogprob {
+                    token_id: 30,
+                    logprob: -0.3,
+                    rank: 2,
+                },
+            ],
+        };
+        let outputs = EngineCoreOutputs::RequestBatch(RequestBatchOutputs {
+            engine_index: 0,
+            outputs: vec![EngineCoreOutput {
+                request_id: "r1".to_string(),
+                new_token_ids: vec![10],
+                new_logprobs: Some(MaybeWireLogprobs::Direct(Logprobs {
+                    positions: vec![position],
+                })),
+                finish_reason: Some(EngineCoreFinishReason::Length),
+                ..Default::default()
+            }],
+            finished_requests: Some(BTreeSet::from(["r1".to_string()])),
+            ..Default::default()
+        });
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "engine task ends after responding"
+        )]
+        let engine_task = tokio::spawn(async move {
+            let (mut input, mut output) = engine.split();
+            let inbound = input.recv().await.unwrap();
+            let request = match inbound {
+                EngineInbound::Add(request) => request,
+                other => panic!("expected Add, got {other:?}"),
+            };
+            assert_eq!(request.sampling_params.as_ref().unwrap().logprobs, Some(2));
+            output.send_outputs(&outputs).await.unwrap();
+        });
+
+        let req = vllm::GenerateRequest {
+            request_id: "r1".to_string(),
+            input: Some(vllm::generate_request::Input::Tokenized(
+                vllm::TokenizedInput {
+                    original_text: String::new(),
+                    input_ids: vec![1, 2, 3],
+                },
+            )),
+            sampling_params: Some(vllm::SamplingParams {
+                max_tokens: Some(1),
+                logprobs: Some(2),
+                ..Default::default()
+            }),
+            stream: true,
+            ..Default::default()
+        };
+        let mut stream = client
+            .generate(ProtoGenerateRequest::Vllm(Box::new(req)))
+            .await
+            .expect("generate");
+
+        // The requested count is 2, so `top_logprobs` keeps the sampled entry
+        // plus the leading candidate (the third entry is dropped).
+        let expected_top = vec![vllm::TopLogProbs {
+            values: vec![-0.5, -0.1],
+            token_ids: vec![10, 20],
+        }];
+
+        // The finish tick carried a token, so the delta streams as a chunk.
+        let chunk = stream.next().await.expect("chunk item").expect("chunk ok");
+        match chunk.response {
+            Some(vllm::generate_response::Response::Chunk(chunk)) => {
+                let logprobs = chunk.output_logprobs.expect("chunk logprobs");
+                assert_eq!(logprobs.token_logprobs, vec![-0.5]);
+                assert_eq!(logprobs.token_ids, vec![10]);
+                assert_eq!(logprobs.top_logprobs, expected_top);
+            }
+            other => panic!("expected chunk, got {other:?}"),
+        }
+        let complete = stream
+            .next()
+            .await
+            .expect("complete item")
+            .expect("complete ok");
+        match complete.response {
+            Some(vllm::generate_response::Response::Complete(complete)) => {
+                let logprobs = complete.output_logprobs.expect("complete logprobs");
+                assert_eq!(logprobs.token_logprobs, vec![-0.5]);
+                assert_eq!(logprobs.token_ids, vec![10]);
+                assert_eq!(logprobs.top_logprobs, expected_top);
             }
             other => panic!("expected complete, got {other:?}"),
         }
@@ -1151,24 +1378,25 @@ mod tests {
                 .unwrap();
         });
 
-        let req = vllm::GenerateRequest {
+        let req = tokenspeed_proto::GenerateRequest {
             request_id: "r1".to_string(),
-            input: Some(vllm::generate_request::Input::Tokenized(
-                vllm::TokenizedInput {
-                    original_text: String::new(),
-                    input_ids: vec![1, 2, 3],
-                },
-            )),
-            sampling_params: Some(vllm::SamplingParams {
-                max_tokens: Some(2),
-                // Plain sampled-token logprob (count 1); must be wired through.
-                logprobs: Some(1),
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
+                input_ids: vec![1, 2, 3],
+                original_text: String::new(),
+            }),
+            sampling_params: Some(tokenspeed_proto::SamplingParams {
+                max_new_tokens: Some(2),
                 ..Default::default()
             }),
+            // Plain sampled-token logprob; must be wired through.
+            return_logprob: true,
             stream: true,
             ..Default::default()
         };
-        let mut stream = client.generate(req).await.expect("generate");
+        let mut stream = client
+            .generate(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+            .await
+            .expect("generate");
 
         let first = stream.next().await.expect("chunk item").expect("chunk ok");
         match first.response {
@@ -1228,35 +1456,33 @@ mod tests {
     }
 
     #[test]
-    fn tokenspeed_sampling_maps_top_k_sentinel_and_seed() {
+    fn tokenspeed_sampling_maps_top_k_sentinel_and_floors_n() {
         use engine_zmq_client::protocol::tokenspeed::sampling::TOP_K_DISABLED;
 
-        // Proto top_k=0 ("all tokens") normalizes to the engine's disabled
-        // sentinel; negative seed dropped; n floored to 1.
-        let mapped = translate_sampling_tokenspeed(vllm::SamplingParams {
-            top_k: 0,
+        // Unset top_k rides the API convention `-1` ("all tokens") and normalizes
+        // to the engine's disabled sentinel; n=0 floors to 1; max_new_tokens
+        // forwards.
+        let mapped = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            top_k: None,
             n: 0,
-            seed: Some(-1),
-            max_tokens: Some(8),
+            max_new_tokens: Some(8),
             ..Default::default()
         });
         assert_eq!(mapped.top_k, TOP_K_DISABLED);
         assert_eq!(mapped.n, 1);
-        assert_eq!(mapped.seed, None);
         assert_eq!(mapped.max_new_tokens, Some(8));
         // The wire form is always normalized (the engine skips re-derivation).
         assert!(mapped.is_normalized);
 
-        let mapped = translate_sampling_tokenspeed(vllm::SamplingParams {
-            top_k: 40,
-            seed: Some(7),
+        // An explicit top_k passes through unchanged.
+        let mapped = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            top_k: Some(40),
             ..Default::default()
         });
         assert_eq!(mapped.top_k, 40);
-        assert_eq!(mapped.seed, Some(7));
 
         // A near-zero temperature collapses to greedy on the wire.
-        let mapped = translate_sampling_tokenspeed(vllm::SamplingParams {
+        let mapped = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
             temperature: Some(0.0),
             ..Default::default()
         });
@@ -1264,7 +1490,7 @@ mod tests {
         assert_eq!(mapped.top_k, 1);
 
         // Empty stop_token_ids ride as None (the normalized encoding).
-        let mapped = translate_sampling_tokenspeed(vllm::SamplingParams::default());
+        let mapped = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams::default());
         assert_eq!(mapped.stop_token_ids, None);
     }
 
@@ -1283,108 +1509,123 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tokenspeed_plain_logprobs_set_return_logprob() {
-        // Counts 0 and 1 are the plain sampled-token case; both accepted.
-        for count in [0, 1] {
-            let req = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-                logprobs: Some(count),
-                ..Default::default()
-            }))
-            .expect("plain logprobs accepted");
-            assert!(req.return_logprob);
+    fn ts_tokenized_req(
+        sampling: tokenspeed_proto::SamplingParams,
+    ) -> tokenspeed_proto::GenerateRequest {
+        tokenspeed_proto::GenerateRequest {
+            request_id: "r1".to_string(),
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
+                input_ids: vec![1, 2, 3],
+                original_text: String::new(),
+            }),
+            sampling_params: Some(sampling),
+            stream: true,
+            ..Default::default()
         }
-
-        // No logprobs -> the flag stays false.
-        let req = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams::default()))
-            .expect("no logprobs accepted");
-        assert!(!req.return_logprob);
     }
 
     #[test]
-    fn tokenspeed_rejects_top_k_and_prompt_logprobs() {
-        // Top-k (count > 1) cannot be honored.
-        assert!(
-            translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-                logprobs: Some(5),
-                ..Default::default()
-            }))
-            .is_err()
-        );
-        // "all" (count -1) cannot be honored.
-        assert!(
-            translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-                logprobs: Some(-1),
-                ..Default::default()
-            }))
-            .is_err()
-        );
-        // Prompt logprobs cannot be produced.
-        assert!(
-            translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-                prompt_logprobs: Some(1),
-                ..Default::default()
-            }))
-            .is_err()
-        );
+    fn tokenspeed_return_logprob_flag_passes_through() {
+        // The request-level `return_logprob` drives the plain sampled-token
+        // logprob (count 0/1 in `top_logprobs_num` is the same case).
+        let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams::default());
+        req.return_logprob = true;
+        let wire = translate_request_tokenspeed(req).expect("return_logprob accepted");
+        assert!(wire.return_logprob);
+
+        // Unset -> the flag stays false.
+        let wire = translate_request_tokenspeed(ts_tokenized_req(
+            tokenspeed_proto::SamplingParams::default(),
+        ))
+        .expect("no logprobs accepted");
+        assert!(!wire.return_logprob);
     }
 
     #[test]
-    fn tokenspeed_rejects_unsupported_sampling_features() {
-        // Structured-output constraints have no TokenSpeed wire slot.
-        let err = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-            constraint: Some(vllm::sampling_params::Constraint::JsonObject(true)),
-            ..Default::default()
-        }))
-        .expect_err("constraint rejected");
-        assert!(err.contains("structured output"), "{err}");
-
-        // Stop strings have no wire slot and are not enforced by the gateway.
-        let err = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-            stop: vec!["</s>".to_string()],
-            ..Default::default()
-        }))
-        .expect_err("stop strings rejected");
-        assert!(err.contains("stop_token_ids"), "{err}");
-
-        // logit_bias has no wire slot.
-        let err = translate_request_tokenspeed(tokenized_req(vllm::SamplingParams {
-            logit_bias: HashMap::from([(7, 1.0)]),
-            ..Default::default()
-        }))
-        .expect_err("logit_bias rejected");
-        assert!(err.contains("logit_bias"), "{err}");
-    }
-
-    #[test]
-    fn tokenspeed_rejects_nonzero_dp_rank() {
-        // Single-engine backend: only rank 0 (or none) is valid.
-        let mut req = tokenized_req(vllm::SamplingParams::default());
-        req.data_parallel_rank = Some(1);
+    fn tokenspeed_rejects_top_logprobs_and_prompt_logprobs() {
+        // Top-k logprobs (count > 1) cannot be honored over the wire.
+        let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams::default());
+        req.top_logprobs_num = 5;
         assert!(translate_request_tokenspeed(req).is_err());
 
-        let mut req = tokenized_req(vllm::SamplingParams::default());
-        req.data_parallel_rank = Some(0);
-        assert!(translate_request_tokenspeed(req).is_ok());
+        // Prompt (input) logprobs cannot be produced.
+        let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams::default());
+        req.token_ids_logprob = vec![1, 2];
+        assert!(translate_request_tokenspeed(req).is_err());
+
+        // A bare count of 0/1 is the plain sampled-token case: accepted.
+        for count in [0, 1] {
+            let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams::default());
+            req.top_logprobs_num = count;
+            assert!(translate_request_tokenspeed(req).is_ok());
+        }
+    }
+
+    #[test]
+    fn tokenspeed_forwards_stop_token_ids_and_drops_stop_strings() {
+        // String stops are resolved upstream; any that reach here are dropped
+        // (the token-only engine cannot match them) while stop token ids ride
+        // through and the router-side decoder trims residual text.
+        let req =
+            translate_request_tokenspeed(ts_tokenized_req(tokenspeed_proto::SamplingParams {
+                stop: vec!["</s>".to_string()],
+                stop_token_ids: vec![13],
+                ..Default::default()
+            }))
+            .expect("residual stop strings must not be rejected");
+        assert_eq!(req.sampling_params.stop_token_ids, Some(vec![13]));
+        assert_eq!(req.sampling_params.stop, None);
     }
 
     #[test]
     fn vllm_rejects_unsupported_sampling_features() {
         // Structured-output constraints are not translated onto the wire.
-        let err = translate_request(tokenized_req(vllm::SamplingParams {
-            constraint: Some(vllm::sampling_params::Constraint::JsonObject(true)),
-            ..Default::default()
-        }))
+        let err = translate_request(
+            tokenized_req(vllm::SamplingParams {
+                constraint: Some(vllm::sampling_params::Constraint::JsonObject(true)),
+                ..Default::default()
+            }),
+            4096,
+        )
         .expect_err("constraint rejected");
         assert!(err.contains("structured output"), "{err}");
 
         // Prompt logprobs have no renderer merge on the ZMQ path.
-        let err = translate_request(tokenized_req(vllm::SamplingParams {
-            prompt_logprobs: Some(1),
-            ..Default::default()
-        }))
+        let err = translate_request(
+            tokenized_req(vllm::SamplingParams {
+                prompt_logprobs: Some(1),
+                ..Default::default()
+            }),
+            4096,
+        )
         .expect_err("prompt logprobs rejected");
         assert!(err.contains("prompt logprobs"), "{err}");
+    }
+
+    #[test]
+    fn vllm_defaults_unset_max_tokens_to_remaining_context() {
+        let max_tokens = |sampling, max_model_len| {
+            translate_request(tokenized_req(sampling), max_model_len)
+                .expect("request translated")
+                .sampling_params
+                .expect("sampling params present")
+                .max_tokens
+        };
+
+        // Unset max_tokens defaults to `max_model_len - prompt_len` (prompt is
+        // 3 tokens), mirroring vLLM's bypassed OpenAI frontend.
+        assert_eq!(max_tokens(vllm::SamplingParams::default(), 100), 97);
+        // An explicit value is always honored.
+        assert_eq!(
+            max_tokens(
+                vllm::SamplingParams {
+                    max_tokens: Some(8),
+                    ..Default::default()
+                },
+                100,
+            ),
+            8,
+        );
     }
 
     /// n=3 fans out into 3 single-sample wire requests with unique sub-rids.
@@ -1502,7 +1743,10 @@ mod tests {
             ..Default::default()
         });
         req.request_id = "r1".to_string();
-        let mut stream = client.generate(req).await.expect("generate");
+        let mut stream = client
+            .generate(ProtoGenerateRequest::Vllm(Box::new(req)))
+            .await
+            .expect("generate");
 
         let mut completes = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1576,12 +1820,15 @@ mod tests {
                 let request: TokenizedGenerateReqInput =
                     decode_msgpack(frames[1].as_ref()).unwrap();
                 assert_eq!(request.sampling_params.n, 1);
-                rids.push((request.rid.clone(), request.sampling_params.seed));
+                // TokenSpeed has no seed on the wire; the engine derives one from
+                // the (unique) rid so all TP/DP ranks agree.
+                assert_eq!(request.sampling_params.seed, None);
+                rids.push(request.rid.clone());
             }
             assert_eq!(
                 rids,
-                vec![("r1-0".to_string(), Some(5)), ("r1-1".to_string(), Some(6))],
-                "sub-rids must be unique and seeds derived per sub"
+                vec!["r1-0".to_string(), "r1-1".to_string()],
+                "sub-rids must be unique per sub"
             );
             // Both subs finish in one wire batch (the batch demux fans them
             // back out to their sub-streams).
@@ -1601,13 +1848,15 @@ mod tests {
                 .unwrap();
         });
 
-        let mut req = tokenized_req(vllm::SamplingParams {
+        let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams {
             n: 2,
-            seed: Some(5),
             ..Default::default()
         });
         req.request_id = "r1".to_string();
-        let mut stream = client.generate(req).await.expect("generate");
+        let mut stream = client
+            .generate(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+            .await
+            .expect("generate");
 
         let mut completes = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1660,10 +1909,12 @@ mod tests {
         let (mut engine_input, _engine_output) = engine.split();
 
         let stream = client
-            .generate(tokenized_req(vllm::SamplingParams {
-                n: 2,
-                ..Default::default()
-            }))
+            .generate(ProtoGenerateRequest::Vllm(Box::new(tokenized_req(
+                vllm::SamplingParams {
+                    n: 2,
+                    ..Default::default()
+                },
+            ))))
             .await
             .expect("generate");
 
@@ -1678,7 +1929,7 @@ mod tests {
 
         drop(stream); // unfinished -> every sub auto-aborts
 
-        let mut aborted = std::collections::BTreeSet::new();
+        let mut aborted = BTreeSet::new();
         while aborted.len() < 2 {
             match engine_input.recv().await.unwrap() {
                 EngineInbound::Abort(rids) => aborted.extend(rids),
@@ -1687,7 +1938,7 @@ mod tests {
         }
         assert_eq!(
             aborted,
-            std::collections::BTreeSet::from(["r1-0".to_string(), "r1-1".to_string()])
+            BTreeSet::from(["r1-0".to_string(), "r1-1".to_string()])
         );
     }
 
