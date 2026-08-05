@@ -28,6 +28,7 @@ use engine_zmq_client::{
             output::{EngineCoreFinishReason, EngineCoreOutput, StopReason},
             request::EngineCoreRequest,
             sampling::EngineCoreSamplingParams,
+            structured_outputs::StructuredOutputsParams,
         },
         EngineLoad,
     },
@@ -754,18 +755,6 @@ fn fan_out_tokenspeed_requests(
 fn translate_request_tokenspeed(
     req: tokenspeed_proto::GenerateRequest,
 ) -> Result<TokenizedGenerateReqInput, String> {
-    // The response_format / forced-tool-choice constraint oneof is not
-    // translated onto the TokenSpeed structured-output fields yet; dropping it
-    // would return unconstrained text.
-    if req
-        .sampling_params
-        .as_ref()
-        .is_some_and(|sp| sp.constraint.is_some())
-    {
-        return Err(
-            "structured output constraints are not supported over the ZMQ backend yet".to_string(),
-        );
-    }
     let input_ids = match req.tokenized {
         Some(tokenized) => tokenized.input_ids,
         None => {
@@ -834,8 +823,26 @@ fn translate_sampling_tokenspeed(sp: tokenspeed_proto::SamplingParams) -> TokenS
         n: sp.n.max(1),
         ..TokenSpeedSamplingParams::default()
     };
+    apply_tokenspeed_constraint(&mut params, sp.constraint);
     params.normalize();
     params
+}
+
+/// Map the proto structured-output `constraint` oneof onto the wire's dedicated
+/// fields. The oneof is single-valued, so at most one field is set; the rest
+/// stay `None`.
+fn apply_tokenspeed_constraint(
+    params: &mut TokenSpeedSamplingParams,
+    constraint: Option<tokenspeed_proto::sampling_params::Constraint>,
+) {
+    use tokenspeed_proto::sampling_params::Constraint;
+    match constraint {
+        Some(Constraint::JsonSchema(schema)) => params.json_schema = Some(schema),
+        Some(Constraint::Regex(regex)) => params.regex = Some(regex),
+        Some(Constraint::EbnfGrammar(grammar)) => params.ebnf = Some(grammar),
+        Some(Constraint::StructuralTag(tag)) => params.structural_tag = Some(tag),
+        None => {}
+    }
 }
 
 /// Translate a vLLM-proto generate request into an `EngineCoreRequest`. ZMQ mode
@@ -858,15 +865,6 @@ fn translate_request(
         .map(|rank| u32::try_from(rank).map_err(|_| format!("invalid data_parallel_rank: {rank}")))
         .transpose()?;
     if let Some(sp) = req.sampling_params.as_ref() {
-        // The response_format / forced-tool-choice constraint oneof is not
-        // translated onto the EngineCore wire yet; dropping it would return
-        // unconstrained text.
-        if sp.constraint.is_some() {
-            return Err(
-                "structured output constraints are not supported over the ZMQ backend yet"
-                    .to_string(),
-            );
-        }
         // n is not carried on the EngineCore wire; n>1 is fanned out into
         // single-sample sub-requests by `generate` before translation.
         // The ZMQ renderer path has no prompt-logprob merge, so the engine's
@@ -931,7 +929,30 @@ fn translate_sampling(
         // prompt_logprobs is rejected in `translate_request` (no renderer
         // support on the ZMQ path), so it is never forwarded.
         logit_bias,
+        structured_outputs: sp.constraint.and_then(translate_constraint),
         ..EngineCoreSamplingParams::default()
+    }
+}
+
+/// Map the proto `constraint` oneof onto typed structured-output params. The
+/// backend defaults to guidance engine-side; `json_object=false` selects no
+/// constraint (the caller opted out), so it maps to `None`.
+fn translate_constraint(
+    constraint: vllm::sampling_params::Constraint,
+) -> Option<StructuredOutputsParams> {
+    use vllm::sampling_params::Constraint;
+    match constraint {
+        Constraint::JsonSchema(schema) => Some(StructuredOutputsParams::json(
+            // The engine accepts a JSON schema object or a schema string; parse
+            // to preserve object shape, falling back to the raw string.
+            serde_json::from_str(&schema).unwrap_or(serde_json::Value::String(schema)),
+        )),
+        Constraint::Regex(regex) => Some(StructuredOutputsParams::regex(regex)),
+        Constraint::Grammar(grammar) => Some(StructuredOutputsParams::grammar(grammar)),
+        Constraint::StructuralTag(tag) => Some(StructuredOutputsParams::structural_tag(tag)),
+        Constraint::JsonObject(true) => Some(StructuredOutputsParams::json_object()),
+        Constraint::JsonObject(false) => None,
+        Constraint::Choice(choice) => Some(StructuredOutputsParams::choice(choice.choices)),
     }
 }
 
@@ -1562,6 +1583,48 @@ mod tests {
     }
 
     #[test]
+    fn tokenspeed_maps_structured_output_constraints() {
+        // The `constraint` oneof maps 1:1 onto the wire's dedicated fields; the
+        // oneof is single-valued, so the other three stay unset.
+        use tokenspeed_proto::sampling_params::Constraint;
+
+        let json = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            constraint: Some(Constraint::JsonSchema("{\"type\":\"object\"}".into())),
+            ..Default::default()
+        });
+        assert_eq!(json.json_schema.as_deref(), Some("{\"type\":\"object\"}"));
+        assert_eq!(json.regex, None);
+        assert_eq!(json.ebnf, None);
+        assert_eq!(json.structural_tag, None);
+
+        let regex = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            constraint: Some(Constraint::Regex("[0-9]+".into())),
+            ..Default::default()
+        });
+        assert_eq!(regex.regex.as_deref(), Some("[0-9]+"));
+        assert_eq!(regex.json_schema, None);
+
+        let ebnf = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            constraint: Some(Constraint::EbnfGrammar("root ::= \"a\"".into())),
+            ..Default::default()
+        });
+        assert_eq!(ebnf.ebnf.as_deref(), Some("root ::= \"a\""));
+
+        let tag = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams {
+            constraint: Some(Constraint::StructuralTag("<tag>".into())),
+            ..Default::default()
+        });
+        assert_eq!(tag.structural_tag.as_deref(), Some("<tag>"));
+
+        // No constraint leaves all four structured-output fields unset.
+        let none = translate_sampling_tokenspeed(tokenspeed_proto::SamplingParams::default());
+        assert_eq!(none.json_schema, None);
+        assert_eq!(none.regex, None);
+        assert_eq!(none.ebnf, None);
+        assert_eq!(none.structural_tag, None);
+    }
+
+    #[test]
     fn tokenspeed_forwards_stop_token_ids_and_drops_stop_strings() {
         // String stops are resolved upstream; any that reach here are dropped
         // (the token-only engine cannot match them) while stop token ids ride
@@ -1579,17 +1642,6 @@ mod tests {
 
     #[test]
     fn vllm_rejects_unsupported_sampling_features() {
-        // Structured-output constraints are not translated onto the wire.
-        let err = translate_request(
-            tokenized_req(vllm::SamplingParams {
-                constraint: Some(vllm::sampling_params::Constraint::JsonObject(true)),
-                ..Default::default()
-            }),
-            4096,
-        )
-        .expect_err("constraint rejected");
-        assert!(err.contains("structured output"), "{err}");
-
         // Prompt logprobs have no renderer merge on the ZMQ path.
         let err = translate_request(
             tokenized_req(vllm::SamplingParams {
@@ -1626,6 +1678,68 @@ mod tests {
             ),
             8,
         );
+    }
+
+    #[test]
+    fn vllm_translates_structured_output_constraints() {
+        use engine_zmq_client::protocol::vllm::structured_outputs::{
+            StructuredOutputBackend, StructuredOutputConstraint,
+        };
+
+        let translate = |constraint| {
+            translate_request(
+                tokenized_req(vllm::SamplingParams {
+                    constraint: Some(constraint),
+                    ..Default::default()
+                }),
+                4096,
+            )
+            .expect("constraint translated")
+            .sampling_params
+            .expect("sampling params present")
+            .structured_outputs
+        };
+
+        // Each constraint mode maps onto its typed counterpart, always lowering
+        // to the guidance backend engine-side.
+        let json_object = translate(vllm::sampling_params::Constraint::JsonObject(true))
+            .expect("json_object translated");
+        assert_eq!(
+            json_object.constraint,
+            StructuredOutputConstraint::JsonObject
+        );
+        assert_eq!(json_object.backend, StructuredOutputBackend::Guidance);
+
+        let regex = translate(vllm::sampling_params::Constraint::Regex("a.*".to_string()))
+            .expect("regex translated");
+        assert_eq!(
+            regex.constraint,
+            StructuredOutputConstraint::Regex("a.*".to_string())
+        );
+
+        let choice = translate(vllm::sampling_params::Constraint::Choice(
+            vllm::ChoiceConstraint {
+                choices: vec!["yes".to_string(), "no".to_string()],
+            },
+        ))
+        .expect("choice translated");
+        assert_eq!(
+            choice.constraint,
+            StructuredOutputConstraint::Choice(vec!["yes".to_string(), "no".to_string()])
+        );
+
+        // A JSON schema string is parsed to preserve object shape.
+        let json = translate(vllm::sampling_params::Constraint::JsonSchema(
+            r#"{"type":"object"}"#.to_string(),
+        ))
+        .expect("json schema translated");
+        assert_eq!(
+            json.constraint,
+            StructuredOutputConstraint::Json(serde_json::json!({"type": "object"}))
+        );
+
+        // json_object=false means the caller opted out: no constraint.
+        assert!(translate(vllm::sampling_params::Constraint::JsonObject(false)).is_none());
     }
 
     /// n=3 fans out into 3 single-sample wire requests with unique sub-rids.
