@@ -90,12 +90,15 @@ class WorkerPool:
 
             # Non-REGULAR workers (PD prefill/decode) aren't cached, but we
             # still have to release any cached regular worker first — it
-            # holds the GPUs the caller is about to claim.
-            if worker_type != WorkerType.REGULAR:
+            # holds the GPUs the caller is about to claim. ZMQ workers are
+            # likewise uncached: the engine dials one gateway's handshake
+            # sockets and cannot be reused by the next class's gateway.
+            if worker_type != WorkerType.REGULAR or mode == ConnectionMode.ZMQ:
                 if self._key is not None:
                     logger.info(
-                        "WorkerPool: evicting %s to free GPUs for non-REGULAR %s/%s",
+                        "WorkerPool: evicting %s to free GPUs for uncached %s %s/%s",
                         self._key,
+                        mode.value,
                         worker_type,
                         model_id,
                     )

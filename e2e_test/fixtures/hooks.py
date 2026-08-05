@@ -14,9 +14,15 @@ from __future__ import annotations
 import os
 
 import pytest
-from infra import cleanup_pool, get_runtime
+from infra import ConnectionMode, cleanup_pool, get_connection_mode_override, get_runtime
 
 from .markers import resolve_class_marker
+
+# Local wires a plain (non-PD/EPD) test case can be authored with; these are the
+# only backends a ZMQ lane reuses (mapped onto ZMQ by the ``setup_backend``
+# fixture). Anything else — ``pd_*``/``epd_*``, EPD topology tuples, cloud
+# vendor names — is out of scope for ZMQ.
+_ZMQ_LOCAL_WIRES = frozenset({"grpc", "http"})
 
 # ---------------------------------------------------------------------------
 # Marker registration
@@ -117,6 +123,66 @@ def _get_marker(item: pytest.Item, name: str):
     return resolve_class_marker(item, name)
 
 
+def _setup_backend_param(item: pytest.Item):
+    """Return the ``setup_backend`` parametrize value for an item, or None."""
+    callspec = getattr(item, "callspec", None)
+    if callspec is None:
+        return None
+    return getattr(callspec, "params", {}).get("setup_backend")
+
+
+def _is_multi_worker(item: pytest.Item) -> bool:
+    """True when the item's ``workers`` marker asks for a PD/multi-worker topology."""
+    marker = resolve_class_marker(item, "workers")
+    if marker is None:
+        return False
+    kwargs = marker.kwargs
+    if (kwargs.get("count") or 1) > 1:
+        return True
+    return bool(kwargs.get("prefill") or kwargs.get("decode"))
+
+
+def _zmq_dedup_key(item: pytest.Item) -> tuple:
+    """Group key ignoring the ``setup_backend`` value.
+
+    Lets us collapse a case parametrized on both ``grpc`` and ``http`` into a
+    single ZMQ run (they map onto the same wire) while keeping distinct
+    ``api_client`` (or other) parametrizations apart.
+    """
+    callspec = getattr(item, "callspec", None)
+    params = getattr(callspec, "params", {}) or {}
+    others = tuple(sorted((k, repr(v)) for k, v in params.items() if k != "setup_backend"))
+    return (item.nodeid.split("[", 1)[0], others)
+
+
+def _filter_zmq_items(items: list[pytest.Item]) -> tuple[list[pytest.Item], list[pytest.Item]]:
+    """Split items into (kept, deselected) for a ZMQ lane.
+
+    Keeps single-worker local cases (``grpc``/``http`` map onto ZMQ) and drops
+    the gRPC-only families: PD (``pd_*``), EPD (``epd_*`` and topology tuples),
+    and multiple-worker topologies. A case authored for both ``grpc`` and
+    ``http`` is collapsed to one ZMQ run. Items without a ``setup_backend``
+    parametrization are left untouched.
+    """
+    kept: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    groups_with_grpc = {_zmq_dedup_key(it) for it in items if _setup_backend_param(it) == "grpc"}
+    for item in items:
+        param = _setup_backend_param(item)
+        if param is None:
+            kept.append(item)
+            continue
+        if param not in _ZMQ_LOCAL_WIRES or _is_multi_worker(item):
+            deselected.append(item)
+            continue
+        # Collapse the http twin when a grpc one covers the same ZMQ run.
+        if param == "http" and _zmq_dedup_key(item) in groups_with_grpc:
+            deselected.append(item)
+            continue
+        kept.append(item)
+    return kept, deselected
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
@@ -124,7 +190,9 @@ def pytest_collection_modifyitems(
     """Filter + order collected tests.
 
     Filtering: env vars ``E2E_ENGINE``, ``E2E_VENDOR``, ``E2E_GPU_TIER``
-    select the matching slice when set.
+    select the matching slice when set. When ``E2E_CONNECTION_MODE=zmq`` the
+    lane additionally drops the gRPC-only families (PD, EPD, multi-worker) and
+    collapses ``grpc``/``http`` twins onto a single ZMQ run.
 
     Ordering: items are sorted by ``(backend, model)`` so consecutive
     classes that share a backend cluster together. This is what lets
@@ -156,6 +224,12 @@ def pytest_collection_modifyitems(
                     continue
             selected.append(item)
         items[:] = selected
+
+    if get_connection_mode_override() == ConnectionMode.ZMQ:
+        kept, deselected = _filter_zmq_items(items)
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+            items[:] = kept
 
     items.sort(key=_pool_sort_key)
 
