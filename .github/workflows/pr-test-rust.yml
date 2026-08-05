@@ -562,12 +562,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The ZMQ lane restarts the engine per model group (66-90s of
+          # load+warmup each); the suite needs more headroom than the gRPC
+          # lane, whose pool amortizes worker bring-up.
           - engine: vllm
-            timeout: 24
-            test_timeout: 18
+            timeout: 46
+            test_timeout: 40
           - engine: tokenspeed
             timeout: 50
-            test_timeout: 18
+            test_timeout: 40
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
