@@ -236,6 +236,7 @@ class TestRouterConfigValidation:
         assert args.prefill_selector == {"app": "prefill"}
         assert args.decode_selector == {"app": "decode"}
         assert args.bootstrap_port_annotation == "sglang.ai/bootstrap-port"
+        assert args.worker_ports_annotation == "smg.ai/worker-ports"
 
     def test_prometheus_config_validation(self):
         """Test Prometheus configuration validation."""

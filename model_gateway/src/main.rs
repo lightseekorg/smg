@@ -347,7 +347,8 @@ struct CliArgs {
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
     selector: Vec<String>,
 
-    /// Port to use for discovered worker pods
+    /// Port to use for discovered worker pods without a `smg.ai/worker-ports`
+    /// annotation (pods running multiple servers list their ports there)
     #[arg(
         long,
         default_value_t = 80,
@@ -1346,6 +1347,7 @@ impl CliArgs {
                 prefill_selector: Self::parse_selector(&self.prefill_selector),
                 decode_selector: Self::parse_selector(&self.decode_selector),
                 bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
+                worker_ports_annotation: "smg.ai/worker-ports".to_string(),
                 router_selector: Self::parse_selector(&self.router_selector),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source: self.model_id_from.clone(),
@@ -1609,6 +1611,7 @@ impl CliArgs {
                 prefill_selector: Self::parse_selector(&self.prefill_selector),
                 decode_selector: Self::parse_selector(&self.decode_selector),
                 bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
+                worker_ports_annotation: "smg.ai/worker-ports".to_string(),
                 router_selector,
                 router_mesh_port_annotation,
                 model_id_source,
