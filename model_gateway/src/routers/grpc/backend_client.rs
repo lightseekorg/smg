@@ -49,12 +49,10 @@ impl BackendClient {
         }
     }
 
-    /// True if this backend speaks the vLLM protocol (gRPC-vLLM or ZMQ).
-    pub fn is_vllm(&self) -> bool {
-        match self {
-            Self::Grpc(client) => client.is_vllm(),
-            Self::Zmq(_) => true,
-        }
+    /// True if this is a direct-ZMQ backend (the engine receives token ids only
+    /// and cannot match string stops itself).
+    pub fn is_zmq(&self) -> bool {
+        matches!(self, Self::Zmq(_))
     }
 
     /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so

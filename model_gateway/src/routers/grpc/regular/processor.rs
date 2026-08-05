@@ -78,14 +78,19 @@ impl ResponseProcessor {
 
         // Accumulate text with early breaks
         let mut final_text = String::new();
+        let mut stopped = false;
         for output in outputs {
             match output {
                 SequenceDecoderOutput::Text(t) => final_text.push_str(&t),
                 SequenceDecoderOutput::StoppedWithText(t) => {
                     final_text.push_str(&t);
+                    stopped = true;
                     break;
                 }
-                SequenceDecoderOutput::Stopped => break,
+                SequenceDecoderOutput::Stopped => {
+                    stopped = true;
+                    break;
+                }
                 SequenceDecoderOutput::Held => {}
             }
         }
@@ -177,8 +182,14 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 3: Use finish reason directly from proto (already OpenAI-compatible string)
-        let finish_reason_str = complete.finish_reason();
+        // Step 3: Determine finish reason. A local stop-decoder match takes
+        // precedence over the engine's reason (which is "length" when stop
+        // strings are enforced gateway-side rather than by the backend).
+        let finish_reason_str = if stopped {
+            "stop"
+        } else {
+            complete.finish_reason()
+        };
 
         // Override finish reason if we have tool calls
         let final_finish_reason_str = if tool_calls.is_some() {
@@ -187,7 +198,12 @@ impl ResponseProcessor {
             finish_reason_str
         };
 
-        let matched_stop = complete.matched_stop_json();
+        // When the local decoder matched a stop string, surface it (the engine
+        // reports no stop_reason over the ZMQ path); otherwise use the engine's.
+        let matched_stop = stop_decoder
+            .matched_stop()
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .or_else(|| complete.matched_stop_json());
 
         // Step 4: Convert output logprobs if present
         let logprobs = complete.output_logprobs().map(|ref proto_logprobs| {
@@ -579,14 +595,19 @@ impl ResponseProcessor {
             })?;
 
         let mut final_text = String::new();
+        let mut stopped = false;
         for output in outputs {
             match output {
                 SequenceDecoderOutput::Text(t) => final_text.push_str(&t),
                 SequenceDecoderOutput::StoppedWithText(t) => {
                     final_text.push_str(&t);
+                    stopped = true;
                     break;
                 }
-                SequenceDecoderOutput::Stopped => break,
+                SequenceDecoderOutput::Stopped => {
+                    stopped = true;
+                    break;
+                }
                 SequenceDecoderOutput::Held => {}
             }
         }
@@ -726,10 +747,20 @@ impl ResponseProcessor {
             }
         }
 
-        // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
-        let finish_reason_str = complete.finish_reason();
-        let matched_stop = complete.matched_stop_json();
-        let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
+        // Step 4: Determine stop_reason and stop_sequence (derived from same conditions).
+        // A local stop-decoder match takes precedence over the engine's reason
+        // (the backend has no stop-string detection over ZMQ), surfacing the
+        // matched sequence for a StopSequence result.
+        let finish_reason_str = if stopped {
+            "stop"
+        } else {
+            complete.finish_reason()
+        };
+        let stop_sequence = stop_decoder.matched_stop().map(String::from).or_else(|| {
+            complete
+                .matched_stop_json()
+                .and_then(|v| v.as_str().map(String::from))
+        });
 
         let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {
             Some(messages::StopReason::ToolUse)
@@ -832,14 +863,19 @@ impl ResponseProcessor {
                 };
 
                 let mut decoded_text = String::new();
+                let mut stopped = false;
                 for output in outputs {
                     match output {
                         SequenceDecoderOutput::Text(t) => decoded_text.push_str(&t),
                         SequenceDecoderOutput::StoppedWithText(t) => {
                             decoded_text.push_str(&t);
+                            stopped = true;
                             break;
                         }
-                        SequenceDecoderOutput::Stopped => break,
+                        SequenceDecoderOutput::Stopped => {
+                            stopped = true;
+                            break;
+                        }
                         SequenceDecoderOutput::Held => {}
                     }
                 }
@@ -851,7 +887,12 @@ impl ResponseProcessor {
                 prompt_tokens = prompt_tokens.max(complete.prompt_tokens());
                 total_completion += complete.completion_tokens();
 
-                let finish_reason = {
+                // A local stop-decoder match takes precedence over the engine's
+                // reason (which is "length" when stop strings are enforced
+                // gateway-side rather than by the backend).
+                let finish_reason = if stopped {
+                    Some("stop".to_string())
+                } else {
                     let reason = complete.finish_reason();
                     if reason.is_empty() {
                         None
@@ -868,7 +909,13 @@ impl ResponseProcessor {
                     }
                 };
 
-                let matched_stop = complete.matched_stop_json();
+                // When the local decoder matched a stop string, surface it (the
+                // engine reports no stop_reason over the ZMQ path); otherwise use
+                // the engine's.
+                let matched_stop = stop_decoder
+                    .matched_stop()
+                    .map(|s| serde_json::Value::String(s.to_string()))
+                    .or_else(|| complete.matched_stop_json());
 
                 let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
                 let echo_len = if completion_req.echo {

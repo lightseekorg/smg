@@ -122,6 +122,11 @@ impl TokenizerTrait for MockTokenizer {
         self.reverse_vocab.get(&id).cloned()
     }
 
+    fn eos_token_ids(&self) -> &[u32] {
+        // `<eos>` in the mock vocab.
+        &[999]
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
