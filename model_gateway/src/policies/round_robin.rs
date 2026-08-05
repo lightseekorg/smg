@@ -166,23 +166,36 @@ mod tests {
         assert_eq!(policy.select_worker(&workers, &info), Some(0));
     }
 
-    #[test]
-    fn test_independent_policies_cover_all_workers_across_two_pools() {
-        fn make_workers(prefix: &str, n: usize) -> Vec<Arc<dyn Worker>> {
-            (0..n)
-                .map(|i| {
-                    Arc::new(
-                        BasicWorkerBuilder::new(format!("http://{prefix}{i}:8000"))
-                            .worker_type(WorkerType::Regular)
-                            .health_config(no_health_check())
-                            .build(),
-                    ) as Arc<dyn Worker>
-                })
-                .collect()
-        }
+    fn assert_even_two_pool_coverage(prefill: [usize; 4], decode: [usize; 4]) {
+        assert_eq!(
+            prefill, [10, 10, 10, 10],
+            "even two-pool round-robin coverage: prefill"
+        );
+        assert_eq!(
+            decode, [10, 10, 10, 10],
+            "even two-pool round-robin coverage: decode"
+        );
+    }
 
-        let prefill_workers = make_workers("p", 4);
-        let decode_workers = make_workers("d", 4);
+    fn make_regular_workers(prefix: &str, n: usize) -> Vec<Arc<dyn Worker>> {
+        (0..n)
+            .map(|i| {
+                Arc::new(
+                    BasicWorkerBuilder::new(format!("http://{prefix}{i}:8000"))
+                        .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
+                        .build(),
+                ) as Arc<dyn Worker>
+            })
+            .collect()
+    }
+
+    #[test]
+    #[should_panic(expected = "even two-pool round-robin coverage")]
+    fn test_shared_counter_fails_even_two_pool_coverage() {
+        // Same even-coverage bar as the independent test; a shared counter must fail it.
+        let prefill_workers = make_regular_workers("p", 4);
+        let decode_workers = make_regular_workers("d", 4);
         let info = SelectWorkerInfo::default();
 
         let shared = RoundRobinPolicy::new();
@@ -194,8 +207,14 @@ mod tests {
             shared_prefill[p] += 1;
             shared_decode[d] += 1;
         }
-        assert_eq!(shared_prefill, [20, 0, 20, 0]);
-        assert_eq!(shared_decode, [0, 20, 0, 20]);
+        assert_even_two_pool_coverage(shared_prefill, shared_decode);
+    }
+
+    #[test]
+    fn test_independent_counters_pass_even_two_pool_coverage() {
+        let prefill_workers = make_regular_workers("p", 4);
+        let decode_workers = make_regular_workers("d", 4);
+        let info = SelectWorkerInfo::default();
 
         let prefill_policy = RoundRobinPolicy::new();
         let decode_policy = RoundRobinPolicy::new();
@@ -209,7 +228,6 @@ mod tests {
             indep_prefill[p] += 1;
             indep_decode[d] += 1;
         }
-        assert_eq!(indep_prefill, [10, 10, 10, 10]);
-        assert_eq!(indep_decode, [10, 10, 10, 10]);
+        assert_even_two_pool_coverage(indep_prefill, indep_decode);
     }
 }
