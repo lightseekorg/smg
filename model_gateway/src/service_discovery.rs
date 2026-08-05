@@ -454,6 +454,36 @@ pub async fn start_service_discovery(
 
     let client = Client::try_default().await?;
 
+    Ok(run_service_discovery(
+        client,
+        config,
+        app_context,
+        mesh_cluster_state,
+        mesh_port,
+    ))
+}
+
+/// Run discovery against an injected client. Compiled only for this crate's
+/// own integration tests, which point it at a scripted API server.
+#[cfg(feature = "test-util")]
+pub fn start_service_discovery_with_client(
+    client: Client,
+    config: ServiceDiscoveryConfig,
+    app_context: Arc<AppContext>,
+    mesh_cluster_state: Option<ClusterState>,
+    mesh_port: Option<u16>,
+) -> task::JoinHandle<()> {
+    let _ = ring::default_provider().install_default();
+    run_service_discovery(client, config, app_context, mesh_cluster_state, mesh_port)
+}
+
+fn run_service_discovery(
+    client: Client,
+    config: ServiceDiscoveryConfig,
+    app_context: Arc<AppContext>,
+    mesh_cluster_state: Option<ClusterState>,
+    mesh_port: Option<u16>,
+) -> task::JoinHandle<()> {
     // Log the appropriate selectors based on mode
     if config.disaggregated_mode {
         let encode_selector = config
@@ -618,7 +648,7 @@ pub async fn start_service_discovery(
         tokio::join!(driver, reconciler);
     });
 
-    Ok(handle)
+    handle
 }
 
 /// One worker the reconciler wants registered: a single engine server

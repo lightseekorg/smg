@@ -20,6 +20,9 @@ grpc-client = []
 grpc-server = []
 opencv-video = ["llm-multimodal/opencv-video"]
 mm-rdma = ["smg-mm-rdma/nixl"]
+# Client-injection seam for this crate's own K8s discovery integration tests
+# (auto-enabled by the self dev-dependency below, never in production builds).
+test-util = []
 
 vendored-openssl = ["openssl/vendored"]
 
@@ -137,6 +140,8 @@ chrono = { version = "0.4", features = ["clock"] }
 toml = "1.1"
 
 [dev-dependencies]
+# Self dev-dependency: turns on `test-util` for this crate's own test targets.
+smg = { path = ".", features = ["test-util"] }
 # Enable the mock engine for the ZMQ client's loopback tests.
 engine-zmq-client = { workspace = true, features = ["mock-engine"] }
 criterion = { version = "0.8", features = ["html_reports"] }
