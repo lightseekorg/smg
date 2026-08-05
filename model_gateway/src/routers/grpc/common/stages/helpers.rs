@@ -382,6 +382,22 @@ pub(crate) fn resolve_string_stops(
             if let Some(params) = req.sampling_params.as_mut() {
                 let stops = std::mem::take(&mut params.stop);
                 encode_single_token_stops(stops, &mut params.stop_token_ids, tokenizer);
+                // The engine only stops at EOS when the frontend supplies the
+                // ids, and the connect-time model-dir resolution has nothing
+                // to read when the worker's model id is a repo id rather than
+                // a local path. The tokenizer carries the merged EOS set, so
+                // fold it into the stop tokens as the always-available
+                // backstop — without it an uncapped request generates to the
+                // full context window.
+                if !params.ignore_eos {
+                    if let Some(tokenizer) = tokenizer {
+                        for &id in tokenizer.eos_token_ids() {
+                            if !params.stop_token_ids.contains(&id) {
+                                params.stop_token_ids.push(id);
+                            }
+                        }
+                    }
+                }
             }
         }
         _ => {}
@@ -646,12 +662,39 @@ mod stop_resolution_tests {
         );
         assert!(params.stop_token_ids.is_empty());
 
-        // ZMQ vLLM (EngineCore sees token ids only) resolves like SGLang.
+        // ZMQ vLLM (EngineCore sees token ids only) resolves like SGLang, and
+        // gains the tokenizer's EOS ids so generation always terminates.
         let mut zmq = vllm_request(vec!["."], vec![]);
         resolve_string_stops(&mut zmq, Some(&mock_tokenizer()), true);
         let params = vllm_params(&zmq);
         assert!(params.stop.is_empty(), "ZMQ vLLM stop cleared");
-        assert_eq!(params.stop_token_ids, vec![6]);
+        assert_eq!(params.stop_token_ids, vec![6, 999]);
+    }
+
+    #[test]
+    fn vllm_zmq_appends_tokenizer_eos_ids() {
+        let mut req = vllm_request(vec![], vec![7]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), true);
+        assert_eq!(vllm_params(&req).stop_token_ids, vec![7, 999]);
+
+        // Already-present EOS ids are not duplicated.
+        let mut req = vllm_request(vec![], vec![999]);
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), true);
+        assert_eq!(vllm_params(&req).stop_token_ids, vec![999]);
+    }
+
+    #[test]
+    fn vllm_zmq_ignore_eos_skips_injection() {
+        let mut req = ProtoGenerateRequest::Vllm(Box::new(vllm_proto::GenerateRequest {
+            sampling_params: Some(vllm_proto::SamplingParams {
+                stop_token_ids: vec![7],
+                ignore_eos: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        resolve_string_stops(&mut req, Some(&mock_tokenizer()), true);
+        assert_eq!(vllm_params(&req).stop_token_ids, vec![7]);
     }
 
     #[test]
