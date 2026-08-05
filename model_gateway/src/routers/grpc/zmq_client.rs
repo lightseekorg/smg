@@ -17,6 +17,7 @@ use std::{
 };
 
 use engine_zmq_client::{
+    codec::dtype::ModelDtype,
     connect_handshake,
     connector::{EngineCoreClient, EngineCoreStream, TokenSpeedClient, TokenSpeedStream},
     protocol::{
@@ -42,6 +43,7 @@ use crate::{
     routers::grpc::{
         client::{ModelInfo, ServerInfo},
         proto_wrapper::ProtoGenerateRequest,
+        zmq_multimodal,
     },
     worker::RuntimeType,
 };
@@ -183,10 +185,10 @@ impl ZmqEngineClient {
                 // (which the ZMQ path bypasses) defaults an unset value to
                 // `max_model_len - prompt_len`. The context length comes from the
                 // engine's ready handshake, so a connected engine is required.
-                let max_model_len = client
+                let (max_model_len, model_dtype) = client
                     .engines()
                     .first()
-                    .map(|e| e.ready_response.max_model_len)
+                    .map(|e| (e.ready_response.max_model_len, e.ready_response.dtype))
                     .ok_or_else(|| tonic::Status::unavailable("no connected ZMQ engine"))?;
                 let mut streams = SelectAll::new();
                 for (index, sub) in fan_out_requests(*req).into_iter().enumerate() {
@@ -199,7 +201,7 @@ impl ZmqEngineClient {
                         .and_then(|sp| sp.logprobs)
                         .filter(|&n| n > 0)
                         .map_or(0, |n| n as usize);
-                    let request = translate_request(sub, max_model_len)
+                    let request = translate_request(sub, max_model_len, model_dtype)
                         .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
                     streams.push(VllmGenerateStream::new(stream, index as u32, top_logprobs));
@@ -755,6 +757,13 @@ fn fan_out_tokenspeed_requests(
 fn translate_request_tokenspeed(
     req: tokenspeed_proto::GenerateRequest,
 ) -> Result<TokenizedGenerateReqInput, String> {
+    // The TokenSpeed ZMQ wire has no multimodal slot yet; reject loudly rather
+    // than silently dropping pixels (assembly also refuses upstream).
+    if req.mm_inputs.is_some() {
+        return Err(
+            "multimodal inputs are not supported over the TokenSpeed ZMQ backend".to_string(),
+        );
+    }
     let input_ids = match req.tokenized {
         Some(tokenized) => tokenized.input_ids,
         None => {
@@ -850,6 +859,7 @@ fn apply_tokenspeed_constraint(
 fn translate_request(
     req: vllm::GenerateRequest,
     max_model_len: u64,
+    model_dtype: ModelDtype,
 ) -> Result<EngineCoreRequest, String> {
     let prompt_token_ids = match req.input {
         Some(vllm::generate_request::Input::Tokenized(tokenized)) => Some(tokenized.input_ids),
@@ -860,6 +870,19 @@ fn translate_request(
             return Err("ZMQ mode requires pre-tokenized input; no input provided".to_string());
         }
     };
+    // Per-item mm features: the split the Python servicer performs before the
+    // engine happens here instead (the ZMQ path bypasses it).
+    let mm_features = req
+        .mm_inputs
+        .map(|mm| {
+            zmq_multimodal::build_mm_features(
+                mm,
+                prompt_token_ids.as_deref().unwrap_or(&[]),
+                model_dtype,
+            )
+        })
+        .transpose()?
+        .filter(|features| !features.is_empty());
     let data_parallel_rank = req
         .data_parallel_rank
         .map(|rank| u32::try_from(rank).map_err(|_| format!("invalid data_parallel_rank: {rank}")))
@@ -881,7 +904,7 @@ fn translate_request(
     Ok(EngineCoreRequest {
         request_id: req.request_id,
         prompt_token_ids,
-        mm_features: None,
+        mm_features,
         sampling_params: req
             .sampling_params
             .map(|sp| translate_sampling(sp, default_max_tokens)),
@@ -1641,6 +1664,15 @@ mod tests {
     }
 
     #[test]
+    fn tokenspeed_rejects_multimodal_inputs() {
+        // The TokenSpeed ZMQ wire has no multimodal slot yet; reject rather than
+        // silently drop pixels.
+        let mut req = ts_tokenized_req(tokenspeed_proto::SamplingParams::default());
+        req.mm_inputs = Some(tokenspeed_proto::MultimodalInputs::default());
+        assert!(translate_request_tokenspeed(req).is_err());
+    }
+
+    #[test]
     fn vllm_rejects_unsupported_sampling_features() {
         // Prompt logprobs have no renderer merge on the ZMQ path.
         let err = translate_request(
@@ -1649,6 +1681,7 @@ mod tests {
                 ..Default::default()
             }),
             4096,
+            ModelDtype::BFloat16,
         )
         .expect_err("prompt logprobs rejected");
         assert!(err.contains("prompt logprobs"), "{err}");
@@ -1657,7 +1690,7 @@ mod tests {
     #[test]
     fn vllm_defaults_unset_max_tokens_to_remaining_context() {
         let max_tokens = |sampling, max_model_len| {
-            translate_request(tokenized_req(sampling), max_model_len)
+            translate_request(tokenized_req(sampling), max_model_len, ModelDtype::BFloat16)
                 .expect("request translated")
                 .sampling_params
                 .expect("sampling params present")
@@ -1693,6 +1726,7 @@ mod tests {
                     ..Default::default()
                 }),
                 4096,
+                ModelDtype::BFloat16,
             )
             .expect("constraint translated")
             .sampling_params

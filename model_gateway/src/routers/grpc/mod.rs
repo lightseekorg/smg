@@ -18,6 +18,7 @@ pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
 pub mod zmq_client; // ZMQ backend adapter behind the vLLM client surface
+pub(crate) mod zmq_multimodal; // Proto mm inputs → EngineCore mm_features
 
 // Re-export for convenience
 pub use proto_wrapper::{MultimodalData, TensorBytes};

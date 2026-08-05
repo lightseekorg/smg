@@ -1,8 +1,5 @@
 // Ported from the Apache-2.0 reference `vllm-engine-core-client`
 // (vllm-project/vllm): protocol/request.rs.
-//
-// `mm_features` is carried as OpaqueValue for now (typed in the multimodal
-// phase); on the text path it is `nil` and carries no aux-frame tensors.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -13,7 +10,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::{
     codec::OpaqueValue,
-    protocol::vllm::{lora, sampling::EngineCoreSamplingParams},
+    protocol::vllm::{lora, multimodal::MmFeatures, sampling::EngineCoreSamplingParams},
     Error, Result,
 };
 
@@ -70,8 +67,8 @@ pub struct ReasoningParserKwargs {
 pub struct EngineCoreRequest {
     pub request_id: String,
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Multimodal features (untyped for now; `nil` on the text path).
-    pub mm_features: Option<OpaqueValue>,
+    /// Multimodal features, one per input item, sorted by placeholder offset.
+    pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
     /// Pooling parameters, preserved in the schema but not yet strongly typed.
     pub pooling_params: Option<OpaqueValue>,
@@ -129,9 +126,10 @@ impl EngineCoreRequest {
         Ok(())
     }
 
-    // NOTE: send-side aux-frame extraction (walking `mm_features` for large
-    // tensors) is added with the typed multimodal module. Text requests carry
-    // no tensors, so the transport send path appends no aux frames for now.
+    // NOTE: multimodal tensors are sent as inline ext-3 raw views in the
+    // request frame — valid at any size (the engine's aux-frame split is an
+    // encoder-side optimization only). Send-side aux extraction is a perf
+    // follow-up.
 }
 
 #[cfg(test)]
