@@ -168,11 +168,13 @@ mod tests {
 
     fn assert_even_two_pool_coverage(prefill: [usize; 4], decode: [usize; 4]) {
         assert_eq!(
-            prefill, [10, 10, 10, 10],
+            prefill,
+            [10, 10, 10, 10],
             "even two-pool round-robin coverage: prefill"
         );
         assert_eq!(
-            decode, [10, 10, 10, 10],
+            decode,
+            [10, 10, 10, 10],
             "even two-pool round-robin coverage: decode"
         );
     }
