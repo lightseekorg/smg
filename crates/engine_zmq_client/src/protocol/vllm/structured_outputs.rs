@@ -11,8 +11,10 @@ use crate::error::{Error, Result};
 /// Structured-output backend selected for EngineCore grammar compilation.
 ///
 /// Python stores this in `StructuredOutputsParams._backend` after request
-/// validation. This client currently always lowers structured-output requests
-/// to guidance, ignoring any peer-supplied `_backend` value.
+/// validation. This client selects the backend per constraint: structural
+/// tags require xgrammar (the triggered-tags format is not understood by
+/// guidance's legacy structures/triggers parser); everything else lowers to
+/// guidance. Peer-supplied `_backend` values are ignored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StructuredOutputBackend {
@@ -96,10 +98,17 @@ impl StructuredOutputsParams {
     }
 
     fn from_constraint(constraint: StructuredOutputConstraint) -> Self {
+        // Structural tags use the triggered-tags format that only xgrammar
+        // compiles; guidance's parser expects the legacy structures/triggers
+        // shape and fails the request at grammar build.
+        let backend = match &constraint {
+            StructuredOutputConstraint::StructuralTag(_) => StructuredOutputBackend::Xgrammar,
+            _ => StructuredOutputBackend::default(),
+        };
         Self {
             constraint,
             options: StructuredOutputOptions::default(),
-            backend: StructuredOutputBackend::default(),
+            backend,
         }
     }
 }
@@ -261,6 +270,18 @@ mod tests {
 
         let value = serde_json::to_value(params).unwrap();
         assert_eq!(value["_backend"], "guidance");
+    }
+
+    #[test]
+    fn structural_tag_selects_xgrammar_backend() {
+        // The triggered-tags format only compiles under xgrammar; guidance's
+        // legacy parser fails the request at grammar build.
+        let params = StructuredOutputsParams::structural_tag(r#"{"format":{}}"#);
+        assert_eq!(params.backend, StructuredOutputBackend::Xgrammar);
+
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["_backend"], "xgrammar");
+        assert_eq!(value["structural_tag"], r#"{"format":{}}"#);
     }
 
     #[test]
