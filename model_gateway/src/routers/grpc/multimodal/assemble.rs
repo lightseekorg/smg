@@ -28,16 +28,19 @@ use super::{
     transport::{mm_encoder_input_dtype, resolve_mm_shm_enabled, resolve_mm_shm_min_bytes},
     MediaBatch, MultimodalIntermediate, PrecomputedMultimodalIntermediate, PromptBinding,
 };
-use crate::routers::grpc::{
-    backend_client::BackendClient,
-    client::GrpcClient,
-    context::WorkerSelection,
-    proto_wrapper::{
-        cleanup_tokenspeed_items_encoder_shm, SglangMultimodalData, TensorBytes,
-        TokenSpeedModality, TokenSpeedMultimodalData, TokenSpeedMultimodalItem, TokenSpeedTensor,
-        TrtllmMultimodalData, VllmMultimodalData,
+use crate::{
+    routers::grpc::{
+        backend_client::BackendClient,
+        client::GrpcClient,
+        context::WorkerSelection,
+        proto_wrapper::{
+            cleanup_tokenspeed_items_encoder_shm, SglangMultimodalData, TensorBytes,
+            TokenSpeedModality, TokenSpeedMultimodalData, TokenSpeedMultimodalItem,
+            TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
+        },
+        MultimodalData,
     },
-    MultimodalData,
+    worker::RuntimeType,
 };
 
 /// Assemble backend-specific multimodal data from the intermediate.
@@ -108,7 +111,20 @@ async fn assemble_multimodal_data_impl(
         BackendClient::Grpc(GrpcClient::Mlx(_)) => {
             anyhow::bail!("MLX does not support multimodal inputs")
         }
-        BackendClient::Zmq(_) => anyhow::bail!("ZMQ backend does not support multimodal inputs"),
+        BackendClient::Zmq(client) => match client.runtime() {
+            RuntimeType::Vllm | RuntimeType::Unspecified => {
+                let batch = into_single_batch(intermediate, "vLLM")?;
+                let mut data = assemble_vllm(batch, workers)?;
+                // The ZMQ translate reads tensor bytes inline; this wire has no
+                // /dev/shm or RDMA pull on the engine side.
+                data.shm_enabled = false;
+                data.rdma_enabled = false;
+                Ok(MultimodalData::Vllm(data))
+            }
+            runtime => anyhow::bail!(
+                "multimodal inputs are not supported over the {runtime} ZMQ backend yet"
+            ),
+        },
     }
 }
 

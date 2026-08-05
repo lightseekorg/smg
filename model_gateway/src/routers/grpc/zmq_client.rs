@@ -20,6 +20,7 @@ use std::{
 };
 
 use engine_zmq_client::{
+    codec::dtype::ModelDtype,
     connect_handshake,
     connector::{EngineCoreClient, EngineCoreStream, TokenSpeedClient, TokenSpeedStream},
     protocol::{
@@ -41,7 +42,7 @@ use futures::{stream::SelectAll, Stream, StreamExt};
 use openai_protocol::worker::{SchedulerLoadSnapshot, WorkerLoadResponse};
 use smg_grpc_client::vllm_proto as vllm;
 
-use crate::worker::RuntimeType;
+use crate::{routers::grpc::zmq_multimodal, worker::RuntimeType};
 
 /// Loopback host for the same-host ZMQ transport (TCP handshake and local
 /// binds). Shared with the worker-side socket derivation.
@@ -231,10 +232,10 @@ impl ZmqEngineClient {
                 // (which the ZMQ path bypasses) defaults an unset value to
                 // `max_model_len - prompt_len`. The context length comes from the
                 // engine's ready handshake, so a connected engine is required.
-                let max_model_len = client
+                let (max_model_len, model_dtype) = client
                     .engines()
                     .first()
-                    .map(|e| e.ready_response.max_model_len)
+                    .map(|e| (e.ready_response.max_model_len, e.ready_response.dtype))
                     .ok_or_else(|| tonic::Status::unavailable("no connected ZMQ engine"))?;
                 let mut streams = SelectAll::new();
                 for (index, sub) in subs.into_iter().enumerate() {
@@ -247,7 +248,7 @@ impl ZmqEngineClient {
                         .and_then(|sp| sp.logprobs)
                         .filter(|&n| n > 0)
                         .map_or(0, |n| n as usize);
-                    let request = translate_request(sub, max_model_len, &self.eos)
+                    let request = translate_request(sub, max_model_len, model_dtype, &self.eos)
                         .map_err(tonic::Status::invalid_argument)?;
                     let stream = client.submit(request).await.map_err(zmq_status)?;
                     streams.push(VllmGenerateStream::new(stream, index as u32, top_logprobs));
@@ -748,6 +749,13 @@ fn fan_out_requests(req: vllm::GenerateRequest) -> Vec<vllm::GenerateRequest> {
 fn translate_request_tokenspeed(
     req: vllm::GenerateRequest,
 ) -> Result<TokenizedGenerateReqInput, String> {
+    // The TokenSpeed wire has no multimodal slot yet; reject loudly rather
+    // than silently dropping pixels (assembly also refuses upstream).
+    if req.mm_inputs.is_some() {
+        return Err(
+            "multimodal inputs are not supported over the TokenSpeed ZMQ backend".to_string(),
+        );
+    }
     let input_ids = match req.input {
         Some(vllm::generate_request::Input::Tokenized(tokenized)) => tokenized.input_ids,
         Some(vllm::generate_request::Input::Text(_)) => {
@@ -871,6 +879,7 @@ fn translate_sampling_tokenspeed(sp: vllm::SamplingParams) -> TokenSpeedSampling
 fn translate_request(
     req: vllm::GenerateRequest,
     max_model_len: u64,
+    model_dtype: ModelDtype,
     eos: &EosTokenIds,
 ) -> Result<EngineCoreRequest, String> {
     let prompt_token_ids = match req.input {
@@ -882,6 +891,19 @@ fn translate_request(
             return Err("ZMQ mode requires pre-tokenized input; no input provided".to_string());
         }
     };
+    // Per-item mm features: the split the Python servicer performs before the
+    // engine happens here instead (the ZMQ path bypasses it).
+    let mm_features = req
+        .mm_inputs
+        .map(|mm| {
+            zmq_multimodal::build_mm_features(
+                mm,
+                prompt_token_ids.as_deref().unwrap_or(&[]),
+                model_dtype,
+            )
+        })
+        .transpose()?
+        .filter(|features| !features.is_empty());
     let data_parallel_rank = req
         .data_parallel_rank
         .map(|rank| u32::try_from(rank).map_err(|_| format!("invalid data_parallel_rank: {rank}")))
@@ -903,6 +925,7 @@ fn translate_request(
     Ok(EngineCoreRequest {
         request_id: req.request_id,
         prompt_token_ids,
+        mm_features,
         sampling_params: req
             .sampling_params
             .map(|sp| translate_sampling(sp, default_max_tokens, eos)),
@@ -1665,6 +1688,7 @@ mod tests {
                 ..Default::default()
             }),
             4096,
+            ModelDtype::BFloat16,
             &EosTokenIds::default(),
         )
         .expect_err("prompt logprobs rejected");
@@ -1677,6 +1701,7 @@ mod tests {
             translate_request(
                 tokenized_req(sampling),
                 max_model_len,
+                ModelDtype::BFloat16,
                 &EosTokenIds::default(),
             )
             .expect("request translated")
@@ -1705,7 +1730,7 @@ mod tests {
     fn vllm_attaches_eos_stop_ids() {
         let eos = EosTokenIds::new(Some(5), vec![7]);
         let sampling = |sp| {
-            translate_request(tokenized_req(sp), 4096, &eos)
+            translate_request(tokenized_req(sp), 4096, ModelDtype::BFloat16, &eos)
                 .expect("request translated")
                 .sampling_params
                 .expect("sampling params present")
@@ -1768,6 +1793,7 @@ mod tests {
                     ..Default::default()
                 }),
                 4096,
+                ModelDtype::BFloat16,
                 &EosTokenIds::default(),
             )
             .expect("constraint translated")

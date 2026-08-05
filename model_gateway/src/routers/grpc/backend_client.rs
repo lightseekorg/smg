@@ -23,6 +23,7 @@ use crate::routers::grpc::{
         ProtoStream,
     },
     zmq_client::ZmqEngineClient,
+    MultimodalData,
 };
 
 /// A backend connection: gRPC (any engine) or direct ZMQ (vLLM EngineCore or
@@ -210,8 +211,11 @@ impl BackendClient {
                 client.build_chat_request(request_id, body, processed_text, token_ids, options)
             }
             Self::Zmq(_) => {
-                reject_zmq_multimodal(&options)?;
-                finish_vllm_request(None, |mm| {
+                let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                finish_vllm_request(vllm_mm, |mm| {
                     VllmEngineClient::build_generate_request_from_chat(
                         request_id,
                         body,
@@ -238,8 +242,11 @@ impl BackendClient {
                 client.build_messages_request(request_id, body, processed_text, token_ids, options)
             }
             Self::Zmq(_) => {
-                reject_zmq_multimodal(&options)?;
-                finish_vllm_request(None, |mm| {
+                let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
+                finish_vllm_request(vllm_mm, |mm| {
                     VllmEngineClient::build_generate_request_from_messages(
                         request_id,
                         body,
@@ -298,12 +305,4 @@ impl BackendClient {
             }
         }
     }
-}
-
-/// ZMQ text path does not carry multimodal inputs yet.
-fn reject_zmq_multimodal(options: &GenerateRequestBuildOptions) -> Result<(), String> {
-    if options.multimodal_inputs.is_some() {
-        return Err("ZMQ backend does not support multimodal inputs yet".to_string());
-    }
-    Ok(())
 }

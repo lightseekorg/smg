@@ -136,6 +136,42 @@ impl WireNdArray {
         Self::from_raw_bytes(dtype, shape, Bytes::from(data))
     }
 
+    /// Build from little-endian `float32` bytes, casting each element to
+    /// `dtype`. Mirrors the model-dtype cast the engine's own frontend applies
+    /// to floating multimodal tensors before they reach the model.
+    pub fn from_f32_bytes_cast(
+        dtype: super::dtype::ModelDtype,
+        shape: Vec<usize>,
+        data: &[u8],
+    ) -> std::result::Result<Self, String> {
+        use super::dtype::ModelDtype;
+        if !data.len().is_multiple_of(4) {
+            return Err(format!(
+                "float32 buffer length {} is not a multiple of 4",
+                data.len()
+            ));
+        }
+        validate_element_count(&shape, data.len() / 4)?;
+        let floats = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c));
+        Ok(match dtype {
+            ModelDtype::Float32 => Self::from_raw("float32", shape, data.to_vec()),
+            ModelDtype::Float16 => Self::from_raw_bytes(
+                "float16",
+                shape,
+                bytes_from_pod_vec(floats.map(f16::from_f32).collect::<Vec<_>>()),
+            ),
+            ModelDtype::BFloat16 => Self::from_raw_bytes(
+                "bfloat16",
+                shape,
+                bytes_from_pod_vec(floats.map(bf16::from_f32).collect::<Vec<_>>()),
+            ),
+        })
+    }
+
     /// Build from an owned immutable raw-view buffer.
     pub fn from_raw_bytes(dtype: impl Into<String>, shape: Vec<usize>, data: Bytes) -> Self {
         Self {
