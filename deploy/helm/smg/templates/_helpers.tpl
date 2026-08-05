@@ -276,7 +276,7 @@ Called from the router Deployment template.
 - {{ .Values.history.oracle.password | quote }}
 {{- end }}
 {{- end }}
-{{- if gt (int .Values.auth.rateLimitTokensPerSecond) 0 }}
+{{- if ge (int .Values.auth.rateLimitTokensPerSecond) 0 }}
 - "--rate-limit-tokens-per-second"
 - {{ .Values.auth.rateLimitTokensPerSecond | quote }}
 {{- end }}

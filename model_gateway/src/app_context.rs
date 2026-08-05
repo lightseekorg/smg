@@ -497,7 +497,7 @@ impl AppContextBuilder {
             n => {
                 let rate_limit_tokens = config
                     .rate_limit_tokens_per_second
-                    .filter(|&t| t > 0)
+                    .filter(|&t| t >= 0)
                     .unwrap_or(n);
                 Some(Arc::new(TokenBucket::new(
                     n as usize,
@@ -714,6 +714,26 @@ impl Default for AppContextBuilder {
 mod tests {
     use super::*;
     use crate::config::types::PolicyConfig;
+
+    #[tokio::test]
+    async fn explicit_zero_rate_limit_disables_refill() {
+        let config = RouterConfig {
+            max_concurrent_requests: 2,
+            rate_limit_tokens_per_second: Some(0),
+            ..RouterConfig::default()
+        };
+        let bucket = AppContextBuilder::new()
+            .maybe_rate_limiter(&config)
+            .rate_limiter
+            .expect("rate limiter should be enabled");
+
+        assert!(bucket.try_acquire(2.0).is_ok());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(bucket.try_acquire(1.0).is_err());
+
+        bucket.return_tokens_sync(1.0);
+        assert!(bucket.try_acquire(1.0).is_ok());
+    }
 
     fn config_with_policy(policy: PolicyConfig) -> RouterConfig {
         RouterConfig {
