@@ -167,7 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn test_independent_policies_cover_all_workers_across_two_pools() {
+    fn test_shared_vs_independent_counters_across_two_pools() {
+        // Algorithm-level contrast (not stage wiring): one shared counter vs two
+        // independent counters when alternately selecting from two pools.
         fn make_workers(prefix: &str, n: usize) -> Vec<Arc<dyn Worker>> {
             (0..n)
                 .map(|i| {
@@ -194,8 +196,16 @@ mod tests {
             shared_prefill[p] += 1;
             shared_decode[d] += 1;
         }
-        assert_eq!(shared_prefill, [20, 0, 20, 0]);
-        assert_eq!(shared_decode, [0, 20, 0, 20]);
+        assert_eq!(
+            shared_prefill,
+            [20, 0, 20, 0],
+            "shared counter: prefill only sees even indices"
+        );
+        assert_eq!(
+            shared_decode,
+            [0, 20, 0, 20],
+            "shared counter: decode only sees odd indices"
+        );
 
         let prefill_policy = RoundRobinPolicy::new();
         let decode_policy = RoundRobinPolicy::new();
@@ -209,7 +219,15 @@ mod tests {
             indep_prefill[p] += 1;
             indep_decode[d] += 1;
         }
-        assert_eq!(indep_prefill, [10, 10, 10, 10]);
-        assert_eq!(indep_decode, [10, 10, 10, 10]);
+        assert_eq!(
+            indep_prefill,
+            [10, 10, 10, 10],
+            "independent counters: prefill covers all workers"
+        );
+        assert_eq!(
+            indep_decode,
+            [10, 10, 10, 10],
+            "independent counters: decode covers all workers"
+        );
     }
 }

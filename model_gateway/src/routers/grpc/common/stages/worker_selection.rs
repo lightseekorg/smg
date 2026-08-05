@@ -722,26 +722,50 @@ mod tests {
         (prefill_urls, decode_urls)
     }
 
+    fn hit_counts_in_order(urls: &[String], hits: &HashMap<String, usize>) -> Vec<usize> {
+        urls.iter()
+            .map(|url| hits.get(url).copied().unwrap_or(0))
+            .collect()
+    }
+
+    /// Drive `select_pd_pair` through the stage (uses `get_prefill_policy` /
+    /// `get_decode_policy` internally) and count selections by worker URL.
+    fn count_select_pd_pair_hits(
+        stage: &WorkerSelectionStage,
+        model_id: &str,
+        iterations: usize,
+    ) -> (HashMap<String, usize>, HashMap<String, usize>) {
+        let mut prefill_hits = HashMap::new();
+        let mut decode_hits = HashMap::new();
+        for _ in 0..iterations {
+            let (prefill, decode, _) = stage
+                .select_pd_pair(model_id, None, None, None)
+                .expect("select_pd_pair should return a pair");
+            *prefill_hits.entry(prefill.url().to_string()).or_default() += 1;
+            *decode_hits.entry(decode.url().to_string()).or_default() += 1;
+        }
+        (prefill_hits, decode_hits)
+    }
+
     #[test]
-    fn select_pd_pair_round_robin_covers_all_workers_with_independent_policies() {
-        let model_id = "test-model";
+    fn select_pd_pair_shared_round_robin_counter_skips_half_the_workers() {
+        // Reproduce the pre-fix wiring: one RoundRobinPolicy Arc for both legs.
+        // Each select_pd_pair advances the shared counter twice (P then D), so each
+        // role only observes every other index.
+        let model_id = "test-model-shared";
         let worker_registry = Arc::new(WorkerRegistry::new());
         let (prefill_urls, decode_urls) = register_pd_workers(&worker_registry, model_id, 4);
 
         let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
-        // Mirror production PD startup: create two independent RoundRobin instances.
-        policy_registry
-            .set_prefill_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
-        policy_registry
-            .set_decode_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
+        let shared = PolicyFactory::create_from_config(&PolicyConfig::RoundRobin);
+        policy_registry.set_prefill_policy(Arc::clone(&shared));
+        policy_registry.set_decode_policy(shared);
 
         let prefill_policy = policy_registry.get_prefill_policy();
         let decode_policy = policy_registry.get_decode_policy();
-        assert_eq!(prefill_policy.name(), "round_robin");
-        assert_eq!(decode_policy.name(), "round_robin");
         assert!(
-            !Arc::ptr_eq(&prefill_policy, &decode_policy),
-            "prefill/decode must not share one RoundRobinPolicy counter"
+            Arc::ptr_eq(&prefill_policy, &decode_policy),
+            "fixture must share one RoundRobinPolicy counter across P/D"
         );
 
         let stage = WorkerSelectionStage::new(
@@ -749,30 +773,56 @@ mod tests {
             policy_registry,
             WorkerSelectionMode::PrefillDecode,
         );
+        let (prefill_hits, decode_hits) = count_select_pd_pair_hits(&stage, model_id, 40);
 
-        let mut prefill_hits: HashMap<String, usize> = HashMap::new();
-        let mut decode_hits: HashMap<String, usize> = HashMap::new();
-        for _ in 0..40 {
-            let (prefill, decode, _) = stage
-                .select_pd_pair(model_id, None, None, None)
-                .expect("select_pd_pair should return a pair");
-            *prefill_hits.entry(prefill.url().to_string()).or_default() += 1;
-            *decode_hits.entry(decode.url().to_string()).or_default() += 1;
-        }
+        assert_eq!(
+            hit_counts_in_order(&prefill_urls, &prefill_hits),
+            vec![20, 0, 20, 0],
+            "shared counter: prefill should only hit even indices"
+        );
+        assert_eq!(
+            hit_counts_in_order(&decode_urls, &decode_hits),
+            vec![0, 20, 0, 20],
+            "shared counter: decode should only hit odd indices"
+        );
+    }
 
-        for url in &prefill_urls {
-            assert_eq!(
-                prefill_hits.get(url).copied().unwrap_or(0),
-                10,
-                "prefill worker {url} should receive 10 of 40 selections"
-            );
-        }
-        for url in &decode_urls {
-            assert_eq!(
-                decode_hits.get(url).copied().unwrap_or(0),
-                10,
-                "decode worker {url} should receive 10 of 40 selections"
-            );
-        }
+    #[test]
+    fn select_pd_pair_independent_round_robin_counters_cover_all_workers() {
+        // Production PD startup: two independent RoundRobinPolicy instances.
+        let model_id = "test-model-independent";
+        let worker_registry = Arc::new(WorkerRegistry::new());
+        let (prefill_urls, decode_urls) = register_pd_workers(&worker_registry, model_id, 4);
+
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
+        policy_registry
+            .set_prefill_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
+        policy_registry
+            .set_decode_policy(PolicyFactory::create_from_config(&PolicyConfig::RoundRobin));
+
+        let prefill_policy = policy_registry.get_prefill_policy();
+        let decode_policy = policy_registry.get_decode_policy();
+        assert!(
+            !Arc::ptr_eq(&prefill_policy, &decode_policy),
+            "fixture must use independent RoundRobinPolicy counters for P/D"
+        );
+
+        let stage = WorkerSelectionStage::new(
+            worker_registry,
+            policy_registry,
+            WorkerSelectionMode::PrefillDecode,
+        );
+        let (prefill_hits, decode_hits) = count_select_pd_pair_hits(&stage, model_id, 40);
+
+        assert_eq!(
+            hit_counts_in_order(&prefill_urls, &prefill_hits),
+            vec![10, 10, 10, 10],
+            "independent counters: every prefill worker should get 10/40"
+        );
+        assert_eq!(
+            hit_counts_in_order(&decode_urls, &decode_hits),
+            vec![10, 10, 10, 10],
+            "independent counters: every decode worker should get 10/40"
+        );
     }
 }
