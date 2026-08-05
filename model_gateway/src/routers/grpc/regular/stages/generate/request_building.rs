@@ -86,6 +86,12 @@ impl PipelineStage for GenerateRequestBuildingStage {
             ctx.state.workers.as_ref(),
         );
 
+        // issue #227: SGLang gRPC workers run with skip_tokenizer_init and
+        // reject string `stop` sequences. Resolve them router-side (drop the
+        // strings, convert single-token stops to stop_token_ids) before
+        // dispatch; the router-side StopSequenceDecoder handles text trimming.
+        helpers::resolve_sglang_string_stops(&mut proto_request, ctx.tokenizer_arc().as_ref());
+
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);

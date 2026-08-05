@@ -141,6 +141,7 @@ impl PipelineStage for CompletionRequestBuildingStage {
         let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_type = &ctx.input.request_type;
         let workers = ctx.state.workers.as_ref();
+        let tokenizer = ctx.tokenizer_arc();
 
         let plan = match items.as_slice() {
             [] => {
@@ -149,9 +150,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     "No prompts prepared",
                 ))
             }
-            [item] => ExecutionPlan::generate(
-                self.plan_kind,
-                self.build_proto_request(
+            [item] => {
+                let mut proto_request = self.build_proto_request(
                     builder_client,
                     helpers::resolve_request_id(
                         request_type,
@@ -163,8 +163,15 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     &completion_request,
                     request_type,
                     workers,
-                )?,
-            ),
+                )?;
+                // issue #227: SGLang gRPC workers run with skip_tokenizer_init
+                // and reject string `stop` sequences. Resolve them router-side
+                // (drop the strings, convert single-token stops to
+                // stop_token_ids) before dispatch; the router-side
+                // StopSequenceDecoder handles text trimming.
+                helpers::resolve_sglang_string_stops(&mut proto_request, tokenizer.as_ref());
+                ExecutionPlan::generate(self.plan_kind, proto_request)
+            }
             batch_items => {
                 // The shared id (client rid or middleware request id) stays
                 // clean for the response; per-sub engine ids get a uniqueness
@@ -186,14 +193,19 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     } else {
                         format!("{shared_request_id}-p{i}")
                     };
-                    requests.push(self.build_proto_request(
+                    let mut proto_request = self.build_proto_request(
                         builder_client,
                         sub_request_id,
                         item,
                         &completion_request,
                         request_type,
                         workers,
-                    )?);
+                    )?;
+                    // issue #227: SGLang gRPC workers reject string `stop`
+                    // sequences under skip_tokenizer_init; resolve them
+                    // router-side before dispatch (see single-item branch).
+                    helpers::resolve_sglang_string_stops(&mut proto_request, tokenizer.as_ref());
+                    requests.push(proto_request);
                 }
                 ExecutionPlan::Batch {
                     kind: self.plan_kind,
