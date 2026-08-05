@@ -15,15 +15,16 @@ use futures::Stream;
 use parking_lot::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{trace, warn};
-use zeromq::RouterSendHalf;
 
 use crate::{
     error::{Error, Result},
     protocol::{
-        tokenspeed::TokenSpeedProtocol, vllm::VllmProtocol, EngineBatch, EngineLoad, EngineOutput,
-        EngineProtocol,
+        sglang::SglangProtocol, tokenspeed::TokenSpeedProtocol, vllm::VllmProtocol, EngineBatch,
+        EngineLoad, EngineOutput, EngineProtocol,
     },
-    transport::{run_output_loop, send_message, ConnectedEngine, ConnectedTransport, EngineId},
+    transport::{
+        run_output_loop, send_message, ConnectedEngine, ConnectedTransport, EngineId, InputSocket,
+    },
 };
 
 /// The vLLM EngineCore connector (the original engine surface).
@@ -34,6 +35,10 @@ pub type EngineCoreStream = RequestStream<VllmProtocol>;
 pub type TokenSpeedClient = Client<TokenSpeedProtocol>;
 /// The per-request output stream for the TokenSpeed connector.
 pub type TokenSpeedStream = RequestStream<TokenSpeedProtocol>;
+/// The SGLang connector (no-handshake PUSH/PULL, tag-dispatched).
+pub type SglangClient = Client<SglangProtocol>;
+/// The per-request output stream for the SGLang connector.
+pub type SglangStream = RequestStream<SglangProtocol>;
 
 type OutputSender<O> = mpsc::UnboundedSender<Result<O>>;
 type OutputReceiver<O> = mpsc::UnboundedReceiver<Result<O>>;
@@ -101,8 +106,8 @@ impl<O: EngineOutput> RequestRegistry<O> {
 }
 
 struct ClientInner<P: EngineProtocol> {
-    /// Shared input ROUTER send half (serialized across concurrent submits).
-    input_send: tokio::sync::Mutex<RouterSendHalf>,
+    /// Shared input socket, ROUTER or PUSH (serialized across concurrent submits).
+    input_send: tokio::sync::Mutex<InputSocket>,
     engines: Vec<ConnectedEngine>,
     registry: Mutex<RequestRegistry<P::Output>>,
     /// Latest per-rank load, keyed by engine index. SMG's DP load signal.
@@ -142,7 +147,7 @@ impl<P: EngineProtocol> ClientInner<P> {
     async fn send_to_engine(
         &self,
         engine_id: &EngineId,
-        request_type: Bytes,
+        request_type: Option<Bytes>,
         payload: Vec<u8>,
         aux_frames: Vec<Bytes>,
     ) -> Result<()> {
@@ -708,5 +713,114 @@ mod tests {
         assert!(second.finished());
         // Terminal output ends the stream.
         assert!(stream.next().await.is_none());
+    }
+
+    /// The generic connector drives the SGLang protocol over the no-handshake
+    /// PUSH/PULL transport: no identity or request-type frame, a tag-dispatched
+    /// `TokenizedGenerateReqInput` in, and `BatchTokenIDOutput` batches back. The
+    /// engine replies with the pinned Python wire vectors, exercising the real
+    /// bytes end to end (the output struct is decode-only, so it cannot be
+    /// re-encoded in-process).
+    #[tokio::test]
+    async fn sglang_client_submits_and_streams() {
+        use crate::{
+            mock_engine::MockPushPullEngine,
+            protocol::sglang::{
+                request::{AbortReq, TokenizedGenerateReqInput},
+                sampling::SamplingParams,
+                token_ids::TokenIdArray,
+            },
+            transport::connect_push_pull,
+        };
+
+        // Pinned Python `BatchTokenIDOutput` vectors for rid "req-00000001",
+        // output_ids [[15496]] — still-generating (finish nil) then finished
+        // (`{"type":"stop"}`). Captured in `protocol::sglang::output` tests.
+        const OUTPUT_STILL_GENERATING: &str =
+            "dc0032b24261746368546f6b656e49444f757470757491ac7265712d3030303030303031c091\
+             c091a09192a171c408883c00000000000091009192a171c408883c00000000000091c391c391\
+             c29103910091019100c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0\
+             c0c0c0c0c0c0";
+        const OUTPUT_FINISHED: &str =
+            "dc0032b24261746368546f6b656e49444f757470757491ac7265712d3030303030303031c091\
+             82a474797065a473746f70a76d6174636865640291a09192a171c408883c0000000000009100\
+             9192a171c408883c00000000000091c391c391c29103910091019100c0c0c0c0c0c0c0c0c0c0\
+             c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+        fn from_hex(hex: &str) -> Bytes {
+            let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+            Bytes::from(
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                    .collect::<Vec<u8>>(),
+            )
+        }
+
+        let ns = IpcNamespace::new().unwrap();
+        let (input, output) = (ns.input_endpoint(), ns.output_endpoint());
+        std::mem::forget(ns);
+
+        // Frontend binds PUSH input + PULL output; the mock scheduler connects in.
+        let (transport, engine) = tokio::join!(
+            connect_push_pull("127.0.0.1", Some(&input), Some(&output), TIMEOUT),
+            MockPushPullEngine::connect(&input, &output),
+        );
+        let client = SglangClient::new(transport.unwrap());
+        let mut engine = engine.unwrap();
+
+        let request = TokenizedGenerateReqInput {
+            rid: "req-00000001".to_string(),
+            input_ids: TokenIdArray(vec![9906, 11, 1917]),
+            sampling_params: SamplingParams {
+                max_new_tokens: Some(4),
+                ..SamplingParams::default()
+            },
+            stream: true,
+            ..TokenizedGenerateReqInput::default()
+        };
+        let mut stream = client.submit(request).await.unwrap();
+
+        // The scheduler sees a single-frame payload: no identity, no type frame.
+        let frames = engine.recv_request().await.unwrap();
+        assert_eq!(frames.len(), 1);
+        let received: TokenizedGenerateReqInput = decode_msgpack(frames[0].as_ref()).unwrap();
+        assert_eq!(received.rid, "req-00000001");
+        assert_eq!(received.input_ids, TokenIdArray(vec![9906, 11, 1917]));
+
+        engine
+            .send_output(vec![from_hex(OUTPUT_STILL_GENERATING)])
+            .await
+            .unwrap();
+        engine
+            .send_output(vec![from_hex(OUTPUT_FINISHED)])
+            .await
+            .unwrap();
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.output_ids, vec![15496]);
+        assert!(!first.finished());
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.finish_reason.as_deref(), Some("stop"));
+        assert!(second.finished());
+        // Terminal output ends the stream.
+        assert!(stream.next().await.is_none());
+
+        // A fresh request dropped before finishing auto-aborts with a tagged
+        // AbortReq (still no identity/type frame on the PUSH input).
+        let request = TokenizedGenerateReqInput {
+            rid: "req-00000002".to_string(),
+            input_ids: TokenIdArray(vec![1]),
+            stream: true,
+            ..TokenizedGenerateReqInput::default()
+        };
+        let stream = client.submit(request).await.unwrap();
+        let add = engine.recv_request().await.unwrap();
+        assert_eq!(add.len(), 1);
+        drop(stream);
+        let abort = engine.recv_request().await.unwrap();
+        assert_eq!(abort.len(), 1);
+        let decoded: AbortReq = decode_msgpack(abort[0].as_ref()).unwrap();
+        assert_eq!(decoded, AbortReq::new("req-00000002"));
     }
 }

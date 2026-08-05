@@ -187,6 +187,42 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
     Ok(())
 }
 
+/// Remove an `ipc://` socket file stranded by a crashed predecessor. libzmq
+/// refuses to `bind()` over an existing ipc endpoint file (it fails with
+/// `EADDRINUSE`), so a socket left behind by an earlier process that did not
+/// unbind cleanly would block every future bind at the same path. Only an actual
+/// socket file is removed: a regular file or directory at the path is left in
+/// place and surfaced as an error, so an unexpected collision is never silently
+/// clobbered. A missing path is a no-op.
+///
+/// This targets the crashed-predecessor case. In the one-worker-per-rank model a
+/// given ipc path has a single binder, so this does not race a live peer.
+async fn remove_stale_ipc_socket(ipc_url: &str) -> WorkerResult<()> {
+    let path = ipc_url.strip_prefix("ipc://").unwrap_or(ipc_url);
+    let fail = |reason: String| WorkerError::ConnectionFailed {
+        url: ipc_url.to_string(),
+        reason,
+    };
+    let meta = match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(fail(format!("failed to stat ipc socket {path}: {e}"))),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if !meta.file_type().is_socket() {
+            return Err(fail(format!(
+                "ipc socket path {path} exists but is not a socket; refusing to remove it"
+            )));
+        }
+    }
+    let _ = &meta;
+    tokio::fs::remove_file(path)
+        .await
+        .map_err(|e| fail(format!("failed to remove stale ipc socket {path}: {e}")))
+}
+
 /// Bind the SMG-side ZMQ sockets and complete the handshake with the engine.
 /// Shared by the lazy client accessor and the background handshake driver so
 /// both go through the exact same connect path. `base_url` is the `ipc://` URL;
@@ -200,6 +236,11 @@ async fn connect_zmq_backend(
     let (handshake, input, output) =
         zmq_socket_addresses(&base_url, handshake_override.as_deref())?;
     ensure_ipc_socket_dir(&base_url).await?;
+    // Clear the data-plane sockets a crashed predecessor may have stranded;
+    // libzmq will not bind over an existing ipc endpoint file. The handshake is
+    // tcp://, so it needs no such cleanup.
+    remove_stale_ipc_socket(&input).await?;
+    remove_stale_ipc_socket(&output).await?;
     tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
     match ZmqEngineClient::connect(
         &handshake,
@@ -2802,6 +2843,45 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let url = format!("ipc://{}/x.ipc", file.display());
         assert!(ensure_ipc_socket_dir(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remove_stale_ipc_socket_is_a_noop_when_absent() {
+        let base = tempfile::tempdir().unwrap();
+        let url = format!("ipc://{}/gone.sock", base.path().display());
+        // A path that never existed is fine — the first launch has nothing to
+        // clean up.
+        remove_stale_ipc_socket(&url).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_stale_ipc_socket_removes_a_stranded_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("engine-in.sock");
+        // Binding a unix listener creates a real socket file, standing in for
+        // one a crashed predecessor left behind.
+        let listener = UnixListener::bind(&path).unwrap();
+        drop(listener); // closing the listener does not unlink the file
+        assert!(path.exists(), "socket file should linger after close");
+
+        let url = format!("ipc://{}", path.display());
+        remove_stale_ipc_socket(&url).await.unwrap();
+        assert!(!path.exists(), "stale socket must be removed before bind");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_stale_ipc_socket_refuses_a_non_socket() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("engine-in.sock");
+        // A regular file at the socket path is unexpected — never clobber it.
+        std::fs::write(&path, b"not a socket").unwrap();
+        let url = format!("ipc://{}", path.display());
+        assert!(remove_stale_ipc_socket(&url).await.is_err());
+        assert!(path.exists(), "a non-socket path must be left untouched");
     }
 
     /// A ZMQ client whose engine dies must be evicted by the health probe (the

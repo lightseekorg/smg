@@ -321,7 +321,14 @@ mod tests {
         .await
         .expect("frontend handshake");
         let client = EngineCoreClient::new(transport);
-        assert_eq!(client.engines()[0].ready_response.data_parallel_rank, 0);
+        assert_eq!(
+            client.engines()[0]
+                .ready_response
+                .as_ref()
+                .expect("handshake engine registers a ready response")
+                .data_parallel_rank,
+            0
+        );
 
         let mut stream = client
             .submit(EngineCoreRequest {

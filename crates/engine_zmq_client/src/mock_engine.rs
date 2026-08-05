@@ -13,7 +13,7 @@ use tokio::time::{sleep, timeout};
 use zeromq::{
     prelude::{Socket, SocketRecv, SocketSend},
     util::PeerIdentity,
-    DealerSocket, PushSocket, SocketOptions, ZmqMessage,
+    DealerSocket, PullSocket, PushSocket, SocketOptions, ZmqMessage,
 };
 
 use crate::{
@@ -185,6 +185,53 @@ impl MockEngine {
     /// Push a raw multi-frame output. Convenience for sequential test drivers.
     pub async fn send_output(&mut self, frames: Vec<Bytes>) -> Result<()> {
         self.output.send_frames(frames).await
+    }
+}
+
+/// A mock engine over the no-handshake PUSH/PULL topology (the SGLang scheduler
+/// role): it CONNECTS a PULL to the frontend's bound PUSH input to receive
+/// requests, and a PUSH to the frontend's bound PULL output to send outputs.
+/// There is no handshake and no identity frame.
+pub struct MockPushPullEngine {
+    input: PullSocket,
+    output: PushSocket,
+}
+
+impl MockPushPullEngine {
+    /// Connect to a frontend that has already bound its PUSH input and PULL
+    /// output sockets.
+    pub async fn connect(input_address: &str, output_address: &str) -> Result<Self> {
+        wait_for_endpoint(input_address).await?;
+        let mut input = PullSocket::new();
+        input.connect(input_address).await?;
+
+        wait_for_endpoint(output_address).await?;
+        let mut output = PushSocket::new();
+        output.connect(output_address).await?;
+
+        Ok(Self { input, output })
+    }
+
+    /// Receive one request's raw frames (`[payload, aux..]`; no identity or type
+    /// frame on this topology).
+    pub async fn recv_request(&mut self) -> Result<Vec<Bytes>> {
+        Ok(self.input.recv().await?.into_vec())
+    }
+
+    /// Push one raw multi-frame output message back to the frontend.
+    pub async fn send_output(&mut self, frames: Vec<Bytes>) -> Result<()> {
+        let mut iter = frames.into_iter();
+        let Some(first) = iter.next() else {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: "mock engine output needs at least one frame".to_string(),
+            });
+        };
+        let mut message = ZmqMessage::from(first);
+        for frame in iter {
+            message.push_back(frame);
+        }
+        self.output.send(message).await?;
+        Ok(())
     }
 }
 

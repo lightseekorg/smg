@@ -63,13 +63,17 @@ async fn main() {
     .expect("handshake with engine");
 
     let engine = &transport.engines[0];
+    let ready = engine
+        .ready_response
+        .as_ref()
+        .expect("handshake engine registers a ready response");
     eprintln!(
         "[probe] engine registered: vllm_version={} max_model_len={} num_gpu_blocks={} block_size={} dtype={} engine_index={:?}",
-        engine.ready_response.vllm_version,
-        engine.ready_response.max_model_len,
-        engine.ready_response.num_gpu_blocks,
-        engine.ready_response.block_size,
-        engine.ready_response.dtype.as_str(),
+        ready.vllm_version,
+        ready.max_model_len,
+        ready.num_gpu_blocks,
+        ready.block_size,
+        ready.dtype.as_str(),
         engine.engine_id.engine_index(),
     );
 

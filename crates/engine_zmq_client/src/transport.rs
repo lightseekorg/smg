@@ -14,12 +14,13 @@ use std::{
 };
 
 use bytes::Bytes;
+use futures::{channel::mpsc as futures_mpsc, StreamExt};
 use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, error, info, trace, warn};
 use zeromq::{
     prelude::{Socket, SocketRecv, SocketSend},
     util::PeerIdentity,
-    PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage,
+    PullSocket, PushSocket, RouterSendHalf, RouterSocket, SocketEvent, ZmqError, ZmqMessage,
 };
 
 use crate::{
@@ -105,27 +106,57 @@ impl TryFrom<EngineId> for PeerIdentity {
     }
 }
 
-/// Per-engine handshake result collected while bootstrapping one shared
-/// transport.
+/// Per-engine result collected while bootstrapping one shared transport.
 #[derive(Clone, Debug)]
 pub struct ConnectedEngine {
     /// The identity of the connected engine.
     pub engine_id: EngineId,
-    /// Post-init configuration received on the input socket registration.
-    pub ready_response: EngineCoreReadyResponse,
+    /// Post-init configuration received on the input socket registration, when
+    /// the topology carries one. Handshake engines (vLLM/TokenSpeed) register a
+    /// [`EngineCoreReadyResponse`]; a no-handshake PUSH/PULL engine (SGLang)
+    /// signals readiness out-of-band, so it has none.
+    pub ready_response: Option<EngineCoreReadyResponse>,
 }
 
-/// The connected shared transport plus all registered engines after a
-/// successful startup handshake.
+/// The frontend's request-sending socket.
+///
+/// Handshake engines (vLLM/TokenSpeed) use a ROUTER, where every message leads
+/// with the engine identity frame that selects the DP rank. A no-handshake
+/// PUSH/PULL engine (SGLang) uses a PUSH into the scheduler's PULL, with no
+/// identity frame — the sole engine is implied.
+pub enum InputSocket {
+    /// ROUTER send half: messages lead with the engine identity frame.
+    Router(RouterSendHalf),
+    /// PUSH socket: messages carry no routing identity frame.
+    Push(PushSocket),
+}
+
+impl InputSocket {
+    /// Whether this input leads each message with an engine identity frame.
+    fn is_router(&self) -> bool {
+        matches!(self, Self::Router(_))
+    }
+
+    /// Send one already-framed message over the underlying socket.
+    async fn send(&mut self, message: ZmqMessage) -> Result<()> {
+        match self {
+            Self::Router(half) => half.send(message).await?,
+            Self::Push(socket) => socket.send(message).await?,
+        }
+        Ok(())
+    }
+}
+
+/// The connected shared transport plus all registered engines.
 pub struct ConnectedTransport {
     /// Local address of the shared input socket engines connect to for requests.
     pub input_address: String,
     /// Local address of the shared output socket engines connect to for outputs.
     pub output_address: String,
-    /// All engines connected through the startup handshake.
+    /// All engines connected on this transport.
     pub engines: Vec<ConnectedEngine>,
-    /// The sending half of the shared input ROUTER socket.
-    pub input_send: RouterSendHalf,
+    /// The sending half of the shared input socket (ROUTER or PUSH).
+    pub input_send: InputSocket,
     /// The shared output PULL socket for receiving all engines' responses.
     pub output_socket: PullSocket,
 }
@@ -276,9 +307,86 @@ pub async fn connect_handshake(
         input_address,
         output_address,
         engines,
-        input_send,
+        input_send: InputSocket::Router(input_send),
         output_socket,
     })
+}
+
+/// Connect to a single same-host engine over a no-handshake PUSH/PULL topology.
+///
+/// The frontend BINDS a PUSH input socket (the engine's scheduler PULLs
+/// requests) and a PULL output socket (the engine PUSHes outputs back). There is
+/// no startup handshake and no per-engine registration, so a single engine is
+/// synthesized with no post-init config. `ipc://` is supported via explicit
+/// addresses; otherwise an ephemeral `tcp://host:0` is used.
+///
+/// A bound PUSH with no attached peer fails sends immediately instead of
+/// queueing, so this blocks (up to `peer_timeout`) until the engine has dialed
+/// into the input socket before returning a usable transport.
+pub async fn connect_push_pull(
+    local_host: &str,
+    local_input_address: Option<&str>,
+    local_output_address: Option<&str>,
+    peer_timeout: Duration,
+) -> Result<ConnectedTransport> {
+    let mut input_socket = PushSocket::new();
+    // Register the monitor before binding so the peer-attach event cannot be
+    // missed between bind and the wait below.
+    let mut input_monitor = input_socket.monitor();
+    let input_bind = local_input_address
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("tcp://{local_host}:0"));
+    let input_address = input_socket.bind(&input_bind).await?.to_string();
+
+    let mut output_socket = PullSocket::new();
+    let output_bind = local_output_address
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("tcp://{local_host}:0"));
+    let output_address = output_socket.bind(&output_bind).await?.to_string();
+
+    info!(%input_address, %output_address, "bound local PUSH/PULL transport sockets");
+
+    wait_for_input_peer(&mut input_monitor, peer_timeout).await?;
+    info!(%input_address, "engine attached to input socket");
+
+    Ok(ConnectedTransport {
+        input_address,
+        output_address,
+        // No handshake: synthesize the sole engine with no registration payload.
+        engines: vec![ConnectedEngine {
+            engine_id: EngineId::from_engine_index(0),
+            ready_response: None,
+        }],
+        input_send: InputSocket::Push(input_socket),
+        output_socket,
+    })
+}
+
+/// Block until a peer attaches to the bound input socket, bounded by
+/// `peer_timeout`. The socket monitor emits `Accepted` when a peer connects;
+/// other lifecycle events (e.g. `Listening`) precede it and are skipped.
+async fn wait_for_input_peer(
+    monitor: &mut futures_mpsc::Receiver<SocketEvent>,
+    peer_timeout: Duration,
+) -> Result<()> {
+    loop {
+        let event =
+            timeout(peer_timeout, monitor.next())
+                .await
+                .map_err(|_| Error::HandshakeTimeout {
+                    stage: "input peer",
+                    timeout: peer_timeout,
+                })?;
+        match event {
+            Some(SocketEvent::Accepted(..)) => return Ok(()),
+            Some(_) => continue,
+            None => {
+                return Err(Error::Transport(ZmqError::Socket(
+                    "input socket monitor closed before a peer attached",
+                )))
+            }
+        }
+    }
 }
 
 /// Bind the shared input (ROUTER) and output (PULL) sockets. `ipc://` is
@@ -394,34 +502,48 @@ async fn wait_for_input_registrations(
             })?;
             Ok(ConnectedEngine {
                 engine_id,
-                ready_response,
+                ready_response: Some(ready_response),
             })
         })
         .collect()
 }
 
-/// Send an encoded request to one engine over the shared input ROUTER socket.
-/// Frames: `[engine_id, request_type, payload, aux..]`.
+/// Send an encoded request to one engine over the shared input socket.
+///
+/// On a ROUTER input the frames are `[engine_id, request_type?, payload, aux..]`:
+/// the leading identity frame selects the engine. On a PUSH input there is no
+/// routing identity, so the frames are `[request_type?, payload, aux..]` for the
+/// sole connected engine. `request_type` is omitted for protocols that dispatch
+/// by payload tag alone (no type frame).
 pub async fn send_message(
-    input_send: &mut RouterSendHalf,
+    input: &mut InputSocket,
     engine_id: &EngineId,
-    request_type: Bytes,
+    request_type: Option<Bytes>,
     payload: Bytes,
     aux_frames: Vec<Bytes>,
 ) -> Result<()> {
-    let mut message = ZmqMessage::from(engine_id.to_frame());
-    message.push_back(request_type);
-    message.push_back(payload);
-    for frame in aux_frames {
+    let mut frames: Vec<Bytes> = Vec::with_capacity(aux_frames.len() + 3);
+    if input.is_router() {
+        frames.push(engine_id.to_frame());
+    }
+    if let Some(request_type) = request_type {
+        frames.push(request_type);
+    }
+    frames.push(payload);
+    frames.extend(aux_frames);
+
+    // `payload` is always pushed, so `frames` is never empty.
+    let frame_count = frames.len();
+    let mut iter = frames.into_iter();
+    let Some(first) = iter.next() else {
+        return Err(unexpected_handshake("cannot send an empty ZMQ message"));
+    };
+    let mut message = ZmqMessage::from(first);
+    for frame in iter {
         message.push_back(frame);
     }
-    trace!(
-        ?engine_id,
-        frame_count = message.len(),
-        "sending ZMQ message"
-    );
-    input_send.send(message).await?;
-    Ok(())
+    trace!(?engine_id, frame_count, "sending ZMQ message");
+    input.send(message).await
 }
 
 /// Receive engine outputs from the shared PULL socket, decode them with the
@@ -536,7 +658,11 @@ mod tests {
             EngineId::from_engine_index(0)
         );
         assert_eq!(
-            transport.engines[0].ready_response.vllm_version,
+            transport.engines[0]
+                .ready_response
+                .as_ref()
+                .expect("handshake engine registers a ready response")
+                .vllm_version,
             "test-vllm-version"
         );
 
@@ -558,7 +684,7 @@ mod tests {
         send_message(
             &mut input_send,
             &engine_id,
-            EngineCoreRequestType::Add.to_frame(),
+            Some(EngineCoreRequestType::Add.to_frame()),
             Bytes::from(payload),
             Vec::new(),
         )

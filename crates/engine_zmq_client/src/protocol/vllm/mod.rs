@@ -64,12 +64,12 @@ impl EngineProtocol for VllmProtocol {
     type Request = EngineCoreRequest;
     type Output = EngineCoreOutput;
 
-    fn add_frame() -> Bytes {
-        EngineCoreRequestType::Add.to_frame()
+    fn add_frame() -> Option<Bytes> {
+        Some(EngineCoreRequestType::Add.to_frame())
     }
 
-    fn abort_frame() -> Bytes {
-        EngineCoreRequestType::Abort.to_frame()
+    fn abort_frame() -> Option<Bytes> {
+        Some(EngineCoreRequestType::Abort.to_frame())
     }
 
     fn request_id(request: &Self::Request) -> &str {

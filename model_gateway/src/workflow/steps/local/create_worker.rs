@@ -117,17 +117,20 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
             }
         })?;
 
-        // Only vLLM EngineCore and TokenSpeed speak the ZMQ direct-backend wire.
-        // Fail registration here rather than letting the connect-time rejection
-        // strand the worker in Pending.
+        // vLLM EngineCore, TokenSpeed, and SGLang speak the ZMQ direct-backend
+        // wire. Fail registration here rather than letting the connect-time
+        // rejection strand the worker in Pending.
         if *connection_mode == ConnectionMode::Zmq
-            && !matches!(runtime_type, RuntimeType::Vllm | RuntimeType::TokenSpeed)
+            && !matches!(
+                runtime_type,
+                RuntimeType::Vllm | RuntimeType::TokenSpeed | RuntimeType::Sglang
+            )
         {
             return Err(WorkflowError::StepFailed {
                 step_id: StepId::new("create_worker"),
                 message: format!(
-                    "ZMQ worker {} has unsupported runtime {}: only vllm and tokenspeed \
-                     are supported over the ZMQ direct backend",
+                    "ZMQ worker {} has unsupported runtime {}: only vllm, tokenspeed, \
+                     and sglang are supported over the ZMQ direct backend",
                     config.url, runtime_type
                 ),
             });
