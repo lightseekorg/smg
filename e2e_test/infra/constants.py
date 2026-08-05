@@ -9,6 +9,7 @@ class ConnectionMode(StrEnum):
 
     HTTP = "http"
     GRPC = "grpc"
+    ZMQ = "zmq"
 
 
 class WorkerType(StrEnum):
@@ -35,7 +36,7 @@ class Runtime(StrEnum):
 
 
 # Convenience sets
-LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC})
+LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC, ConnectionMode.ZMQ})
 LOCAL_RUNTIMES = frozenset(
     {Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM, Runtime.MLX, Runtime.TOKENSPEED}
 )
@@ -58,6 +59,9 @@ ENV_BACKENDS = "E2E_BACKENDS"
 ENV_MODEL = "E2E_MODEL"
 ENV_RUNTIME = (
     "E2E_RUNTIME"  # Runtime for gRPC tests — one of Runtime.{SGLANG,VLLM,TRTLLM,TOKENSPEED}
+)
+ENV_CONNECTION_MODE = (
+    "E2E_CONNECTION_MODE"  # Per-lane wire override — see get_connection_mode_override
 )
 ENV_STARTUP_TIMEOUT = "E2E_STARTUP_TIMEOUT"
 ENV_SKIP_MODEL_POOL = "SKIP_MODEL_POOL"
@@ -123,6 +127,31 @@ def is_tokenspeed() -> bool:
         True if E2E_RUNTIME is "tokenspeed", False otherwise.
     """
     return get_runtime() == "tokenspeed"
+
+
+def get_connection_mode_override() -> "ConnectionMode | None":
+    """Per-lane wire-protocol override for local backends.
+
+    Set ``E2E_CONNECTION_MODE`` to run the existing local test cases over a
+    different wire (like ``E2E_RUNTIME`` picks the engine): a ``grpc``/``http``
+    case then runs over that mode without a separate parametrize value. PD/EPD
+    backends keep their own wire. Returns ``None`` when the var is unset or
+    blank (the workflow always exports it and leaves it empty for non-override
+    lanes); a set-but-unrecognized value is a misconfiguration and raises.
+    """
+    value = os.environ.get(ENV_CONNECTION_MODE)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    valid = [mode.value for mode in ConnectionMode]
+    try:
+        return ConnectionMode(value.lower())
+    except ValueError:
+        raise ValueError(
+            f"{ENV_CONNECTION_MODE}={value!r} is not a valid connection mode; use one of {valid}"
+        ) from None
 
 
 ENV_VLLM_KV_BACKEND = "E2E_VLLM_KV_BACKEND"

@@ -541,13 +541,13 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            Self::TokenSpeed(client) => {
+            Self::TokenSpeed(_) => {
                 let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::TokenSpeed(data) => data.into_proto(true),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_tokenspeed_request(tokenspeed_mm, |mm| {
-                    client.build_generate_request_from_chat(
+                    TokenSpeedSchedulerClient::build_generate_request_from_chat(
                         request_id,
                         body,
                         processed_text,
@@ -633,13 +633,13 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            Self::TokenSpeed(client) => {
+            Self::TokenSpeed(_) => {
                 let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
                     MultimodalData::TokenSpeed(data) => data.into_proto(true),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
                 finish_tokenspeed_request(tokenspeed_mm, |mm| {
-                    client.build_generate_request_from_messages(
+                    TokenSpeedSchedulerClient::build_generate_request_from_messages(
                         request_id,
                         body,
                         processed_text,
@@ -696,8 +696,8 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            Self::TokenSpeed(client) => {
-                let req = client.build_generate_request_from_completion(
+            Self::TokenSpeed(_) => {
+                let req = TokenSpeedSchedulerClient::build_generate_request_from_completion(
                     request_id,
                     body,
                     original_text,
@@ -752,8 +752,8 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            Self::TokenSpeed(client) => {
-                let req = client.build_plain_generate_request(
+            Self::TokenSpeed(_) => {
+                let req = TokenSpeedSchedulerClient::build_plain_generate_request(
                     request_id,
                     body,
                     original_text,

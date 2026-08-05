@@ -12,11 +12,37 @@ use crate::{
         error,
         grpc::{
             common::stages::PipelineStage,
-            context::{FinalResponse, RequestContext, RequestType},
+            context::{ClientSelection, FinalResponse, RequestContext, RequestType},
         },
     },
     worker::AttachedBody,
 };
+
+/// String `stop` sequences the ROUTER must enforce: only for direct-ZMQ
+/// backends, where the engine receives token ids and never sees the strings.
+/// Empty for gRPC backends (the engine matches stops itself).
+fn router_stop_strings(ctx: &RequestContext) -> Vec<String> {
+    let is_zmq = ctx
+        .state
+        .clients
+        .as_ref()
+        .is_some_and(|clients| match clients {
+            ClientSelection::Single { client } => client.is_zmq(),
+            ClientSelection::Disaggregated { decode, .. } => decode.is_zmq(),
+        });
+    if !is_zmq {
+        return Vec::new();
+    }
+    match &ctx.input.request_type {
+        RequestType::Chat(_) => ctx
+            .chat_request_arc()
+            .stop
+            .as_ref()
+            .map(|stop| stop.to_vec())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
 
 /// Harmony Response Processing stage: Parse and format Harmony responses
 ///
@@ -80,6 +106,7 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                             execution_result,
                             ctx.chat_request_arc(),
                             dispatch,
+                            router_stop_strings(ctx),
                         );
 
                     // Attach load guards to response body for proper RAII lifecycle
@@ -93,9 +120,15 @@ impl PipelineStage for HarmonyResponseProcessingStage {
 
                 // For non-streaming, delegate to Harmony response processor to build ChatCompletionResponse
                 let chat_request = ctx.chat_request_arc();
+                let stops = router_stop_strings(ctx);
                 let response = self
                     .processor
-                    .process_non_streaming_chat_response(execution_result, chat_request, dispatch)
+                    .process_non_streaming_chat_response(
+                        execution_result,
+                        chat_request,
+                        dispatch,
+                        &stops,
+                    )
                     .await?;
 
                 ctx.state.response.final_response = Some(FinalResponse::Chat(response));

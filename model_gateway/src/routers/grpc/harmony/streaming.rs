@@ -27,6 +27,7 @@ use tracing::{debug, error};
 use super::{
     builder::{convert_harmony_logprobs, try_harmony_encoding},
     processor::ResponsesIterationResult,
+    stop::TextStopScanner,
     types::HarmonyChannelDelta,
     HarmonyParserAdapter,
 };
@@ -100,11 +101,15 @@ impl HarmonyStreamingProcessor {
         clippy::disallowed_methods,
         reason = "streaming tasks are fire-and-forget by design; client disconnect terminates them"
     )]
+    /// `router_stop_strings` is non-empty only when the router must enforce
+    /// string `stop` sequences itself (direct-ZMQ backends: the engine sees
+    /// token ids only).
     pub fn process_streaming_chat_response(
         self: Arc<Self>,
         execution_result: context::ExecutionResult,
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
+        router_stop_strings: Vec<String>,
     ) -> Response {
         // Create SSE channel
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -113,8 +118,14 @@ impl HarmonyStreamingProcessor {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 tokio::spawn(async move {
-                    let result =
-                        Self::process_single_stream(stream, dispatch, chat_request, &tx).await;
+                    let result = Self::process_single_stream(
+                        stream,
+                        dispatch,
+                        chat_request,
+                        &tx,
+                        router_stop_strings,
+                    )
+                    .await;
 
                     if let Err(e) = result {
                         error!("Harmony streaming error: {}", e);
@@ -137,6 +148,7 @@ impl HarmonyStreamingProcessor {
                         dispatch,
                         chat_request,
                         &tx,
+                        router_stop_strings,
                     )
                     .await;
 
@@ -179,6 +191,7 @@ impl HarmonyStreamingProcessor {
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        router_stop_strings: Vec<String>,
     ) -> Result<(), String> {
         let mut prompt_tokens = HashMap::new();
         let mut cached_tokens = HashMap::new();
@@ -189,6 +202,7 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
+            &router_stop_strings,
         )
         .await
     }
@@ -200,6 +214,7 @@ impl HarmonyStreamingProcessor {
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        router_stop_strings: Vec<String>,
     ) -> Result<(), String> {
         // Phase 1: Process prefill stream (collect metadata)
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
@@ -222,6 +237,7 @@ impl HarmonyStreamingProcessor {
             tx,
             &mut prompt_tokens,
             &mut cached_tokens,
+            &router_stop_strings,
         )
         .await?;
 
@@ -244,6 +260,7 @@ impl HarmonyStreamingProcessor {
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         prompt_tokens: &mut HashMap<u32, u32>,
         cached_tokens: &mut HashMap<u32, u32>,
+        router_stop_strings: &[String],
     ) -> Result<(), String> {
         // Timing for metrics
         let start_time = Instant::now();
@@ -253,6 +270,12 @@ impl HarmonyStreamingProcessor {
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
+        // Router-enforced string stops (direct-ZMQ): per-index, per-channel
+        // scanners. Once an index stops, its further deltas are swallowed and
+        // the engine's own Complete is not re-emitted.
+        let mut analysis_scanners: HashMap<u32, TextStopScanner> = HashMap::new();
+        let mut final_scanners: HashMap<u32, TextStopScanner> = HashMap::new();
+        let mut router_stopped: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut completion_tokens = CompletionTokenTracker::new();
         // Reusable SSE encoder shared across every chunk emitted for this stream.
         let mut encoder = SseEncoder::new();
@@ -303,21 +326,76 @@ impl HarmonyStreamingProcessor {
                         .map_err(|e| format!("Parse error: {e}"))?;
 
                     // Emit SSE event if there's a delta
-                    if let Some(delta) = delta_result {
-                        let is_first = is_firsts.get(&index).copied().unwrap_or(false);
-                        Self::emit_chunk_delta(
-                            &delta,
-                            index,
-                            is_first,
-                            dispatch,
-                            original_request,
-                            tx,
-                            &mut encoder,
-                            chunk_logprobs,
-                        )?;
+                    if let Some(mut delta) = delta_result {
+                        if router_stopped.contains(&index) {
+                            continue;
+                        }
+                        let mut stop_matched: Option<String> = None;
+                        if !router_stop_strings.is_empty() {
+                            if let Some(text) = delta.analysis_delta.take() {
+                                let scanner = analysis_scanners.entry(index).or_insert_with(|| {
+                                    TextStopScanner::new(router_stop_strings.to_vec())
+                                });
+                                let scan = scanner.push(&text);
+                                delta.analysis_delta = (!scan.emit.is_empty()).then_some(scan.emit);
+                                if scan.stopped {
+                                    stop_matched = scanner.matched().map(str::to_string);
+                                    delta.final_delta = None;
+                                    delta.commentary_delta = None;
+                                }
+                            }
+                            if stop_matched.is_none() {
+                                if let Some(text) = delta.final_delta.take() {
+                                    let scanner =
+                                        final_scanners.entry(index).or_insert_with(|| {
+                                            TextStopScanner::new(router_stop_strings.to_vec())
+                                        });
+                                    let scan = scanner.push(&text);
+                                    delta.final_delta =
+                                        (!scan.emit.is_empty()).then_some(scan.emit);
+                                    if scan.stopped {
+                                        stop_matched = scanner.matched().map(str::to_string);
+                                        delta.commentary_delta = None;
+                                    }
+                                }
+                            }
+                        }
 
-                        if is_first {
-                            is_firsts.insert(index, false);
+                        let has_payload = delta.analysis_delta.is_some()
+                            || delta.final_delta.is_some()
+                            || delta.commentary_delta.is_some();
+                        let is_first = is_firsts.get(&index).copied().unwrap_or(false);
+                        if has_payload || is_first {
+                            Self::emit_chunk_delta(
+                                &delta,
+                                index,
+                                is_first,
+                                dispatch,
+                                original_request,
+                                tx,
+                                &mut encoder,
+                                chunk_logprobs,
+                            )?;
+
+                            if is_first {
+                                is_firsts.insert(index, false);
+                            }
+                        }
+
+                        // A router-side stop fired: emit the final chunk now
+                        // and swallow the rest of this index's stream (the
+                        // engine keeps generating until its own limits).
+                        if let Some(stop) = stop_matched {
+                            Self::emit_final_chunk(
+                                index,
+                                "stop",
+                                Some(&serde_json::Value::String(stop)),
+                                dispatch,
+                                original_request,
+                                tx,
+                                &mut encoder,
+                            )?;
+                            router_stopped.insert(index);
                         }
                     }
                 }
@@ -340,6 +418,37 @@ impl HarmonyStreamingProcessor {
 
                         let final_output =
                             parser.finalize(complete_wrapper.finish_reason().to_string());
+
+                        // A router-side stop already closed this choice.
+                        if router_stopped.contains(&index) {
+                            continue;
+                        }
+
+                        // Release scanner-held text that never became a match.
+                        let flushed = HarmonyChannelDelta {
+                            analysis_delta: analysis_scanners
+                                .get_mut(&index)
+                                .map(TextStopScanner::flush)
+                                .filter(|s| !s.is_empty()),
+                            commentary_delta: None,
+                            final_delta: final_scanners
+                                .get_mut(&index)
+                                .map(TextStopScanner::flush)
+                                .filter(|s| !s.is_empty()),
+                            is_final: false,
+                        };
+                        if flushed.analysis_delta.is_some() || flushed.final_delta.is_some() {
+                            Self::emit_chunk_delta(
+                                &flushed,
+                                index,
+                                false,
+                                dispatch,
+                                original_request,
+                                tx,
+                                &mut encoder,
+                                None,
+                            )?;
+                        }
 
                         Self::emit_final_chunk(
                             index,

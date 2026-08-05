@@ -5,20 +5,21 @@
 //! shapes, field order, and `array_like` positional-tuple encoding are the wire
 //! contract with Python `EngineCoreProc` — do not reorder fields.
 //!
-//! Text generation is typed fully. Multimodal features, structured outputs
-//! (guided decoding), and pooling params are carried as [`crate::codec::OpaqueValue`]
-//! for now — they serialize as `nil` on the text path and get strongly typed in
-//! the multimodal phase.
+//! Text generation, structured outputs (guided decoding), and multimodal
+//! features are typed fully. Pooling params and prompt embeds are carried as
+//! [`crate::codec::OpaqueValue`] — they serialize as `nil` on supported paths.
 
 // The startup handshake is engine-neutral (TokenSpeed speaks the same
 // protocol); re-exported here so existing `vllm::handshake` paths keep working.
 pub use crate::protocol::handshake;
 pub mod logprobs;
 pub mod lora;
+pub mod multimodal;
 pub mod output;
 pub mod request;
 pub mod sampling;
 pub mod stats;
+pub mod structured_outputs;
 
 use bytes::Bytes;
 

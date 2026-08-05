@@ -1,15 +1,12 @@
 // Ported from the Apache-2.0 reference `vllm-engine-core-client`
 // (vllm-project/vllm): protocol/sampling.rs.
-//
-// `structured_outputs` (guided decoding) is carried as OpaqueValue for now; it
-// serializes as `nil` when absent and gets strongly typed in a later phase.
 
 use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 
-use crate::codec::OpaqueValue;
+use super::structured_outputs::StructuredOutputsParams;
 
 fn default_top_p() -> f32 {
     1.0
@@ -113,9 +110,9 @@ pub struct EngineCoreSamplingParams {
     /// Tokenized bad words to avoid during generation.
     #[serde(rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
-    /// Structured outputs (guided decoding). Carried untyped for now; `nil` on
-    /// the text path.
-    pub structured_outputs: Option<OpaqueValue>,
+    /// Structured outputs (guided decoding). `None` (serialized `nil`) on the
+    /// unconstrained text path.
+    pub structured_outputs: Option<StructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at each
     /// position, in addition to the sampled/scored token.
     pub logprob_token_ids: Option<Vec<u32>>,

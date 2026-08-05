@@ -13,16 +13,23 @@ use openai_protocol::{
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
-    common_proto, tokenizer_bundle::StreamBundle, SglangSchedulerClient, VllmEngineClient,
+    common_proto, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TokenSpeedSchedulerClient,
+    VllmEngineClient,
 };
 
-use crate::routers::grpc::{
-    client::{GenerateRequestBuildOptions, GrpcClient, HealthCheckResponse, ModelInfo, ServerInfo},
-    proto_wrapper::{
-        finish_vllm_request, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
-        ProtoStream,
+use crate::{
+    routers::grpc::{
+        client::{
+            GenerateRequestBuildOptions, GrpcClient, HealthCheckResponse, ModelInfo, ServerInfo,
+        },
+        proto_wrapper::{
+            finish_tokenspeed_request, finish_vllm_request, ProtoEmbedComplete, ProtoEmbedRequest,
+            ProtoGenerateRequest, ProtoStream,
+        },
+        zmq_client::ZmqEngineClient,
+        MultimodalData,
     },
-    zmq_client::ZmqEngineClient,
+    worker::RuntimeType,
 };
 
 /// A backend connection: gRPC (any engine) or direct ZMQ (vLLM EngineCore or
@@ -35,19 +42,17 @@ pub enum BackendClient {
 
 impl BackendClient {
     /// Runtime type backing this client.
-    pub fn runtime_type(&self) -> crate::worker::RuntimeType {
+    pub fn runtime_type(&self) -> RuntimeType {
         match self {
             Self::Grpc(client) => client.runtime_type(),
             Self::Zmq(client) => client.runtime(),
         }
     }
 
-    /// True if this backend speaks the vLLM protocol (gRPC-vLLM or ZMQ).
-    pub fn is_vllm(&self) -> bool {
-        match self {
-            Self::Grpc(client) => client.is_vllm(),
-            Self::Zmq(_) => true,
-        }
+    /// True if this is a direct-ZMQ backend (the engine receives token ids only
+    /// and cannot match string stops itself).
+    pub fn is_zmq(&self) -> bool {
+        matches!(self, Self::Zmq(_))
     }
 
     /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so
@@ -88,14 +93,14 @@ impl BackendClient {
     pub async fn get_model_info(&self) -> Result<ModelInfo, tonic::Status> {
         match self {
             Self::Grpc(client) => client.get_model_info().await,
-            Self::Zmq(client) => Ok(ModelInfo::Vllm(client.get_model_info())),
+            Self::Zmq(client) => Ok(client.get_model_info()),
         }
     }
 
     pub async fn get_server_info(&self) -> Result<ServerInfo, tonic::Status> {
         match self {
             Self::Grpc(client) => client.get_server_info().await,
-            Self::Zmq(client) => Ok(ServerInfo::Vllm(client.get_server_info())),
+            Self::Zmq(client) => Ok(client.get_server_info()),
         }
     }
 
@@ -168,14 +173,7 @@ impl BackendClient {
     ) -> Result<ProtoStream, tonic::Status> {
         match self {
             Self::Grpc(client) => client.generate(req).await,
-            Self::Zmq(client) => match req {
-                ProtoGenerateRequest::Vllm(boxed_req) => {
-                    Ok(ProtoStream::Zmq(client.generate(*boxed_req).await?))
-                }
-                _ => Err(tonic::Status::internal(
-                    "ZMQ backend expects a vLLM generate request",
-                )),
-            },
+            Self::Zmq(client) => Ok(ProtoStream::Zmq(client.generate(req).await?)),
         }
     }
 
@@ -191,6 +189,10 @@ impl BackendClient {
         }
     }
 
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -203,22 +205,50 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_chat_request(request_id, body, processed_text, token_ids, options)
             }
-            Self::Zmq(_) => {
-                reject_zmq_multimodal(&options)?;
-                finish_vllm_request(None, |mm| {
-                    VllmEngineClient::build_generate_request_from_chat(
-                        request_id,
-                        body,
-                        processed_text,
-                        token_ids,
-                        mm,
-                        options.tool_constraints,
-                    )
-                })
-            }
+            // A ZMQ backend speaks vLLM EngineCore or TokenSpeed directly; build
+            // the native request for its runtime, mirroring the gRPC per-engine
+            // dispatch in `GrpcClient::build_chat_request`.
+            Self::Zmq(client) => match client.runtime() {
+                RuntimeType::TokenSpeed => {
+                    let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
+                        MultimodalData::TokenSpeed(data) => data.into_proto(true),
+                        _ => unreachable!("caller guarantees matching variant"),
+                    });
+                    finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                        TokenSpeedSchedulerClient::build_generate_request_from_chat(
+                            request_id,
+                            body,
+                            processed_text,
+                            token_ids,
+                            mm,
+                            options.tool_constraints,
+                        )
+                    })
+                }
+                _ => {
+                    let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
+                        MultimodalData::Vllm(data) => data.into_proto(),
+                        _ => unreachable!("caller guarantees matching variant"),
+                    });
+                    finish_vllm_request(vllm_mm, |mm| {
+                        VllmEngineClient::build_generate_request_from_chat(
+                            request_id,
+                            body,
+                            processed_text,
+                            token_ids,
+                            mm,
+                            options.tool_constraints,
+                        )
+                    })
+                }
+            },
         }
     }
 
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
     pub fn build_messages_request(
         &self,
         request_id: String,
@@ -231,19 +261,42 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_messages_request(request_id, body, processed_text, token_ids, options)
             }
-            Self::Zmq(_) => {
-                reject_zmq_multimodal(&options)?;
-                finish_vllm_request(None, |mm| {
-                    VllmEngineClient::build_generate_request_from_messages(
-                        request_id,
-                        body,
-                        processed_text,
-                        token_ids,
-                        mm,
-                        options.tool_constraints,
-                    )
-                })
-            }
+            // Mirrors the gRPC per-engine dispatch: build the request natively for
+            // the ZMQ backend's runtime (vLLM EngineCore or TokenSpeed).
+            Self::Zmq(client) => match client.runtime() {
+                RuntimeType::TokenSpeed => {
+                    let tokenspeed_mm = options.multimodal_inputs.map(|mm| match mm {
+                        MultimodalData::TokenSpeed(data) => data.into_proto(true),
+                        _ => unreachable!("caller guarantees matching variant"),
+                    });
+                    finish_tokenspeed_request(tokenspeed_mm, |mm| {
+                        TokenSpeedSchedulerClient::build_generate_request_from_messages(
+                            request_id,
+                            body,
+                            processed_text,
+                            token_ids,
+                            mm,
+                            options.tool_constraints,
+                        )
+                    })
+                }
+                _ => {
+                    let vllm_mm = options.multimodal_inputs.map(|mm| match mm {
+                        MultimodalData::Vllm(data) => data.into_proto(),
+                        _ => unreachable!("caller guarantees matching variant"),
+                    });
+                    finish_vllm_request(vllm_mm, |mm| {
+                        VllmEngineClient::build_generate_request_from_messages(
+                            request_id,
+                            body,
+                            processed_text,
+                            token_ids,
+                            mm,
+                            options.tool_constraints,
+                        )
+                    })
+                }
+            },
         }
     }
 
@@ -258,15 +311,26 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_completion_request(request_id, body, original_text, token_ids)
             }
-            Self::Zmq(_) => {
-                let req = VllmEngineClient::build_generate_request_from_completion(
-                    request_id,
-                    body,
-                    original_text,
-                    token_ids,
-                )?;
-                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
-            }
+            Self::Zmq(client) => match client.runtime() {
+                RuntimeType::TokenSpeed => {
+                    let req = TokenSpeedSchedulerClient::build_generate_request_from_completion(
+                        request_id,
+                        body,
+                        original_text,
+                        token_ids,
+                    )?;
+                    Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+                }
+                _ => {
+                    let req = VllmEngineClient::build_generate_request_from_completion(
+                        request_id,
+                        body,
+                        original_text,
+                        token_ids,
+                    )?;
+                    Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+                }
+            },
         }
     }
 
@@ -281,23 +345,26 @@ impl BackendClient {
             Self::Grpc(client) => {
                 client.build_generate_request(request_id, body, original_text, token_ids)
             }
-            Self::Zmq(_) => {
-                let req = VllmEngineClient::build_plain_generate_request(
-                    request_id,
-                    body,
-                    original_text,
-                    token_ids,
-                )?;
-                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
-            }
+            Self::Zmq(client) => match client.runtime() {
+                RuntimeType::TokenSpeed => {
+                    let req = TokenSpeedSchedulerClient::build_plain_generate_request(
+                        request_id,
+                        body,
+                        original_text,
+                        token_ids,
+                    )?;
+                    Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
+                }
+                _ => {
+                    let req = VllmEngineClient::build_plain_generate_request(
+                        request_id,
+                        body,
+                        original_text,
+                        token_ids,
+                    )?;
+                    Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+                }
+            },
         }
     }
-}
-
-/// ZMQ text path does not carry multimodal inputs yet.
-fn reject_zmq_multimodal(options: &GenerateRequestBuildOptions) -> Result<(), String> {
-    if options.multimodal_inputs.is_some() {
-        return Err("ZMQ backend does not support multimodal inputs yet".to_string());
-    }
-    Ok(())
 }

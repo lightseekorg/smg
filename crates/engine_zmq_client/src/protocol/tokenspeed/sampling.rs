@@ -52,13 +52,14 @@ pub struct SamplingParams {
     pub repetition_penalty: f64,
     /// Minimum number of tokens to generate before EOS / stop handling.
     pub min_new_tokens: u32,
-    /// Structured-output JSON schema. SMG rejects constraints upstream.
+    /// Structured-output JSON schema. Set from the request's `constraint`;
+    /// at most one of these four structured-output fields is populated.
     pub json_schema: Option<String>,
-    /// Structured-output regex. SMG rejects constraints upstream.
+    /// Structured-output regex. Set from the request's `constraint`.
     pub regex: Option<String>,
-    /// Structured-output EBNF grammar. SMG rejects constraints upstream.
+    /// Structured-output EBNF grammar. Set from the request's `constraint`.
     pub ebnf: Option<String>,
-    /// Structured-output structural tag. SMG rejects constraints upstream.
+    /// Structured-output structural tag. Set from the request's `constraint`.
     pub structural_tag: Option<String>,
     /// Ignore the EOS token and keep generating until another stop condition.
     pub ignore_eos: bool,

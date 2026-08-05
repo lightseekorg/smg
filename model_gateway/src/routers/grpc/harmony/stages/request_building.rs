@@ -2,21 +2,24 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use smg_grpc_client::{SglangGenerateRequestOptions, VllmEngineClient};
+use smg_grpc_client::{SglangGenerateRequestOptions, TokenSpeedSchedulerClient, VllmEngineClient};
 use tracing::{debug, error};
 
-use crate::routers::{
-    error,
-    grpc::{
-        backend_client::BackendClient,
-        client::GrpcClient,
-        common::stages::{helpers, PipelineStage},
-        context::{
-            ClientSelection, ExecutionPlan, ExecutionPlanKind, PreparationOutput, RequestContext,
-            RequestType,
+use crate::{
+    routers::{
+        error,
+        grpc::{
+            backend_client::BackendClient,
+            client::GrpcClient,
+            common::stages::{helpers, PipelineStage},
+            context::{
+                ClientSelection, ExecutionPlan, ExecutionPlanKind, PreparationOutput,
+                RequestContext, RequestType,
+            },
+            proto_wrapper::ProtoGenerateRequest,
         },
-        proto_wrapper::ProtoGenerateRequest,
     },
+    worker::RuntimeType,
 };
 
 /// Harmony Request Building stage: Convert Harmony tokens to gRPC request
@@ -299,12 +302,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
-            BackendClient::Grpc(GrpcClient::TokenSpeed(tokenspeed_client)) => {
+            BackendClient::Grpc(GrpcClient::TokenSpeed(_)) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
-                        tokenspeed_client
-                            .build_generate_request_from_chat(
+                        TokenSpeedSchedulerClient::build_generate_request_from_chat(
                                 request_id,
                                 body,
                                 placeholder_processed_text,
@@ -317,8 +319,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
-                    RequestType::Responses(request) => tokenspeed_client
-                        .build_generate_request_from_responses(
+                    RequestType::Responses(request) => TokenSpeedSchedulerClient::build_generate_request_from_responses(
                             request_id,
                             request.as_ref(),
                             placeholder_processed_text,
@@ -344,9 +345,58 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::TokenSpeed(Box::new(req))
             }
+            // A ZMQ worker speaks vLLM EngineCore or TokenSpeed directly; build the
+            // request natively for its runtime, mirroring the gRPC per-engine
+            // dispatch above. Both support the Harmony request types (Chat +
+            // Responses).
+            BackendClient::Zmq(zmq_client) if zmq_client.runtime() == RuntimeType::TokenSpeed => {
+                let req = match &ctx.input.request_type {
+                    RequestType::Chat(request) => {
+                        let body = modified_request
+                            .as_deref()
+                            .unwrap_or_else(|| request.as_ref());
+                        TokenSpeedSchedulerClient::build_generate_request_from_chat(
+                            request_id,
+                            body,
+                            placeholder_processed_text,
+                            token_ids,
+                            None, // Harmony path: multimodal not yet wired
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed ZMQ generate request");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?
+                    }
+                    RequestType::Responses(request) => {
+                        TokenSpeedSchedulerClient::build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            token_ids,
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed ZMQ generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?
+                    }
+                    RequestType::Embedding(_) => {
+                        return Err(error::bad_request(
+                            "harmony_embedding_not_supported",
+                            "Embedding requests are not supported with Harmony models".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
+                };
+                ProtoGenerateRequest::TokenSpeed(Box::new(req))
+            }
             BackendClient::Zmq(_) => {
-                // A ZMQ worker is a vLLM engine, so it uses the same vLLM request
-                // builders and supports the same request types (Chat + Responses).
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request
