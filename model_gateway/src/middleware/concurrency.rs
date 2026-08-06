@@ -32,37 +32,54 @@ use crate::{
     server::AppState,
 };
 
-/// A body wrapper that holds a token and returns it when the body is fully consumed or dropped.
-/// This ensures that for streaming responses, the token is only returned after the entire
-/// stream has been sent to the client.
-pub struct TokenGuardBody {
-    inner: Body,
-    /// The token bucket to return tokens to. Uses Option so we can take() on drop.
-    token_bucket: Option<Arc<TokenBucket>>,
+/// Returns an acquired token when the request is cancelled or the response body is dropped.
+struct TokenPermit {
+    token_bucket: Arc<TokenBucket>,
     /// Number of tokens to return.
     tokens: f64,
+}
+
+impl TokenPermit {
+    fn new(token_bucket: Arc<TokenBucket>, tokens: f64) -> Self {
+        Self {
+            token_bucket,
+            tokens,
+        }
+    }
+
+    fn try_acquire(token_bucket: Arc<TokenBucket>, tokens: f64) -> Result<Self, ()> {
+        token_bucket.try_acquire(tokens)?;
+        Ok(Self::new(token_bucket, tokens))
+    }
+}
+
+impl Drop for TokenPermit {
+    fn drop(&mut self) {
+        debug!(
+            "TokenPermit: request ended, returning {} tokens to bucket",
+            self.tokens
+        );
+        // Use lock-free sync return - no runtime needed, guaranteed token return
+        self.token_bucket.return_tokens_sync(self.tokens);
+    }
+}
+
+/// A body wrapper that holds a token until the body is fully consumed or dropped.
+pub struct TokenGuardBody {
+    inner: Body,
+    _permit: TokenPermit,
 }
 
 impl TokenGuardBody {
     /// Create a new TokenGuardBody that will return tokens when dropped.
     pub fn new(inner: Body, token_bucket: Arc<TokenBucket>, tokens: f64) -> Self {
+        Self::with_permit(inner, TokenPermit::new(token_bucket, tokens))
+    }
+
+    fn with_permit(inner: Body, permit: TokenPermit) -> Self {
         Self {
             inner,
-            token_bucket: Some(token_bucket),
-            tokens,
-        }
-    }
-}
-
-impl Drop for TokenGuardBody {
-    fn drop(&mut self) {
-        if let Some(bucket) = self.token_bucket.take() {
-            debug!(
-                "TokenGuardBody: stream ended, returning {} tokens to bucket",
-                self.tokens
-            );
-            // Use lock-free sync return - no runtime needed, guaranteed token return
-            bucket.return_tokens_sync(self.tokens);
+            _permit: permit,
         }
     }
 }
@@ -90,12 +107,18 @@ impl http_body::Body for TokenGuardBody {
     }
 }
 
+async fn run_with_permit(next: Next, request: Request<Body>, permit: TokenPermit) -> Response {
+    let (parts, body) = next.run(request).await.into_parts();
+    let body = TokenGuardBody::with_permit(body, permit);
+    Response::from_parts(parts, Body::new(body))
+}
+
 /// Request queue entry
 pub struct QueuedRequest {
     /// Time when the request was queued
     queued_at: Instant,
     /// Channel to send the permit back when acquired
-    permit_tx: oneshot::Sender<Result<(), StatusCode>>,
+    permit_tx: oneshot::Sender<Result<TokenPermit, StatusCode>>,
 }
 
 /// Queue processor that handles queued requests
@@ -134,10 +157,10 @@ impl QueueProcessor {
             let remaining_timeout = self.queue_timeout - elapsed;
 
             // Try to acquire token for this request
-            if self.token_bucket.try_acquire(1.0).is_ok() {
+            if let Ok(permit) = TokenPermit::try_acquire(self.token_bucket.clone(), 1.0) {
                 // Got token immediately
                 debug!("Queue: acquired token immediately for queued request");
-                let _ = queued.permit_tx.send(Ok(()));
+                let _ = queued.permit_tx.send(Ok(permit));
             } else {
                 // Need to wait for token
                 let token_bucket = self.token_bucket.clone();
@@ -154,7 +177,8 @@ impl QueueProcessor {
                         .is_ok()
                     {
                         debug!("Queue: acquired token after waiting");
-                        let _ = queued.permit_tx.send(Ok(()));
+                        let permit = TokenPermit::new(token_bucket, 1.0);
+                        let _ = queued.permit_tx.send(Ok(permit));
                     } else {
                         warn!("Queue: request timed out waiting for token");
                         let _ = queued.permit_tx.send(Err(StatusCode::REQUEST_TIMEOUT));
@@ -217,17 +241,10 @@ pub async fn concurrency_limit_middleware(
     };
 
     // Try to acquire token immediately
-    if token_bucket.try_acquire(1.0).is_ok() {
+    if let Ok(permit) = TokenPermit::try_acquire(token_bucket.clone(), 1.0) {
         debug!("Acquired token immediately");
         Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
-        let response = next.run(request).await;
-
-        // Wrap the response body with TokenGuardBody to return token when stream ends
-        // This ensures that for streaming responses, the token is only returned
-        // after the entire stream has been sent to the client.
-        let (parts, body) = response.into_parts();
-        let guarded_body = TokenGuardBody::new(body, token_bucket, 1.0);
-        Response::from_parts(parts, Body::new(guarded_body))
+        run_with_permit(next, request, permit).await
     } else {
         // No tokens available, try to queue if enabled
         if let Some(queue_tx) = &app_state.concurrency_queue_tx {
@@ -246,15 +263,10 @@ pub async fn concurrency_limit_middleware(
                 Ok(()) => {
                     // Wait for token from queue processor
                     match permit_rx.await {
-                        Ok(Ok(())) => {
+                        Ok(Ok(permit)) => {
                             debug!("Acquired token from queue");
                             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
-                            let response = next.run(request).await;
-
-                            // Wrap the response body with TokenGuardBody to return token when stream ends
-                            let (parts, body) = response.into_parts();
-                            let guarded_body = TokenGuardBody::new(body, token_bucket, 1.0);
-                            Response::from_parts(parts, Body::new(guarded_body))
+                            run_with_permit(next, request, permit).await
                         }
                         Ok(Err(status)) => {
                             warn!("Queue returned error status: {}", status);
@@ -279,5 +291,63 @@ pub async fn concurrency_limit_middleware(
             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
             StatusCode::TOO_MANY_REQUESTS.into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_body_holds_token_until_dropped() {
+        let bucket = Arc::new(TokenBucket::new(1, 0));
+        let permit = TokenPermit::try_acquire(bucket.clone(), 1.0).unwrap();
+        let body = TokenGuardBody::with_permit(Body::empty(), permit);
+
+        assert_eq!(bucket.available_tokens(), 0.0);
+        drop(body);
+        assert_eq!(bucket.available_tokens(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_returns_acquired_token() {
+        let bucket = Arc::new(TokenBucket::new(1, 0));
+        let task_bucket = bucket.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Test helper: the spawned task is explicitly aborted and awaited before the test ends"
+        )]
+        let task = tokio::spawn(async move {
+            let _permit = TokenPermit::try_acquire(task_bucket, 1.0).unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(bucket.available_tokens(), 0.0);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(bucket.available_tokens(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_request_returns_acquired_token() {
+        let bucket = Arc::new(TokenBucket::new(1, 0));
+        let (queue_tx, queue_rx) = mpsc::channel(1);
+        let (permit_tx, permit_rx) = oneshot::channel();
+        drop(permit_rx);
+
+        assert!(queue_tx
+            .send(QueuedRequest {
+                queued_at: Instant::now(),
+                permit_tx,
+            })
+            .await
+            .is_ok());
+        drop(queue_tx);
+
+        QueueProcessor::new(bucket.clone(), queue_rx, Duration::from_secs(1))
+            .run()
+            .await;
+        assert_eq!(bucket.available_tokens(), 1.0);
     }
 }
