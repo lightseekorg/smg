@@ -220,6 +220,10 @@ class Router:
             context keys. Example: {'x-tenant-id': 'tenant_id'}. Default: {}
         bootstrap_port_annotation: Kubernetes annotation name for bootstrap port (PD
             mode). Default: 'sglang.ai/bootstrap-port'
+        worker_ports_annotation: Kubernetes annotation listing a pod's worker data
+            ports (comma-separated) for pods running multiple engine servers.
+            Absent = one worker at service_discovery_port. Default:
+            'smg.ai/worker-ports'
         request_timeout_secs: Request timeout in seconds. Default: 600
         max_concurrent_requests: Maximum number of concurrent requests allowed for
             rate limiting. Default: 256

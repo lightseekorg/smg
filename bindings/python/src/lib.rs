@@ -494,6 +494,7 @@ struct Router {
     multimodal_shm_min_bytes: Option<usize>,
     model_aliases: HashMap<String, String>,
     worker_startup_delay: u64,
+    worker_ports_annotation: String,
 }
 
 impl Router {
@@ -667,6 +668,7 @@ impl Router {
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
+                worker_ports_annotation: self.worker_ports_annotation.clone(),
                 router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source: self.model_id_from.clone(),
@@ -986,6 +988,7 @@ impl Router {
         multimodal_shm_min_bytes = None,
         model_aliases = HashMap::new(),
         worker_startup_delay = 0,
+        worker_ports_annotation = String::from("smg.ai/worker-ports"),
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1114,6 +1117,7 @@ impl Router {
         multimodal_shm_min_bytes: Option<usize>,
         model_aliases: HashMap<String, String>,
         worker_startup_delay: u64,
+        worker_ports_annotation: String,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1256,6 +1260,7 @@ impl Router {
             multimodal_shm_min_bytes,
             model_aliases,
             worker_startup_delay,
+            worker_ports_annotation,
         })
     }
 
@@ -1294,6 +1299,7 @@ impl Router {
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
+                worker_ports_annotation: self.worker_ports_annotation.clone(),
                 router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
                 model_id_source,

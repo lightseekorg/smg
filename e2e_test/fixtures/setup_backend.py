@@ -23,13 +23,16 @@ import pytest
 from infra import (
     DEFAULT_MODEL,
     DEFAULT_ROUTER_TIMEOUT,
+    DEFAULT_STARTUP_TIMEOUT,
     ENV_MODEL,
     ENV_SKIP_BACKEND_SETUP,
     RUNTIME_LABELS,
     THIRD_PARTY_MODELS,
     ConnectionMode,
     Gateway,
+    Runtime,
     WorkerType,
+    get_connection_mode_override,
     get_runtime,
     launch_cloud_gateway,
 )
@@ -61,6 +64,24 @@ _WORKER_DEFAULTS = {
 _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
+# Engines that speak the direct-ZMQ backend wire in e2e. Pairing ZMQ with any
+# other engine can't work, so we reject it up front instead of timing out on a
+# worker that never becomes ready.
+ZMQ_CAPABLE_ENGINES = frozenset({Runtime.VLLM.value, Runtime.TOKENSPEED.value})
+
+
+def _validate_connection_mode(connection_mode: ConnectionMode, engine: str) -> None:
+    """Reject connection-mode/engine pairings that cannot start.
+
+    Raises ``ValueError`` when a lane selects ZMQ for an engine that does not
+    support the direct-ZMQ backend.
+    """
+    if connection_mode == ConnectionMode.ZMQ and engine not in ZMQ_CAPABLE_ENGINES:
+        raise ValueError(
+            f"ConnectionMode.ZMQ is only supported for engines "
+            f"{sorted(ZMQ_CAPABLE_ENGINES)}, not {engine!r}"
+        )
+
 
 def _start_workers_tracked(**kwargs) -> list:
     """Start workers via the session pool and track failures for fail-fast.
@@ -89,6 +110,25 @@ def _start_gateway(gateway: Gateway, gateway_config: dict, **mode_kwargs) -> Non
         log_level=gateway_config.get("log_level"),
         log_dir=gateway_config.get("log_dir"),
     )
+
+
+def _gateway_readiness_timeout(
+    connection_mode: ConnectionMode, model_id: str, base_timeout: float
+) -> float:
+    """Effective gateway readiness timeout for the given connection mode.
+
+    gRPC/HTTP workers are health-checked (model fully loaded) by the pool
+    before the gateway starts, so the gateway only has to connect — the short
+    router timeout suffices. ZMQ engines instead spawn and return immediately;
+    their model load happens *inside* the gateway's readiness gate, so that gate
+    must cover model load too. Use the model's ``startup_timeout`` (what the
+    worker gate would have applied), never shrinking an explicitly larger
+    gateway timeout.
+    """
+    if connection_mode != ConnectionMode.ZMQ:
+        return base_timeout
+    startup_timeout = get_model_spec(model_id).get("startup_timeout", DEFAULT_STARTUP_TIMEOUT)
+    return max(base_timeout, startup_timeout)
 
 
 def _make_openai_client(gateway: Gateway) -> openai.OpenAI:
@@ -145,7 +185,13 @@ def setup_backend(request: pytest.FixtureRequest):
     is_pd = backend_name.startswith("pd_")
     protocol = backend_name.replace("epd_", "").replace("pd_", "")
     connection_mode = ConnectionMode(protocol)
+    # A lane can override the local wire (e.g. run grpc/http cases over ZMQ);
+    # PD/EPD keep their own wire since they are excluded from those lanes.
+    mode_override = get_connection_mode_override()
+    if mode_override is not None and not is_pd and not is_epd:
+        connection_mode = mode_override
     engine = get_runtime()
+    _validate_connection_mode(connection_mode, engine)
     model_path = get_model_spec(model_id)["model"]
     workers_config = get_marker_kwargs(request, "workers", defaults=_WORKER_DEFAULTS)
     log_dir = os.environ.get("E2E_LOG_DIR") or gateway_config.get("log_dir")
@@ -232,18 +278,36 @@ def _setup_local(
         gpus=workers_config.get("gpus"),
         extra_engine_args=workers_config.get("extra_engine_args"),
     )
+    # ZMQ engines dial this gateway's handshake sockets, so they cannot be
+    # reused by a later class's gateway — the pool starts them fresh and the
+    # caller owns their teardown (like the PD path). gRPC/HTTP workers stay
+    # in the pool and outlive the gateway.
+    is_zmq = connection_mode == ConnectionMode.ZMQ
+    # ZMQ engines load the model inside the gateway's readiness gate (the worker
+    # spawn returned immediately), so that gate must cover model load.
+    gateway_config = {
+        **gateway_config,
+        "timeout": _gateway_readiness_timeout(connection_mode, model_id, gateway_config["timeout"]),
+    }
     try:
         _start_gateway(
             gateway,
             gateway_config,
             worker_urls=[w.base_url for w in workers],
             model_path=model_path,
+            backend=engine if is_zmq else None,
         )
         logger.info("%s backend ready at %s", backend_name, gateway.base_url)
         yield backend_name, model_path, _make_openai_client(gateway), gateway
     finally:
-        logger.info("Tearing down %s backend (workers stay in pool)", backend_name)
+        logger.info(
+            "Tearing down %s backend (%s)",
+            backend_name,
+            "stopping ZMQ workers" if is_zmq else "workers stay in pool",
+        )
         gateway.shutdown()
+        if is_zmq:
+            stop_workers(workers)
 
 
 # ---------------------------------------------------------------------------
@@ -463,20 +527,34 @@ def backend_router(request: pytest.FixtureRequest):
     backend_name = request.param
     model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
     connection_mode = ConnectionMode(backend_name)
+    mode_override = get_connection_mode_override()
+    if mode_override is not None:
+        connection_mode = mode_override
+    engine = get_runtime()
+    _validate_connection_mode(connection_mode, engine)
     model_path = get_model_spec(model_id)["model"]
+    is_zmq = connection_mode == ConnectionMode.ZMQ
 
     # Route through the pool so we evict any cached class-scope worker
-    # holding the GPUs we need. The pool retains ownership; we don't stop
-    # the workers ourselves.
+    # holding the GPUs we need. The pool retains ownership of gRPC/HTTP
+    # workers; ZMQ engines are bound to this gateway, so we stop them here.
     workers = get_pool().acquire(
         model_id=model_id,
-        engine=get_runtime(),
+        engine=engine,
         mode=connection_mode,
         count=1,
     )
     gateway = Gateway()
     try:
-        gateway.start(worker_urls=[w.base_url for w in workers], model_path=model_path)
+        gateway.start(
+            worker_urls=[w.base_url for w in workers],
+            model_path=model_path,
+            backend=engine if is_zmq else None,
+            # ZMQ loads the model inside the gateway's readiness gate; cover it.
+            timeout=_gateway_readiness_timeout(connection_mode, model_id, DEFAULT_ROUTER_TIMEOUT),
+        )
         yield gateway
     finally:
         gateway.shutdown()
+        if is_zmq:
+            stop_workers(workers)

@@ -542,8 +542,6 @@ pub mod metrics_labels {
     // Discovery registration results
     pub const REGISTRATION_SUCCESS: &str = "success";
     pub const REGISTRATION_FAILED: &str = "failed";
-    pub const REGISTRATION_DUPLICATE: &str = "duplicate";
-    pub const DEREGISTRATION_POD_DELETED: &str = "pod_deleted";
     pub const DEREGISTRATION_RECONCILED: &str = "reconciled";
 
     // Rate limit results

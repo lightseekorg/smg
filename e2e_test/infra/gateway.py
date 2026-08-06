@@ -122,6 +122,7 @@ class Gateway:
         igw_mode: bool = False,
         cloud_backend: str | None = None,
         history_backend: str = "memory",
+        backend: str | None = None,
         policy: str = "round_robin",
         timeout: float = DEFAULT_ROUTER_TIMEOUT,
         show_output: bool | None = None,
@@ -229,8 +230,13 @@ class Gateway:
             self.model_path = model_path
             self.pd_mode = False
             self.igw_mode = False
+            mode_args = ["--model-path", model_path, "--worker-urls", *worker_urls]
+            # ZMQ workers share one wire across engine runtimes, so the router
+            # cannot probe the backend from the ipc:// URL — pin it explicitly.
+            if backend is not None:
+                mode_args += ["--backend", backend]
             self._launch(
-                mode_args=["--model-path", model_path, "--worker-urls", *worker_urls],
+                mode_args=mode_args,
                 timeout=timeout,
                 show_output=show_output,
                 extra_args=extra_args,

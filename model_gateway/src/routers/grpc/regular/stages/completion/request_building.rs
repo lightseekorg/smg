@@ -141,6 +141,12 @@ impl PipelineStage for CompletionRequestBuildingStage {
         let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_type = &ctx.input.request_type;
         let workers = ctx.state.workers.as_ref();
+        // Resolve string `stop` sequences for engines that can't match them
+        // server-side (SGLang skip_tokenizer_init, and every direct-ZMQ
+        // backend): drop the strings, convert single-token stops to
+        // stop_token_ids; the router-side StopSequenceDecoder trims the text.
+        let is_zmq = builder_client.is_zmq();
+        let tokenizer = ctx.tokenizer_arc();
 
         let plan = match items.as_slice() {
             [] => {
@@ -149,9 +155,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     "No prompts prepared",
                 ))
             }
-            [item] => ExecutionPlan::generate(
-                self.plan_kind,
-                self.build_proto_request(
+            [item] => {
+                let mut proto_request = self.build_proto_request(
                     builder_client,
                     helpers::resolve_request_id(
                         request_type,
@@ -163,8 +168,10 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     &completion_request,
                     request_type,
                     workers,
-                )?,
-            ),
+                )?;
+                helpers::resolve_string_stops(&mut proto_request, tokenizer.as_ref(), is_zmq);
+                ExecutionPlan::generate(self.plan_kind, proto_request)
+            }
             batch_items => {
                 // The shared id (client rid or middleware request id) stays
                 // clean for the response; per-sub engine ids get a uniqueness
@@ -186,14 +193,16 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     } else {
                         format!("{shared_request_id}-p{i}")
                     };
-                    requests.push(self.build_proto_request(
+                    let mut proto_request = self.build_proto_request(
                         builder_client,
                         sub_request_id,
                         item,
                         &completion_request,
                         request_type,
                         workers,
-                    )?);
+                    )?;
+                    helpers::resolve_string_stops(&mut proto_request, tokenizer.as_ref(), is_zmq);
+                    requests.push(proto_request);
                 }
                 ExecutionPlan::Batch {
                     kind: self.plan_kind,

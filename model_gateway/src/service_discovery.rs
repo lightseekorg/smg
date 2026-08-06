@@ -1,18 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
-    // std::sync::Mutex is intentional: all critical sections are tiny
-    // (HashSet insert/remove/contains) and never cross .await boundaries.
-    // See: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, ListParams},
+    api::Api,
     runtime::{
-        watcher::{watcher, Config},
+        reflector::{self, Store},
+        watcher::{watcher, Config, Event},
         WatchStreamExt,
     },
     Client,
@@ -23,12 +21,13 @@ use smg_mesh::{
     gossip::{NodeState, NodeStatus},
     ClusterState,
 };
-use tokio::{task, time};
+use tokio::{sync::Notify, task, time};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
     observability::metrics::{metrics_labels, Metrics},
+    worker::WorkerOrigin,
     workflow::{Job, WorkerRegistrationMode},
 };
 
@@ -99,6 +98,9 @@ pub struct ServiceDiscoveryConfig {
     pub decode_selector: HashMap<String, String>,
     // Bootstrap port annotation specific to mooncake implementation
     pub bootstrap_port_annotation: String,
+    /// Annotation listing the pod's worker data ports (comma-separated).
+    /// Absent = single worker at `port`.
+    pub worker_ports_annotation: String,
     // Router node discovery for mesh
     pub router_selector: HashMap<String, String>,
     pub router_mesh_port_annotation: String,
@@ -164,9 +166,9 @@ impl ServiceDiscoveryConfig {
 }
 
 /// Build a kube watcher Config that pushes the given label selector down to
-/// the API server, logging the start of a new watcher iteration at INFO.
-/// An empty selector falls back to `Config::default()` (no server-side
-/// label filtering) so the watcher still functions when no selector is set.
+/// the API server, logging watcher startup at INFO. An empty selector falls
+/// back to `Config::default()` (no server-side label filtering) so the
+/// watcher still functions when no selector is set.
 fn build_watcher_config(watcher_kind: &str, label_selector: &str) -> Config {
     info!(
         "Starting K8s {} watcher | selector: '{}'",
@@ -192,6 +194,7 @@ impl Default for ServiceDiscoveryConfig {
             prefill_selector: HashMap::new(),
             decode_selector: HashMap::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
+            worker_ports_annotation: "smg.ai/worker-ports".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
@@ -207,6 +210,11 @@ pub enum PodType {
     Regular,
 }
 
+/// Labels stamped on every discovery-created worker; workers carrying
+/// [`POD_UID_LABEL`] are owned (added/removed) by the K8s reconciler.
+pub const POD_NAME_LABEL: &str = "smg.ai/pod-name";
+pub const POD_UID_LABEL: &str = "smg.ai/pod-uid";
+
 #[derive(Debug, Clone)]
 pub struct PodInfo {
     pub name: String,
@@ -215,30 +223,14 @@ pub struct PodInfo {
     pub status: String,
     pub is_ready: bool,
     pub pod_type: Option<PodType>,
-    pub bootstrap_port: Option<u16>,
+    /// Worker data ports: the worker-ports annotation when present, else the
+    /// single configured discovery port.
+    pub ports: Vec<u16>,
+    /// Per-port bootstrap ports (Encode/Prefill only), aligned with `ports`.
+    pub bootstrap_ports: Vec<Option<u16>>,
     pub is_router: bool,
     pub mesh_port: Option<u16>,
     pub model_id_override: Option<String>,
-}
-
-// Identity is (name, uid) — the uid changes on every pod restart, so
-// StatefulSet pods that keep the same name+IP across restarts are still
-// detected as different entities.  Mutable fields like status and is_ready
-// must not affect set membership, otherwise reconciliation produces false
-// diffs when a pod's readiness changes between watcher events and a full list.
-impl PartialEq for PodInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.uid == other.uid
-    }
-}
-
-impl Eq for PodInfo {}
-
-impl std::hash::Hash for PodInfo {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.uid.hash(state);
-    }
 }
 
 impl PodInfo {
@@ -315,18 +307,16 @@ impl PodInfo {
             None
         };
 
-        let bootstrap_port = if matches!(&pod_type, Some(PodType::Encode | PodType::Prefill)) {
-            if let Some(config) = config {
-                pod.metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|annotations| annotations.get(&config.bootstrap_port_annotation))
-                    .and_then(|port_str| port_str.parse::<u16>().ok())
-            } else {
-                None
-            }
+        let ports = config
+            .map(|config| resolve_worker_ports(&name, pod, config))
+            .unwrap_or_default();
+
+        let bootstrap_ports = if matches!(&pod_type, Some(PodType::Encode | PodType::Prefill)) {
+            config
+                .map(|config| resolve_bootstrap_ports(&name, pod, config, ports.len()))
+                .unwrap_or_default()
         } else {
-            None
+            vec![None; ports.len()]
         };
 
         // Check if this is a router pod
@@ -364,7 +354,8 @@ impl PodInfo {
             status: pod_status,
             is_ready,
             pod_type,
-            bootstrap_port,
+            ports,
+            bootstrap_ports,
             is_router,
             mesh_port,
             model_id_override,
@@ -374,10 +365,74 @@ impl PodInfo {
     pub fn is_healthy(&self) -> bool {
         self.is_ready && self.status == "Running"
     }
+}
 
-    pub fn worker_url(&self, port: u16) -> String {
-        // Bare host:port lets DetectConnectionModeStep dual-probe HTTP and gRPC.
-        format!("{}:{}", self.ip, port)
+/// Parse a comma-separated port list. Preserves order, rejects 0 and junk.
+fn parse_port_list(raw: &str) -> Option<Vec<u16>> {
+    let mut ports = Vec::new();
+    for part in raw.split(',') {
+        let port: u16 = part.trim().parse().ok()?;
+        if port == 0 {
+            return None;
+        }
+        ports.push(port);
+    }
+    Some(ports)
+}
+
+/// Data ports for the pod's workers: the worker-ports annotation when present
+/// (deduped, order-preserving), else the single configured discovery port.
+fn resolve_worker_ports(pod_name: &str, pod: &Pod, config: &ServiceDiscoveryConfig) -> Vec<u16> {
+    let Some(raw) = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(&config.worker_ports_annotation))
+    else {
+        return vec![config.port];
+    };
+    match parse_port_list(raw) {
+        Some(mut ports) => {
+            let mut seen = HashSet::new();
+            ports.retain(|port| seen.insert(*port));
+            ports
+        }
+        None => {
+            warn!(
+                "Pod {}: invalid {} annotation '{}', falling back to port {}",
+                pod_name, config.worker_ports_annotation, raw, config.port
+            );
+            vec![config.port]
+        }
+    }
+}
+
+/// Bootstrap ports aligned with the pod's worker ports: a single value applies
+/// to every worker; a list must match the worker port count.
+fn resolve_bootstrap_ports(
+    pod_name: &str,
+    pod: &Pod,
+    config: &ServiceDiscoveryConfig,
+    num_ports: usize,
+) -> Vec<Option<u16>> {
+    let Some(raw) = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(&config.bootstrap_port_annotation))
+    else {
+        return vec![None; num_ports];
+    };
+    match parse_port_list(raw) {
+        Some(ports) if ports.len() == 1 => vec![Some(ports[0]); num_ports],
+        Some(ports) if ports.len() == num_ports => ports.into_iter().map(Some).collect(),
+        _ => {
+            warn!(
+                "Pod {}: {} annotation '{}' does not align with {} worker port(s), ignoring",
+                pod_name, config.bootstrap_port_annotation, raw, num_ports
+            );
+            vec![None; num_ports]
+        }
     }
 }
 
@@ -399,6 +454,36 @@ pub async fn start_service_discovery(
 
     let client = Client::try_default().await?;
 
+    Ok(run_service_discovery(
+        client,
+        config,
+        app_context,
+        mesh_cluster_state,
+        mesh_port,
+    ))
+}
+
+/// Run discovery against an injected client. Compiled only for this crate's
+/// own integration tests, which point it at a scripted API server.
+#[cfg(feature = "test-util")]
+pub fn start_service_discovery_with_client(
+    client: Client,
+    config: ServiceDiscoveryConfig,
+    app_context: Arc<AppContext>,
+    mesh_cluster_state: Option<ClusterState>,
+    mesh_port: Option<u16>,
+) -> task::JoinHandle<()> {
+    let _ = ring::default_provider().install_default();
+    run_service_discovery(client, config, app_context, mesh_cluster_state, mesh_port)
+}
+
+fn run_service_discovery(
+    client: Client,
+    config: ServiceDiscoveryConfig,
+    app_context: Arc<AppContext>,
+    mesh_cluster_state: Option<ClusterState>,
+    mesh_port: Option<u16>,
+) -> task::JoinHandle<()> {
     // Log the appropriate selectors based on mode
     if config.disaggregated_mode {
         let encode_selector = config
@@ -459,8 +544,6 @@ pub async fn start_service_discovery(
         reason = "service discovery runs for the lifetime of the server; shutdown is handled by dropping the handle"
     )]
     let handle = task::spawn(async move {
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-
         let pods: Api<Pod> = if let Some(namespace) = &config.namespace {
             Api::namespaced(client, namespace)
         } else {
@@ -469,8 +552,7 @@ pub async fn start_service_discovery(
 
         debug!("K8s service discovery initialized");
 
-        let config_arc = Arc::new(config.clone());
-        let port = config.port;
+        let config_arc = Arc::new(config);
 
         // Spawn router discovery task if enabled and mesh is available
         // Router discovery requires mesh to be enabled to update cluster state
@@ -509,573 +591,418 @@ pub async fn start_service_discovery(
             }
         }
 
-        // Spawn a supervisor that runs periodic reconciliation and restarts it
-        // on panic. This is a safety net independent of the watcher: it catches
-        // missed events regardless of whether the watcher is healthy, restarting,
-        // or erroring out.
-        {
-            let reconcile_pods_api = pods.clone();
-            let reconcile_config = Arc::clone(&config_arc);
-            let reconcile_tracked = Arc::clone(&tracked_pods);
-            let reconcile_ctx = Arc::clone(&app_context);
-            let reconcile_interval = config.check_interval;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "reconciliation supervisor runs for the lifetime of the server"
-            )]
-            tokio::spawn(async move {
-                loop {
-                    let api = reconcile_pods_api.clone();
-                    let cfg = Arc::clone(&reconcile_config);
-                    let trk = Arc::clone(&reconcile_tracked);
-                    let ctx = Arc::clone(&reconcile_ctx);
-                    let handle = tokio::spawn(async move {
-                        // Delay the first tick so the watcher has time to populate initial state.
-                        let start = time::Instant::now() + reconcile_interval;
-                        let mut interval = time::interval_at(start, reconcile_interval);
-                        loop {
-                            interval.tick().await;
-                            reconcile_pods(
-                                &api,
-                                Arc::clone(&cfg),
-                                Arc::clone(&trk),
-                                Arc::clone(&ctx),
-                                port,
-                            )
-                            .await;
+        // Level-triggered reconcile: the reflector keeps `store` consistent
+        // with the API server (initial LIST → watch, re-LIST on desync,
+        // reconnect with internal backoff). Every watch event and a periodic
+        // tick trigger one pass diffing desired workers against the registry.
+        let (store, writer) = reflector::store::<Pod>();
+        let notify = Arc::new(Notify::new());
+
+        let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
+        // managed_fields dominate pod object size and nothing here reads them;
+        // pruning keeps the long-lived Store lean.
+        let mut stream = watcher(pods, watcher_config)
+            .modify(|pod| pod.metadata.managed_fields = None)
+            .default_backoff()
+            .reflect(writer)
+            .boxed();
+
+        let driver = {
+            let notify = Arc::clone(&notify);
+            async move {
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(_) => notify.notify_one(),
+                        Err(e) => {
+                            error!("K8s worker watcher error (auto-retrying with backoff): {e}");
                         }
-                    });
-                    if let Err(e) = handle.await {
-                        error!(
-                            "Periodic reconciliation task panicked: {} -- restarting after {}s",
-                            e,
-                            reconcile_interval.as_secs()
-                        );
-                        time::sleep(reconcile_interval).await;
-                    } else {
-                        break;
                     }
                 }
-            });
-            info!(
-                "Periodic reconciliation enabled | interval: {}s",
-                config.check_interval.as_secs()
-            );
-        }
-
-        let mut retry_delay = Duration::from_secs(1);
-        const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
-
-        loop {
-            let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
-            let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
-
-            let config_clone = Arc::clone(&config_arc);
-            let tracked_pods_clone = Arc::clone(&tracked_pods);
-
-            let filtered_stream = watcher_stream.filter_map(move |obj_res| {
-                let config_inner = Arc::clone(&config_clone);
-
-                async move {
-                    match obj_res {
-                        Ok(pod) => {
-                            if PodInfo::should_include(&pod, &config_inner) {
-                                Some(Ok(pod))
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => Some(Err(e)),
-                    }
-                }
-            });
-
-            let tracked_pods_clone2 = Arc::clone(&tracked_pods_clone);
-            let app_context_clone = Arc::clone(&app_context);
-            let config_clone2 = Arc::clone(&config_arc);
-
-            let watcher_ok = filtered_stream
-                .try_for_each(move |pod| {
-                    let tracked_pods_inner = Arc::clone(&tracked_pods_clone2);
-                    let app_context_inner = Arc::clone(&app_context_clone);
-                    let config_inner = Arc::clone(&config_clone2);
-
-                    async move {
-                        let pod_info = PodInfo::from_pod(&pod, Some(&config_inner));
-
-                        if let Some(pod_info) = pod_info {
-                            if pod.metadata.deletion_timestamp.is_some() {
-                                handle_pod_deletion(
-                                    &pod_info,
-                                    tracked_pods_inner,
-                                    app_context_inner,
-                                    port,
-                                )
-                                .await;
-                            } else {
-                                handle_pod_event(
-                                    &pod_info,
-                                    tracked_pods_inner,
-                                    app_context_inner,
-                                    port,
-                                    config_inner.disaggregated_mode,
-                                )
-                                .await;
-                            }
-                        }
-                        Ok(())
-                    }
-                })
-                .await;
-
-            match watcher_ok {
-                Ok(()) => {
-                    retry_delay = Duration::from_secs(1);
-                }
-                Err(err) => {
-                    error!("Error in Kubernetes watcher: {}", err);
-                    warn!(
-                        "Retrying in {} seconds with exponential backoff",
-                        retry_delay.as_secs()
-                    );
-                    time::sleep(retry_delay).await;
-
-                    retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
-                }
-            }
-
-            warn!(
-                "Kubernetes watcher exited, restarting in {} seconds",
-                config_arc.check_interval.as_secs()
-            );
-            time::sleep(config_arc.check_interval).await;
-        }
-    });
-
-    Ok(handle)
-}
-
-async fn handle_pod_event(
-    pod_info: &PodInfo,
-    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
-    app_context: Arc<AppContext>,
-    port: u16,
-    disaggregated_mode: bool,
-) {
-    let worker_url = pod_info.worker_url(port);
-
-    if pod_info.is_healthy() {
-        // Track whether to add and get count in single lock acquisition.
-        // Also detect UID changes (StatefulSet pod restarts with same name):
-        // evict the old entry so the router replaces the stale connection.
-        let (should_add, evicted, tracked_count) = {
-            let mut tracker = match tracked_pods.lock() {
-                Ok(tracker) => tracker,
-                Err(e) => {
-                    error!("Failed to acquire tracked_pods lock: {}", e);
-                    return;
-                }
-            };
-
-            if tracker.contains(pod_info) {
-                (false, None, tracker.len())
-            } else {
-                // Check for same-name pod with different UID (restart).
-                let old = tracker
-                    .iter()
-                    .find(|p| p.name == pod_info.name && p.uid != pod_info.uid)
-                    .cloned();
-                if let Some(ref old) = old {
-                    tracker.remove(old);
-                }
-                tracker.insert(pod_info.clone());
-                (true, old, tracker.len())
+                error!("K8s worker watcher stream ended; discovery no longer receives updates");
             }
         };
 
-        // Submit RemoveWorker for the evicted old-UID pod outside the lock.
-        if let Some(ref old) = evicted {
-            let old_url = old.worker_url(port);
-            info!(
-                "Evicting restarted pod {} (old uid={}) | url: {}",
-                old.name, old.uid, old_url
-            );
-            let job = Job::RemoveWorker {
-                url: old_url.clone(),
-                expected_revision: None,
-            };
-            if let Some(job_queue) = app_context.worker_job_queue.get() {
-                if let Err(e) = job_queue.submit(job).await {
-                    error!(
-                        "Failed to submit removal for evicted pod {}: {}",
-                        old_url, e
-                    );
-                }
-            }
-        }
-
-        if should_add {
-            info!(
-                "Adding pod: {} | type: {:?} | url: {}",
-                pod_info.name, pod_info.pod_type, worker_url
-            );
-
-            let worker_type = if disaggregated_mode {
-                match &pod_info.pod_type {
-                    Some(PodType::Encode) => WorkerType::Encode,
-                    Some(PodType::Prefill) => WorkerType::Prefill,
-                    Some(PodType::Decode) => WorkerType::Decode,
-                    _ => WorkerType::Regular,
-                }
-            } else {
-                WorkerType::Regular
-            };
-
-            let bootstrap_port = if disaggregated_mode {
-                match &pod_info.pod_type {
-                    Some(PodType::Encode | PodType::Prefill) => pod_info.bootstrap_port,
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            let mut spec = WorkerSpec::new(worker_url.clone());
-            spec.worker_type = worker_type;
-            spec.bootstrap_port = bootstrap_port;
-            // Inject pod-metadata model_id as a label so the existing
-            // resolution chain in create_worker.rs picks it up at
-            // priority #2 (served_model_name).
-            if let Some(ref override_id) = pod_info.model_id_override {
-                spec.labels
-                    .insert("served_model_name".to_string(), override_id.clone());
-            }
-            spec.api_key.clone_from(&app_context.router_config.api_key);
-            // Health config is resolved at worker build time from router
-            // defaults + per-worker overrides (spec.health).
-            spec.max_connection_attempts = app_context
-                .router_config
-                .health_check
-                .success_threshold
-                .max(1)
-                * 20;
-
-            let config = spec;
-
-            let job = Job::AddWorker {
-                config: Box::new(config.clone()),
-                registration_mode: WorkerRegistrationMode::Upsert,
-            };
-
-            if let Some(job_queue) = app_context.worker_job_queue.get() {
-                match job_queue.submit(job).await {
-                    Ok(()) => {
-                        debug!("Worker addition job submitted for: {}", worker_url);
-
-                        // Layer 4: Record successful registration from K8s discovery
-                        Metrics::record_discovery_registration(
-                            metrics_labels::DISCOVERY_KUBERNETES,
-                            metrics_labels::REGISTRATION_SUCCESS,
-                        );
-
-                        // Update workers discovered gauge (using count from initial lock)
-                        Metrics::set_discovery_workers_discovered(
-                            metrics_labels::DISCOVERY_KUBERNETES,
-                            tracked_count,
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to submit worker addition job for {}: {}",
-                            worker_url, e
-                        );
-
-                        // Layer 4: Record failed registration
-                        Metrics::record_discovery_registration(
-                            metrics_labels::DISCOVERY_KUBERNETES,
-                            metrics_labels::REGISTRATION_FAILED,
-                        );
-
-                        match tracked_pods.lock() {
-                            Ok(mut tracker) => {
-                                tracker.remove(pod_info);
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Lock poisoned during rollback for {}: {} -- tracked state is now inconsistent",
-                                    worker_url, e
-                                );
-                            }
-                        }
-                    }
-                }
-            } else {
-                debug!(
-                    "JobQueue not initialized, skipping async worker addition for: {}",
-                    worker_url
-                );
-            }
-        } else {
-            // Pod already tracked - this is a duplicate event
-            Metrics::record_discovery_registration(
-                metrics_labels::DISCOVERY_KUBERNETES,
-                metrics_labels::REGISTRATION_DUPLICATE,
-            );
-        }
-    }
-}
-
-async fn handle_pod_deletion(
-    pod_info: &PodInfo,
-    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
-    app_context: Arc<AppContext>,
-    port: u16,
-) {
-    let worker_url = pod_info.worker_url(port);
-
-    // Remove pod and get remaining count in single lock acquisition
-    let (was_tracked, remaining_count) = {
-        let mut tracked = match tracked_pods.lock() {
-            Ok(tracked) => tracked,
-            Err(e) => {
-                error!("Failed to acquire tracked_pods lock during deletion: {}", e);
+        let reconciler = async {
+            if store.wait_until_ready().await.is_err() {
+                error!("K8s worker watcher dropped before initial sync; reconciliation disabled");
                 return;
             }
-        };
-        let removed = tracked.remove(pod_info);
-        (removed, tracked.len())
-    };
-
-    if was_tracked {
-        info!(
-            "Removing pod: {} | type: {:?} | url: {}",
-            pod_info.name, pod_info.pod_type, worker_url
-        );
-
-        let job = Job::RemoveWorker {
-            url: worker_url.clone(),
-            expected_revision: None,
-        };
-
-        if let Some(job_queue) = app_context.worker_job_queue.get() {
-            if let Err(e) = job_queue.submit(job).await {
-                error!(
-                    "Failed to submit worker removal job for {}: {}",
-                    worker_url, e
-                );
-            } else {
-                debug!("Submitted worker removal job for {}", worker_url);
-
-                // Layer 4: Record deregistration from K8s pod deletion
-                Metrics::record_discovery_deregistration(
-                    metrics_labels::DISCOVERY_KUBERNETES,
-                    metrics_labels::DEREGISTRATION_POD_DELETED,
-                );
-
-                // Update workers discovered gauge (using count from initial lock)
-                Metrics::set_discovery_workers_discovered(
-                    metrics_labels::DISCOVERY_KUBERNETES,
-                    remaining_count,
-                );
-            }
-        } else {
-            error!(
-                "JobQueue not initialized, cannot remove worker {}",
-                worker_url
+            info!(
+                "K8s worker store synced, reconciling on change and every {}s",
+                config_arc.check_interval.as_secs()
             );
+            let mut interval = time::interval(config_arc.check_interval);
+            interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = notify.notified() => {
+                        // Coalesce event bursts (relists, rollouts) into one pass.
+                        time::sleep(Duration::from_secs(1)).await;
+                    }
+                    _ = interval.tick() => {}
+                }
+                reconcile_workers(&store, &config_arc, &app_context).await;
+            }
+        };
+
+        tokio::join!(driver, reconciler);
+    });
+
+    handle
+}
+
+/// One worker the reconciler wants registered: a single engine server
+/// (pod IP + data port) plus the metadata needed to build its spec.
+#[derive(Debug, Clone)]
+struct DesiredWorker {
+    /// Bare host:port so DetectConnectionModeStep dual-probes HTTP and gRPC.
+    url: String,
+    worker_type: WorkerType,
+    bootstrap_port: Option<u16>,
+    pod_name: String,
+    pod_uid: String,
+    model_id_override: Option<String>,
+}
+
+/// Desired view of the cluster derived from the store snapshot.
+#[derive(Debug, Default)]
+struct DesiredState {
+    /// Owning pod uid per worker URL, for all live, non-terminating pods
+    /// (any readiness). Registered workers whose URL is absent — or owned by
+    /// a different pod uid — are removed; unready pods keep their own
+    /// workers (the health checker owns readiness flaps).
+    uid_by_url: HashMap<String, String>,
+    /// Workers on healthy pods — registration candidates.
+    addable: Vec<DesiredWorker>,
+}
+
+fn worker_type_for(pod_type: Option<&PodType>, disaggregated_mode: bool) -> WorkerType {
+    if disaggregated_mode {
+        match pod_type {
+            Some(PodType::Encode) => WorkerType::Encode,
+            Some(PodType::Prefill) => WorkerType::Prefill,
+            Some(PodType::Decode) => WorkerType::Decode,
+            _ => WorkerType::Regular,
         }
     } else {
-        debug!(
-            "Pod deletion event for untracked/already removed pod: {} (type: {:?}). Worker URL: {}",
-            pod_info.name, pod_info.pod_type, worker_url
-        );
+        WorkerType::Regular
     }
 }
 
-/// Build the set of live pods from a K8s pod list, filtering by config selectors
-/// and excluding pods with a deletion timestamp.
-fn build_live_pod_set(pod_list: &[Pod], config: &ServiceDiscoveryConfig) -> HashSet<PodInfo> {
-    let mut live_pods = HashSet::new();
-    for pod in pod_list {
+fn compute_desired_state(pods: &[Arc<Pod>], config: &ServiceDiscoveryConfig) -> DesiredState {
+    let mut state = DesiredState::default();
+    for pod in pods {
         if !PodInfo::should_include(pod, config) {
             continue;
         }
+        // Terminating pods leave the desired set immediately so their
+        // workers drain at the start of the grace period, not the end.
         if pod.metadata.deletion_timestamp.is_some() {
             continue;
         }
-        if let Some(info) = PodInfo::from_pod(pod, Some(config)) {
-            live_pods.insert(info);
+        let Some(info) = PodInfo::from_pod(pod, Some(config)) else {
+            continue;
+        };
+        for (index, port) in info.ports.iter().enumerate() {
+            let url = format!("{}:{}", info.ip, port);
+            if state.uid_by_url.contains_key(&url) {
+                continue;
+            }
+            state.uid_by_url.insert(url.clone(), info.uid.clone());
+            if info.is_healthy() {
+                state.addable.push(DesiredWorker {
+                    url,
+                    worker_type: worker_type_for(info.pod_type.as_ref(), config.disaggregated_mode),
+                    bootstrap_port: info.bootstrap_ports.get(index).copied().flatten(),
+                    pod_name: info.name.clone(),
+                    pod_uid: info.uid.clone(),
+                    model_id_override: info.model_id_override.clone(),
+                });
+            }
         }
     }
-    live_pods
+    state
 }
 
-/// Compute the reconciliation diff between tracked and live pod sets.
-///
-/// Returns `(stale, missing)` where:
-/// - `stale`: pods in `tracked` but not in `live` (should be removed)
-/// - `missing`: pods in `live` but not in `tracked` that are healthy (should be added)
-fn compute_reconciliation_diff(
-    tracked: &HashSet<PodInfo>,
-    live: &HashSet<PodInfo>,
-) -> (Vec<PodInfo>, Vec<PodInfo>) {
-    let stale: Vec<PodInfo> = tracked.difference(live).cloned().collect();
-    let missing: Vec<PodInfo> = live
-        .difference(tracked)
-        .filter(|p| p.is_healthy())
-        .cloned()
-        .collect();
-    (stale, missing)
+/// A registry worker owned by K8s discovery (stamped with [`POD_UID_LABEL`]).
+#[derive(Debug, Clone)]
+struct OwnedWorker {
+    /// Scheme- and DP-rank-stripped `host:port`.
+    url: String,
+    pod_uid: String,
+    /// Revision guard for removal: a concurrently replaced worker is skipped
+    /// and re-evaluated on the next pass instead of removed blindly.
+    revision: u64,
 }
 
-/// Reconcile the tracked pod set with actual Kubernetes state.
-///
-/// Performs a full pod list via the K8s API and compares with `tracked_pods`:
-/// - Pods in `tracked_pods` but no longer in K8s → submit `RemoveWorker` job
-/// - Healthy pods in K8s but missing from `tracked_pods` → submit `AddWorker` job
-///
-/// This closes two gaps in the event-driven watcher:
-/// 1. Missed deletion events (pod force-deleted, watcher down during delete)
-/// 2. Missed creation events (pod created while watcher was restarting)
-async fn reconcile_pods(
-    pods: &Api<Pod>,
-    config: Arc<ServiceDiscoveryConfig>,
-    tracked_pods: Arc<Mutex<HashSet<PodInfo>>>,
-    app_context: Arc<AppContext>,
-    port: u16,
-) {
-    let reconcile_start = time::Instant::now();
-    let label_selector = config.list_label_selector();
-    let list_params = if label_selector.is_empty() {
-        ListParams::default()
-    } else {
-        ListParams::default().labels(&label_selector)
-    };
-    let pod_list = match pods.list(&list_params).await {
-        Ok(list) => list,
-        Err(e) => {
-            error!("Reconciliation: failed to list pods: {}", e);
-            return;
-        }
-    };
+/// `http://10.0.0.1:8080@2` → `10.0.0.1:8080`.
+fn canonical_host_port(url: &str) -> &str {
+    let stripped = ["http://", "https://", "grpc://", "grpcs://", "ipc://"]
+        .iter()
+        .find_map(|scheme| url.strip_prefix(scheme))
+        .unwrap_or(url);
+    stripped.split('@').next().unwrap_or(stripped)
+}
 
-    // Build the set of live pods that match our selectors.
-    // Include all non-deleted pods regardless of health: the router's own health
-    // checker handles unhealthy workers. Only pods completely gone from K8s are stale.
-    let live_pods = build_live_pod_set(&pod_list.items, &config);
-
-    // Diff: stale = tracked but not live, missing = live-and-healthy but not tracked
-    let (stale, missing) = {
-        let tracked = match tracked_pods.lock() {
-            Ok(t) => t,
-            Err(e) => {
-                error!("Reconciliation: failed to acquire lock: {}", e);
-                return;
+/// Snapshot the registry workers this reconciler owns: locally registered
+/// (never mesh-imported) and stamped with the pod-uid label. Manually added
+/// workers lack the label and are never touched.
+fn k8s_owned_workers(app_context: &AppContext) -> Vec<OwnedWorker> {
+    app_context
+        .worker_registry
+        .get_all_with_ids()
+        .into_iter()
+        .filter_map(|(id, worker)| {
+            if app_context.worker_registry.origin_of(&id) != Some(WorkerOrigin::Local) {
+                return None;
             }
-        };
-        compute_reconciliation_diff(&tracked, &live_pods)
+            let pod_uid = worker.metadata().spec.labels.get(POD_UID_LABEL)?.clone();
+            Some(OwnedWorker {
+                url: canonical_host_port(worker.url()).to_string(),
+                pod_uid,
+                revision: worker.revision(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct ReconcileActions {
+    /// Workers to register: new URLs, plus same-URL pods whose uid changed
+    /// (restart with a stable IP).
+    add: Vec<DesiredWorker>,
+    /// Workers to remove: URL gone from the desired set, or owned by a pod
+    /// uid that no longer holds the URL (covers a stale-scheme sibling the
+    /// same-URL Upsert cannot replace).
+    remove: Vec<OwnedWorker>,
+}
+
+fn compute_actions(desired: &DesiredState, registered: &[OwnedWorker]) -> ReconcileActions {
+    let mut actions = ReconcileActions::default();
+
+    let mut registered_uid: HashMap<&str, &str> = HashMap::new();
+    for worker in registered {
+        registered_uid.insert(worker.url.as_str(), worker.pod_uid.as_str());
+        match desired.uid_by_url.get(worker.url.as_str()) {
+            Some(uid) if *uid == worker.pod_uid => {}
+            _ => actions.remove.push(worker.clone()),
+        }
+    }
+    // DP-rank expansions share one canonical URL; remove it once.
+    actions.remove.sort_unstable_by(|a, b| a.url.cmp(&b.url));
+    actions.remove.dedup_by(|a, b| a.url == b.url);
+
+    for worker in &desired.addable {
+        match registered_uid.get(worker.url.as_str()) {
+            Some(uid) if *uid == worker.pod_uid => {}
+            _ => actions.add.push(worker.clone()),
+        }
+    }
+    actions
+}
+
+fn build_worker_spec(desired: &DesiredWorker, app_context: &AppContext) -> WorkerSpec {
+    let mut spec = WorkerSpec::new(desired.url.clone());
+    spec.worker_type = desired.worker_type;
+    spec.bootstrap_port = desired.bootstrap_port;
+    spec.labels
+        .insert(POD_NAME_LABEL.to_string(), desired.pod_name.clone());
+    spec.labels
+        .insert(POD_UID_LABEL.to_string(), desired.pod_uid.clone());
+    // served_model_name is priority #2 in create_worker's model_id chain.
+    if let Some(ref model_id) = desired.model_id_override {
+        spec.labels
+            .insert("served_model_name".to_string(), model_id.clone());
+    }
+    spec.api_key.clone_from(&app_context.router_config.api_key);
+    spec.max_connection_attempts = app_context
+        .router_config
+        .health_check
+        .success_threshold
+        .max(1)
+        * 20;
+    spec
+}
+
+/// One reconcile pass: diff desired workers (store snapshot) against the
+/// K8s-owned registry entries and submit Add/Remove jobs for the gap.
+/// Failed or missed work is retried on the next pass by construction.
+async fn reconcile_workers(
+    store: &Store<Pod>,
+    config: &ServiceDiscoveryConfig,
+    app_context: &Arc<AppContext>,
+) {
+    let start = time::Instant::now();
+    let snapshot = store.state();
+    let desired = compute_desired_state(&snapshot, config);
+    let registered = k8s_owned_workers(app_context);
+    let actions = compute_actions(&desired, &registered);
+
+    let desired_count = desired.uid_by_url.len();
+    if actions.add.is_empty() && actions.remove.is_empty() {
+        Metrics::set_discovery_workers_discovered(
+            metrics_labels::DISCOVERY_KUBERNETES,
+            desired_count,
+        );
+        return;
+    }
+
+    let Some(job_queue) = app_context.worker_job_queue.get() else {
+        warn!(
+            "JobQueue not initialized; deferring {} addition(s), {} removal(s)",
+            actions.add.len(),
+            actions.remove.len()
+        );
+        return;
     };
 
-    if stale.is_empty() && missing.is_empty() {
-        debug!("Reconciliation: tracked state is consistent with K8s");
+    // One in-flight job per URL: a pending/processing job owns that worker's
+    // transition (a duplicate removal would find it already Draining, skip
+    // the settle sleep, and collapse the drain window). Completed/failed
+    // statuses do not block, so failures retry on the next pass.
+    let in_flight = |url: &str| {
+        job_queue
+            .get_status(url)
+            .is_some_and(|status| status.status == "pending" || status.status == "processing")
+    };
+    let removals: Vec<&OwnedWorker> = actions
+        .remove
+        .iter()
+        .filter(|worker| !in_flight(&worker.url))
+        .collect();
+    let additions: Vec<&DesiredWorker> = actions
+        .add
+        .iter()
+        .filter(|worker| !in_flight(&worker.url))
+        .collect();
+
+    if removals.is_empty() && additions.is_empty() {
+        Metrics::set_discovery_workers_discovered(
+            metrics_labels::DISCOVERY_KUBERNETES,
+            desired_count,
+        );
         return;
     }
 
     info!(
-        "Reconciliation: removing {} stale, adding {} missing pods",
-        stale.len(),
-        missing.len()
+        "Reconciling workers: {} to add, {} to remove ({} desired)",
+        additions.len(),
+        removals.len(),
+        desired_count
     );
 
-    // Remove stale workers (only update tracked_pods after successful job submission)
-    for pod_info in &stale {
-        let worker_url = pod_info.worker_url(port);
-        info!(
-            "Reconciliation: removing stale pod {} (uid={}) | url: {}",
-            pod_info.name, pod_info.uid, worker_url
-        );
+    for worker in removals {
+        info!("Removing worker {}: pod gone or terminating", worker.url);
         let job = Job::RemoveWorker {
-            url: worker_url.clone(),
-            expected_revision: None,
+            url: worker.url.clone(),
+            expected_revision: Some(worker.revision),
         };
-        if let Some(job_queue) = app_context.worker_job_queue.get() {
-            match job_queue.submit(job).await {
-                Ok(()) => {
-                    match tracked_pods.lock() {
-                        Ok(mut tracker) => {
-                            tracker.remove(pod_info);
-                        }
-                        Err(e) => {
-                            error!(
-                                "Reconciliation: lock poisoned while removing {}: {} -- aborting reconciliation",
-                                pod_info.name, e
-                            );
-                            return;
-                        }
-                    }
-                    Metrics::record_discovery_deregistration(
-                        metrics_labels::DISCOVERY_KUBERNETES,
-                        metrics_labels::DEREGISTRATION_RECONCILED,
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "Reconciliation: failed to submit removal for {}: {}",
-                        worker_url, e
-                    );
-                }
-            }
-        } else {
-            warn!(
-                "Reconciliation: JobQueue not initialized, cannot remove stale worker: {}",
-                worker_url
-            );
-        }
-    }
-
-    // Add missing workers, tracking how many succeed.
-    let mut added = 0usize;
-    for pod_info in &missing {
-        let pre = tracked_pods.lock().map(|t| t.len()).unwrap_or(0);
-        handle_pod_event(
-            pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            config.disaggregated_mode,
-        )
-        .await;
-        let post = tracked_pods.lock().map(|t| t.len()).unwrap_or(0);
-        if post > pre {
-            added += 1;
-        }
-    }
-    if !missing.is_empty() && added < missing.len() {
-        warn!(
-            "Reconciliation: only {}/{} missing pods were successfully added",
-            added,
-            missing.len()
-        );
-    }
-
-    // Update gauge to final post-reconciliation count
-    match tracked_pods.lock() {
-        Ok(tracker) => {
-            Metrics::set_discovery_workers_discovered(
+        match job_queue.submit(job).await {
+            Ok(()) => Metrics::record_discovery_deregistration(
                 metrics_labels::DISCOVERY_KUBERNETES,
-                tracker.len(),
-            );
-        }
-        Err(e) => {
-            error!("Reconciliation: lock poisoned during gauge update: {}", e);
+                metrics_labels::DEREGISTRATION_RECONCILED,
+            ),
+            Err(e) => error!("Failed to submit worker removal for {}: {}", worker.url, e),
         }
     }
 
-    // Record reconciliation cycle duration for observability.
-    Metrics::record_discovery_sync_duration(
-        metrics_labels::DISCOVERY_KUBERNETES,
-        reconcile_start.elapsed(),
-    );
+    for worker in additions {
+        info!(
+            "Registering worker {} ({:?}) for pod {}",
+            worker.url, worker.worker_type, worker.pod_name
+        );
+        let job = Job::AddWorker {
+            config: Box::new(build_worker_spec(worker, app_context)),
+            registration_mode: WorkerRegistrationMode::Upsert,
+        };
+        match job_queue.submit(job).await {
+            Ok(()) => Metrics::record_discovery_registration(
+                metrics_labels::DISCOVERY_KUBERNETES,
+                metrics_labels::REGISTRATION_SUCCESS,
+            ),
+            Err(e) => {
+                error!("Failed to submit worker addition for {}: {}", worker.url, e);
+                Metrics::record_discovery_registration(
+                    metrics_labels::DISCOVERY_KUBERNETES,
+                    metrics_labels::REGISTRATION_FAILED,
+                );
+            }
+        }
+    }
+
+    Metrics::set_discovery_workers_discovered(metrics_labels::DISCOVERY_KUBERNETES, desired_count);
+    Metrics::record_discovery_sync_duration(metrics_labels::DISCOVERY_KUBERNETES, start.elapsed());
+}
+
+/// Apply one router-watcher event to the mesh cluster state. A hard delete
+/// or a set deletion timestamp marks the node Down; the mesh SWIM/CRDT layer
+/// owns convergence, so no store snapshot is needed here.
+fn apply_router_event(
+    event: &Event<Pod>,
+    config: &ServiceDiscoveryConfig,
+    cluster_state: &ClusterState,
+    default_mesh_port: u16,
+) {
+    let (pod, is_delete) = match event {
+        Event::Apply(pod) | Event::InitApply(pod) => (pod, false),
+        Event::Delete(pod) => (pod, true),
+        Event::Init | Event::InitDone => return,
+    };
+
+    if !PodInfo::matches_selector(pod, &config.router_selector) {
+        return;
+    }
+    let Some(pod_info) = PodInfo::from_pod(pod, Some(config)) else {
+        return;
+    };
+    if !pod_info.is_router {
+        return;
+    }
+
+    if is_delete || pod.metadata.deletion_timestamp.is_some() {
+        let mut state = cluster_state.write();
+        if let Some(node) = state.get_mut(&pod_info.name) {
+            node.status = NodeStatus::Down as i32;
+            node.version += 1;
+            info!("Router node {} marked as Down (pod deleted)", pod_info.name);
+        } else {
+            debug!(
+                "Router node {} not found in cluster state (already removed)",
+                pod_info.name
+            );
+        }
+    } else if pod_info.is_healthy() {
+        let mesh_port = pod_info.mesh_port.unwrap_or(default_mesh_port);
+        let node_address = format!("{}:{}", pod_info.ip, mesh_port);
+        let mut state = cluster_state.write();
+        let existing_version = state.get(&pod_info.name).map(|n| n.version).unwrap_or(0);
+
+        let node_state = NodeState {
+            name: pod_info.name.clone(),
+            address: node_address,
+            status: NodeStatus::Alive as i32,
+            version: existing_version + 1,
+            metadata: HashMap::new(),
+        };
+
+        state.insert(pod_info.name.clone(), node_state.clone());
+        info!(
+            "Router node {} added/updated in mesh cluster (address: {})",
+            pod_info.name, node_state.address
+        );
+    } else {
+        let mut state = cluster_state.write();
+        if let Some(node) = state.get_mut(&pod_info.name) {
+            if node.status != NodeStatus::Down as i32 {
+                node.status = NodeStatus::Suspected as i32;
+                node.version += 1;
+                debug!(
+                    "Router node {} marked as Suspected (pod not healthy)",
+                    pod_info.name
+                );
+            }
+        }
+    }
 }
 
 /// Start router node discovery for mesh cluster
@@ -1085,130 +1012,17 @@ async fn start_router_discovery(
     cluster_state: ClusterState,
     default_mesh_port: u16,
 ) {
-    use std::collections::HashMap;
+    let watcher_config = build_watcher_config("router", &config.router_label_selector());
+    let mut stream = watcher(pods, watcher_config).default_backoff().boxed();
 
-    let mut retry_delay = Duration::from_secs(1);
-    const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
-
-    loop {
-        let watcher_config = build_watcher_config("router", &config.router_label_selector());
-        let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
-
-        let config_clone = Arc::clone(&config);
-
-        let filtered_stream = watcher_stream.filter_map(move |obj_res| {
-            let config_inner = Arc::clone(&config_clone);
-
-            async move {
-                match obj_res {
-                    Ok(pod) => {
-                        // Check if this pod matches router selector
-                        if PodInfo::matches_selector(&pod, &config_inner.router_selector) {
-                            Some(Ok(pod))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(e) => Some(Err(e)),
-                }
-            }
-        });
-
-        let config_clone2 = Arc::clone(&config);
-        let cluster_state_clone2 = cluster_state.clone();
-
-        match filtered_stream
-            .try_for_each(move |pod| {
-                let config_inner = Arc::clone(&config_clone2);
-                let cluster_state_inner = cluster_state_clone2.clone();
-
-                async move {
-                    let pod_info = PodInfo::from_pod(&pod, Some(&config_inner));
-
-                    if let Some(pod_info) = pod_info {
-                        if pod_info.is_router {
-                            let mesh_port = pod_info.mesh_port.unwrap_or(default_mesh_port);
-                            let node_address = format!("{}:{}", pod_info.ip, mesh_port);
-
-                            if pod.metadata.deletion_timestamp.is_some() {
-                                // Pod is being deleted, mark node as Down
-                                let mut state = cluster_state_inner.write();
-                                if let Some(node) = state.get_mut(&pod_info.name) {
-                                    node.status = NodeStatus::Down as i32;
-                                    node.version += 1;
-                                    info!(
-                                        "Router node {} marked as Down (pod deleted)",
-                                        pod_info.name
-                                    );
-                                } else {
-                                    debug!(
-                                        "Router node {} not found in cluster state (already removed)",
-                                        pod_info.name
-                                    );
-                                }
-                            } else if pod_info.is_healthy() {
-                                // Pod is healthy, add or update node in cluster state
-                                let mut state = cluster_state_inner.write();
-                                let existing_version = state
-                                    .get(&pod_info.name)
-                                    .map(|n| n.version)
-                                    .unwrap_or(0);
-
-                                let node_state = NodeState {
-                                    name: pod_info.name.clone(),
-                                    address: node_address,
-                                    status: NodeStatus::Alive as i32,
-                                    version: existing_version + 1,
-                                    metadata: HashMap::new(),
-                                };
-
-                                state.insert(pod_info.name.clone(), node_state.clone());
-                                info!(
-                                    "Router node {} added/updated in mesh cluster (address: {})",
-                                    pod_info.name, node_state.address
-                                );
-                            } else {
-                                // Pod is not healthy, mark as Suspected
-                                let mut state = cluster_state_inner.write();
-                                if let Some(node) = state.get_mut(&pod_info.name) {
-                                    if node.status != NodeStatus::Down as i32 {
-                                        node.status = NodeStatus::Suspected as i32;
-                                        node.version += 1;
-                                        debug!(
-                                            "Router node {} marked as Suspected (pod not healthy)",
-                                            pod_info.name
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-            })
-            .await
-        {
-            Ok(()) => {
-                retry_delay = Duration::from_secs(1);
-            }
-            Err(err) => {
-                error!("Error in router discovery watcher: {}", err);
-                warn!(
-                    "Retrying router discovery in {} seconds with exponential backoff",
-                    retry_delay.as_secs()
-                );
-                time::sleep(retry_delay).await;
-
-                retry_delay = std::cmp::min(retry_delay * 2, MAX_RETRY_DELAY);
-            }
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => apply_router_event(&event, &config, &cluster_state, default_mesh_port),
+            Err(e) => error!("Router watcher error (auto-retrying with backoff): {e}"),
         }
-
-        warn!(
-            "Router discovery watcher exited, restarting in {} seconds",
-            config.check_interval.as_secs()
-        );
-        time::sleep(config.check_interval).await;
     }
+
+    error!("K8s router watcher stream ended; router discovery no longer receives updates");
 }
 
 #[cfg(test)]
@@ -1378,6 +1192,7 @@ mod tests {
             prefill_selector,
             decode_selector,
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
+            worker_ports_annotation: "smg.ai/worker-ports".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
@@ -1445,6 +1260,7 @@ mod tests {
         assert!(config.prefill_selector.is_empty());
         assert!(config.decode_selector.is_empty());
         assert_eq!(config.bootstrap_port_annotation, "sglang.ai/bootstrap-port");
+        assert_eq!(config.worker_ports_annotation, "smg.ai/worker-ports");
     }
 
     #[test]
@@ -1475,7 +1291,8 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert!(pod_info.pod_type.is_none());
-        assert!(pod_info.bootstrap_port.is_none());
+        assert!(pod_info.ports.is_empty());
+        assert!(pod_info.bootstrap_ports.is_empty());
     }
 
     #[test]
@@ -1489,7 +1306,8 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert_eq!(pod_info.pod_type, Some(PodType::Prefill));
-        assert_eq!(pod_info.bootstrap_port, Some(8081));
+        assert_eq!(pod_info.ports, vec![8080]);
+        assert_eq!(pod_info.bootstrap_ports, vec![Some(8081)]);
     }
 
     #[test]
@@ -1503,7 +1321,8 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert_eq!(pod_info.pod_type, Some(PodType::Encode));
-        assert_eq!(pod_info.bootstrap_port, Some(8091));
+        assert_eq!(pod_info.ports, vec![8080]);
+        assert_eq!(pod_info.bootstrap_ports, vec![Some(8091)]);
     }
 
     #[test]
@@ -1517,7 +1336,7 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert_eq!(pod_info.pod_type, Some(PodType::Decode));
-        assert!(pod_info.bootstrap_port.is_none());
+        assert_eq!(pod_info.bootstrap_ports, vec![None]);
     }
 
     #[test]
@@ -1532,7 +1351,7 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert_eq!(pod_info.pod_type, Some(PodType::Regular));
-        assert!(pod_info.bootstrap_port.is_none());
+        assert_eq!(pod_info.bootstrap_ports, vec![None]);
     }
 
     #[test]
@@ -1546,7 +1365,7 @@ mod tests {
         assert_eq!(pod_info.status, "Running");
         assert!(pod_info.is_ready);
         assert_eq!(pod_info.pod_type, Some(PodType::Regular));
-        assert!(pod_info.bootstrap_port.is_none());
+        assert_eq!(pod_info.bootstrap_ports, vec![None]);
     }
 
     #[test]
@@ -1560,7 +1379,7 @@ mod tests {
 
         let pod_info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
         assert_eq!(pod_info.pod_type, Some(PodType::Prefill));
-        assert!(pod_info.bootstrap_port.is_none());
+        assert_eq!(pod_info.bootstrap_ports, vec![None]);
     }
 
     #[test]
@@ -1624,7 +1443,8 @@ mod tests {
             status: "Running".into(),
             is_ready: true,
             pod_type: None,
-            bootstrap_port: None,
+            ports: vec![],
+            bootstrap_ports: vec![],
             is_router: false,
             mesh_port: None,
             model_id_override: None,
@@ -1638,7 +1458,8 @@ mod tests {
             status: "Running".into(),
             is_ready: false,
             pod_type: None,
-            bootstrap_port: None,
+            ports: vec![],
+            bootstrap_ports: vec![],
             is_router: false,
             mesh_port: None,
             model_id_override: None,
@@ -1652,7 +1473,8 @@ mod tests {
             status: "Pending".into(),
             is_ready: true,
             pod_type: None,
-            bootstrap_port: None,
+            ports: vec![],
+            bootstrap_ports: vec![],
             is_router: false,
             mesh_port: None,
             model_id_override: None,
@@ -1660,359 +1482,526 @@ mod tests {
         assert!(!not_running_pod.is_healthy());
     }
 
+    // ========== Port annotation parsing ==========
+
     #[test]
-    fn test_pod_info_identity_based_equality() {
-        // PodInfo equality is based on (name, uid) only — mutable fields like
-        // status, is_ready, ip, and pod_type do not affect identity.
-        let pod1 = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
+    fn test_parse_port_list() {
+        assert_eq!(parse_port_list("8080"), Some(vec![8080]));
+        assert_eq!(
+            parse_port_list(" 8080, 8081 ,8082"),
+            Some(vec![8080, 8081, 8082])
+        );
+        assert_eq!(parse_port_list("8080,abc"), None);
+        assert_eq!(parse_port_list("0"), None);
+        assert_eq!(parse_port_list(""), None);
+        assert_eq!(parse_port_list("70000"), None);
+    }
 
-        let pod2_same_identity = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Pending".into(),
-            is_ready: false,
-            pod_type: Some(PodType::Decode),
+    fn pod_with_annotations(name: &str, annotations: &[(&str, &str)]) -> Pod {
+        let mut pod = make_labeled_pod(name, "10.0.0.1", &[("app", "sglang")]);
+        pod.metadata.annotations = Some(
+            annotations
+                .iter()
+                .map(|&(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        pod
+    }
+
+    #[test]
+    fn test_from_pod_ports_default_to_config_port() {
+        let config = make_regular_config();
+        let pod = make_labeled_pod("w", "10.0.0.1", &[("app", "sglang")]);
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.ports, vec![config.port]);
+        assert_eq!(info.bootstrap_ports, vec![None]);
+    }
+
+    #[test]
+    fn test_from_pod_ports_from_annotation() {
+        let config = make_regular_config();
+        let pod = pod_with_annotations("w", &[("smg.ai/worker-ports", "8080,8081,8082,8083")]);
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.ports, vec![8080, 8081, 8082, 8083]);
+        assert_eq!(info.bootstrap_ports, vec![None; 4]);
+    }
+
+    #[test]
+    fn test_from_pod_ports_annotation_dedupes_preserving_order() {
+        let config = make_regular_config();
+        let pod = pod_with_annotations("w", &[("smg.ai/worker-ports", "8081,8080,8081")]);
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.ports, vec![8081, 8080]);
+    }
+
+    #[test]
+    fn test_from_pod_invalid_ports_annotation_falls_back_to_config_port() {
+        let config = make_regular_config();
+        let pod = pod_with_annotations("w", &[("smg.ai/worker-ports", "8080,nope")]);
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.ports, vec![config.port]);
+    }
+
+    #[test]
+    fn test_from_pod_bootstrap_broadcasts_to_all_ports() {
+        let config = create_pd_config();
+        let mut pod = create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", Some(9080));
+        pod.metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert("smg.ai/worker-ports".to_string(), "8080,8081".to_string());
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.ports, vec![8080, 8081]);
+        assert_eq!(info.bootstrap_ports, vec![Some(9080), Some(9080)]);
+    }
+
+    #[test]
+    fn test_from_pod_bootstrap_list_zips_with_ports() {
+        let config = create_pd_config();
+        let mut pod = create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", None);
+        let annotations = pod.metadata.annotations.as_mut().unwrap();
+        annotations.insert("smg.ai/worker-ports".to_string(), "8080,8081".to_string());
+        annotations.insert(
+            "sglang.ai/bootstrap-port".to_string(),
+            "9080,9081".to_string(),
+        );
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.bootstrap_ports, vec![Some(9080), Some(9081)]);
+    }
+
+    #[test]
+    fn test_from_pod_bootstrap_count_mismatch_ignored() {
+        let config = create_pd_config();
+        let mut pod = create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", None);
+        let annotations = pod.metadata.annotations.as_mut().unwrap();
+        annotations.insert("smg.ai/worker-ports".to_string(), "8080,8081".to_string());
+        annotations.insert(
+            "sglang.ai/bootstrap-port".to_string(),
+            "9080,9081,9082".to_string(),
+        );
+        let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
+        assert_eq!(info.bootstrap_ports, vec![None, None]);
+    }
+
+    // ========== Desired state ==========
+
+    fn store_snapshot(pods: Vec<Pod>) -> Vec<Arc<Pod>> {
+        pods.into_iter().map(Arc::new).collect()
+    }
+
+    #[test]
+    fn test_compute_desired_state_multi_port_pod() {
+        let config = make_regular_config();
+        let pod = pod_with_annotations("w", &[("smg.ai/worker-ports", "8080,8081")]);
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+
+        assert_eq!(desired.uid_by_url.len(), 2);
+        assert_eq!(
+            desired.uid_by_url.get("10.0.0.1:8080"),
+            Some(&"uid-w".to_string())
+        );
+        assert_eq!(
+            desired.uid_by_url.get("10.0.0.1:8081"),
+            Some(&"uid-w".to_string())
+        );
+        assert_eq!(desired.addable.len(), 2);
+        assert!(desired.addable.iter().all(|w| w.pod_uid == "uid-w"));
+        assert!(desired.addable.iter().all(|w| w.pod_name == "w"));
+    }
+
+    #[test]
+    fn test_compute_desired_state_terminating_pod_excluded() {
+        let config = make_regular_config();
+        let mut pod = make_labeled_pod("w", "10.0.0.1", &[("app", "sglang")]);
+        pod.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+        assert!(desired.uid_by_url.is_empty());
+        assert!(desired.addable.is_empty());
+    }
+
+    #[test]
+    fn test_compute_desired_state_unready_pod_present_but_not_addable() {
+        let config = make_regular_config();
+        let mut pod = make_labeled_pod("w", "10.0.0.1", &[("app", "sglang")]);
+        if let Some(status) = pod.status.as_mut() {
+            status.conditions = Some(vec![PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                last_probe_time: None,
+                last_transition_time: None,
+                message: None,
+                reason: None,
+                observed_generation: None,
+            }]);
+        }
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+        assert!(desired.uid_by_url.contains_key("10.0.0.1:8000"));
+        assert!(desired.addable.is_empty());
+    }
+
+    #[test]
+    fn test_compute_desired_state_ignores_non_matching_pods() {
+        let config = make_regular_config();
+        let pod = make_labeled_pod("w", "10.0.0.1", &[("app", "other")]);
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+        assert!(desired.uid_by_url.is_empty());
+        assert!(desired.addable.is_empty());
+    }
+
+    #[test]
+    fn test_compute_desired_state_pd_prefill_bootstrap_alignment() {
+        let config = create_pd_config();
+        let mut pod = create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", None);
+        let annotations = pod.metadata.annotations.as_mut().unwrap();
+        annotations.insert("smg.ai/worker-ports".to_string(), "8080,8081".to_string());
+        annotations.insert(
+            "sglang.ai/bootstrap-port".to_string(),
+            "9080,9081".to_string(),
+        );
+
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+        assert_eq!(desired.addable.len(), 2);
+        let by_url: HashMap<&str, &DesiredWorker> = desired
+            .addable
+            .iter()
+            .map(|w| (w.url.as_str(), w))
+            .collect();
+        let first = by_url["10.0.0.1:8080"];
+        assert_eq!(first.worker_type, WorkerType::Prefill);
+        assert_eq!(first.bootstrap_port, Some(9080));
+        let second = by_url["10.0.0.1:8081"];
+        assert_eq!(second.bootstrap_port, Some(9081));
+    }
+
+    #[test]
+    fn test_compute_desired_state_carries_model_id_override() {
+        let mut config = make_regular_config();
+        config.model_id_source = Some(ModelIdSource::Namespace);
+        let mut pod = make_labeled_pod("w", "10.0.0.1", &[("app", "sglang")]);
+        pod.metadata.namespace = Some("team-a".to_string());
+        let desired = compute_desired_state(&store_snapshot(vec![pod]), &config);
+        assert_eq!(
+            desired.addable[0].model_id_override,
+            Some("team-a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_desired_state_from_reflector_store() {
+        let (store, mut writer) = reflector::store::<Pod>();
+        let pod = pod_with_annotations("w", &[("smg.ai/worker-ports", "8080,8081")]);
+        writer.apply_watcher_event(&Event::Init);
+        writer.apply_watcher_event(&Event::InitApply(pod));
+        writer.apply_watcher_event(&Event::InitDone);
+
+        let config = make_regular_config();
+        let desired = compute_desired_state(&store.state(), &config);
+        assert_eq!(desired.uid_by_url.len(), 2);
+    }
+
+    // ========== Registry diff ==========
+
+    #[test]
+    fn test_canonical_host_port() {
+        assert_eq!(canonical_host_port("10.0.0.1:8080"), "10.0.0.1:8080");
+        assert_eq!(canonical_host_port("http://10.0.0.1:8080"), "10.0.0.1:8080");
+        assert_eq!(
+            canonical_host_port("grpc://10.0.0.1:8080@2"),
+            "10.0.0.1:8080"
+        );
+        assert_eq!(canonical_host_port("10.0.0.1:8080@0"), "10.0.0.1:8080");
+    }
+
+    fn desired_worker(url: &str, uid: &str) -> DesiredWorker {
+        DesiredWorker {
+            url: url.to_string(),
+            worker_type: WorkerType::Regular,
             bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
+            pod_name: "w".to_string(),
+            pod_uid: uid.to_string(),
             model_id_override: None,
-        };
+        }
+    }
 
-        let pod3_different_identity = PodInfo {
-            name: "pod2".into(),
-            uid: "uid-2".into(),
-            ip: "1.2.3.5".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
+    fn desired_state_of(workers: &[DesiredWorker], present_only: &[(&str, &str)]) -> DesiredState {
+        let mut state = DesiredState::default();
+        for worker in workers {
+            state
+                .uid_by_url
+                .insert(worker.url.clone(), worker.pod_uid.clone());
+            state.addable.push(worker.clone());
+        }
+        for (url, uid) in present_only {
+            state
+                .uid_by_url
+                .insert((*url).to_string(), (*uid).to_string());
+        }
+        state
+    }
 
-        // Same (name, uid) → equal, even with different status/type/readiness
-        assert_eq!(pod1, pod2_same_identity);
-        // Different (name, uid) → not equal
-        assert_ne!(pod1, pod3_different_identity);
+    fn owned(url: &str, uid: &str) -> OwnedWorker {
+        OwnedWorker {
+            url: url.to_string(),
+            pod_uid: uid.to_string(),
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn test_compute_actions_adds_missing_workers() {
+        let desired = desired_state_of(
+            &[
+                desired_worker("10.0.0.1:8080", "u1"),
+                desired_worker("10.0.0.1:8081", "u1"),
+            ],
+            &[],
+        );
+        let actions = compute_actions(&desired, &[]);
+        assert_eq!(actions.add.len(), 2);
+        assert!(actions.remove.is_empty());
+    }
+
+    #[test]
+    fn test_compute_actions_noop_when_converged() {
+        let desired = desired_state_of(&[desired_worker("10.0.0.1:8080", "u1")], &[]);
+        let registered = [owned("10.0.0.1:8080", "u1")];
+        let actions = compute_actions(&desired, &registered);
+        assert!(actions.add.is_empty());
+        assert!(actions.remove.is_empty());
+    }
+
+    #[test]
+    fn test_compute_actions_removes_workers_for_gone_pods() {
+        let desired = desired_state_of(&[desired_worker("10.0.0.1:8080", "u1")], &[]);
+        let registered = [owned("10.0.0.1:8080", "u1"), owned("10.0.0.2:8080", "u2")];
+        let actions = compute_actions(&desired, &registered);
+        assert!(actions.add.is_empty());
+        assert_eq!(actions.remove.len(), 1);
+        assert_eq!(actions.remove[0].url, "10.0.0.2:8080");
+    }
+
+    #[test]
+    fn test_compute_actions_uid_change_removes_and_reregisters_same_url() {
+        // Same-IP pod restart (hostNetwork / stable IP): URL unchanged but
+        // uid differs → the stale worker is removed (covers a scheme-flipped
+        // sibling the Upsert cannot replace) and the new one registered.
+        let desired = desired_state_of(&[desired_worker("10.0.0.1:8080", "uid-new")], &[]);
+        let registered = [owned("10.0.0.1:8080", "uid-old")];
+        let actions = compute_actions(&desired, &registered);
+        assert_eq!(actions.add.len(), 1);
+        assert_eq!(actions.add[0].pod_uid, "uid-new");
+        assert_eq!(actions.remove.len(), 1);
+        assert_eq!(actions.remove[0].pod_uid, "uid-old");
+    }
+
+    #[test]
+    fn test_compute_actions_removes_stale_worker_behind_unready_replacement() {
+        // Pod A was deleted; unready replacement B holds the same URL. A's
+        // worker must go now — B registers only once it turns healthy.
+        let desired = desired_state_of(&[], &[("10.0.0.1:8080", "uid-b")]);
+        let registered = [owned("10.0.0.1:8080", "uid-a")];
+        let actions = compute_actions(&desired, &registered);
+        assert!(actions.add.is_empty());
+        assert_eq!(actions.remove.len(), 1);
+        assert_eq!(actions.remove[0].pod_uid, "uid-a");
+    }
+
+    #[test]
+    fn test_compute_actions_dp_ranks_removed_once() {
+        let registered = [owned("10.0.0.1:8080", "u1"), owned("10.0.0.1:8080", "u1")];
+        let actions = compute_actions(&DesiredState::default(), &registered);
+        assert_eq!(actions.remove.len(), 1);
+        assert_eq!(actions.remove[0].url, "10.0.0.1:8080");
+        assert_eq!(actions.remove[0].revision, 1);
+        assert!(actions.add.is_empty());
+    }
+
+    #[test]
+    fn test_compute_actions_unready_pod_keeps_registered_worker() {
+        // URL present (pod exists, unready → not addable) and registered:
+        // neither added nor removed — the health checker owns readiness.
+        let desired = desired_state_of(&[], &[("10.0.0.1:8080", "u1")]);
+        let registered = [owned("10.0.0.1:8080", "u1")];
+        let actions = compute_actions(&desired, &registered);
+        assert!(actions.add.is_empty());
+        assert!(actions.remove.is_empty());
+    }
+
+    #[test]
+    fn test_k8s_owned_workers_scoped_by_label_and_origin() {
+        use openai_protocol::model_card::ModelCard;
+
+        use crate::worker::BasicWorkerBuilder;
+
+        let app_context = create_test_app_context();
+
+        let mut labels = HashMap::new();
+        labels.insert(POD_UID_LABEL.to_string(), "uid-1".to_string());
+        let discovered = Arc::new(
+            BasicWorkerBuilder::new("http://10.0.0.1:8080")
+                .model(ModelCard::new("m"))
+                .labels(labels)
+                .build(),
+        );
+        let manual = Arc::new(
+            BasicWorkerBuilder::new("http://10.0.0.2:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        app_context.worker_registry.register(discovered).unwrap();
+        app_context.worker_registry.register(manual).unwrap();
+
+        let owned = k8s_owned_workers(&app_context);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].url, "10.0.0.1:8080");
+        assert_eq!(owned[0].pod_uid, "uid-1");
+    }
+
+    #[test]
+    fn test_k8s_owned_workers_excludes_mesh_imported_workers() {
+        // A peer's discovered worker arrives via mesh sync carrying the
+        // pod-uid label; its pod is absent from this node's store, so without
+        // the Local-origin filter the reconciler would remove it every pass.
+        let app_context = create_test_app_context();
+
+        let mut spec = WorkerSpec::new("http://10.0.0.3:8080");
+        spec.labels
+            .insert(POD_UID_LABEL.to_string(), "uid-mesh".to_string());
+        let state = smg_mesh::WorkerState {
+            worker_id: "peer-w1".to_string(),
+            model_id: "m".to_string(),
+            url: "http://10.0.0.3:8080".to_string(),
+            health: true,
+            load: 0.0,
+            version: 0,
+            spec: serde_json::to_vec(&spec).unwrap(),
+        };
+        app_context.worker_registry.on_remote_worker_state(&state);
+        assert!(app_context
+            .worker_registry
+            .get_by_url("http://10.0.0.3:8080")
+            .is_some());
+
+        assert!(k8s_owned_workers(&app_context).is_empty());
+    }
+
+    #[test]
+    fn test_build_worker_spec_stamps_ownership_labels() {
+        let app_context = create_test_app_context();
+        let desired = DesiredWorker {
+            url: "10.0.0.1:8081".to_string(),
+            worker_type: WorkerType::Prefill,
+            bootstrap_port: Some(9080),
+            pod_name: "prefill-0".to_string(),
+            pod_uid: "uid-1".to_string(),
+            model_id_override: Some("llama".to_string()),
+        };
+        let spec = build_worker_spec(&desired, &app_context);
+        assert_eq!(spec.url, "10.0.0.1:8081");
+        assert_eq!(spec.worker_type, WorkerType::Prefill);
+        assert_eq!(spec.bootstrap_port, Some(9080));
+        assert_eq!(
+            spec.labels.get(POD_NAME_LABEL),
+            Some(&"prefill-0".to_string())
+        );
+        assert_eq!(spec.labels.get(POD_UID_LABEL), Some(&"uid-1".to_string()));
+        assert_eq!(
+            spec.labels.get("served_model_name"),
+            Some(&"llama".to_string())
+        );
     }
 
     #[tokio::test]
-    async fn test_handle_pod_event_add_unhealthy_pod() {
+    async fn test_reconcile_workers_without_job_queue_is_safe() {
         let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-pod1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Pending".into(),
-            is_ready: false,
-            pod_type: None,
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
-
-        handle_pod_event(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            false, // disaggregated_mode = false
-        )
-        .await;
-
-        assert!(!tracked_pods.lock().unwrap().contains(&pod_info));
+        let (store, mut writer) = reflector::store::<Pod>();
+        writer.apply_watcher_event(&Event::Init);
+        writer.apply_watcher_event(&Event::InitApply(make_labeled_pod(
+            "w",
+            "10.0.0.1",
+            &[("app", "sglang")],
+        )));
+        writer.apply_watcher_event(&Event::InitDone);
+        let config = make_regular_config();
+        reconcile_workers(&store, &config, &app_context).await;
     }
 
-    #[tokio::test]
-    async fn test_handle_pod_deletion_non_existing_pod() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-pod1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: None,
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
+    // ========== Router events ==========
+
+    fn router_config_and_pod() -> (ServiceDiscoveryConfig, Pod) {
+        let mut router_selector = HashMap::new();
+        router_selector.insert("role".to_string(), "router".to_string());
+        let config = ServiceDiscoveryConfig {
+            enabled: true,
+            router_selector,
+            ..Default::default()
         };
-        let port = 8080u16;
-
-        handle_pod_deletion(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-        )
-        .await;
-
-        assert!(tracked_pods.lock().unwrap().is_empty());
+        let mut pod = make_labeled_pod("r1", "10.1.0.1", &[("role", "router")]);
+        pod.metadata.annotations = Some(
+            [("sglang.ai/mesh-port".to_string(), "7100".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        (config, pod)
     }
 
-    #[tokio::test]
-    async fn test_handle_pd_pod_event_prefill_pod() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "prefill-pod".into(),
-            uid: "uid-prefill-pod".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
+    #[test]
+    fn test_apply_router_event_apply_then_delete() {
+        let (config, pod) = router_config_and_pod();
+        let cluster_state: ClusterState = Arc::default();
 
-        handle_pod_event(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            true, // disaggregated_mode = true for PD pod
-        )
-        .await;
-
-        // With fully async control plane, pod is tracked and job is queued
-        // Worker registration and validation happen in background job
-        assert!(tracked_pods.lock().unwrap().contains(&pod_info));
-
-        // Note: In tests with uninitialized queue, background jobs don't process
-        // Worker won't appear in registry until background job runs (in production)
-    }
-
-    #[tokio::test]
-    async fn test_handle_pd_pod_event_decode_pod() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "decode-pod".into(),
-            uid: "uid-decode-pod".into(),
-            ip: "1.2.3.5".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Decode),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
-
-        handle_pod_event(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            true, // disaggregated_mode = true for PD pod
-        )
-        .await;
-
-        // With fully async control plane, pod is tracked and job is queued
-        // Worker registration and validation happen in background job
-        assert!(tracked_pods.lock().unwrap().contains(&pod_info));
-
-        // Note: In tests with uninitialized queue, background jobs don't process
-        // Worker won't appear in registry until background job runs (in production)
-    }
-
-    #[tokio::test]
-    async fn test_handle_pd_pod_deletion_tracked_pod() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "test-pod".into(),
-            uid: "uid-test-pod".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-
-        // Add pod to tracked set first
+        apply_router_event(&Event::Apply(pod.clone()), &config, &cluster_state, 7000);
         {
-            let mut tracked = tracked_pods.lock().unwrap();
-            tracked.insert(pod_info.clone());
+            let state = cluster_state.read();
+            let node = state.get("r1").unwrap();
+            assert_eq!(node.status, NodeStatus::Alive as i32);
+            assert_eq!(node.address, "10.1.0.1:7100");
         }
 
-        let port = 8080u16;
-
-        handle_pod_deletion(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-        )
-        .await;
-
-        // Pod should be removed from tracking
-        assert!(!tracked_pods.lock().unwrap().contains(&pod_info));
+        apply_router_event(&Event::Delete(pod), &config, &cluster_state, 7000);
+        assert_eq!(
+            cluster_state.read().get("r1").unwrap().status,
+            NodeStatus::Down as i32
+        );
     }
 
-    #[tokio::test]
-    async fn test_handle_pd_pod_deletion_untracked_pod() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "untracked-pod".into(),
-            uid: "uid-untracked-pod".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Decode),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
+    #[test]
+    fn test_apply_router_event_terminating_marks_down() {
+        let (config, mut pod) = router_config_and_pod();
+        let cluster_state: ClusterState = Arc::default();
 
-        // Don't add pod to tracked set
-
-        handle_pod_deletion(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-        )
-        .await;
-
-        // Tracked set should remain empty
-        assert!(tracked_pods.lock().unwrap().is_empty());
+        apply_router_event(&Event::Apply(pod.clone()), &config, &cluster_state, 7000);
+        pod.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        apply_router_event(&Event::Apply(pod), &config, &cluster_state, 7000);
+        assert_eq!(
+            cluster_state.read().get("r1").unwrap().status,
+            NodeStatus::Down as i32
+        );
     }
 
-    #[tokio::test]
-    async fn test_unified_handler_regular_mode() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "regular-pod".into(),
-            uid: "uid-regular-pod".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Regular),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
+    #[test]
+    fn test_apply_router_event_unready_marks_suspected() {
+        let (config, mut pod) = router_config_and_pod();
+        let cluster_state: ClusterState = Arc::default();
 
-        handle_pod_event(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            false, // disaggregated_mode = false
-        )
-        .await;
-
-        // With fully async control plane, pod is tracked and job is queued
-        // In regular mode (disaggregated_mode=false), worker_type defaults to Regular
-        // Worker registration and validation happen in background job
-        assert!(tracked_pods.lock().unwrap().contains(&pod_info));
-
-        // Note: In tests with uninitialized queue, background jobs don't process
-        // Worker won't appear in registry until background job runs (in production)
-    }
-
-    #[tokio::test]
-    async fn test_unified_handler_pd_mode_with_prefill() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "prefill-pod".into(),
-            uid: "uid-prefill-pod-2".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let port = 8080u16;
-
-        handle_pod_event(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            true, // disaggregated_mode = true
-        )
-        .await;
-
-        // With fully async control plane, pod is tracked and job is queued
-        // Worker registration and validation happen in background job
-        assert!(tracked_pods.lock().unwrap().contains(&pod_info));
-
-        // Note: In tests with uninitialized queue, background jobs don't process
-        // Worker won't appear in registry until background job runs (in production)
-    }
-
-    #[tokio::test]
-    async fn test_unified_handler_deletion_with_pd_mode() {
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let pod_info = PodInfo {
-            name: "decode-pod".into(),
-            uid: "uid-decode-pod-2".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Decode),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-
-        // Add pod to tracked set first
-        {
-            let mut tracked = tracked_pods.lock().unwrap();
-            tracked.insert(pod_info.clone());
+        apply_router_event(&Event::Apply(pod.clone()), &config, &cluster_state, 7000);
+        if let Some(status) = pod.status.as_mut() {
+            status.conditions = Some(vec![PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                last_probe_time: None,
+                last_transition_time: None,
+                message: None,
+                reason: None,
+                observed_generation: None,
+            }]);
         }
-
-        let port = 8080u16;
-
-        handle_pod_deletion(
-            &pod_info,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-        )
-        .await;
-
-        // Pod should be removed from tracking
-        assert!(!tracked_pods.lock().unwrap().contains(&pod_info));
+        apply_router_event(&Event::Apply(pod), &config, &cluster_state, 7000);
+        assert_eq!(
+            cluster_state.read().get("r1").unwrap().status,
+            NodeStatus::Suspected as i32
+        );
     }
 
     // ========== ModelIdSource tests ==========
@@ -2182,33 +2171,6 @@ mod tests {
         assert_eq!(info.model_id_override, None);
     }
 
-    // ========== Reconciliation helper tests ==========
-
-    fn make_pod_info(name: &str, ip: &str, status: &str, is_ready: bool) -> PodInfo {
-        make_pod_info_with_uid(name, name, ip, status, is_ready)
-    }
-
-    fn make_pod_info_with_uid(
-        name: &str,
-        uid: &str,
-        ip: &str,
-        status: &str,
-        is_ready: bool,
-    ) -> PodInfo {
-        PodInfo {
-            name: name.into(),
-            uid: uid.into(),
-            ip: ip.into(),
-            status: status.into(),
-            is_ready,
-            pod_type: Some(PodType::Regular),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        }
-    }
-
     fn make_regular_config() -> ServiceDiscoveryConfig {
         let mut selector = HashMap::new();
         selector.insert("app".to_string(), "sglang".to_string());
@@ -2251,217 +2213,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_live_pod_set_includes_matching_pods() {
-        let config = make_regular_config();
-        let pods = vec![
-            make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]),
-            make_labeled_pod("pod-b", "10.0.0.2", &[("app", "sglang")]),
-        ];
-
-        let live = build_live_pod_set(&pods, &config);
-        assert_eq!(live.len(), 2);
-        assert!(live.iter().any(|p| p.name == "pod-a"));
-        assert!(live.iter().any(|p| p.name == "pod-b"));
-    }
-
-    #[test]
-    fn test_build_live_pod_set_excludes_non_matching_pods() {
-        let config = make_regular_config();
-        let pods = vec![
-            make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]),
-            make_labeled_pod("pod-b", "10.0.0.2", &[("app", "other")]),
-        ];
-
-        let live = build_live_pod_set(&pods, &config);
-        assert_eq!(live.len(), 1);
-        assert!(live.iter().any(|p| p.name == "pod-a"));
-    }
-
-    #[test]
-    fn test_build_live_pod_set_excludes_pods_with_deletion_timestamp() {
-        let config = make_regular_config();
-        let mut deleted_pod = make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]);
-        deleted_pod.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
-        let live_pod = make_labeled_pod("pod-b", "10.0.0.2", &[("app", "sglang")]);
-
-        let live = build_live_pod_set(&[deleted_pod, live_pod], &config);
-        assert_eq!(live.len(), 1);
-        assert!(live.iter().any(|p| p.name == "pod-b"));
-    }
-
-    #[test]
-    fn test_build_live_pod_set_empty_list() {
-        let config = make_regular_config();
-        let live = build_live_pod_set(&[], &config);
-        assert!(live.is_empty());
-    }
-
-    #[test]
-    fn test_build_live_pod_set_pd_mode() {
-        let config = create_pd_config();
-        let pods = vec![
-            create_pd_k8s_pod("prefill-0", "10.0.0.1", "prefill", Some(8081)),
-            create_pd_k8s_pod("decode-0", "10.0.0.2", "decode", None),
-            create_pd_k8s_pod("other-0", "10.0.0.3", "other", None),
-        ];
-
-        let live = build_live_pod_set(&pods, &config);
-        // Only prefill and decode selectors match; "other" does not
-        assert_eq!(live.len(), 2);
-        assert!(live.iter().any(|p| p.name == "prefill-0"));
-        assert!(live.iter().any(|p| p.name == "decode-0"));
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_no_changes() {
-        let pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
-        let tracked: HashSet<PodInfo> = [pod.clone()].into_iter().collect();
-        let live: HashSet<PodInfo> = [pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert!(stale.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_stale_pod() {
-        let tracked_pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
-        let tracked: HashSet<PodInfo> = [tracked_pod.clone()].into_iter().collect();
-        let live: HashSet<PodInfo> = HashSet::new();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].name, "pod-a");
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_missing_healthy_pod() {
-        let tracked: HashSet<PodInfo> = HashSet::new();
-        let live_pod = make_pod_info("pod-b", "10.0.0.2", "Running", true);
-        let live: HashSet<PodInfo> = [live_pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert!(stale.is_empty());
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].name, "pod-b");
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_missing_unhealthy_pod_excluded() {
-        let tracked: HashSet<PodInfo> = HashSet::new();
-        // Pod exists in K8s but is not ready — should NOT be added
-        let unhealthy_pod = make_pod_info("pod-c", "10.0.0.3", "Running", false);
-        let live: HashSet<PodInfo> = [unhealthy_pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert!(stale.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_missing_pending_pod_excluded() {
-        let tracked: HashSet<PodInfo> = HashSet::new();
-        // Pod is "Pending" with is_ready=true — is_healthy() returns false
-        let pending_pod = make_pod_info("pod-d", "10.0.0.4", "Pending", true);
-        let live: HashSet<PodInfo> = [pending_pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert!(stale.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_mixed() {
-        // tracked: {A, B}, live: {B, C (healthy), D (unhealthy)}
-        // Expected: stale=[A], missing=[C]
-        let pod_a = make_pod_info("pod-a", "10.0.0.1", "Running", true);
-        let pod_b = make_pod_info("pod-b", "10.0.0.2", "Running", true);
-        let pod_c = make_pod_info("pod-c", "10.0.0.3", "Running", true);
-        let pod_d = make_pod_info("pod-d", "10.0.0.4", "Running", false);
-
-        let tracked: HashSet<PodInfo> = [pod_a.clone(), pod_b.clone()].into_iter().collect();
-        let live: HashSet<PodInfo> = [pod_b, pod_c.clone(), pod_d].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].name, "pod-a");
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].name, "pod-c");
-    }
-
-    #[test]
-    fn test_compute_reconciliation_diff_both_empty() {
-        let tracked: HashSet<PodInfo> = HashSet::new();
-        let live: HashSet<PodInfo> = HashSet::new();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert!(stale.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_build_live_pod_set_includes_unhealthy_non_deleted_pods() {
-        // Reconciliation should include unhealthy pods in live set (they are not stale),
-        // but compute_reconciliation_diff will filter them out of "missing" additions.
-        let config = make_regular_config();
-        let mut unhealthy_pod = make_labeled_pod("pod-a", "10.0.0.1", &[("app", "sglang")]);
-        // Make it not-ready
-        if let Some(ref mut status) = unhealthy_pod.status {
-            status.conditions = Some(vec![PodCondition {
-                type_: "Ready".to_string(),
-                status: "False".to_string(),
-                last_probe_time: None,
-                last_transition_time: None,
-                message: None,
-                reason: None,
-                observed_generation: None,
-            }]);
-        }
-
-        let live = build_live_pod_set(&[unhealthy_pod], &config);
-        // Pod should still be in the live set (not considered stale)
-        assert_eq!(live.len(), 1);
-        assert!(!live.iter().next().unwrap().is_ready);
-    }
-
-    #[test]
-    fn test_reconciliation_readiness_change_not_considered_stale() {
-        // A tracked pod that exists in K8s but changed readiness should NOT be
-        // considered stale — PodInfo identity is (name, uid), not full state.
-        let tracked_pod = make_pod_info("pod-a", "10.0.0.1", "Running", true);
-        let live_pod = make_pod_info("pod-a", "10.0.0.1", "Running", false);
-
-        let tracked: HashSet<PodInfo> = [tracked_pod].into_iter().collect();
-        let live: HashSet<PodInfo> = [live_pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        // Same (name, uid) means the pod is recognized as the same entity.
-        // Not stale (still in K8s), not missing (already tracked).
-        assert!(stale.is_empty());
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn test_reconciliation_detects_pod_restart_same_name_and_ip() {
-        // LWS / StatefulSet pods keep the same name across restarts,
-        // and hostNetwork pods keep the same IP (the node IP).
-        // The uid changes on every restart, so reconciliation must
-        // detect the old instance as stale and the new one as missing.
-        let old_pod = make_pod_info_with_uid("worker-0", "uid-old", "10.0.0.1", "Running", true);
-        let new_pod = make_pod_info_with_uid("worker-0", "uid-new", "10.0.0.1", "Running", true);
-
-        let tracked: HashSet<PodInfo> = [old_pod].into_iter().collect();
-        let live: HashSet<PodInfo> = [new_pod].into_iter().collect();
-
-        let (stale, missing) = compute_reconciliation_diff(&tracked, &live);
-        assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].uid, "uid-old");
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].uid, "uid-new");
-    }
-
-    #[test]
     fn test_pod_info_from_pod_missing_uid() {
         let mut k8s_pod = create_k8s_pod(
             Some("test-pod"),
@@ -2472,103 +2223,6 @@ mod tests {
         );
         k8s_pod.metadata.uid = None;
         assert!(PodInfo::from_pod(&k8s_pod, None).is_none());
-    }
-
-    #[test]
-    fn test_pod_info_hash_consistent_with_eq() {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
-
-        let pod1 = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-1".into(),
-            ip: "1.2.3.4".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Prefill),
-            bootstrap_port: Some(8081),
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        let pod2 = PodInfo {
-            name: "pod1".into(),
-            uid: "uid-1".into(),
-            ip: "5.6.7.8".into(),
-            status: "Pending".into(),
-            is_ready: false,
-            pod_type: Some(PodType::Decode),
-            bootstrap_port: None,
-            is_router: true,
-            mesh_port: Some(9090),
-            model_id_override: Some("model".into()),
-        };
-
-        assert_eq!(pod1, pod2);
-
-        let mut h1 = DefaultHasher::new();
-        let mut h2 = DefaultHasher::new();
-        pod1.hash(&mut h1);
-        pod2.hash(&mut h2);
-        assert_eq!(
-            h1.finish(),
-            h2.finish(),
-            "Equal PodInfos must produce the same hash"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_handle_pod_event_evicts_old_uid_on_restart() {
-        // When a StatefulSet pod restarts with same name but new UID,
-        // handle_pod_event should evict the old entry and insert the new one.
-        let app_context = create_test_app_context();
-        let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
-        let port = 8080u16;
-
-        let old_pod = PodInfo {
-            name: "worker-0".into(),
-            uid: "uid-old".into(),
-            ip: "10.0.0.1".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Regular),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-        // Pre-populate tracked set with the old pod.
-        tracked_pods.lock().unwrap().insert(old_pod.clone());
-
-        let new_pod = PodInfo {
-            name: "worker-0".into(),
-            uid: "uid-new".into(),
-            ip: "10.0.0.1".into(),
-            status: "Running".into(),
-            is_ready: true,
-            pod_type: Some(PodType::Regular),
-            bootstrap_port: None,
-            is_router: false,
-            mesh_port: None,
-            model_id_override: None,
-        };
-
-        handle_pod_event(
-            &new_pod,
-            Arc::clone(&tracked_pods),
-            Arc::clone(&app_context),
-            port,
-            false,
-        )
-        .await;
-
-        let tracker = tracked_pods.lock().unwrap();
-        // Old pod should be evicted, new pod should be present.
-        assert_eq!(tracker.len(), 1);
-        assert!(!tracker.contains(&old_pod));
-        assert!(tracker.contains(&new_pod));
     }
 
     #[test]

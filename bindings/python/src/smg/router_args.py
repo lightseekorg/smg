@@ -92,6 +92,7 @@ class RouterArgs:
     decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     router_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
+    worker_ports_annotation: str = "smg.ai/worker-ports"
     model_id_from: str | None = None
     # Prometheus configuration
     prometheus_port: int | None = None
@@ -1352,6 +1353,7 @@ class RouterArgs:
 
         # Mooncake-specific annotation
         args_dict["bootstrap_port_annotation"] = "sglang.ai/bootstrap-port"
+        args_dict["worker_ports_annotation"] = "smg.ai/worker-ports"
 
         # Parse control plane API keys
         args_dict["control_plane_api_keys"] = cls._parse_control_plane_api_keys(

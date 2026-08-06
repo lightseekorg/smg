@@ -271,6 +271,9 @@ impl StreamingProcessor {
         let mut stream_buffers: HashMap<u32, String> = HashMap::new();
         let mut finish_reasons: HashMap<u32, String> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<Value>> = HashMap::new();
+        // Indices whose local stop decoder fired: their finish reason is pinned
+        // to "stop" and later engine output for the index is ignored.
+        let mut stopped_indices: HashSet<u32> = HashSet::new();
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
@@ -384,6 +387,12 @@ impl StreamingProcessor {
 
                     let index = chunk.index();
 
+                    // Once the local stop decoder has fired for an index, ignore
+                    // any further engine output the backend emits for it.
+                    if stopped_indices.contains(&index) {
+                        continue;
+                    }
+
                     completion_tokens.record_chunk(&chunk);
 
                     // Get or create stop decoder for this index
@@ -406,8 +415,25 @@ impl StreamingProcessor {
                     });
 
                     // Process tokens through stop decoder
-                    let (chunk_text, _should_stop) =
+                    let (chunk_text, should_stop) =
                         Self::process_chunk_tokens(stop_decoder, chunk.token_ids());
+
+                    if should_stop {
+                        // Stop-decoder match takes precedence: pin "stop" even if
+                        // the backend's eventual Complete carries "length" (the
+                        // local stop sequence fired first). Any pre-stop text in
+                        // `chunk_text` is still emitted below before the finish
+                        // reason is flushed in Phase 4.
+                        finish_reasons
+                            .entry(index)
+                            .or_insert_with(|| "stop".to_string());
+                        matched_stops.entry(index).or_insert_with(|| {
+                            stop_decoder
+                                .matched_stop()
+                                .map(|s| Value::String(s.to_string()))
+                        });
+                        stopped_indices.insert(index);
+                    }
 
                     if chunk_text.is_empty() {
                         continue;
@@ -568,9 +594,13 @@ impl StreamingProcessor {
 
                     cached_tokens.insert(index, complete.cached_tokens());
                     reasoning_tokens.insert(index, complete.reasoning_tokens());
-                    finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    matched_stops.insert(index, complete.matched_stop_json());
+                    // A local stop-decoder match already pinned "stop" for this
+                    // index; don't let the engine's finish reason overwrite it.
+                    if !stopped_indices.contains(&index) {
+                        finish_reasons.insert(index, complete.finish_reason().to_string());
+                        matched_stops.insert(index, complete.matched_stop_json());
+                    }
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
@@ -1740,6 +1770,9 @@ impl StreamingProcessor {
         let mut prompt_tokens: u32 = 0;
         let mut finish_reason_str = String::new();
         let mut matched_stop: Option<Value> = None;
+        // Set once the local stop decoder fires: pins "stop" and ignores later
+        // engine output (the backend has no stop-string detection over ZMQ).
+        let mut stopped = false;
 
         // Check parser availability once upfront. Run parser when the user explicitly
         // enabled thinking, or when the selected parser needs structural special tokens.
@@ -1867,10 +1900,28 @@ impl StreamingProcessor {
                         first_token_time = Some(Instant::now());
                     }
 
+                    // Once the local stop decoder has fired, ignore further
+                    // engine output for this (single-choice) request.
+                    if stopped {
+                        continue;
+                    }
+
                     completion_tokens.record_chunk(&chunk);
 
-                    let (chunk_text, _should_stop) =
+                    let (chunk_text, should_stop) =
                         Self::process_chunk_tokens(&mut stop_decoder, chunk.token_ids());
+
+                    if should_stop {
+                        // Stop-decoder match takes precedence over the engine's
+                        // eventual finish reason (the local stop sequence fired
+                        // first). Pre-stop text in `chunk_text` is still emitted
+                        // below; Phase 4 derives StopSequence from `matched_stop`.
+                        stopped = true;
+                        finish_reason_str = "stop".to_string();
+                        matched_stop = stop_decoder
+                            .matched_stop()
+                            .map(|s| Value::String(s.to_string()));
+                    }
 
                     if chunk_text.is_empty() {
                         continue;
@@ -2150,8 +2201,12 @@ impl StreamingProcessor {
 
                     prompt_tokens = complete.prompt_tokens();
                     completion_tokens.record_complete(&complete);
-                    finish_reason_str = complete.finish_reason().to_string();
-                    matched_stop = complete.matched_stop_json();
+                    // A local stop-decoder match already pinned "stop"; don't let
+                    // the engine's finish reason overwrite it.
+                    if !stopped {
+                        finish_reason_str = complete.finish_reason().to_string();
+                        matched_stop = complete.matched_stop_json();
+                    }
                 }
                 ProtoResponseVariant::None => continue,
             }

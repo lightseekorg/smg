@@ -35,7 +35,7 @@ use crate::{
         grpc::{
             backend_client::BackendClient,
             client::GrpcClient,
-            zmq_client::{ZmqEngineClient, ZMQ_LOOPBACK_HOST},
+            zmq_client::{EosTokenIds, ZmqEngineClient, ZMQ_LOOPBACK_HOST},
         },
     },
 };
@@ -200,6 +200,19 @@ async fn connect_zmq_backend(
     let (handshake, input, output) =
         zmq_socket_addresses(&base_url, handshake_override.as_deref())?;
     ensure_ipc_socket_dir(&base_url).await?;
+    // The engine can't stop at EOS on its own (it has no tokenizer or model
+    // config); resolve the EOS ids from the local model dir so every request
+    // carries them.
+    let model_dir = std::path::Path::new(&model_id);
+    let eos = if model_dir.is_dir() {
+        EosTokenIds::from_model_dir(model_dir)
+    } else {
+        tracing::warn!(
+            "ZMQ worker model id '{model_id}' is not a local model directory; EOS ids \
+             unavailable — generation stops only at max_tokens or explicit stops"
+        );
+        EosTokenIds::default()
+    };
     tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
     match ZmqEngineClient::connect(
         &handshake,
@@ -207,6 +220,7 @@ async fn connect_zmq_backend(
         &output,
         1,
         model_id,
+        eos,
         runtime,
         ZMQ_CONNECT_TIMEOUT,
     )
@@ -2826,6 +2840,7 @@ mod tests {
                 &output,
                 1,
                 "m".to_string(),
+                EosTokenIds::default(),
                 RuntimeType::Vllm,
                 Duration::from_secs(10)
             ),
