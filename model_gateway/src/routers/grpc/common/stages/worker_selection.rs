@@ -21,8 +21,8 @@ use crate::{
         },
     },
     worker::{
-        ConnectionModeExt, HashRing, RuntimeType, Worker, WorkerRegistry, WorkerType,
-        UNKNOWN_MODEL_ID,
+        ConnectionMode, ConnectionModeExt, HashRing, RuntimeType, Worker, WorkerRegistry,
+        WorkerType, UNKNOWN_MODEL_ID,
     },
 };
 
@@ -456,7 +456,14 @@ impl WorkerSelectionStage {
             .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, w| {
                 if w.connection_mode().uses_grpc_pipeline() && w.is_available() {
                     match w.metadata().spec.worker_type {
-                        WorkerType::Encode => acc.0.push(w),
+                        // Encode dispatch is a gRPC encoder RPC sent to the
+                        // worker's URL; a direct-ZMQ worker has no encode
+                        // path, so only gRPC workers qualify for this pool.
+                        WorkerType::Encode => {
+                            if *w.connection_mode() == ConnectionMode::Grpc {
+                                acc.0.push(w);
+                            }
+                        }
                         WorkerType::Prefill => acc.1.push(w),
                         WorkerType::Decode => acc.2.push(w),
                         WorkerType::Regular => {}

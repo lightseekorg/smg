@@ -775,6 +775,39 @@ mod stop_resolution_tests {
     }
 
     #[test]
+    fn pd_bootstrap_injection_skips_non_sglang_requests() {
+        use super::{RuntimeType, Worker, WorkerSelection};
+        use crate::worker::{BasicWorkerBuilder, WorkerType};
+
+        // An SGLang-runtime worker selection paired with a non-SGLang proto
+        // (e.g. a misreporting backend) must skip injection, not panic.
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://prefill:30000")
+                .worker_type(WorkerType::Prefill)
+                .build(),
+        );
+        let selection = WorkerSelection::Disaggregated {
+            encode_assignments: None,
+            prefill: worker.clone(),
+            decode: worker,
+            runtime_type: RuntimeType::Sglang,
+        };
+
+        let mut req = vllm_request(vec!["."], vec![7]);
+        let before = match &req {
+            ProtoGenerateRequest::Vllm(inner) => (**inner).clone(),
+            _ => panic!("vllm_request builds a Vllm variant"),
+        };
+        super::maybe_inject_pd_metadata(&mut req, &selection);
+        match &req {
+            ProtoGenerateRequest::Vllm(inner) => {
+                assert_eq!(**inner, before, "request must be untouched");
+            }
+            _ => panic!("variant must be unchanged"),
+        }
+    }
+
+    #[test]
     fn tokenspeed_zmq_multi_token_relies_on_router_decoder() {
         // "Hello world" => [1, 2]: not a flat stop id, so it must not forward.
         let mut req = tokenspeed_request(vec!["Hello world"], vec![42]);

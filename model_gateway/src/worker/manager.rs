@@ -879,13 +879,23 @@ impl WorkerManager {
         let grpc_workers = total_workers - http_workers - zmq_skipped;
 
         if workers.is_empty() {
+            let message = if zmq_skipped > 0 {
+                format!(
+                    "No cache-flush-capable workers available \
+                     ({zmq_skipped} ZMQ workers skipped: no cache-flush RPC)"
+                )
+            } else {
+                "No workers available for cache flush".to_string()
+            };
+            info!("{}", message);
             return FlushCacheResult {
                 successful: vec![],
                 failed: vec![],
                 total_workers,
                 http_workers,
                 grpc_workers,
-                message: "No workers available for cache flush".to_string(),
+                zmq_workers: zmq_skipped,
+                message,
             };
         }
 
@@ -926,6 +936,7 @@ impl WorkerManager {
             total_workers,
             http_workers,
             grpc_workers,
+            zmq_workers: zmq_skipped,
             message,
         }
     }

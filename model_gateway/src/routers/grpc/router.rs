@@ -1352,6 +1352,52 @@ mod pd_tests {
     /// PD serves /v1/responses: an unknown model is rejected per-request (404),
     /// not gated behind a blanket 501, and cancel reaches storage.
     #[tokio::test]
+    async fn pd_debug_counts_include_zmq_workers() {
+        let ctx = grpc_ctx(pd_routing_mode()).await;
+        for (url, worker_type, mode) in [
+            (
+                "grpc://prefill:30000",
+                WorkerType::Prefill,
+                ConnectionMode::Grpc,
+            ),
+            (
+                "ipc:///tmp/smg-test-prefill",
+                WorkerType::Prefill,
+                ConnectionMode::Zmq,
+            ),
+            (
+                "ipc:///tmp/smg-test-decode",
+                WorkerType::Decode,
+                ConnectionMode::Zmq,
+            ),
+        ] {
+            let worker = BasicWorkerBuilder::new(url)
+                .worker_type(worker_type)
+                .connection_mode(mode)
+                .model(ModelCard::new("m"))
+                .health_config(HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build();
+            ctx.worker_registry
+                .register(Arc::new(worker))
+                .expect("register worker");
+        }
+
+        let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");
+        let debug = format!("{router:?}");
+        assert!(
+            debug.contains("prefill_workers_count: 2"),
+            "ZMQ prefill worker missing from debug counts: {debug}"
+        );
+        assert!(
+            debug.contains("decode_workers_count: 1"),
+            "ZMQ decode worker missing from debug counts: {debug}"
+        );
+    }
+
+    #[tokio::test]
     async fn pd_router_serves_responses_and_cancel() {
         let ctx = grpc_ctx(pd_routing_mode()).await;
         let router = GrpcRouter::new(&ctx, Mode::PrefillDecode).expect("pd router");

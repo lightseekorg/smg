@@ -824,9 +824,42 @@ impl RequestExecutionStage {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use smg_grpc_client::vllm_proto as vllm;
 
     use super::*;
+    use crate::worker::{BasicWorkerBuilder, ConnectionMode, Worker, WorkerType};
+
+    #[test]
+    fn pd_leg_labels_reflect_each_legs_transport() {
+        let prefill: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("ipc:///tmp/smg-test-prefill")
+                .worker_type(WorkerType::Prefill)
+                .connection_mode(ConnectionMode::Zmq)
+                .build(),
+        );
+        let decode: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://decode:30000")
+                .worker_type(WorkerType::Decode)
+                .connection_mode(ConnectionMode::Grpc)
+                .build(),
+        );
+        let selection = WorkerSelection::Disaggregated {
+            encode_assignments: None,
+            prefill,
+            decode,
+            runtime_type: RuntimeType::TokenSpeed,
+        };
+        assert_eq!(
+            pd_leg_labels(&selection),
+            (
+                metrics_labels::CONNECTION_ZMQ,
+                metrics_labels::CONNECTION_GRPC
+            ),
+            "each PD leg must carry its own transport label"
+        );
+    }
 
     #[test]
     fn kv_connector_mode_mooncake_uses_bootstrap_metadata() {
