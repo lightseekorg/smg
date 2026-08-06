@@ -23,7 +23,10 @@ use axum::{
 };
 use bytes::Bytes;
 use http_body::Frame;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::error::Elapsed,
+};
 use tracing::{debug, error, warn};
 
 use super::token_bucket::TokenBucket;
@@ -40,16 +43,24 @@ struct TokenPermit {
 }
 
 impl TokenPermit {
-    fn new(token_bucket: Arc<TokenBucket>, tokens: f64) -> Self {
-        Self {
-            token_bucket,
-            tokens,
-        }
-    }
-
     fn try_acquire(token_bucket: Arc<TokenBucket>, tokens: f64) -> Result<Self, ()> {
         token_bucket.try_acquire(tokens)?;
-        Ok(Self::new(token_bucket, tokens))
+        Ok(Self {
+            token_bucket,
+            tokens,
+        })
+    }
+
+    async fn acquire_timeout(
+        token_bucket: Arc<TokenBucket>,
+        tokens: f64,
+        timeout: Duration,
+    ) -> Result<Self, Elapsed> {
+        token_bucket.acquire_timeout(tokens, timeout).await?;
+        Ok(Self {
+            token_bucket,
+            tokens,
+        })
     }
 }
 
@@ -71,11 +82,6 @@ pub struct TokenGuardBody {
 }
 
 impl TokenGuardBody {
-    /// Create a new TokenGuardBody that will return tokens when dropped.
-    pub fn new(inner: Body, token_bucket: Arc<TokenBucket>, tokens: f64) -> Self {
-        Self::with_permit(inner, TokenPermit::new(token_bucket, tokens))
-    }
-
     fn with_permit(inner: Body, permit: TokenPermit) -> Self {
         Self {
             inner,
@@ -171,13 +177,10 @@ impl QueueProcessor {
                     reason = "fire-and-forget permit acquisition: task is bounded by remaining_timeout and communicates via oneshot; dropping the JoinHandle detaches the task but it self-terminates"
                 )]
                 tokio::spawn(async move {
-                    if token_bucket
-                        .acquire_timeout(1.0, remaining_timeout)
-                        .await
-                        .is_ok()
+                    if let Ok(permit) =
+                        TokenPermit::acquire_timeout(token_bucket, 1.0, remaining_timeout).await
                     {
                         debug!("Queue: acquired token after waiting");
-                        let permit = TokenPermit::new(token_bucket, 1.0);
                         let _ = queued.permit_tx.send(Ok(permit));
                     } else {
                         warn!("Queue: request timed out waiting for token");
@@ -313,16 +316,18 @@ mod tests {
     async fn cancellation_returns_acquired_token() {
         let bucket = Arc::new(TokenBucket::new(1, 0));
         let task_bucket = bucket.clone();
+        let (acquired_tx, acquired_rx) = oneshot::channel();
         #[expect(
             clippy::disallowed_methods,
             reason = "Test helper: the spawned task is explicitly aborted and awaited before the test ends"
         )]
         let task = tokio::spawn(async move {
             let _permit = TokenPermit::try_acquire(task_bucket, 1.0).unwrap();
+            let _ = acquired_tx.send(());
             std::future::pending::<()>().await;
         });
 
-        tokio::task::yield_now().await;
+        acquired_rx.await.unwrap();
         assert_eq!(bucket.available_tokens(), 0.0);
         task.abort();
         let _ = task.await;
