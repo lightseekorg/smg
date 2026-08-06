@@ -1,0 +1,120 @@
+# Reference deployment for running smg with K8s service discovery
+# **inside** the cluster: the gateway authenticates via its ServiceAccount
+# (in-cluster config), needs exactly pods get/list/watch in the watched
+# namespace, and probes engine pods over the pod network — no hostNetwork.
+#
+# The engine Deployment is the canonical multi-server shape: every pod runs
+# four engines on 8080-8083 and lists them in the smg.ai/worker-ports
+# annotation; each pod IP contributes four workers.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: smg-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: smg-discovery
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: smg-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: smg-discovery
+subjects:
+  - kind: ServiceAccount
+    name: smg-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smg-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smg-gateway
+  template:
+    metadata:
+      labels:
+        app: smg-gateway
+    spec:
+      serviceAccountName: smg-discovery
+      containers:
+        - name: smg
+          image: smg-gateway:e2e
+          imagePullPolicy: Never
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "3009"
+            - --service-discovery
+            - --selector
+            - app=engines-incluster
+            - --service-discovery-port
+            - "8080"
+            - --service-discovery-namespace
+            - default
+            - --policy
+            - round_robin
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3009
+            initialDelaySeconds: 1
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smg-gateway
+spec:
+  selector:
+    app: smg-gateway
+  ports:
+    - port: 3009
+      targetPort: 3009
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: engines
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: engines-incluster
+  template:
+    metadata:
+      labels:
+        app: engines-incluster
+      annotations:
+        smg.ai/worker-ports: "8080,8081,8082,8083"
+    spec:
+      containers:
+        - name: engines
+          image: smg-mock-worker:e2e
+          imagePullPolicy: Never
+          args:
+            - --host
+            - 0.0.0.0
+            - --http-base-port
+            - "8080"
+            - --http-count
+            - "4"
+            - --model
+            - incluster-model
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2

@@ -1,0 +1,87 @@
+# Burst workload: three single-engine pods applied and deleted as a batch.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: burst-0
+  labels:
+    app: smg-kind-e2e
+  annotations:
+    smg.ai/worker-ports: "28091"
+spec:
+  hostNetwork: true
+  restartPolicy: Never
+  containers:
+    - name: engine
+      image: python:3.12-alpine
+      command: ["python", "/opt/mock/server.py", "28091"]
+      volumeMounts:
+        - name: script
+          mountPath: /opt/mock
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 28091
+        initialDelaySeconds: 1
+        periodSeconds: 2
+  volumes:
+    - name: script
+      configMap:
+        name: mock-engine-script
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: burst-1
+  labels:
+    app: smg-kind-e2e
+  annotations:
+    smg.ai/worker-ports: "28092"
+spec:
+  hostNetwork: true
+  restartPolicy: Never
+  containers:
+    - name: engine
+      image: python:3.12-alpine
+      command: ["python", "/opt/mock/server.py", "28092"]
+      volumeMounts:
+        - name: script
+          mountPath: /opt/mock
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 28092
+        initialDelaySeconds: 1
+        periodSeconds: 2
+  volumes:
+    - name: script
+      configMap:
+        name: mock-engine-script
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: burst-2
+  labels:
+    app: smg-kind-e2e
+  annotations:
+    smg.ai/worker-ports: "28093"
+spec:
+  hostNetwork: true
+  restartPolicy: Never
+  containers:
+    - name: engine
+      image: python:3.12-alpine
+      command: ["python", "/opt/mock/server.py", "28093"]
+      volumeMounts:
+        - name: script
+          mountPath: /opt/mock
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 28093
+        initialDelaySeconds: 1
+        periodSeconds: 2
+  volumes:
+    - name: script
+      configMap:
+        name: mock-engine-script
