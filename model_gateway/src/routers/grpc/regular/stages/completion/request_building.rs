@@ -141,11 +141,9 @@ impl PipelineStage for CompletionRequestBuildingStage {
         let disaggregated = matches!(clients, ClientSelection::Disaggregated { .. });
         let request_type = &ctx.input.request_type;
         let workers = ctx.state.workers.as_ref();
-        // Resolve string `stop` sequences for engines that can't match them
-        // server-side (SGLang skip_tokenizer_init, and every direct-ZMQ
-        // backend): drop the strings, convert single-token stops to
-        // stop_token_ids; the router-side StopSequenceDecoder trims the text.
-        let is_zmq = builder_client.is_zmq();
+        // Each built request is finalized by the client below: it resolves
+        // string `stop`s its engine can't match and reports the router's
+        // residual trim obligation.
         let tokenizer = ctx.tokenizer_arc();
 
         let plan = match items.as_slice() {
@@ -169,7 +167,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     request_type,
                     workers,
                 )?;
-                helpers::resolve_string_stops(&mut proto_request, tokenizer.as_ref(), is_zmq);
+                let _router_stops = builder_client
+                    .finalize_generate_request(&mut proto_request, tokenizer.as_ref());
                 ExecutionPlan::generate(self.plan_kind, proto_request)
             }
             batch_items => {
@@ -201,7 +200,8 @@ impl PipelineStage for CompletionRequestBuildingStage {
                         request_type,
                         workers,
                     )?;
-                    helpers::resolve_string_stops(&mut proto_request, tokenizer.as_ref(), is_zmq);
+                    let _router_stops = builder_client
+                        .finalize_generate_request(&mut proto_request, tokenizer.as_ref());
                     requests.push(proto_request);
                 }
                 ExecutionPlan::Batch {

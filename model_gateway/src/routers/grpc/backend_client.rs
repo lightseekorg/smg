@@ -55,6 +55,28 @@ impl BackendClient {
         matches!(self, Self::Zmq(_))
     }
 
+    /// Finalize a built generate request for this backend's wire: resolve
+    /// string `stop`s the engine cannot match (token-only wires and SGLang's
+    /// `skip_tokenizer_init` workers) into `stop_token_ids`, folding in EOS
+    /// where the frontend owns stopping.
+    ///
+    /// Returns the router's residual obligation: the stop strings the engine
+    /// will never see, which response processing must trim from output text.
+    /// Empty when the engine matches stops server-side. This is the client's
+    /// own policy — callers need no transport knowledge.
+    pub fn finalize_generate_request(
+        &self,
+        request: &mut ProtoGenerateRequest,
+        tokenizer: Option<&std::sync::Arc<dyn llm_tokenizer::traits::Tokenizer>>,
+    ) -> Vec<String> {
+        let token_only_wire = self.is_zmq();
+        crate::routers::grpc::common::stages::helpers::resolve_string_stops(
+            request,
+            tokenizer,
+            token_only_wire,
+        )
+    }
+
     /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so
     /// this reports `true` for gRPC; ZMQ reflects its connection liveness.
     pub fn is_alive(&self) -> bool {
