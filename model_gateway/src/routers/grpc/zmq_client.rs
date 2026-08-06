@@ -37,6 +37,7 @@ use engine_zmq_client::{
     ConnectedEngine,
 };
 use futures::{stream::SelectAll, Stream, StreamExt};
+use llm_tokenizer::traits::Tokenizer;
 use openai_protocol::worker::{SchedulerLoadSnapshot, WorkerLoadResponse};
 use smg_grpc_client::{tokenspeed_proto, vllm_proto as vllm};
 
@@ -124,6 +125,37 @@ fn eos_ids_from_value(value: Option<&serde_json::Value>) -> Vec<u32> {
         Some(serde_json::Value::Array(ids)) => ids.iter().filter_map(as_id).collect(),
         Some(id) => as_id(id).into_iter().collect(),
         None => Vec::new(),
+    }
+}
+
+/// Request-time EOS backstop for the tokenizer-less EngineCore.
+///
+/// EOS injection has exactly one owner — this file. The connect-time
+/// [`EosTokenIds`] model-dir resolution has nothing to read when the worker's
+/// model id is a repo id rather than a local path, so the tokenizer's merged
+/// EOS set is folded into `stop_token_ids` here as the always-available
+/// backstop; without it an uncapped request generates to the full context
+/// window. Not needed for TokenSpeed (its scheduler stops at EOS itself) —
+/// the caller gates on runtime.
+pub(crate) fn fold_tokenizer_eos_backstop(
+    request: &mut ProtoGenerateRequest,
+    tokenizer: Option<&Arc<dyn Tokenizer>>,
+) {
+    let ProtoGenerateRequest::Vllm(req) = request else {
+        return;
+    };
+    let Some(params) = req.sampling_params.as_mut() else {
+        return;
+    };
+    if params.ignore_eos {
+        return;
+    }
+    if let Some(tokenizer) = tokenizer {
+        for &id in tokenizer.eos_token_ids() {
+            if !params.stop_token_ids.contains(&id) {
+                params.stop_token_ids.push(id);
+            }
+        }
     }
 }
 
@@ -1137,6 +1169,47 @@ mod tests {
     };
 
     use super::*;
+
+    fn eos_request(stop_token_ids: Vec<u32>, ignore_eos: bool) -> ProtoGenerateRequest {
+        ProtoGenerateRequest::Vllm(Box::new(vllm::GenerateRequest {
+            sampling_params: Some(vllm::SamplingParams {
+                stop_token_ids,
+                ignore_eos,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    fn eos_stop_ids(req: &ProtoGenerateRequest) -> &[u32] {
+        match req {
+            ProtoGenerateRequest::Vllm(r) => &r.sampling_params.as_ref().unwrap().stop_token_ids,
+            _ => panic!("expected vLLM request"),
+        }
+    }
+
+    #[test]
+    fn eos_backstop_appends_tokenizer_ids_without_duplicates() {
+        // MockTokenizer's EOS set is {999}.
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(llm_tokenizer::mock::MockTokenizer::new());
+
+        let mut req = eos_request(vec![7], false);
+        fold_tokenizer_eos_backstop(&mut req, Some(&tokenizer));
+        assert_eq!(eos_stop_ids(&req), &[7, 999]);
+
+        // Already-present EOS ids are not duplicated.
+        let mut req = eos_request(vec![999], false);
+        fold_tokenizer_eos_backstop(&mut req, Some(&tokenizer));
+        assert_eq!(eos_stop_ids(&req), &[999]);
+    }
+
+    #[test]
+    fn eos_backstop_respects_ignore_eos() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(llm_tokenizer::mock::MockTokenizer::new());
+        let mut req = eos_request(vec![7], true);
+        fold_tokenizer_eos_backstop(&mut req, Some(&tokenizer));
+        assert_eq!(eos_stop_ids(&req), &[7]);
+    }
 
     fn batch(
         request_id: &str,

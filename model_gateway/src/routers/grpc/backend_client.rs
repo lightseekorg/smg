@@ -70,11 +70,19 @@ impl BackendClient {
         tokenizer: Option<&std::sync::Arc<dyn llm_tokenizer::traits::Tokenizer>>,
     ) -> Vec<String> {
         let token_only_wire = self.is_zmq();
-        crate::routers::grpc::common::stages::helpers::resolve_string_stops(
+        let router_stops = crate::routers::grpc::common::stages::helpers::resolve_string_stops(
             request,
             tokenizer,
             token_only_wire,
-        )
+        );
+        if let Self::Zmq(client) = self {
+            // EngineCore has no tokenizer, so stopping at EOS is this
+            // frontend's job; TokenSpeed's scheduler stops at EOS itself.
+            if client.runtime() != RuntimeType::TokenSpeed {
+                crate::routers::grpc::zmq_client::fold_tokenizer_eos_backstop(request, tokenizer);
+            }
+        }
+        router_stops
     }
 
     /// Local liveness. gRPC has no cheap local flag (it uses a health RPC), so
