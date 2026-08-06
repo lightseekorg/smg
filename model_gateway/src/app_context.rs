@@ -718,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_zero_rate_limit_disables_refill() {
         let config = RouterConfig {
-            max_concurrent_requests: 2,
+            max_concurrent_requests: 10,
             rate_limit_tokens_per_second: Some(0),
             ..RouterConfig::default()
         };
@@ -727,8 +727,10 @@ mod tests {
             .rate_limiter
             .expect("rate limiter should be enabled");
 
-        assert!(bucket.try_acquire(2.0).is_ok());
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(bucket.try_acquire(10.0).is_ok());
+        // The previous fallback used max_concurrent_requests as the refill
+        // rate, which would add more than one token during this wait.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(bucket.try_acquire(1.0).is_err());
 
         bucket.return_tokens_sync(1.0);
