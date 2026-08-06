@@ -248,7 +248,7 @@ impl BackendClient {
                         )
                     })
                 }
-                _ => {
+                RuntimeType::Vllm => {
                     let vllm_mm = zmq_vllm_mm(options.multimodal_inputs)?;
                     finish_vllm_request(vllm_mm, |mm| {
                         VllmEngineClient::build_generate_request_from_chat(
@@ -261,6 +261,9 @@ impl BackendClient {
                         )
                     })
                 }
+                other => Err(format!(
+                    "ZMQ backend reports unsupported runtime {other:?}; expected vLLM or TokenSpeed"
+                )),
             },
         }
     }
@@ -293,7 +296,7 @@ impl BackendClient {
                         )
                     })
                 }
-                _ => {
+                RuntimeType::Vllm => {
                     let vllm_mm = zmq_vllm_mm(options.multimodal_inputs)?;
                     finish_vllm_request(vllm_mm, |mm| {
                         VllmEngineClient::build_generate_request_from_messages(
@@ -306,6 +309,9 @@ impl BackendClient {
                         )
                     })
                 }
+                other => Err(format!(
+                    "ZMQ backend reports unsupported runtime {other:?}; expected vLLM or TokenSpeed"
+                )),
             },
         }
     }
@@ -331,7 +337,7 @@ impl BackendClient {
                     )?;
                     Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
                 }
-                _ => {
+                RuntimeType::Vllm => {
                     let req = VllmEngineClient::build_generate_request_from_completion(
                         request_id,
                         body,
@@ -340,6 +346,9 @@ impl BackendClient {
                     )?;
                     Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
                 }
+                other => Err(format!(
+                    "ZMQ backend reports unsupported runtime {other:?}; expected vLLM or TokenSpeed"
+                )),
             },
         }
     }
@@ -365,7 +374,7 @@ impl BackendClient {
                     )?;
                     Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
                 }
-                _ => {
+                RuntimeType::Vllm => {
                     let req = VllmEngineClient::build_plain_generate_request(
                         request_id,
                         body,
@@ -374,6 +383,9 @@ impl BackendClient {
                     )?;
                     Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
                 }
+                other => Err(format!(
+                    "ZMQ backend reports unsupported runtime {other:?}; expected vLLM or TokenSpeed"
+                )),
             },
         }
     }

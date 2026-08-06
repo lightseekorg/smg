@@ -112,7 +112,9 @@ async fn assemble_multimodal_data_impl(
             anyhow::bail!("MLX does not support multimodal inputs")
         }
         BackendClient::Zmq(client) => match client.runtime() {
-            RuntimeType::Vllm | RuntimeType::Unspecified => {
+            // connect() admits only vLLM/TokenSpeed runtimes over ZMQ, so no
+            // Unspecified fallback: anything else is a hard error below.
+            RuntimeType::Vllm => {
                 let batch = into_single_batch(intermediate, "vLLM")?;
                 let mut data = assemble_vllm(batch, workers)?;
                 // The ZMQ translate reads tensor bytes inline; this wire has no

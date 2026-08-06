@@ -396,7 +396,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::TokenSpeed(Box::new(req))
             }
-            BackendClient::Zmq(_) => {
+            BackendClient::Zmq(zmq_client) if zmq_client.runtime() == RuntimeType::Vllm => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request
@@ -442,6 +442,17 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     }
                 };
                 ProtoGenerateRequest::Vllm(Box::new(req))
+            }
+            // connect() admits only vLLM/TokenSpeed runtimes over ZMQ; a client
+            // reporting anything else is a wiring bug, not a request to serve.
+            BackendClient::Zmq(zmq_client) => {
+                return Err(error::internal_error(
+                    "unsupported_zmq_runtime",
+                    format!(
+                        "ZMQ backend reports unsupported runtime {:?} for Harmony requests",
+                        zmq_client.runtime()
+                    ),
+                ));
             }
         };
 
