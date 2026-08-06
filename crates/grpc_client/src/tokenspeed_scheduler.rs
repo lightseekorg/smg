@@ -178,12 +178,7 @@ impl TokenSpeedSchedulerClient {
 
     // ── Request builders ──────────────────────────────────────────────
 
-    #[expect(
-        clippy::unused_self,
-        reason = "receiver kept for API parity with the other engine clients"
-    )]
     pub fn build_generate_request_from_chat(
-        &self,
         request_id: String,
         body: &ChatCompletionRequest,
         processed_text: String,
@@ -208,12 +203,7 @@ impl TokenSpeedSchedulerClient {
         })
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "receiver kept for API parity with the other engine clients"
-    )]
     pub fn build_plain_generate_request(
-        &self,
         request_id: String,
         body: &GenerateRequest,
         original_text: Option<String>,
@@ -242,12 +232,7 @@ impl TokenSpeedSchedulerClient {
         })
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "receiver kept for API parity with the other engine clients"
-    )]
     pub fn build_generate_request_from_responses(
-        &self,
         request_id: String,
         body: &ResponsesRequest,
         processed_text: String,
@@ -267,12 +252,7 @@ impl TokenSpeedSchedulerClient {
         })
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "receiver kept for API parity with the other engine clients"
-    )]
     pub fn build_generate_request_from_messages(
-        &self,
         request_id: String,
         body: &CreateMessageRequest,
         processed_text: String,
@@ -295,12 +275,7 @@ impl TokenSpeedSchedulerClient {
         })
     }
 
-    #[expect(
-        clippy::unused_self,
-        reason = "receiver kept for API parity with the other engine clients"
-    )]
     pub fn build_generate_request_from_completion(
-        &self,
         request_id: String,
         body: &CompletionRequest,
         original_text: String,
