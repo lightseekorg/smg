@@ -12,36 +12,18 @@ use crate::{
         error,
         grpc::{
             common::stages::PipelineStage,
-            context::{ClientSelection, FinalResponse, RequestContext, RequestType},
+            context::{FinalResponse, RequestContext, RequestType},
         },
     },
     worker::AttachedBody,
 };
 
-/// String `stop` sequences the ROUTER must enforce: only for direct-ZMQ
-/// backends, where the engine receives token ids and never sees the strings.
-/// Empty for gRPC backends (the engine matches stops itself).
+/// String `stop` sequences the ROUTER must enforce, as reported by the
+/// backend client during request building (its residual obligation: strings
+/// the engine will never match). Empty for engines that match server-side —
+/// no transport inspection here.
 fn router_stop_strings(ctx: &RequestContext) -> Vec<String> {
-    let is_zmq = ctx
-        .state
-        .clients
-        .as_ref()
-        .is_some_and(|clients| match clients {
-            ClientSelection::Single { client } => client.is_zmq(),
-            ClientSelection::Disaggregated { decode, .. } => decode.is_zmq(),
-        });
-    if !is_zmq {
-        return Vec::new();
-    }
-    match &ctx.input.request_type {
-        RequestType::Chat(_) => ctx
-            .chat_request_arc()
-            .stop
-            .as_ref()
-            .map(|stop| stop.to_vec())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
+    ctx.state.response.router_stop_obligations.clone()
 }
 
 /// Harmony Response Processing stage: Parse and format Harmony responses

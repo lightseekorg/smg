@@ -500,6 +500,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         }
 
+        // The client resolves string `stop`s its engine can't match and
+        // reports the router's residual trim obligation; harmony response
+        // processing scans channel text for exactly these strings.
+        ctx.state.response.router_stop_obligations = builder_client
+            .finalize_generate_request(&mut proto_request, ctx.tokenizer_arc().as_ref());
+
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);

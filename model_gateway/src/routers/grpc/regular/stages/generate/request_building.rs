@@ -88,9 +88,8 @@ impl PipelineStage for GenerateRequestBuildingStage {
 
         // The client resolves string `stop`s its engine can't match and
         // reports the router's residual trim obligation; no transport
-        // knowledge needed here. (Obligation wiring lands with the
-        // response-side convergence commit.)
-        let _router_stops = builder_client
+        // knowledge needed here.
+        ctx.state.response.router_stop_obligations = builder_client
             .finalize_generate_request(&mut proto_request, ctx.tokenizer_arc().as_ref());
 
         if self.inject_pd_metadata {

@@ -457,6 +457,12 @@ pub(crate) struct ResponseState {
     /// Stop sequence decoder
     pub stop_decoder: Option<StopSequenceDecoder>,
 
+    /// String stops the engine will never match, reported by
+    /// `BackendClient::finalize_generate_request` during request building.
+    /// Response processing must trim these from output text; empty when the
+    /// engine matches stops server-side.
+    pub router_stop_obligations: Vec<String>,
+
     /// Derived skip_special_tokens for streaming (set in preparation, read in response_processing).
     /// Stored here because PreparationOutput is consumed by request_building before
     /// response_processing runs.

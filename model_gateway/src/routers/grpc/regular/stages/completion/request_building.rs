@@ -167,7 +167,7 @@ impl PipelineStage for CompletionRequestBuildingStage {
                     request_type,
                     workers,
                 )?;
-                let _router_stops = builder_client
+                ctx.state.response.router_stop_obligations = builder_client
                     .finalize_generate_request(&mut proto_request, tokenizer.as_ref());
                 ExecutionPlan::generate(self.plan_kind, proto_request)
             }
@@ -200,7 +200,9 @@ impl PipelineStage for CompletionRequestBuildingStage {
                         request_type,
                         workers,
                     )?;
-                    let _router_stops = builder_client
+                    // Same CompletionRequest per prompt: every iteration
+                    // yields the same residual duty, so keep the last.
+                    ctx.state.response.router_stop_obligations = builder_client
                         .finalize_generate_request(&mut proto_request, tokenizer.as_ref());
                     requests.push(proto_request);
                 }
