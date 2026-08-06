@@ -1971,6 +1971,12 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(|r| ProtoGenerateResponse::TokenSpeed(Box::new(r)))),
+            // Every ZMQ engine (including TokenSpeed) emits vllm-shaped
+            // responses: the adapter translates wire output into
+            // `vllm::GenerateResponse`, so variant checks like
+            // `is_tokenspeed()` on a response are unreliable for ZMQ-backed
+            // streams. Key response-side engine logic on the worker's
+            // `runtime_type()`, never on the response variant.
             Self::Zmq(stream) => stream
                 .next()
                 .await

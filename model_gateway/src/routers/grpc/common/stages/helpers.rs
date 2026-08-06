@@ -452,7 +452,13 @@ fn inject_sglang_bootstrap_metadata(
         bootstrap_room: room_id,
     };
 
-    let sglang_request = request.as_sglang_mut();
+    // Guarded by the caller's runtime check, but match defensively: a non-SGLang
+    // proto here (e.g. a ZMQ backend reporting an unexpected runtime) must not
+    // take down the request task via the panicking accessor.
+    let ProtoGenerateRequest::Sglang(sglang_request) = request else {
+        warn!("PD bootstrap metadata requested for a non-SGLang request; skipping injection");
+        return;
+    };
     sglang_request.disaggregated_params = Some(disagg_params);
 
     debug!(

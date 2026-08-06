@@ -40,7 +40,7 @@ use crate::{
         common::retry::{is_retryable_status, RetryExecutor},
         error, RouterTrait,
     },
-    worker::{ConnectionMode, WorkerRegistry, WorkerType},
+    worker::{WorkerRegistry, WorkerType},
 };
 
 const QWEN3_ASR_LANGUAGES: &[(&str, &str)] = &[
@@ -824,23 +824,20 @@ impl std::fmt::Debug for GrpcRouter {
                     .finish()
             }
             Mode::PrefillDecode | Mode::EncodePrefillDecode => {
-                let prefill_workers = self.worker_registry.get_workers_filtered(
-                    None,
-                    Some(WorkerType::Prefill),
-                    Some(ConnectionMode::Grpc),
-                    None,
-                    false,
-                );
-                let decode_workers = self.worker_registry.get_workers_filtered(
-                    None,
-                    Some(WorkerType::Decode),
-                    Some(ConnectionMode::Grpc),
-                    None,
-                    false,
-                );
+                // Count every worker this router can serve (gRPC and ZMQ both
+                // ride the gRPC pipeline), not just ConnectionMode::Grpc.
+                let count_pipeline_workers = |worker_type| {
+                    self.worker_registry
+                        .get_workers_filtered(None, Some(worker_type), None, None, false)
+                        .iter()
+                        .filter(|w| w.connection_mode().uses_grpc_pipeline())
+                        .count()
+                };
+                let prefill_workers = count_pipeline_workers(WorkerType::Prefill);
+                let decode_workers = count_pipeline_workers(WorkerType::Decode);
                 f.debug_struct("GrpcRouter")
-                    .field("prefill_workers_count", &prefill_workers.len())
-                    .field("decode_workers_count", &decode_workers.len())
+                    .field("prefill_workers_count", &prefill_workers)
+                    .field("decode_workers_count", &decode_workers)
                     .finish()
             }
         }
@@ -1252,7 +1249,7 @@ mod pd_tests {
         config::{PolicyConfig, RouterConfig, RoutingMode},
         policies::PolicyRegistry,
         tenant::TenantKey,
-        worker::{BasicWorkerBuilder, WorkerRegistry},
+        worker::{BasicWorkerBuilder, ConnectionMode, WorkerRegistry},
     };
 
     fn pd_routing_mode() -> RoutingMode {

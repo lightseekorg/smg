@@ -399,13 +399,17 @@ impl WorkerSelectionStage {
         // Record worker selection metrics for both prefill and decode
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
-            metrics_labels::CONNECTION_GRPC,
+            available_prefill[prefill_idx]
+                .connection_mode()
+                .as_metric_label(),
             model,
             prefill_policy.name(),
         );
         Metrics::record_worker_selection(
             metrics_labels::WORKER_DECODE,
-            metrics_labels::CONNECTION_GRPC,
+            available_decode[decode_idx]
+                .connection_mode()
+                .as_metric_label(),
             model,
             decode_policy.name(),
         );
@@ -577,13 +581,17 @@ impl WorkerSelectionStage {
         // recorded in assign_encode_workers.
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
-            metrics_labels::CONNECTION_GRPC,
+            available_prefill[prefill_idx]
+                .connection_mode()
+                .as_metric_label(),
             model_id,
             prefill_policy.name(),
         );
         Metrics::record_worker_selection(
             metrics_labels::WORKER_DECODE,
-            metrics_labels::CONNECTION_GRPC,
+            available_decode[decode_idx]
+                .connection_mode()
+                .as_metric_label(),
             model_id,
             decode_policy.name(),
         );
