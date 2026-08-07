@@ -50,6 +50,10 @@ on:
         description: "Override reasoning parser for BOTH arms; empty = matrix defaults"
         required: false
         default: ""
+      run_timeout:
+        description: "Override per-arm `bfcl generate`/`evaluate` wall-clock cap in seconds (0 = uncapped); empty = matrix default"
+        required: false
+        default: ""
 
 concurrency:
   group: nightly-bfcl-${{ github.event_name }}-${{ github.ref }}
@@ -126,6 +130,13 @@ jobs:
           import json, os
           # max_model_len "auto": largest window that fits in GPU memory (capped at
           # native max). A fixed 32768 400'd on multi_turn_long_context (>32k prompts).
+          #
+          # run_timeout: per-arm wall-clock cap on `bfcl generate` (and `evaluate`),
+          # in seconds. Sized ~1.5-4x the observed healthy duration of each leg; a
+          # frontend that emits non-terminating garbage never hits a stop token, so
+          # every case runs to the generation cap and the leg would otherwise crawl
+          # until the 360m job limit and produce nothing at all. Sequential legs get
+          # half the budget: their two arms run one after the other in the same job.
           legs = [
               # H100 legs (TP=2 per arm, both arms concurrent: GPUs 0,1 + 2,3).
               {"name": "qwen3.6", "runner": "4-gpu-h100", "tp": 2,
@@ -134,6 +145,8 @@ jobs:
                "vllm_tool": "qwen3_xml", "vllm_reason": "qwen3",
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               # Slowest healthy leg: 4441 cases took 4h02m per arm on 2026-08-05.
+               "run_timeout": "18000",
                "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
@@ -142,12 +155,14 @@ jobs:
                "vllm_tool": "openai", "vllm_reason": "",
                "smg_tool": "", "smg_reason": "",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
+               "run_timeout": "7200",  # healthy: 31m for both arms on 2026-08-05
                "model_cache": "/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # Blackwell legs (B200). Models pre-staged on NVMe at /raid/models/<id>.
               # Concurrent TP=4 per arm (0-3 + 4-7).
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
-               "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "bfcl_model": "deepseek-ai/DeepSeek-V4-Flash-0731-FC",
+               # Base V4-Flash: the -0731 refresh is not supported yet.
+               "model": "deepseek-ai/DeepSeek-V4-Flash", "bfcl_model": "deepseek-ai/DeepSeek-V4-Flash-FC",
                "vllm_tool": "deepseek_v4", "vllm_reason": "deepseek_v4",
                "smg_tool": "deepseek_v4",
                "smg_reason": "deepseek_v31",  # TODO(confirm): no deepseek_v4 SMG reasoning parser yet
@@ -155,6 +170,8 @@ jobs:
                # kernel asserts fp8 kv-cache (else EngineCore dies at startup).
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
                "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models",
+               # No healthy baseline yet; kept tight until the leg scores cleanly.
+               "run_timeout": "5400",
                "arm_mode": "concurrent", "max_model_len": "auto"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
@@ -162,6 +179,7 @@ jobs:
                "vllm_tool": "minimax_m2", "vllm_reason": "minimax_m2",
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "run_timeout": "14400",
                "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # Kimi-K2.6 int4 (~500GB) fits TP=4 half-node.
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
@@ -172,6 +190,7 @@ jobs:
                "smg_reason": "kimi_thinking",  # K2.6 template prefills <think> (always-in-reasoning); kimi_k25 (always_in_reasoning=false) mis-splits reasoning -> SMG scored 0
                # Generous startup: 1T MoE at TP=4 needs minutes for load+compile+quant (420s timed out).
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
+               "run_timeout": "14400",
                "model_cache": "/raid/models", "arm_mode": "concurrent", "max_model_len": "auto"},
               # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
               # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
@@ -184,6 +203,8 @@ jobs:
                "smg_tool": "glm47_moe", "smg_reason": "glm45",
                # FP8 load + DeepGEMM warmup on the largest leg: generous startup ceiling.
                "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3", "gpu_mem": "0.90", "startup_timeout": "3000",
+               # Sequential: both arms share the 360m job, healthy total 2h52m on 2026-08-05.
+               "run_timeout": "7200",
                "model_cache": "/raid/models", "arm_mode": "sequential", "max_model_len": "auto"},
           ]
           only = os.environ.get("ONLY", "")
@@ -269,6 +290,7 @@ jobs:
           GPU_B: ${{ matrix.gpu_b }}
           # Per-leg health-wait budget: big MoEs need minutes for load + compile + quant.
           BFCL_STARTUP_TIMEOUT: ${{ matrix.startup_timeout }}
+          RUN_TIMEOUT: ${{ github.event.inputs.run_timeout || matrix.run_timeout }}
           # Arm logs + pidfiles under RUNNER_TEMP (per-job, uploadable) not /tmp.
           BFCL_RUN_DIR: ${{ runner.temp }}/bfcl_run
         run: |
@@ -307,6 +329,20 @@ jobs:
           trap 'cleanup; exit 143' INT TERM
           BFCL="$(command -v bfcl)"
           ROOT="$RUNNER_TEMP/bfcl_ab"
+          # run_ab.py exit codes: 0 clean, 1 score regression (informational — this
+          # A/B is never a merge gate), 2 an arm timed out or scored nothing. Only 2
+          # fails the job: a "—" column is a broken run, not a passing one.
+          AB_RC=0
+          gate() {
+            local rc=0
+            "$@" || rc=$?
+            case "$rc" in
+              0) ;;
+              1) echo "::warning::BFCL A/B score regression beyond tolerance — see job summary" ;;
+              *) echo "::error::BFCL A/B incomplete (run_ab exit $rc): an arm timed out or produced no scores"
+                 AB_RC=$rc ;;
+            esac
+          }
           if [ "$ARM_MODE" = sequential ]; then
             # Whole node per arm (TP=8), one at a time: each model needs all 8 GPUs
             # for enough KV cache at the larger max_model_len. Score arm A, tear it
@@ -316,27 +352,27 @@ jobs:
             python scripts/bfcl/run_ab.py --score-arm "vllm=$A_URL" \
               --scores-out "$ROOT/scores_vllm.json" \
               --bfcl-model "$BFCL_MODEL_FC" --categories "$CATEGORIES" \
-              --bfcl "$BFCL" --project-root "$ROOT"
+              --bfcl "$BFCL" --project-root "$ROOT" --run-timeout "$RUN_TIMEOUT"
             bash scripts/bfcl/launch_arm.sh stop 9>&-
             B_URL=$(BFCL_GPU="$GPU_A" bash scripts/bfcl/launch_arm.sh b 9>&-)
             echo "arm B (smg): $B_URL"
             python scripts/bfcl/run_ab.py --score-arm "smg=$B_URL" \
               --scores-out "$ROOT/scores_smg.json" \
               --bfcl-model "$BFCL_MODEL_FC" --categories "$CATEGORIES" \
-              --bfcl "$BFCL" --project-root "$ROOT"
+              --bfcl "$BFCL" --project-root "$ROOT" --run-timeout "$RUN_TIMEOUT"
             bash scripts/bfcl/launch_arm.sh stop 9>&-
-            python scripts/bfcl/run_ab.py \
+            gate python scripts/bfcl/run_ab.py \
               --diff-baseline "$ROOT/scores_vllm.json" --diff-candidate "$ROOT/scores_smg.json" \
               --categories "$CATEGORIES" \
               --out "$RUNNER_TEMP/bfcl_ab.md" --json-out "$RUNNER_TEMP/bfcl_ab.json" \
-              --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --tolerance 0.02
           else
             # Concurrent: arm A (pure vLLM) on the first GPU half, arm B (SMG ->
             # vLLM gRPC) on the second; ports left unset so launch_arm.sh picks free.
             A_URL=$(BFCL_GPU="$GPU_A" bash scripts/bfcl/launch_arm.sh a 9>&-)
             B_URL=$(BFCL_GPU="$GPU_B" bash scripts/bfcl/launch_arm.sh b 9>&-)
             echo "arm A: $A_URL   arm B: $B_URL"
-            python scripts/bfcl/run_ab.py \
+            gate python scripts/bfcl/run_ab.py \
               --baseline  "vllm=$A_URL" \
               --candidate "smg=$B_URL" \
               --bfcl-model "$BFCL_MODEL_FC" \
@@ -345,8 +381,12 @@ jobs:
               --project-root "$ROOT" \
               --out "$RUNNER_TEMP/bfcl_ab.md" \
               --json-out "$RUNNER_TEMP/bfcl_ab.json" \
-              --tolerance 0.02 || echo "BFCL_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --run-timeout "$RUN_TIMEOUT" \
+              --tolerance 0.02
           fi
+          # Fail after the report is written, so Render summary / Upload results
+          # (both always()) still publish the partial table and transcripts.
+          [ "$AB_RC" -eq 0 ] || exit "$AB_RC"
       - name: Render summary
         if: always()
         run: |

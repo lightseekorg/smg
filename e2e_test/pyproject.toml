@@ -43,6 +43,7 @@ markers = [
   "e2e: mark test as end-to-end test requiring GPU workers",
   "slow: mark test as slow-running",
   "external: mark test as dependent on external third-party services (run with -m external)",
+  "kind: mark test as requiring a local kind cluster (run with SMG_KIND_E2E=1)",
 ]
 addopts = "-v -s"
 # Explicitly disable live log to avoid "---- live log ----" dividers

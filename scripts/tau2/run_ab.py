@@ -6,6 +6,9 @@ OpenAI /v1 endpoint; the official `tau2` CLI points --agent-llm at each arm and
 --user-llm at a FIXED gpt-5.2, so any score delta is attributable to the
 frontend (tokenization + tool/reasoning parsing). Arms must already be serving
 (see launch_arms.sh); this driver does not launch them.
+
+Exit codes: 0 clean, 1 score regression beyond --tolerance, 2 an arm did not
+finish (timed out or scored nothing), so there is nothing to compare.
 """
 
 from __future__ import annotations
@@ -20,12 +23,17 @@ from dataclasses import dataclass, field
 from math import comb
 from pathlib import Path
 
+EXIT_OK = 0
+EXIT_REGRESSION = 1
+EXIT_INCOMPLETE = 2
+
 
 @dataclass
 class Arm:
     name: str
     base_url: str
     scores: dict[str, dict[str, float]] = field(default_factory=dict)
+    timed_out: list[str] = field(default_factory=list)  # domains killed by --run-timeout
 
 
 def passk(num_success: int, num_trials: int, k: int) -> float:
@@ -144,6 +152,7 @@ def run_tau2(
             f"WARNING: [{arm.name}/{domain}] timed out after {run_timeout}s; killed",
             file=sys.stderr,
         )
+        arm.timed_out.append(domain)
         return
     if proc.returncode != 0:
         print(f"WARNING: [{arm.name}/{domain}] exited {proc.returncode}", file=sys.stderr)
@@ -157,6 +166,19 @@ def run_tau2(
         # Skip this domain rather than aborting — build_report renders "—" for a
         # missing domain, so one failure doesn't discard the rest of the run.
         print(f"WARNING: [{arm.name}/{domain}] no usable results ({e})", file=sys.stderr)
+
+
+def incompleteness(arm: Arm, domains: list[str]) -> str | None:
+    """Why this arm can't be compared (timed out / unscored domains), else None."""
+    missing = [d for d in domains if d not in arm.scores]
+    if not missing and not arm.timed_out:
+        return None
+    reason = f"no score for {len(missing)}/{len(domains)} domains"
+    if arm.timed_out:
+        reason += f"; timed out: {', '.join(arm.timed_out)}"
+    if missing:
+        reason += f"; unscored: {', '.join(missing)}"
+    return reason
 
 
 def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
@@ -240,6 +262,11 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
         + " | ".join(triple(overall[m], bold=True) for m in metrics)
         + " |"
     )
+    lines.append("")
+    incomplete = {a.name: incompleteness(a, domains) for a in (baseline, candidate)}
+    incomplete = {n: r for n, r in incomplete.items() if r}
+    for name, reason in incomplete.items():
+        lines.append(f"> ⚠️ **Incomplete arm `{name}`** — {reason}.")
     lines += [
         "",
         f"_N = simulations per arm (baseline/candidate) = tasks × {k} trials. "
@@ -249,8 +276,17 @@ def build_report(baseline: Arm, candidate: Arm, domains: list[str], k: int):
     overall_out = dict(overall)
     overall_out["n"] = {"baseline": nsum["b"], "candidate": nsum["c"]}
     payload = {
-        "baseline": {"name": baseline.name, "scores": baseline.scores},
-        "candidate": {"name": candidate.name, "scores": candidate.scores},
+        "baseline": {
+            "name": baseline.name,
+            "scores": baseline.scores,
+            "timed_out": baseline.timed_out,
+        },
+        "candidate": {
+            "name": candidate.name,
+            "scores": candidate.scores,
+            "timed_out": candidate.timed_out,
+        },
+        "incomplete": incomplete,
         "per_domain": rows,
         "overall": overall_out,
     }
@@ -296,7 +332,15 @@ def save_scores(arm: Arm, path: Path) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"name": arm.name, "base_url": arm.base_url, "scores": arm.scores}, indent=2)
+        json.dumps(
+            {
+                "name": arm.name,
+                "base_url": arm.base_url,
+                "scores": arm.scores,
+                "timed_out": arm.timed_out,
+            },
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -305,19 +349,26 @@ def save_scores(arm: Arm, path: Path) -> None:
 def load_scores(path: Path) -> Arm:
     """Rebuild an Arm (name + per-domain scores) from a file written by save_scores."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    return Arm(name=data["name"], base_url=data.get("base_url", ""), scores=data["scores"])
+    return Arm(
+        name=data["name"],
+        base_url=data.get("base_url", ""),
+        scores=data["scores"],
+        timed_out=data.get("timed_out", []),
+    )
 
 
 def write_report_and_gate(
     baseline: Arm, candidate: Arm, domains: list[str], k: int, args: argparse.Namespace
 ) -> int:
-    """Emit the markdown + JSON comparison and apply the informational regression gate."""
+    """Emit the markdown + JSON comparison and apply the completeness/regression gates."""
     report_md, payload = build_report(baseline, candidate, domains, k)
     print("\n" + report_md)
     if args.out:
         args.out.write_text(report_md + "\n", encoding="utf-8")
     if args.json_out:
         args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    exit_code = EXIT_OK
     delta = payload["overall"]["passk"]["delta"]
     if delta is not None and delta < -args.tolerance:
         print(
@@ -325,8 +376,14 @@ def write_report_and_gate(
             f"below {baseline.name} (tol {args.tolerance * 100:.2f}pp)",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        exit_code = EXIT_REGRESSION
+
+    # An incomplete arm outranks a regression: there is no trustworthy delta to gate on.
+    for name, reason in payload["incomplete"].items():
+        print(f"\nINCOMPLETE: arm {name} — {reason}", file=sys.stderr)
+    if payload["incomplete"] and not args.allow_incomplete:
+        exit_code = EXIT_INCOMPLETE
+    return exit_code
 
 
 def _parse_arm(spec: str) -> Arm:
@@ -379,6 +436,11 @@ def main() -> int:
         help="tau2 DATA_DIR (results written/read under <data-dir>/simulations)",
     )
     p.add_argument("--tolerance", type=float, default=0.02)
+    p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="report a timed-out or unscored arm without failing (exit 2 otherwise)",
+    )
     p.add_argument("--out", type=Path)
     p.add_argument("--json-out", type=Path)
     args = p.parse_args()
@@ -391,7 +453,9 @@ def main() -> int:
             p.error("--diff-baseline and --diff-candidate must be given together")
         baseline = load_scores(args.diff_baseline)
         candidate = load_scores(args.diff_candidate)
-        diff_domains = sorted(set(baseline.scores) | set(candidate.scores)) or domains
+        # Requested domains are part of the expected set, so one that neither arm
+        # scored still shows up as missing instead of silently vanishing.
+        diff_domains = sorted(set(domains) | set(baseline.scores) | set(candidate.scores))
         return write_report_and_gate(baseline, candidate, diff_domains, args.num_trials, args)
 
     # Mode: score a single live arm and persist its scores (sequential mode, per arm).
@@ -414,7 +478,10 @@ def main() -> int:
         )
         save_scores(arm, args.scores_out)
         print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
-        return 0
+        if arm.timed_out:
+            print(f"WARNING: [{arm.name}] timed out on: {', '.join(arm.timed_out)}")
+        # Always 0: the gate runs once, on the --diff step that sees both arms.
+        return EXIT_OK
 
     # Mode: concurrent A/B — arms serve on opposite GPU halves, so score them in
     # PARALLEL (separate servers, separate save_to dirs) to roughly halve wall-clock.

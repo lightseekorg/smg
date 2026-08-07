@@ -59,9 +59,9 @@ on:
         required: false
         default: "300"
       run_timeout:
-        description: "Per-domain `tau2 run` wall-clock cap (s); 0 = off"
+        description: "Override per-domain `tau2 run` wall-clock cap (s), 0 = off; empty = matrix default"
         required: false
-        default: "5400"
+        default: ""
       vllm_tool_parser:
         description: "Override pure-vLLM --tool-call-parser; empty = matrix default"
         required: false
@@ -140,6 +140,9 @@ jobs:
           # capped at native max — multi-turn tau2 prompts can exceed a fixed 16k.
           # num_tasks: 0 = all (cheap H100 legs); 30/domain caps the heavy Blackwell
           # legs to bound GPU time + gpt-5.2 spend.
+          #
+          # run_timeout: per-DOMAIN `tau2 run` cap (s), so an arm's worst case is
+          # run_timeout x len(domains). 5400 is the default.
           legs = [
               # H100 legs (TP=2 per arm, both arms concurrent: GPUs 0,1 + 2,3).
               {"name": "qwen3.6", "runner": "4-gpu-h100", "tp": 2,
@@ -149,7 +152,7 @@ jobs:
                "smg_tool": "qwen_xml", "smg_reason": "qwen3",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
                "model_cache": "/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 30},  # cap like Blackwell legs — dense 27B is slow; bounds runtime + skips the airline task-44 straggler
+               "max_model_len": "auto", "num_tasks": 30, "run_timeout": "5400"},  # cap like Blackwell legs — dense 27B is slow; bounds runtime + skips the airline task-44 straggler
               # gpt-oss SMG arm passes NO tool parser (smg_tool empty) -> harmony auto-detect.
               {"name": "gpt-oss", "runner": "4-gpu-h100", "tp": 2,
                "gpu_a": "0,1", "gpu_b": "2,3",
@@ -158,17 +161,20 @@ jobs:
                "smg_tool": "", "smg_reason": "",
                "vllm_extra": "", "gpu_mem": "0.85", "startup_timeout": "600",
                "model_cache": "/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 0},
+               "max_model_len": "auto", "num_tasks": 0, "run_timeout": "5400"},
               # Blackwell legs (B200). Models pre-staged on NVMe at /raid/models/<id>.
               # Concurrent TP=4 per arm (0-3 + 4-7); num_tasks-capped.
               {"name": "deepseek-v4", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
-               "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+               # Base V4-Flash: the -0731 refresh is not supported yet.
+               "model": "deepseek-ai/DeepSeek-V4-Flash",
                "vllm_tool": "deepseek_v4", "vllm_reason": "deepseek_v4",
                "smg_tool": "deepseek_v4", "smg_reason": "deepseek_v31",
                "vllm_extra": "--tokenizer-mode deepseek_v4 --trust-remote-code --kv-cache-dtype fp8 --block-size 256",
                "gpu_mem": "0.90", "startup_timeout": "2400", "model_cache": "/raid/models",
-               "arm_mode": "concurrent", "max_model_len": "auto", "num_tasks": 30},
+               "arm_mode": "concurrent", "max_model_len": "auto", "num_tasks": 30,
+               # 20m/domain = ~1h/arm; both arms have hung on this leg before.
+               "run_timeout": "1200"},
               {"name": "minimax-m2.7", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "MiniMaxAI/MiniMax-M2.7",
@@ -176,7 +182,7 @@ jobs:
                "smg_tool": "minimax_m2", "smg_reason": "minimax",
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
                "model_cache": "/raid/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 30},
+               "max_model_len": "auto", "num_tasks": 30, "run_timeout": "5400"},
               {"name": "kimi-k2.6", "runner": "blackwell", "tp": 4,
                "gpu_a": "0,1,2,3", "gpu_b": "4,5,6,7",
                "model": "moonshotai/Kimi-K2.6",
@@ -184,7 +190,7 @@ jobs:
                "smg_tool": "kimik2", "smg_reason": "kimi_thinking",  # K2.6 template prefills <think> (always-in-reasoning); kimi_k25 is always_in_reasoning=false -> mis-splits reasoning
                "vllm_extra": "--trust-remote-code", "gpu_mem": "0.90", "startup_timeout": "2400",
                "model_cache": "/raid/models", "arm_mode": "concurrent",
-               "max_model_len": "auto", "num_tasks": 30},
+               "max_model_len": "auto", "num_tasks": 30, "run_timeout": "5400"},
               # GLM-5.2-FP8 (~744GB) needs the whole 8-GPU node, so it runs SEQUENTIAL
               # (arm A then arm B; gpu_b unused) unlike the concurrent half-node legs.
               {"name": "glm-5.2", "runner": "blackwell", "tp": 8,
@@ -194,7 +200,9 @@ jobs:
                "smg_tool": "glm47_moe", "smg_reason": "glm45",
                "vllm_extra": "--trust-remote-code --kv-cache-dtype fp8_e4m3",
                "gpu_mem": "0.90", "startup_timeout": "3000", "model_cache": "/raid/models",
-               "arm_mode": "sequential", "max_model_len": "auto", "num_tasks": 30},
+               "arm_mode": "sequential", "max_model_len": "auto", "num_tasks": 30,
+               # Sequential: both arms share the 360m job, so half the per-domain budget.
+               "run_timeout": "2700"},
           ]
           only = os.environ.get("ONLY", "")
           valid = [l["name"] for l in legs]
@@ -238,9 +246,9 @@ jobs:
       NUM_TASKS: ${{ github.event.inputs.num_tasks || (github.event_name == 'pull_request' && '3' || matrix.num_tasks) }}
       MAX_CONCURRENCY: ${{ github.event.inputs.max_concurrency || '16' }}
       # Fail-fast bounds (see COMMON below). Per-request cap 300s catches a single
-      # degenerate generation; per-domain cap 5400s (90m) bounds a wedged `tau2 run`.
+      # degenerate generation; the leg's per-domain cap bounds a wedged `tau2 run`.
       REQUEST_TIMEOUT: ${{ github.event.inputs.request_timeout || '300' }}
-      RUN_TIMEOUT: ${{ github.event.inputs.run_timeout || '5400' }}
+      RUN_TIMEOUT: ${{ github.event.inputs.run_timeout || matrix.run_timeout }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -333,6 +341,20 @@ jobs:
             # domain (worst case 3 domains/arm x 90m = 270m, under timeout-minutes:360).
             --request-timeout "$REQUEST_TIMEOUT" --run-timeout "$RUN_TIMEOUT"
           )
+          # run_ab.py exit codes: 0 clean, 1 score regression (informational — this
+          # A/B is never a merge gate), 2 an arm timed out or scored nothing. Only 2
+          # fails the job: a "—" column is a broken run, not a passing one.
+          AB_RC=0
+          gate() {
+            local rc=0
+            "$@" || rc=$?
+            case "$rc" in
+              0) ;;
+              1) echo "::warning::tau2 A/B score regression beyond tolerance — see job summary" ;;
+              *) echo "::error::tau2 A/B incomplete (run_ab exit $rc): an arm timed out or produced no scores"
+                 AB_RC=$rc ;;
+            esac
+          }
           if [ "$ARM_MODE" = sequential ]; then
             # Whole node per arm (TP=8), one at a time: score arm A, tear it down to
             # free the GPUs, score arm B, then diff the two saved score files.
@@ -346,24 +368,28 @@ jobs:
             python scripts/tau2/run_ab.py --score-arm "smg=$B_URL" \
               --scores-out "$RUNNER_TEMP/scores_smg.json" "${COMMON[@]}"
             bash scripts/tau2/launch_arms.sh stop 9>&-
-            python scripts/tau2/run_ab.py \
+            # --domains is required here too: it is the expected set the completeness
+            # gate checks against, so a domain neither arm scored is still caught.
+            gate python scripts/tau2/run_ab.py \
               --diff-baseline "$RUNNER_TEMP/scores_vllm.json" \
               --diff-candidate "$RUNNER_TEMP/scores_smg.json" \
+              --domains "$DOMAINS" \
               --num-trials "$NUM_TRIALS" --tolerance 0.02 \
-              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
-              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json"
           else
             # Concurrent: arm A (pure vLLM) on the first GPU half, arm B (SMG ->
             # vLLM gRPC) on the second; ports left unset so launch_arms.sh picks free.
             A_URL=$(TAU2_GPU="$GPU_A" bash scripts/tau2/launch_arms.sh a 9>&-)
             B_URL=$(TAU2_GPU="$GPU_B" bash scripts/tau2/launch_arms.sh b 9>&-)
             echo "arm A: $A_URL   arm B: $B_URL"
-            python scripts/tau2/run_ab.py \
+            gate python scripts/tau2/run_ab.py \
               --baseline "vllm=$A_URL" --candidate "smg=$B_URL" "${COMMON[@]}" \
               --tolerance 0.02 \
-              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
-              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json"
           fi
+          # Fail after the report is written, so Render summary / Upload results
+          # (both always()) still publish the partial table and transcripts.
+          [ "$AB_RC" -eq 0 ] || exit "$AB_RC"
       - name: Render summary
         if: always()
         run: |

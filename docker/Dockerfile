@@ -24,8 +24,15 @@ RUN apt update -y \
     && rm -rf /var/lib/apt/lists/* \
     && apt clean
 
+# The sha256 pin makes any mirror integrity-safe; OSUOSL is independent
+# infrastructure for when ffmpeg.org is unreachable.
 RUN mkdir -p /tmp/ffmpeg \
-    && curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o /tmp/ffmpeg.tar.xz \
+    && { curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 30 \
+            --max-time 120 --retry-max-time 300 \
+            "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o /tmp/ffmpeg.tar.xz \
+        || curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 30 \
+            --max-time 120 --retry-max-time 300 \
+            "https://ftp.osuosl.org/pub/blfs/conglomeration/ffmpeg/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o /tmp/ffmpeg.tar.xz; } \
     && echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c - \
     && tar -C /tmp/ffmpeg --strip-components=1 -xJf /tmp/ffmpeg.tar.xz \
     && cd /tmp/ffmpeg \
