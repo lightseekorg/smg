@@ -239,7 +239,6 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> Result<(), String> {
     let Some(parent) = Path::new(path).parent() else {
         return Ok(());
     };
-    let fail = |reason: String| reason;
     // symlink_metadata: a symlinked parent must not redirect the checks (or the
     // sockets) into a directory we did not verify.
     let meta = match tokio::fs::symlink_metadata(parent).await {
@@ -252,34 +251,30 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> Result<(), String> {
             builder
                 .create(parent)
                 .await
-                .map_err(|e| fail(format!("failed to create ipc socket dir for {path}: {e}")))?;
+                .map_err(|e| format!("failed to create ipc socket dir for {path}: {e}"))?;
             tokio::fs::symlink_metadata(parent)
                 .await
-                .map_err(|e| fail(format!("failed to stat ipc socket dir for {path}: {e}")))?
+                .map_err(|e| format!("failed to stat ipc socket dir for {path}: {e}"))?
         }
-        Err(e) => {
-            return Err(fail(format!(
-                "failed to stat ipc socket dir for {path}: {e}"
-            )))
-        }
+        Err(e) => return Err(format!("failed to stat ipc socket dir for {path}: {e}")),
     };
     if !meta.is_dir() {
-        return Err(fail(format!(
+        return Err(format!(
             "ipc socket dir {} exists but is not a directory",
             parent.display()
-        )));
+        ));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let uid = rustix::process::geteuid().as_raw();
         if meta.uid() != uid {
-            return Err(fail(format!(
+            return Err(format!(
                 "ipc socket dir {} is owned by uid {} (expected {uid}); refusing to bind \
                  unauthenticated ZMQ sockets in a directory owned by another user",
                 parent.display(),
                 meta.uid()
-            )));
+            ));
         }
     }
     Ok(())
@@ -884,7 +879,10 @@ impl TokenSpeedGenerateStream {
         }
     }
 
-    fn map_output(&mut self, output: TokenSpeedOutput) -> vllm::GenerateResponse {
+    fn map_output(
+        &mut self,
+        output: TokenSpeedOutput,
+    ) -> Result<vllm::GenerateResponse, tonic::Status> {
         let state = &mut self.state;
         // TokenSpeed reports per-request token counts directly (cumulative for
         // completions), rather than vLLM's per-output prefill-stats deltas.
@@ -918,18 +916,25 @@ impl TokenSpeedGenerateStream {
             .output_logprobs_idx
             .extend(output.output_logprobs_idx.iter().copied());
 
+        // An engine-side failure must surface as an error, not a normal
+        // completion with empty output — mirroring the vLLM stream's guard.
+        if output.finish_reason.as_deref() == Some("error") {
+            return Err(tonic::Status::internal(
+                "engine finished the request with an error (see engine logs)",
+            ));
+        }
         // No matched_stop on this wire: TokenSpeed reports the finish reason
         // only, and the router-side stop machinery owns string matching.
         let finish = output
             .finish_reason
             .map(|reason| (normalize_finish_reason(&reason).to_string(), None));
-        state.emit_tick(
+        Ok(state.emit_tick(
             self.index,
             output.output_ids,
             chunk_logprobs,
             finish,
             &mut self.pending,
-        )
+        ))
     }
 }
 
@@ -946,7 +951,7 @@ impl Stream for TokenSpeedGenerateStream {
             return Poll::Ready(Some(Ok(pending)));
         }
         match std::pin::Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(output))) => Poll::Ready(Some(Ok(this.map_output(output)))),
+            Poll::Ready(Some(Ok(output))) => Poll::Ready(Some(this.map_output(output))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(zmq_status(error)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,

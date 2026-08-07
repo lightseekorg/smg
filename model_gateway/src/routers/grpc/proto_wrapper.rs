@@ -1091,11 +1091,6 @@ pub enum ProtoGenerateRequest {
 }
 
 impl ProtoGenerateRequest {
-    /// Get SGLang variant (panics if not SGLang)
-    #[expect(
-        clippy::panic,
-        reason = "typed accessor: caller guarantees variant via is_sglang() check"
-    )]
     /// Append stop token ids to the request's sampling params (TRT-LLM keeps
     /// them on the request itself). Requests without sampling params are left
     /// unchanged, matching the per-engine injection this replaces.
@@ -1125,6 +1120,11 @@ impl ProtoGenerateRequest {
         }
     }
 
+    /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -2373,5 +2373,32 @@ mod tests {
 
         let image = vllm_mm_data(common::Modality::Image).into_proto();
         assert_eq!(image.modality, common::Modality::Image as i32);
+    }
+    #[test]
+    fn extend_stop_token_ids_reaches_every_variant() {
+        let ids = [7u32, 8];
+        let mut req = ProtoGenerateRequest::Vllm(Box::new(vllm::GenerateRequest {
+            sampling_params: Some(vllm::SamplingParams::default()),
+            ..Default::default()
+        }));
+        req.extend_stop_token_ids(&ids);
+        match &req {
+            ProtoGenerateRequest::Vllm(r) => {
+                assert_eq!(r.sampling_params.as_ref().unwrap().stop_token_ids, ids);
+            }
+            _ => panic!("variant changed"),
+        }
+
+        // TRT-LLM keeps ids on the request itself.
+        let mut req = ProtoGenerateRequest::Trtllm(Box::default());
+        req.extend_stop_token_ids(&ids);
+        match &req {
+            ProtoGenerateRequest::Trtllm(r) => assert_eq!(r.stop_token_ids, ids),
+            _ => panic!("variant changed"),
+        }
+
+        // Missing sampling params: untouched, no panic.
+        let mut req = ProtoGenerateRequest::TokenSpeed(Box::default());
+        req.extend_stop_token_ids(&ids);
     }
 }

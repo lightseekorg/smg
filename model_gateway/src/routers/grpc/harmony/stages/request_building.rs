@@ -151,12 +151,18 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             token_ids,
             tool_constraints,
         )
-        .map_err(|e| {
-            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build Harmony generate request");
-            error::bad_request(
-                "invalid_request_parameters",
-                format!("Invalid request parameters: {e}"),
-            )
+        .map_err(|e| match e {
+            HarmonyBuildError::Request(e) => {
+                error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build Harmony generate request");
+                error::bad_request(
+                    "invalid_request_parameters",
+                    format!("Invalid request parameters: {e}"),
+                )
+            }
+            HarmonyBuildError::Wiring(e) => {
+                error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Harmony backend wiring bug");
+                error::internal_error("unsupported_backend_runtime", e)
+            }
         })?;
 
         // Inject the Harmony stop ids (<|return|> and <|call|>) so the model
@@ -211,6 +217,20 @@ enum HarmonyBody<'a> {
     Responses(&'a openai_protocol::responses::ResponsesRequest),
 }
 
+/// Build failure classes: a bad request (builder rejected the parameters,
+/// HTTP 400) vs. a wiring bug (a backend/runtime pairing that cannot exist,
+/// HTTP 500).
+enum HarmonyBuildError {
+    Request(String),
+    Wiring(String),
+}
+
+impl From<String> for HarmonyBuildError {
+    fn from(reason: String) -> Self {
+        Self::Request(reason)
+    }
+}
+
 /// One (backend x request-kind) dispatch for Harmony request building: every
 /// arm is just the engine's builder call. vLLM and TokenSpeed build through
 /// static translators, so one arm each covers both gRPC and direct-ZMQ.
@@ -221,7 +241,7 @@ fn build_harmony_proto(
     text: String,
     token_ids: Vec<u32>,
     tool_constraints: Option<(String, String)>,
-) -> Result<ProtoGenerateRequest, String> {
+) -> Result<ProtoGenerateRequest, HarmonyBuildError> {
     use HarmonyBody::{Chat, Responses};
     let runtime = client.runtime_type();
     Ok(match (client, body) {
@@ -336,9 +356,9 @@ fn build_harmony_proto(
         // real way here is a ZMQ client reporting a runtime it cannot have
         // (connect() admits vLLM/TokenSpeed only) - a wiring bug, so error out.
         _ => {
-            return Err(format!(
+            return Err(HarmonyBuildError::Wiring(format!(
                 "unsupported backend runtime {runtime:?} for Harmony requests"
-            ))
+            )))
         }
     })
 }
