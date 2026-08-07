@@ -506,6 +506,60 @@ impl StreamState {
             top_logprobs: std::mem::take(&mut self.output_top_logprobs),
         })
     }
+    /// Emit one engine tick as vLLM-proto responses. On a finish tick the
+    /// `Complete` (with the engine-specific finish reason and matched stop) is
+    /// returned directly — unless the tick also carried new tokens, in which
+    /// case a `Chunk` goes out first and the `Complete` is parked in `pending`
+    /// for the next poll. Non-finish ticks emit a plain `Chunk`.
+    fn emit_tick(
+        &mut self,
+        index: u32,
+        token_ids: Vec<u32>,
+        chunk_logprobs: Option<vllm::OutputLogProbs>,
+        finish: Option<(String, Option<vllm::generate_complete::MatchedStop>)>,
+        pending: &mut Option<vllm::GenerateResponse>,
+    ) -> vllm::GenerateResponse {
+        let chunk = |state: &Self, token_ids, chunk_logprobs| {
+            vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
+                token_ids,
+                prompt_tokens: state.prompt_tokens,
+                completion_tokens: state.completion_tokens,
+                cached_tokens: state.cached_tokens,
+                output_logprobs: chunk_logprobs,
+                index,
+                ..Default::default()
+            })
+        };
+        let response = match finish {
+            Some((finish_reason, matched_stop)) => {
+                let complete = vllm::GenerateResponse {
+                    response: Some(vllm::generate_response::Response::Complete(
+                        vllm::GenerateComplete {
+                            output_ids: std::mem::take(&mut self.output_ids),
+                            finish_reason,
+                            prompt_tokens: self.prompt_tokens,
+                            completion_tokens: self.completion_tokens,
+                            cached_tokens: self.cached_tokens,
+                            matched_stop,
+                            output_logprobs: self.take_complete_logprobs(),
+                            index,
+                            ..Default::default()
+                        },
+                    )),
+                };
+                if token_ids.is_empty() {
+                    return complete;
+                }
+                let chunk = chunk(self, token_ids, chunk_logprobs);
+                *pending = Some(complete);
+                chunk
+            }
+            None => chunk(self, token_ids, chunk_logprobs),
+        };
+        vllm::GenerateResponse {
+            response: Some(response),
+        }
+    }
 }
 
 /// Streaming generate output for one vLLM EngineCore sub-request, mapping each
@@ -592,61 +646,27 @@ impl VllmGenerateStream {
         state.output_logprobs_idx.extend(tick_logprobs_idx);
         state.output_top_logprobs.extend(tick_top_logprobs);
 
-        let response = match output.finish_reason {
-            // An engine-side request failure (e.g. grammar compilation) must
-            // surface as an error, not as a normal completion with empty
-            // output — that would produce a 200 with no content.
-            Some(EngineCoreFinishReason::Error) => {
-                return Err(tonic::Status::internal(
-                    "engine finished the request with an error (see engine logs)",
-                ));
-            }
-            Some(reason) => {
-                let complete = vllm::GenerateResponse {
-                    response: Some(vllm::generate_response::Response::Complete(
-                        vllm::GenerateComplete {
-                            output_ids: std::mem::take(&mut state.output_ids),
-                            finish_reason: finish_reason_str(reason).to_string(),
-                            prompt_tokens: state.prompt_tokens,
-                            completion_tokens: state.completion_tokens,
-                            cached_tokens: state.cached_tokens,
-                            matched_stop: output.stop_reason.map(map_matched_stop),
-                            output_logprobs: state.take_complete_logprobs(),
-                            index: self.index,
-                            ..Default::default()
-                        },
-                    )),
-                };
-                if token_ids.is_empty() {
-                    return Ok(complete);
-                }
-                // The finish tick carried new tokens: emit them as a `Chunk`
-                // first and hold the `Complete` for the next poll.
-                let chunk = vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                    token_ids,
-                    prompt_tokens: state.prompt_tokens,
-                    completion_tokens: state.completion_tokens,
-                    cached_tokens: state.cached_tokens,
-                    output_logprobs: chunk_logprobs,
-                    index: self.index,
-                    ..Default::default()
-                });
-                self.pending = Some(complete);
-                chunk
-            }
-            None => vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                token_ids,
-                prompt_tokens: state.prompt_tokens,
-                completion_tokens: state.completion_tokens,
-                cached_tokens: state.cached_tokens,
-                output_logprobs: chunk_logprobs,
-                index: self.index,
-                ..Default::default()
-            }),
-        };
-        Ok(vllm::GenerateResponse {
-            response: Some(response),
-        })
+        // An engine-side request failure (e.g. grammar compilation) must
+        // surface as an error, not as a normal completion with empty output —
+        // that would produce a 200 with no content.
+        if matches!(output.finish_reason, Some(EngineCoreFinishReason::Error)) {
+            return Err(tonic::Status::internal(
+                "engine finished the request with an error (see engine logs)",
+            ));
+        }
+        let finish = output.finish_reason.map(|reason| {
+            (
+                finish_reason_str(reason).to_string(),
+                output.stop_reason.map(map_matched_stop),
+            )
+        });
+        Ok(state.emit_tick(
+            self.index,
+            token_ids,
+            chunk_logprobs,
+            finish,
+            &mut self.pending,
+        ))
     }
 }
 
@@ -730,52 +750,18 @@ impl TokenSpeedGenerateStream {
             .output_logprobs_idx
             .extend(output.output_logprobs_idx.iter().copied());
 
-        let response = match output.finish_reason {
-            Some(reason) => {
-                let complete = vllm::GenerateResponse {
-                    response: Some(vllm::generate_response::Response::Complete(
-                        vllm::GenerateComplete {
-                            output_ids: std::mem::take(&mut state.output_ids),
-                            finish_reason: normalize_finish_reason(&reason).to_string(),
-                            prompt_tokens: state.prompt_tokens,
-                            completion_tokens: state.completion_tokens,
-                            cached_tokens: state.cached_tokens,
-                            output_logprobs: state.take_complete_logprobs(),
-                            index: self.index,
-                            ..Default::default()
-                        },
-                    )),
-                };
-                if output.output_ids.is_empty() {
-                    return complete;
-                }
-                // The finish tick carried new tokens: emit them as a `Chunk`
-                // first and hold the `Complete` for the next poll.
-                let chunk = vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                    token_ids: output.output_ids,
-                    prompt_tokens: state.prompt_tokens,
-                    completion_tokens: state.completion_tokens,
-                    cached_tokens: state.cached_tokens,
-                    output_logprobs: chunk_logprobs,
-                    index: self.index,
-                    ..Default::default()
-                });
-                self.pending = Some(complete);
-                chunk
-            }
-            None => vllm::generate_response::Response::Chunk(vllm::GenerateStreamChunk {
-                token_ids: output.output_ids,
-                prompt_tokens: state.prompt_tokens,
-                completion_tokens: state.completion_tokens,
-                cached_tokens: state.cached_tokens,
-                output_logprobs: chunk_logprobs,
-                index: self.index,
-                ..Default::default()
-            }),
-        };
-        vllm::GenerateResponse {
-            response: Some(response),
-        }
+        // No matched_stop on this wire: TokenSpeed reports the finish reason
+        // only, and the router-side stop machinery owns string matching.
+        let finish = output
+            .finish_reason
+            .map(|reason| (normalize_finish_reason(&reason).to_string(), None));
+        state.emit_tick(
+            self.index,
+            output.output_ids,
+            chunk_logprobs,
+            finish,
+            &mut self.pending,
+        )
     }
 }
 
