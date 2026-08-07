@@ -333,6 +333,20 @@ jobs:
             # domain (worst case 3 domains/arm x 90m = 270m, under timeout-minutes:360).
             --request-timeout "$REQUEST_TIMEOUT" --run-timeout "$RUN_TIMEOUT"
           )
+          # run_ab.py exit codes: 0 clean, 1 score regression (informational — this
+          # A/B is never a merge gate), 2 an arm timed out or scored nothing. Only 2
+          # fails the job: a "—" column is a broken run, not a passing one.
+          AB_RC=0
+          gate() {
+            local rc=0
+            "$@" || rc=$?
+            case "$rc" in
+              0) ;;
+              1) echo "::warning::tau2 A/B score regression beyond tolerance — see job summary" ;;
+              *) echo "::error::tau2 A/B incomplete (run_ab exit $rc): an arm timed out or produced no scores"
+                 AB_RC=$rc ;;
+            esac
+          }
           if [ "$ARM_MODE" = sequential ]; then
             # Whole node per arm (TP=8), one at a time: score arm A, tear it down to
             # free the GPUs, score arm B, then diff the two saved score files.
@@ -346,24 +360,28 @@ jobs:
             python scripts/tau2/run_ab.py --score-arm "smg=$B_URL" \
               --scores-out "$RUNNER_TEMP/scores_smg.json" "${COMMON[@]}"
             bash scripts/tau2/launch_arms.sh stop 9>&-
-            python scripts/tau2/run_ab.py \
+            # --domains is required here too: it is the expected set the completeness
+            # gate checks against, so a domain neither arm scored is still caught.
+            gate python scripts/tau2/run_ab.py \
               --diff-baseline "$RUNNER_TEMP/scores_vllm.json" \
               --diff-candidate "$RUNNER_TEMP/scores_smg.json" \
+              --domains "$DOMAINS" \
               --num-trials "$NUM_TRIALS" --tolerance 0.02 \
-              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
-              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json"
           else
             # Concurrent: arm A (pure vLLM) on the first GPU half, arm B (SMG ->
             # vLLM gRPC) on the second; ports left unset so launch_arms.sh picks free.
             A_URL=$(TAU2_GPU="$GPU_A" bash scripts/tau2/launch_arms.sh a 9>&-)
             B_URL=$(TAU2_GPU="$GPU_B" bash scripts/tau2/launch_arms.sh b 9>&-)
             echo "arm A: $A_URL   arm B: $B_URL"
-            python scripts/tau2/run_ab.py \
+            gate python scripts/tau2/run_ab.py \
               --baseline "vllm=$A_URL" --candidate "smg=$B_URL" "${COMMON[@]}" \
               --tolerance 0.02 \
-              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json" \
-              || echo "TAU2_AB_REGRESSION=1" >> "$GITHUB_ENV"
+              --out "$RUNNER_TEMP/tau2_ab.md" --json-out "$RUNNER_TEMP/tau2_ab.json"
           fi
+          # Fail after the report is written, so Render summary / Upload results
+          # (both always()) still publish the partial table and transcripts.
+          [ "$AB_RC" -eq 0 ] || exit "$AB_RC"
       - name: Render summary
         if: always()
         run: |

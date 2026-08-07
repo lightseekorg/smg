@@ -27,6 +27,9 @@ launch them. Example::
         --bfcl /home/keyang/bfcl-env/bin/bfcl \\
         --project-root /home/keyang/bfcl_ab \\
         --out /tmp/bfcl_ab.md --json-out /tmp/bfcl_ab.json
+
+Exit codes: ``0`` clean, ``1`` score regression beyond ``--tolerance``, ``2`` an
+arm did not finish (timed out or scored nothing), so there is nothing to compare.
 """
 
 from __future__ import annotations
@@ -35,11 +38,16 @@ import argparse
 import concurrent.futures
 import json
 import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+
+EXIT_OK = 0
+EXIT_REGRESSION = 1
+EXIT_INCOMPLETE = 2
 
 
 @dataclass
@@ -53,6 +61,7 @@ class Arm:
     project_root: Path = field(default_factory=Path)
     scores: dict[str, float] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)  # per-category test-case count
+    timed_out: list[str] = field(default_factory=list)  # stages killed by --run-timeout
 
 
 def parse_arm(spec: str, project_root: Path) -> Arm:
@@ -81,8 +90,15 @@ def run_bfcl(
     num_threads: int,
     temperature: float,
     skip_generate: bool,
+    run_timeout: int = 0,
 ) -> None:
-    """Run ``bfcl generate`` + ``bfcl evaluate`` for one arm, in its own root."""
+    """Run ``bfcl generate`` + ``bfcl evaluate`` for one arm, in its own root.
+
+    ``run_timeout`` (0 = off) mirrors tau2's ``--run-timeout``. No BFCL analogue of
+    ``--request-timeout`` exists: the FC handler's ``openai.OpenAI`` client reads
+    ``api_key``/``base_url`` from the environment but not ``timeout``, and ``bfcl
+    generate`` exposes no passthrough, so 600s x 2 retries is the per-call ceiling.
+    """
     arm.project_root.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["BFCL_PROJECT_ROOT"] = str(arm.project_root)
@@ -99,7 +115,7 @@ def run_bfcl(
 
     cats = ",".join(categories)
     if not skip_generate:
-        _run(
+        if not _run(
             [
                 bfcl,
                 "generate",
@@ -118,20 +134,42 @@ def run_bfcl(
             ],
             env,
             f"[{arm.name}] generate",
-        )
+            timeout=run_timeout,
+        ):
+            arm.timed_out.append("generate")
+    # Evaluate even after a killed generate: whatever completed is already on disk.
     _run(
         [bfcl, "evaluate", "--model", model, "--test-category", cats],
         env,
         f"[{arm.name}] evaluate",
+        timeout=run_timeout,
     )
     arm.scores, arm.counts = parse_scores(arm.project_root, model, categories)
 
 
-def _run(cmd: list[str], env: dict[str, str], label: str) -> None:
+def _run(cmd: list[str], env: dict[str, str], label: str, timeout: int = 0) -> bool:
+    """Run one bfcl subcommand; return False if it hit ``timeout`` (0 = no cap)."""
     print(f"\n=== {label}: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, env=env, check=False)
-    if proc.returncode != 0:
-        print(f"WARNING: {label} exited {proc.returncode}", file=sys.stderr)
+    # Own session so a timeout can SIGKILL the whole group: bfcl generate fans out
+    # over a thread pool and can sit blocked on a hung HTTP read.
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True)
+    try:
+        returncode = proc.wait(timeout=timeout or None)
+    except subprocess.TimeoutExpired:
+        _killpg(proc)
+        print(f"WARNING: {label} timed out after {timeout}s; killed", file=sys.stderr)
+        return False
+    if returncode != 0:
+        print(f"WARNING: {label} exited {returncode}", file=sys.stderr)
+    return True
+
+
+def _killpg(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    proc.wait()
 
 
 def parse_scores(
@@ -171,6 +209,20 @@ def _find_category_summary(score_root: Path, category: str) -> tuple[float, int]
         if acc is not None:
             return float(acc), int(summary.get("total_count", 0))
     return None
+
+
+def incompleteness(arm: Arm, categories: list[str]) -> str | None:
+    """Why this arm can't be compared (timed out / unscored categories), else None."""
+    missing = [c for c in categories if c not in arm.scores]
+    if not missing and not arm.timed_out:
+        return None
+    reason = f"no score for {len(missing)}/{len(categories)} categories"
+    if arm.timed_out:
+        reason += f"; timed out during: {', '.join(arm.timed_out)}"
+    if missing:
+        shown = ", ".join(missing[:8]) + (f", +{len(missing) - 8} more" if len(missing) > 8 else "")
+        reason += f"; unscored: {shown}"
+    return reason
 
 
 def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[str, dict]:
@@ -231,6 +283,12 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
     lines.append(overall_row("overall (unweighted)", b_overall, c_overall, overall_delta))
     lines.append(overall_row("overall (weighted by n)", b_weighted, c_weighted, weighted_delta))
     lines.append("")
+    incomplete = {a.name: incompleteness(a, categories) for a in (baseline, candidate)}
+    incomplete = {k: v for k, v in incomplete.items() if v}
+    for name, reason in incomplete.items():
+        lines.append(f"> ⚠️ **Incomplete arm `{name}`** — {reason}.")
+    if incomplete:
+        lines.append("")
     lines.append(
         "_Scores are % accuracy (official BFCL, FC mode). Same model, engine, "
         "checkpoint and sampling on both arms — the only difference is the "
@@ -246,13 +304,16 @@ def build_report(baseline: Arm, candidate: Arm, categories: list[str]) -> tuple[
             "base_url": baseline.base_url,
             "scores": baseline.scores,
             "counts": baseline.counts,
+            "timed_out": baseline.timed_out,
         },
         "candidate": {
             "name": candidate.name,
             "base_url": candidate.base_url,
             "scores": candidate.scores,
             "counts": candidate.counts,
+            "timed_out": candidate.timed_out,
         },
+        "incomplete": incomplete,
         "per_category": rows,
         "overall": {"baseline": b_overall, "candidate": c_overall, "delta": overall_delta},
         "overall_weighted": {
@@ -277,6 +338,7 @@ def save_scores(arm: Arm, path: Path) -> None:
                 "base_url": arm.base_url,
                 "scores": arm.scores,
                 "counts": arm.counts,
+                "timed_out": arm.timed_out,
             },
             indent=2,
         )
@@ -286,20 +348,21 @@ def save_scores(arm: Arm, path: Path) -> None:
 
 
 def load_scores(path: Path) -> Arm:
-    """Rebuild an Arm (name + scores + counts) from a file written by save_scores."""
+    """Rebuild an Arm from a file written by save_scores."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return Arm(
         name=data["name"],
         base_url=data.get("base_url", ""),
         scores=data["scores"],
         counts=data.get("counts", {}),
+        timed_out=data.get("timed_out", []),
     )
 
 
 def write_report_and_gate(
     baseline: Arm, candidate: Arm, categories: list[str], args: argparse.Namespace
 ) -> int:
-    """Emit the markdown + JSON comparison and apply the regression gate."""
+    """Emit the markdown + JSON comparison and apply the completeness/regression gates."""
     report_md, payload = build_report(baseline, candidate, categories)
     print("\n" + report_md)
     if args.out:
@@ -307,6 +370,7 @@ def write_report_and_gate(
     if args.json_out:
         args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    exit_code = EXIT_OK
     overall = payload["overall"]
     if overall["delta"] is not None and overall["delta"] < -args.tolerance:
         print(
@@ -314,8 +378,14 @@ def write_report_and_gate(
             f"below {baseline.name} (tolerance {args.tolerance * 100:.2f}pp)",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        exit_code = EXIT_REGRESSION
+
+    # An incomplete arm outranks a regression: there is no trustworthy delta to gate on.
+    for name, reason in payload["incomplete"].items():
+        print(f"\nINCOMPLETE: arm {name} — {reason}", file=sys.stderr)
+    if payload["incomplete"] and not args.allow_incomplete:
+        exit_code = EXIT_INCOMPLETE
+    return exit_code
 
 
 def main() -> int:
@@ -349,6 +419,17 @@ def main() -> int:
         help="max allowed candidate-below-baseline overall drop",
     )
     p.add_argument(
+        "--run-timeout",
+        default=0,
+        type=int,
+        help="seconds before a bfcl generate/evaluate is killed (0 = no cap)",
+    )
+    p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="report a timed-out or unscored arm without failing (exit 2 otherwise)",
+    )
+    p.add_argument(
         "--skip-generate",
         action="store_true",
         help="reuse existing generation results, only evaluate",
@@ -380,10 +461,14 @@ def main() -> int:
             num_threads=args.num_threads,
             temperature=args.temperature,
             skip_generate=args.skip_generate,
+            run_timeout=args.run_timeout,
         )
         save_scores(arm, args.scores_out)
         print(f"[{arm.name}] scores -> {args.scores_out}: {arm.scores}")
-        return 0
+        if arm.timed_out:
+            print(f"WARNING: [{arm.name}] timed out during: {', '.join(arm.timed_out)}")
+        # Always 0: the gate runs once, on the --diff step that sees both arms.
+        return EXIT_OK
 
     # Mode: concurrent A/B — both arms serve at once on opposite GPU halves, so
     # score them in PARALLEL (separate servers, separate project_roots, no
@@ -402,6 +487,7 @@ def main() -> int:
             num_threads=args.num_threads,
             temperature=args.temperature,
             skip_generate=args.skip_generate,
+            run_timeout=args.run_timeout,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
