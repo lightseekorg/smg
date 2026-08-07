@@ -123,9 +123,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         // were already rejected by the request-id match above; the reject arms
         // here keep this exhaustive without a panic.)
         let body = match &ctx.input.request_type {
-            RequestType::Chat(request) => {
-                HarmonyBody::Chat(modified_request.as_deref().unwrap_or_else(|| request.as_ref()))
-            }
+            RequestType::Chat(request) => HarmonyBody::Chat(
+                modified_request
+                    .as_deref()
+                    .unwrap_or_else(|| request.as_ref()),
+            ),
             RequestType::Responses(request) => HarmonyBody::Responses(request.as_ref()),
             RequestType::Embedding(_) => {
                 return Err(error::bad_request(
@@ -264,15 +266,9 @@ fn build_harmony_proto(
                 tool_constraints,
             )?))
         }
-        (BackendClient::Grpc(GrpcClient::Mlx(c)), Chat(b)) => {
-            ProtoGenerateRequest::Mlx(Box::new(c.build_generate_request_from_chat(
-                request_id,
-                b,
-                text,
-                token_ids,
-                tool_constraints,
-            )?))
-        }
+        (BackendClient::Grpc(GrpcClient::Mlx(c)), Chat(b)) => ProtoGenerateRequest::Mlx(Box::new(
+            c.build_generate_request_from_chat(request_id, b, text, token_ids, tool_constraints)?,
+        )),
         (BackendClient::Grpc(GrpcClient::Mlx(c)), Responses(b)) => {
             ProtoGenerateRequest::Mlx(Box::new(c.build_generate_request_from_responses(
                 request_id,

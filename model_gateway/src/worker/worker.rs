@@ -32,11 +32,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::header_utils::extract_routing_key,
-        grpc::{
-            backend_client::BackendClient,
-            client::GrpcClient,
-            zmq_client::{EosTokenIds, ZmqEngineClient, ZMQ_LOOPBACK_HOST},
-        },
+        grpc::{backend_client::BackendClient, client::GrpcClient, zmq_client},
     },
 };
 
@@ -52,186 +48,23 @@ const FLUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(45);
 /// gRPC client's profile deadline.
 const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
 
-/// Time to wait for a ZMQ engine to complete the startup handshake. Generous:
-/// the engine loads the model and profiles KV cache between INIT and READY.
-const ZMQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Derive a deterministic TCP handshake port from the ipc data-plane path.
-///
-/// vLLM's headless engine dials a *TCP* handshake (`--data-parallel-address` +
-/// `--data-parallel-rpc-port`); making the port a pure function of the worker
-/// URL lets the operator compute the same `--data-parallel-rpc-port` without a
-/// side channel. FNV-1a keeps it stable across processes and builds. Mapped
-/// into 20000..=29999 to avoid well-known and typical ephemeral ranges.
-///
-/// `_zmq_handshake_port` in `bindings/python/src/smg/serve.py` mirrors this
-/// function — keep them in sync.
-fn derive_handshake_port(path: &str) -> u16 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in path.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    // Map into 20000..=29999: below the Linux default ephemeral range
-    // (`net.ipv4.ip_local_port_range` = 32768..60999) so an outbound socket
-    // can't already hold the port. `hash % 10000` always fits u16.
-    20000 + (hash % 10000) as u16
-}
-
-/// Derive the ZMQ socket addresses for a worker from its base URL.
-///
-/// Mirrors vLLM's headless topology: the **handshake is TCP** (the engine dials
-/// it, so it matches `vllm serve --headless --data-parallel-rpc-port`), while
-/// the **data plane is `ipc://`** for the same-host fast path (SMG chooses these
-/// and hands them to the engine during the handshake INIT). The operator gives a
-/// single `ipc://<path>` base; SMG binds the ipc input/output at
-/// `<path>-in.sock` / `-out.sock` and derives the TCP handshake port from the
-/// path. A `WorkerSpec.zmq_handshake_address` override replaces the derived
-/// handshake address verbatim (it must be `tcp://`), for engines that dial a
-/// fixed, pre-agreed address — e.g. TokenSpeed's default dial target is
-/// `tcp://127.0.0.1:30500` (its `--data-parallel-address`/
-/// `--data-parallel-rpc-port` defaults, outside the derived 20000..=29999
-/// band), so setting the override to that value pairs a bare
-/// `ts serve --headless` with a manually registered worker.
-/// Returns `(handshake, input, output)`.
-fn zmq_socket_addresses(
-    base_url: &str,
-    handshake_override: Option<&str>,
-) -> WorkerResult<(String, String, String)> {
-    let path = base_url
-        .strip_prefix("ipc://")
-        .ok_or_else(|| WorkerError::ConnectionFailed {
-            url: base_url.to_string(),
-            reason: "ZMQ worker URL must be ipc://<path>".to_string(),
-        })?;
-    let handshake = match handshake_override {
-        Some(address) => {
-            if !address.starts_with("tcp://") {
-                return Err(WorkerError::ConnectionFailed {
-                    url: base_url.to_string(),
-                    reason: format!(
-                        "zmq_handshake_address must be a tcp:// address \
-                         (the engine dials a TCP handshake), got '{address}'"
-                    ),
-                });
-            }
-            address.to_string()
-        }
-        None => format!("tcp://{ZMQ_LOOPBACK_HOST}:{}", derive_handshake_port(path)),
-    };
-    let input = format!("ipc://{path}-in.sock");
-    let output = format!("ipc://{path}-out.sock");
-    Ok((handshake, input, output))
-}
-
-/// Create the parent directory for a worker's `ipc://` sockets. Kept off the
-/// address computation (which is pure) and async so it doesn't block a runtime
-/// thread.
-///
-/// The ipc:// data-plane sockets SMG binds here carry no authentication, so the
-/// directory must be owner-controlled: when this call creates it, it is created
-/// 0700 (mode applied at mkdir time — no chmod window); when it already exists,
-/// its permissions are left untouched (never chmod a shared dir like `/tmp`)
-/// and it is rejected unless it is a real directory owned by the current user.
-async fn ensure_ipc_socket_dir(base_url: &str) -> WorkerResult<()> {
-    let path = base_url.strip_prefix("ipc://").unwrap_or(base_url);
-    let Some(parent) = std::path::Path::new(path).parent() else {
-        return Ok(());
-    };
-    let fail = |reason: String| WorkerError::ConnectionFailed {
-        url: base_url.to_string(),
-        reason,
-    };
-    // symlink_metadata: a symlinked parent must not redirect the checks (or the
-    // sockets) into a directory we did not verify.
-    let meta = match tokio::fs::symlink_metadata(parent).await {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = tokio::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            builder.mode(0o700);
-            builder
-                .create(parent)
-                .await
-                .map_err(|e| fail(format!("failed to create ipc socket dir for {path}: {e}")))?;
-            tokio::fs::symlink_metadata(parent)
-                .await
-                .map_err(|e| fail(format!("failed to stat ipc socket dir for {path}: {e}")))?
-        }
-        Err(e) => {
-            return Err(fail(format!(
-                "failed to stat ipc socket dir for {path}: {e}"
-            )))
-        }
-    };
-    if !meta.is_dir() {
-        return Err(fail(format!(
-            "ipc socket dir {} exists but is not a directory",
-            parent.display()
-        )));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let uid = rustix::process::geteuid().as_raw();
-        if meta.uid() != uid {
-            return Err(fail(format!(
-                "ipc socket dir {} is owned by uid {} (expected {uid}); refusing to bind \
-                 unauthenticated ZMQ sockets in a directory owned by another user",
-                parent.display(),
-                meta.uid()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Bind the SMG-side ZMQ sockets and complete the handshake with the engine.
-/// Shared by the lazy client accessor and the background handshake driver so
-/// both go through the exact same connect path. `base_url` is the `ipc://` URL;
-/// `model_id` is the config-resolved served model (EngineCore reports none).
+/// Connect the ZMQ backend for this worker URL. All connect mechanics —
+/// address derivation, socket-dir prep, EOS resolution, handshake — live in
+/// the client layer ([`zmq_client::connect_for_worker`]); the worker layer
+/// only wraps the client into its slot and error type.
 async fn connect_zmq_backend(
     base_url: String,
     model_id: String,
     runtime: RuntimeType,
     handshake_override: Option<String>,
 ) -> WorkerResult<Arc<BackendClient>> {
-    let (handshake, input, output) =
-        zmq_socket_addresses(&base_url, handshake_override.as_deref())?;
-    ensure_ipc_socket_dir(&base_url).await?;
-    // The engine can't stop at EOS on its own (it has no tokenizer or model
-    // config); resolve the EOS ids from the local model dir so every request
-    // carries them.
-    let model_dir = std::path::Path::new(&model_id);
-    let eos = if model_dir.is_dir() {
-        EosTokenIds::from_model_dir(model_dir)
-    } else {
-        tracing::warn!(
-            "ZMQ worker model id '{model_id}' is not a local model directory; EOS ids \
-             unavailable — generation stops only at max_tokens or explicit stops"
-        );
-        EosTokenIds::default()
-    };
-    tracing::info!("Binding ZMQ client for worker {base_url} (handshake={handshake})");
-    match ZmqEngineClient::connect(
-        &handshake,
-        &input,
-        &output,
-        1,
-        model_id,
-        eos,
-        runtime,
-        ZMQ_CONNECT_TIMEOUT,
-    )
-    .await
-    {
-        Ok(client) => Ok(Arc::new(BackendClient::Zmq(client))),
-        Err(e) => Err(WorkerError::ConnectionFailed {
+    zmq_client::connect_for_worker(&base_url, model_id, runtime, handshake_override.as_deref())
+        .await
+        .map(|client| Arc::new(BackendClient::Zmq(client)))
+        .map_err(|reason| WorkerError::ConnectionFailed {
             url: base_url,
-            reason: format!("Failed to connect ZMQ engine: {e}"),
-        }),
-    }
+            reason,
+        })
 }
 
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
@@ -1792,56 +1625,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_handshake_port_matches_pinned_vectors() {
-        // Fixed vectors shared with `_zmq_handshake_port` in
-        // bindings/python/src/smg/serve.py — a change on either side breaks the
-        // engine/router port agreement, so these must stay in sync.
-        assert_eq!(derive_handshake_port("/tmp/smg-zmq/ts0.ipc"), 25152);
-        assert_eq!(derive_handshake_port("/tmp/smg-zmq/engine-31000"), 22714);
-        // Range invariant: every path maps into 20000..=29999.
-        for p in ["", "a", "/x/y/z.ipc", "very/long/path/with/segments.sock"] {
-            let port = derive_handshake_port(p);
-            assert!(
-                (20000..=29999).contains(&port),
-                "port {port} out of band for {p:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn zmq_socket_addresses_derive_handshake_by_default() {
-        let (handshake, input, output) =
-            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", None).unwrap();
-        assert_eq!(handshake, "tcp://127.0.0.1:25152");
-        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
-        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
-    }
-
-    #[test]
-    fn zmq_socket_addresses_honor_handshake_override() {
-        // TokenSpeed's default dial target — outside the derived band; the
-        // override must be bound verbatim while the data plane stays derived.
-        let (handshake, input, output) =
-            zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("tcp://127.0.0.1:30500"))
-                .unwrap();
-        assert_eq!(handshake, "tcp://127.0.0.1:30500");
-        assert_eq!(input, "ipc:///tmp/smg-zmq/ts0.ipc-in.sock");
-        assert_eq!(output, "ipc:///tmp/smg-zmq/ts0.ipc-out.sock");
-    }
-
-    #[test]
-    fn zmq_socket_addresses_reject_non_tcp_override() {
-        // The engine dials a TCP handshake; a non-tcp override is a config
-        // error and must fail loudly rather than bind something unexpected.
-        let err = zmq_socket_addresses("ipc:///tmp/smg-zmq/ts0.ipc", Some("ipc:///tmp/hs.sock"))
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("tcp://"),
-            "error must name the required scheme: {err}"
-        );
-    }
-
-    #[test]
     fn test_worker_type_equality() {
         assert_eq!(WorkerType::Regular, WorkerType::Regular);
         assert_ne!(WorkerType::Regular, WorkerType::Decode);
@@ -2783,41 +2566,6 @@ mod tests {
         assert!(worker.has_models_discovered());
     }
 
-    #[tokio::test]
-    async fn ensure_ipc_socket_dir_creates_a_private_owner_only_dir() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("sockets");
-        let url = format!("ipc://{}/x.ipc", dir.display());
-        ensure_ipc_socket_dir(&url).await.unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o700, "created socket dir must be 0700");
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn ensure_ipc_socket_dir_leaves_an_existing_owned_dir_untouched() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let url = format!("ipc://{}/x.ipc", dir.path().display());
-        ensure_ipc_socket_dir(&url).await.unwrap();
-        let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "an existing dir must not be chmod'd");
-    }
-
-    #[tokio::test]
-    async fn ensure_ipc_socket_dir_rejects_a_non_directory_parent() {
-        let base = tempfile::tempdir().unwrap();
-        let file = base.path().join("not-a-dir");
-        std::fs::write(&file, b"x").unwrap();
-        let url = format!("ipc://{}/x.ipc", file.display());
-        assert!(ensure_ipc_socket_dir(&url).await.is_err());
-    }
-
     /// A ZMQ client whose engine dies must be evicted by the health probe (the
     /// connection can't reconnect in place — liveness is latched), and the
     /// handshake guard reset so a later probe rebinds the sockets for a
@@ -2828,6 +2576,8 @@ mod tests {
             mock_engine::{connect_to_frontend, default_ready_response},
             EngineId, ENGINE_CORE_DEAD_SENTINEL,
         };
+
+        use crate::routers::grpc::zmq_client::{EosTokenIds, ZmqEngineClient};
 
         let base = tempfile::tempdir().unwrap();
         let ep = |name: &str| format!("ipc://{}", base.path().join(name).display());
