@@ -221,6 +221,9 @@ class RouterArgs:
         """
         prefix = "router-" if use_router_prefix else ""
 
+        # Repeatable list flags must accumulate across occurrences
+        # (action="extend"/"append"), matching the Rust CLI.
+
         # Create argument groups for organized --help output
         worker_group = parser.add_argument_group(
             "Worker Configuration", "Settings for worker connections and URLs"
@@ -314,6 +317,7 @@ class RouterArgs:
             "--worker-urls",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help=(
                 "List of worker URLs. Supports IPv4 and IPv6 addresses"
@@ -625,7 +629,8 @@ class RouterArgs:
             f"--{prefix}selector",
             type=str,
             nargs="+",
-            default={},
+            action="extend",
+            default=None,
             help="Label selector for Kubernetes service discovery (format: key1=value1 key2=value2)",
         )
         k8s_group.add_argument(
@@ -646,7 +651,8 @@ class RouterArgs:
             f"--{prefix}encode-selector",
             type=str,
             nargs="+",
-            default={},
+            action="extend",
+            default=None,
             help=(
                 "Label selector for encode server pods in EPD mode"
                 " (format: key1=value1 key2=value2)"
@@ -656,7 +662,8 @@ class RouterArgs:
             f"--{prefix}prefill-selector",
             type=str,
             nargs="+",
-            default={},
+            action="extend",
+            default=None,
             help=(
                 "Label selector for prefill server pods in PD mode"
                 " (format: key1=value1 key2=value2)"
@@ -666,7 +673,8 @@ class RouterArgs:
             f"--{prefix}decode-selector",
             type=str,
             nargs="+",
-            default={},
+            action="extend",
+            default=None,
             help=(
                 "Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)"
             ),
@@ -675,7 +683,8 @@ class RouterArgs:
             f"--{prefix}router-selector",
             type=str,
             nargs="+",
-            default=[],
+            action="extend",
+            default=None,
             help=(
                 "Label selector for router pod discovery in HA mesh mode (format: key1=value1 key2=value2)"
             ),
@@ -721,6 +730,7 @@ class RouterArgs:
             f"--{prefix}prometheus-duration-buckets",
             type=float,
             nargs="+",
+            action="extend",
             help="Buckets for Prometheus duration metrics",
         )
 
@@ -729,6 +739,7 @@ class RouterArgs:
             f"--{prefix}request-id-headers",
             type=str,
             nargs="*",
+            action="extend",
             help=(
                 "Custom HTTP headers to check for request IDs (e.g., x-request-id x-trace-id)."
                 " If not specified, uses common defaults."
@@ -738,6 +749,7 @@ class RouterArgs:
             f"--{prefix}storage-context-headers",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help=(
                 "Map HTTP headers into storage hook request context using HEADER=CONTEXT_KEY "
@@ -760,6 +772,7 @@ class RouterArgs:
             f"--{prefix}cors-allowed-origins",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help="CORS allowed origins (e.g., http://localhost:3000 https://example.com)",
         )
@@ -1134,6 +1147,7 @@ class RouterArgs:
             f"--{prefix}ca-cert-paths",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help=(
                 "Path(s) to CA certificate(s) for verifying worker TLS certificates."
@@ -1183,6 +1197,7 @@ class RouterArgs:
             f"--{prefix}control-plane-api-keys",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help=(
                 "API keys for control plane authentication. Format: 'id:name:role:key'"
@@ -1227,6 +1242,7 @@ class RouterArgs:
             f"--{prefix}jwt-role-mapping",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help=(
                 "Mapping from IDP role/group names to gateway roles."
@@ -1274,6 +1290,7 @@ class RouterArgs:
             f"--{prefix}mesh-peer-urls",
             type=str,
             nargs="*",
+            action="extend",
             default=[],
             help="Peer mesh server addresses to join (format: host:port)",
         )
@@ -1396,15 +1413,14 @@ class RouterArgs:
         if not selector_list:
             return {}
 
-        # Support `- --selector\n- a=b c=d` case
-        if len(selector_list) == 1 and (" " in selector_list[0]):
-            selector_list = selector_list[0].split(" ")
-
         selector = {}
+        # An item may hold several space-separated pairs (OME passes
+        # `key1=value1 key2=value2` as a single argv entry).
         for item in selector_list:
-            if "=" in item:
-                key, value = item.split("=", 1)
-                selector[key] = value
+            for token in item.split():
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    selector[key] = value
         return selector
 
     @staticmethod

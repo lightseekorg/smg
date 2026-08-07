@@ -74,6 +74,14 @@ class TestRouterArgs:
         result = RouterArgs._parse_selector(["app=worker=extra"])
         assert result == {"app": "worker=extra"}
 
+    def test_parse_selector_spaced_items(self):
+        """Every item may hold several space-separated pairs, in any mix."""
+        result = RouterArgs._parse_selector(["app=worker env=prod"])
+        assert result == {"app": "worker", "env": "prod"}
+
+        result = RouterArgs._parse_selector(["app=worker env=prod", "tier=engine"])
+        assert result == {"app": "worker", "env": "prod", "tier": "engine"}
+
     def test_parse_model_aliases(self):
         result = RouterArgs._parse_model_aliases(["GLM-5.2-Coding=GLM-5.2", "glm-5.2=GLM-5.2"])
 
@@ -687,6 +695,143 @@ class TestParseRouterArgs:
             assert router_args.selector == {"app": "worker", "env": "prod"}
             assert router_args.service_discovery_port == 8080
             assert router_args.service_discovery_namespace == "default"
+
+    def test_repeated_list_flags_accumulate(self):
+        """Repeated occurrences of list flags append, matching the Rust CLI."""
+        router_args = parse_router_args(
+            [
+                "--selector",
+                "component=engine",
+                "--selector",
+                "ome.io/inferenceservice=svc",
+                "--encode-selector",
+                "app=e",
+                "--encode-selector",
+                "role=encode",
+                "--prefill-selector",
+                "app=p",
+                "--prefill-selector",
+                "role=prefill",
+                "--decode-selector",
+                "app=d",
+                "--decode-selector",
+                "role=decode",
+                "--router-selector",
+                "app=r",
+                "--router-selector",
+                "role=router",
+                "--storage-context-headers",
+                "x-tenant-id=tenant_id",
+                "--storage-context-headers",
+                "x-user-id=user_id",
+                "--worker-urls",
+                "http://w1:8000",
+                "--worker-urls",
+                "http://w2:8000",
+                "--request-id-headers",
+                "x-request-id",
+                "--request-id-headers",
+                "x-trace-id",
+                "--cors-allowed-origins",
+                "http://a",
+                "--cors-allowed-origins",
+                "http://b",
+                "--ca-cert-paths",
+                "/ca/one.pem",
+                "--ca-cert-paths",
+                "/ca/two.pem",
+                "--mesh-peer-urls",
+                "peer1:39527",
+                "--mesh-peer-urls",
+                "peer2:39527",
+                "--prometheus-duration-buckets",
+                "0.1",
+                "--prometheus-duration-buckets",
+                "0.5",
+                "--control-plane-api-keys",
+                "k1:Svc:admin:s1",
+                "--control-plane-api-keys",
+                "k2:Ro:user:s2",
+                "--jwt-role-mapping",
+                "Gateway.Admin=admin",
+                "--jwt-role-mapping",
+                "Gateway.User=user",
+            ]
+        )
+
+        assert router_args.selector == {
+            "component": "engine",
+            "ome.io/inferenceservice": "svc",
+        }
+        assert router_args.encode_selector == {"app": "e", "role": "encode"}
+        assert router_args.prefill_selector == {"app": "p", "role": "prefill"}
+        assert router_args.decode_selector == {"app": "d", "role": "decode"}
+        assert router_args.router_selector == {"app": "r", "role": "router"}
+        assert router_args.storage_context_headers == {
+            "x-tenant-id": "tenant_id",
+            "x-user-id": "user_id",
+        }
+        assert router_args.worker_urls == ["http://w1:8000", "http://w2:8000"]
+        assert router_args.request_id_headers == ["x-request-id", "x-trace-id"]
+        assert router_args.cors_allowed_origins == ["http://a", "http://b"]
+        assert router_args.ca_cert_paths == ["/ca/one.pem", "/ca/two.pem"]
+        assert router_args.mesh_peer_urls == ["peer1:39527", "peer2:39527"]
+        assert router_args.prometheus_duration_buckets == [0.1, 0.5]
+        assert router_args.control_plane_api_keys == [
+            ("k1", "Svc", "s1", "admin"),
+            ("k2", "Ro", "s2", "user"),
+        ]
+        assert router_args.jwt_role_mapping == {
+            "Gateway.Admin": "admin",
+            "Gateway.User": "user",
+        }
+
+    def test_selector_spaced_values_mix_with_repeats(self):
+        """Spaced pairs in one occurrence compose with additional occurrences."""
+        router_args = parse_router_args(
+            [
+                "--selector",
+                "app=worker env=prod",
+                "--selector",
+                "tier=engine",
+            ]
+        )
+
+        assert router_args.selector == {"app": "worker", "env": "prod", "tier": "engine"}
+
+    def test_list_flags_default_empty(self):
+        """Absent list flags parse to the documented empty defaults."""
+        router_args = parse_router_args([])
+
+        assert router_args.selector == {}
+        assert router_args.encode_selector == {}
+        assert router_args.prefill_selector == {}
+        assert router_args.decode_selector == {}
+        assert router_args.router_selector == {}
+        assert router_args.storage_context_headers == {}
+        assert router_args.worker_urls == []
+        assert router_args.cors_allowed_origins == []
+        assert router_args.ca_cert_paths == []
+        assert router_args.mesh_peer_urls == []
+        assert router_args.control_plane_api_keys == []
+        assert router_args.jwt_role_mapping == {}
+
+    def test_prefixed_repeated_selector_accumulates(self):
+        """Repeated --router-selector occurrences accumulate in prefixed mode."""
+        parser = argparse.ArgumentParser()
+        RouterArgs.add_cli_args(parser, use_router_prefix=True)
+        namespace = parser.parse_args(
+            [
+                "--router-selector",
+                "component=engine",
+                "--router-selector",
+                "env=prod",
+            ]
+        )
+
+        router_args = RouterArgs.from_cli_args(namespace, use_router_prefix=True)
+
+        assert router_args.selector == {"component": "engine", "env": "prod"}
 
     def test_parse_repeated_model_alias_args(self):
         router_args = parse_router_args(
