@@ -1167,6 +1167,7 @@ mod tests {
         },
         EngineId,
     };
+    use llm_tokenizer::mock::MockTokenizer;
 
     use super::*;
 
@@ -1191,7 +1192,7 @@ mod tests {
     #[test]
     fn eos_backstop_appends_tokenizer_ids_without_duplicates() {
         // MockTokenizer's EOS set is {999}.
-        let tokenizer: Arc<dyn Tokenizer> = Arc::new(llm_tokenizer::mock::MockTokenizer::new());
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(MockTokenizer::new());
 
         let mut req = eos_request(vec![7], false);
         fold_tokenizer_eos_backstop(&mut req, Some(&tokenizer));
@@ -1205,7 +1206,7 @@ mod tests {
 
     #[test]
     fn eos_backstop_respects_ignore_eos() {
-        let tokenizer: Arc<dyn Tokenizer> = Arc::new(llm_tokenizer::mock::MockTokenizer::new());
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(MockTokenizer::new());
         let mut req = eos_request(vec![7], true);
         fold_tokenizer_eos_backstop(&mut req, Some(&tokenizer));
         assert_eq!(eos_stop_ids(&req), &[7]);
