@@ -1096,6 +1096,35 @@ impl ProtoGenerateRequest {
         clippy::panic,
         reason = "typed accessor: caller guarantees variant via is_sglang() check"
     )]
+    /// Append stop token ids to the request's sampling params (TRT-LLM keeps
+    /// them on the request itself). Requests without sampling params are left
+    /// unchanged, matching the per-engine injection this replaces.
+    pub fn extend_stop_token_ids(&mut self, ids: &[u32]) {
+        match self {
+            Self::Sglang(req) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    params.stop_token_ids.extend_from_slice(ids);
+                }
+            }
+            Self::Vllm(req) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    params.stop_token_ids.extend_from_slice(ids);
+                }
+            }
+            Self::Mlx(req) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    params.stop_token_ids.extend_from_slice(ids);
+                }
+            }
+            Self::TokenSpeed(req) => {
+                if let Some(params) = req.sampling_params.as_mut() {
+                    params.stop_token_ids.extend_from_slice(ids);
+                }
+            }
+            Self::Trtllm(req) => req.stop_token_ids.extend_from_slice(ids),
+        }
+    }
+
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
