@@ -280,6 +280,31 @@ async fn ensure_ipc_socket_dir(base_url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove a stale ipc socket file left by a previous gateway process, if any.
+/// Only ever unlinks sockets (never a regular file at the path), inside the
+/// owner-verified socket dir.
+async fn unlink_stale_socket(address: &str) -> Result<(), String> {
+    let Some(path) = address.strip_prefix("ipc://") else {
+        return Ok(());
+    };
+    match tokio::fs::symlink_metadata(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("failed to stat ipc socket path {path}: {e}")),
+        Ok(meta) => {
+            use std::os::unix::fs::FileTypeExt;
+            if !meta.file_type().is_socket() {
+                return Err(format!(
+                    "ipc socket path {path} exists but is not a socket; refusing to unlink"
+                ));
+            }
+            tracing::info!("Removing stale ipc socket {path} from a previous gateway run");
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(|e| format!("failed to remove stale ipc socket {path}: {e}"))
+        }
+    }
+}
+
 /// Bind the SMG-side ZMQ sockets and complete the handshake with the engine:
 /// the single connect path for a worker's `ipc://` URL, shared by the lazy
 /// client accessor and the background handshake driver. `model_id` is the
@@ -293,6 +318,13 @@ pub(crate) async fn connect_for_worker(
 ) -> Result<ZmqEngineClient, String> {
     let (handshake, input, output) = zmq_socket_addresses(base_url, handshake_override)?;
     ensure_ipc_socket_dir(base_url).await?;
+    // ZMQ refuses to bind over an existing ipc socket file, so leftovers from
+    // a dead gateway would fail every reconnect with a bare transport error.
+    // The dir is verified owner-only above, and a live gateway can't leave
+    // these behind (each worker URL is bound by at most one process), so any
+    // existing socket file here is stale by construction.
+    unlink_stale_socket(&input).await?;
+    unlink_stale_socket(&output).await?;
     // The engine can't stop at EOS on its own (it has no tokenizer or model
     // config); resolve the EOS ids from the local model dir so every request
     // carries them.
@@ -1332,6 +1364,30 @@ mod tests {
     use llm_tokenizer::mock::MockTokenizer;
 
     use super::*;
+
+    #[tokio::test]
+    async fn unlink_stale_socket_removes_sockets_and_refuses_files() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("stale.sock");
+        // A bound-then-dropped listener leaves the socket file behind, exactly
+        // like a dead gateway does.
+        drop(UnixListener::bind(&sock_path).unwrap());
+        assert!(sock_path.exists());
+        let addr = format!("ipc://{}", sock_path.display());
+        unlink_stale_socket(&addr).await.unwrap();
+        assert!(!sock_path.exists(), "stale socket must be removed");
+
+        // Missing file: fine.
+        unlink_stale_socket(&addr).await.unwrap();
+
+        // A regular file at the path is not ours to delete.
+        std::fs::write(&sock_path, b"not a socket").unwrap();
+        let err = unlink_stale_socket(&addr).await.unwrap_err();
+        assert!(err.contains("not a socket"), "{err}");
+        assert!(sock_path.exists(), "regular file must survive");
+    }
 
     #[test]
     fn derive_handshake_port_matches_pinned_vectors() {
