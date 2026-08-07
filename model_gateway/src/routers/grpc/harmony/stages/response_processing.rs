@@ -7,15 +7,12 @@ use axum::response::Response;
 use tracing::error;
 
 use super::super::{HarmonyResponseProcessor, HarmonyStreamingProcessor};
-use crate::{
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{ClientSelection, FinalResponse, RequestContext, RequestType},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::{helpers, PipelineStage, RateLimitCell},
+        context::{ClientSelection, FinalResponse, RequestContext, RequestType},
     },
-    worker::AttachedBody,
 };
 
 /// String `stop` sequences the ROUTER must enforce: only for direct-ZMQ
@@ -99,6 +96,17 @@ impl PipelineStage for HarmonyResponseProcessingStage {
 
                 // For streaming, delegate to streaming processor and return SSE response
                 if is_streaming {
+                    // Reserved (if tenant rate limiting is enabled): settled
+                    // with real usage inside the streaming processor on
+                    // success, or abandoned via the attached
+                    // ReservationAttachment's Drop below on early
+                    // disconnect/error.
+                    let reservation = ctx
+                        .input
+                        .rate_limit_cell
+                        .as_deref()
+                        .and_then(RateLimitCell::take_for_streaming_handoff);
+
                     let response = self
                         .streaming_processor
                         .clone()
@@ -107,13 +115,17 @@ impl PipelineStage for HarmonyResponseProcessingStage {
                             ctx.chat_request_arc(),
                             dispatch,
                             router_stop_strings(ctx),
+                            reservation.clone(),
                         );
 
-                    // Attach load guards to response body for proper RAII lifecycle
-                    let response = match ctx.state.load_guards.take() {
-                        Some(guards) => AttachedBody::wrap_response(response, guards),
-                        None => response,
-                    };
+                    // Attach load guards (and the reservation's
+                    // disconnect/error safety net) to the response body for
+                    // proper RAII lifecycle.
+                    let response = helpers::attach_response_guards(
+                        response,
+                        ctx.state.load_guards.take(),
+                        reservation,
+                    );
 
                     return Ok(Some(response));
                 }

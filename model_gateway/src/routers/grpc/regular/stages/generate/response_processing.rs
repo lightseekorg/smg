@@ -6,16 +6,13 @@ use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use crate::{
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{FinalResponse, RequestContext},
-            regular::{processor, streaming},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::{helpers, PipelineStage, RateLimitCell},
+        context::{FinalResponse, RequestContext},
+        regular::{processor, streaming},
     },
-    worker::AttachedBody,
 };
 
 /// Generate response processing stage
@@ -93,19 +90,32 @@ impl GenerateResponseProcessingStage {
         })?;
 
         if is_streaming {
+            // Reserved (if tenant rate limiting is enabled): settled with real
+            // usage inside the streaming processor on success, or abandoned
+            // via the attached ReservationAttachment's Drop below on early
+            // disconnect/error.
+            let reservation = ctx
+                .input
+                .rate_limit_cell
+                .as_deref()
+                .and_then(RateLimitCell::take_for_streaming_handoff);
+
             // Streaming: Use StreamingProcessor and return SSE response
             let response = self.streaming_processor.clone().process_streaming_generate(
                 execution_result,
                 ctx.generate_request_arc(), // Cheap Arc clone (8 bytes)
                 dispatch,
                 tokenizer,
+                reservation.clone(),
             );
 
-            // Attach load guards to response body for proper RAII lifecycle
-            let response = match ctx.state.load_guards.take() {
-                Some(guards) => AttachedBody::wrap_response(response, guards),
-                None => response,
-            };
+            // Attach load guards (and the reservation's disconnect/error
+            // safety net) to the response body for proper RAII lifecycle.
+            let response = helpers::attach_response_guards(
+                response,
+                ctx.state.load_guards.take(),
+                reservation,
+            );
 
             return Ok(Some(response));
         }

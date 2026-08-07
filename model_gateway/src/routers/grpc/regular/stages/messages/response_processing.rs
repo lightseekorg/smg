@@ -10,16 +10,13 @@ use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
 
-use crate::{
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{FinalResponse, RequestContext},
-            regular::{processor, streaming},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::{helpers, PipelineStage, RateLimitCell},
+        context::{FinalResponse, RequestContext},
+        regular::{processor, streaming},
     },
-    worker::AttachedBody,
 };
 
 /// Message response processing stage
@@ -84,6 +81,16 @@ impl PipelineStage for MessageResponseProcessingStage {
             // Read derived skip_special_tokens (set in preparation, survives request_building .take())
             let skip_special_tokens = ctx.state.response.skip_special_tokens.unwrap_or(true);
 
+            // Reserved (if tenant rate limiting is enabled): settled with real
+            // usage inside the streaming processor on success, or abandoned
+            // via the attached ReservationAttachment's Drop below on early
+            // disconnect/error.
+            let reservation = ctx
+                .input
+                .rate_limit_cell
+                .as_deref()
+                .and_then(RateLimitCell::take_for_streaming_handoff);
+
             // Streaming: use StreamingProcessor and return SSE response
             let response = self
                 .streaming_processor
@@ -94,13 +101,16 @@ impl PipelineStage for MessageResponseProcessingStage {
                     dispatch,
                     tokenizer,
                     skip_special_tokens,
+                    reservation.clone(),
                 );
 
-            // Attach load guards for RAII lifecycle
-            let response = match ctx.state.load_guards.take() {
-                Some(guards) => AttachedBody::wrap_response(response, guards),
-                None => response,
-            };
+            // Attach load guards (and the reservation's disconnect/error
+            // safety net) for RAII lifecycle.
+            let response = helpers::attach_response_guards(
+                response,
+                ctx.state.load_guards.take(),
+                reservation,
+            );
 
             return Ok(Some(response));
         }

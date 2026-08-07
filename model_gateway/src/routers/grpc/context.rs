@@ -23,7 +23,7 @@ use tracing::debug;
 
 use super::{
     backend_client::BackendClient,
-    common::stages::encode::EncodeDispatchPlan,
+    common::stages::{encode::EncodeDispatchPlan, RateLimitCell},
     multimodal::{MultimodalComponents, MultimodalIntermediate},
     proto_wrapper::{
         EncodeItemBootstrapInfo, ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest,
@@ -53,6 +53,11 @@ pub(crate) struct RequestInput {
     /// Canonical model ID used after aliases are resolved at request entry.
     pub model_id: String,
     pub tenant_request_meta: Option<TenantRequestMeta>,
+    /// Shared across every retry attempt of one logical request so
+    /// `RateLimitReserveStage` reserves at most once. `None` for endpoints
+    /// that haven't opted into tenant rate limiting yet (Responses,
+    /// embeddings, classify).
+    pub rate_limit_cell: Option<Arc<RateLimitCell>>,
 }
 
 /// Request type variants
@@ -338,6 +343,17 @@ impl PreparationOutput {
         }
     }
 
+    /// Total input token count across every item -- for accounting (rate-limit
+    /// reservation), not routing. Unlike `token_ids()`, which exposes only the
+    /// first prompt as a routing-affinity proxy, a batched `Completion`
+    /// request's real input cost is the sum of every prompt in the batch.
+    pub fn total_input_token_count(&self) -> usize {
+        match self {
+            Self::Completion { items, .. } => items.iter().map(|item| item.token_ids.len()).sum(),
+            other => other.token_ids().len(),
+        }
+    }
+
     /// Text for worker routing: original_text for regular pipelines, selection_text for Harmony.
     /// Chat/Messages borrow from processed_messages.text to avoid a redundant clone.
     pub fn routing_text(&self) -> Option<&str> {
@@ -502,6 +518,7 @@ impl RequestContext {
                 headers,
                 model_id,
                 tenant_request_meta: None,
+                rate_limit_cell: None,
             },
             components,
             state: ProcessingState::default(),
@@ -980,6 +997,35 @@ mod tests {
         let batch = completion_prep(&["a", "b"], Some("a b"));
         assert_eq!(batch.routing_text(), Some("a b"));
         assert_eq!(batch.token_ids(), &[0]);
+    }
+
+    /// `token_ids()` is deliberately a single-item routing-affinity proxy
+    /// (see the test above), but a batched Completion's real input cost is
+    /// every prompt in the batch -- `total_input_token_count()` must sum
+    /// them all, not just echo the first item like `token_ids()` does.
+    #[test]
+    fn total_input_token_count_sums_every_batched_completion_item() {
+        let batch = PreparationOutput::Completion {
+            items: vec![
+                CompletionItem {
+                    text: "short".to_string(),
+                    token_ids: vec![1],
+                },
+                CompletionItem {
+                    text: "much longer prompt".to_string(),
+                    token_ids: vec![2, 3, 4, 5, 6],
+                },
+            ],
+            joined_routing_text: Some("short much longer prompt".to_string()),
+        };
+
+        // The routing proxy only ever sees the first item...
+        assert_eq!(batch.token_ids().len(), 1);
+        // ...but reservation accounting must see the whole batch's cost.
+        assert_eq!(batch.total_input_token_count(), 6);
+
+        let scalar = completion_prep(&["hello"], None);
+        assert_eq!(scalar.total_input_token_count(), scalar.token_ids().len());
     }
 
     #[test]

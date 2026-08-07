@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap},
+    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
     io,
     sync::Arc,
     time::Instant,
@@ -33,6 +33,7 @@ use super::{
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
+    rate_limit::{SharedReservationHandle, UsageSettlement},
     routers::{
         common::{
             openai_bridge::{self, descriptor, FormatRegistry, ResponseFormat},
@@ -110,6 +111,7 @@ impl HarmonyStreamingProcessor {
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: context::DispatchMetadata,
         router_stop_strings: Vec<String>,
+        reservation: Option<Arc<SharedReservationHandle>>,
     ) -> Response {
         // Create SSE channel
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -124,6 +126,7 @@ impl HarmonyStreamingProcessor {
                         chat_request,
                         &tx,
                         router_stop_strings,
+                        reservation,
                     )
                     .await;
 
@@ -149,6 +152,7 @@ impl HarmonyStreamingProcessor {
                         chat_request,
                         &tx,
                         router_stop_strings,
+                        reservation,
                     )
                     .await;
 
@@ -192,6 +196,7 @@ impl HarmonyStreamingProcessor {
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         router_stop_strings: Vec<String>,
+        reservation: Option<Arc<SharedReservationHandle>>,
     ) -> Result<(), String> {
         let mut prompt_tokens = HashMap::new();
         let mut cached_tokens = HashMap::new();
@@ -203,6 +208,7 @@ impl HarmonyStreamingProcessor {
             &mut prompt_tokens,
             &mut cached_tokens,
             &router_stop_strings,
+            reservation,
         )
         .await
     }
@@ -215,6 +221,7 @@ impl HarmonyStreamingProcessor {
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         router_stop_strings: Vec<String>,
+        reservation: Option<Arc<SharedReservationHandle>>,
     ) -> Result<(), String> {
         // Phase 1: Process prefill stream (collect metadata)
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
@@ -238,6 +245,7 @@ impl HarmonyStreamingProcessor {
             &mut prompt_tokens,
             &mut cached_tokens,
             &router_stop_strings,
+            reservation,
         )
         .await?;
 
@@ -253,6 +261,7 @@ impl HarmonyStreamingProcessor {
     /// and `cached_tokens` maps may be pre-populated from a prefill phase
     /// (prefill/decode stream) or empty (single stream). Values from `Complete` messages
     /// are inserted only if not already present.
+    #[expect(clippy::too_many_arguments)]
     async fn process_chat_decode_stream(
         mut decode_stream: ProtoStream,
         dispatch: &context::DispatchMetadata,
@@ -261,6 +270,7 @@ impl HarmonyStreamingProcessor {
         prompt_tokens: &mut HashMap<u32, u32>,
         cached_tokens: &mut HashMap<u32, u32>,
         router_stop_strings: &[String],
+        reservation: Option<Arc<SharedReservationHandle>>,
     ) -> Result<(), String> {
         // Timing for metrics
         let start_time = Instant::now();
@@ -275,8 +285,14 @@ impl HarmonyStreamingProcessor {
         // the engine's own Complete is not re-emitted.
         let mut analysis_scanners: HashMap<u32, TextStopScanner> = HashMap::new();
         let mut final_scanners: HashMap<u32, TextStopScanner> = HashMap::new();
-        let mut router_stopped: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut router_stopped: HashSet<u32> = HashSet::new();
         let mut completion_tokens = CompletionTokenTracker::new();
+        // Indices that received a *decode* `Complete` -- unlike `prompt_tokens`
+        // (which may already be populated from the prefill phase before this
+        // loop even starts, in PD mode), this is only ever set from this
+        // stream's own Complete messages, so it can't be fooled by prefill
+        // data into thinking decode produced authoritative usage it didn't.
+        let mut decode_completed_indices: HashSet<u32> = HashSet::new();
         // Reusable SSE encoder shared across every chunk emitted for this stream.
         let mut encoder = SseEncoder::new();
 
@@ -401,6 +417,7 @@ impl HarmonyStreamingProcessor {
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
                     let index = complete_wrapper.index();
+                    decode_completed_indices.insert(index);
 
                     // Store final metadata
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
@@ -468,10 +485,35 @@ impl HarmonyStreamingProcessor {
         // Mark stream as completed successfully to prevent abort on drop
         decode_stream.mark_completed();
 
-        // Compute totals once for both usage chunk and metrics
-        let total_prompt: u32 = prompt_tokens.values().sum();
+        // Compute totals once for both usage chunk and metrics. Every `n>1`
+        // choice shares one prompt; each Complete reports that same full
+        // length, so max (not sum) is the actual prompt cost. cached_tokens
+        // is a property of that same shared prompt, not of the individual
+        // completion, so it takes the same treatment.
+        let total_prompt: u32 = prompt_tokens.values().copied().max().unwrap_or(0);
         let total_completion: u32 = completion_tokens.total();
-        let total_cached: u32 = cached_tokens.values().sum();
+        let total_cached: u32 = cached_tokens.values().copied().max().unwrap_or(0);
+
+        if let Some(handle) = reservation {
+            // A clean decode EOF with fewer decode `Complete` messages than
+            // this request's `n>1` choices has only partial usage -- settling
+            // with that would understate the real cost. Deliberately checked
+            // against `decode_completed_indices`, not `prompt_tokens`: in PD
+            // mode `prompt_tokens` can already be non-empty from the prefill
+            // phase alone, which would otherwise mask a decode phase that
+            // never actually finished.
+            let expected_choices = original_request.n.unwrap_or(1).max(1);
+            if (decode_completed_indices.len() as u32) < expected_choices {
+                handle.close_reserved_only().await;
+            } else {
+                handle
+                    .settle_success(UsageSettlement {
+                        actual_input_tokens: total_prompt,
+                        completion_tokens: total_completion,
+                    })
+                    .await;
+            }
+        }
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
