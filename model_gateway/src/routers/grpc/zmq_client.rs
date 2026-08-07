@@ -818,17 +818,27 @@ impl Stream for TokenSpeedGenerateStream {
 ///   pipeline de-duplicates (max per prompt), so nothing is counted n times.
 fn fan_out_requests(req: vllm::GenerateRequest) -> Vec<vllm::GenerateRequest> {
     let n = req.sampling_params.as_ref().map_or(1, |sp| sp.n.max(1));
+    fan_out_n(req, n, |sub, i| {
+        sub.request_id = format!("{}-{i}", sub.request_id);
+        if let Some(sp) = sub.sampling_params.as_mut() {
+            sp.n = 1;
+            // An explicit seed must still yield distinct samples per sub.
+            sp.seed = sp.seed.map(|seed| seed.wrapping_add(i as i32));
+        }
+    })
+}
+
+/// Shared n>1 fan-out scaffolding: clone the request into `n` subs and let
+/// `per_sub` apply the engine-specific rid suffix and sampling tweaks. An
+/// `n <= 1` request passes through untouched.
+fn fan_out_n<R: Clone>(req: R, n: u32, mut per_sub: impl FnMut(&mut R, u32)) -> Vec<R> {
     if n <= 1 {
         return vec![req];
     }
     (0..n)
         .map(|i| {
             let mut sub = req.clone();
-            sub.request_id = format!("{}-{i}", req.request_id);
-            if let Some(sp) = sub.sampling_params.as_mut() {
-                sp.n = 1;
-                sp.seed = sp.seed.map(|seed| seed.wrapping_add(i as i32));
-            }
+            per_sub(&mut sub, i);
             sub
         })
         .collect()
@@ -844,19 +854,12 @@ fn fan_out_tokenspeed_requests(
     req: tokenspeed_proto::GenerateRequest,
 ) -> Vec<tokenspeed_proto::GenerateRequest> {
     let n = req.sampling_params.as_ref().map_or(1, |sp| sp.n.max(1));
-    if n <= 1 {
-        return vec![req];
-    }
-    (0..n)
-        .map(|i| {
-            let mut sub = req.clone();
-            sub.request_id = format!("{}-{i}", req.request_id);
-            if let Some(sp) = sub.sampling_params.as_mut() {
-                sp.n = 1;
-            }
-            sub
-        })
-        .collect()
+    fan_out_n(req, n, |sub, i| {
+        sub.request_id = format!("{}-{i}", sub.request_id);
+        if let Some(sp) = sub.sampling_params.as_mut() {
+            sp.n = 1;
+        }
+    })
 }
 
 /// Translate a TokenSpeed proto `GenerateRequest` into the wire
