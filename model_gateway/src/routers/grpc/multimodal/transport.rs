@@ -154,6 +154,35 @@ pub(super) fn resolve_mm_shm_min_bytes(workers: Option<&WorkerSelection>) -> usi
     worker_shm_min_bytes_override(workers).unwrap_or_else(|| mm_transport_defaults().shm_min_bytes)
 }
 
+/// Resolve whether vLLM `pixel_values` may use the RDMA lane for this request: the
+/// gateway exporter is up and the worker advertises it can pull. The capability
+/// gate keeps SMG from emitting a `remote` payload to a worker that would reject
+/// it, and is the per-worker opt-out (a worker that shouldn't RDMA reports
+/// `supports_rdma_pull=false`).
+///
+/// The exporter is a process-wide resource built once the RDMA lane is enabled
+/// (router transport mode `rdma`, `SMG_MM_TENSOR_TRANSPORT=rdma`, or the legacy
+/// `SMG_MM_PIXEL_RDMA`). Gating on its presence — rather than the per-request
+/// transport mode — matches TokenSpeed and honors every way the lane is enabled.
+pub(super) fn resolve_mm_rdma_enabled(workers: Option<&WorkerSelection>) -> bool {
+    mm_rdma_exporter().is_some() && worker_supports_rdma_pull(workers)
+}
+
+/// Whether the request's worker advertises RDMA-pull support via the
+/// `supports_rdma_pull` label (lifted from vLLM `GetServerInfo`). Missing or
+/// non-`"true"` reads as no.
+fn worker_supports_rdma_pull(workers: Option<&WorkerSelection>) -> bool {
+    primary_worker(workers).is_some_and(|worker| {
+        worker
+            .metadata()
+            .spec
+            .labels
+            .get("supports_rdma_pull")
+            .map(String::as_str)
+            == Some("true")
+    })
+}
+
 // ===================== RDMA pixel lane =====================
 //
 // The gateway owns all RDMA *policy*: it decides whether the lane is on (a
@@ -602,6 +631,43 @@ mod tests {
         assert_eq!(capped, MAX_RDMA_ARENA_BYTES / slot_bytes);
         assert!(capped >= 1, "must keep at least one slot");
         assert_eq!(clamp_pool_slots(64, 32 * 1024 * 1024), 64);
+    }
+
+    fn single_worker_with_labels(pairs: &[(&str, &str)]) -> WorkerSelection {
+        use crate::worker::BasicWorkerBuilder;
+        let labels = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        let worker = BasicWorkerBuilder::new("http://test:8000")
+            .labels(labels)
+            .build();
+        WorkerSelection::Single {
+            worker: Arc::new(worker),
+        }
+    }
+
+    #[test]
+    fn worker_supports_rdma_pull_reads_label() {
+        assert!(worker_supports_rdma_pull(Some(&single_worker_with_labels(
+            &[("supports_rdma_pull", "true",)]
+        ))));
+        assert!(!worker_supports_rdma_pull(Some(
+            &single_worker_with_labels(&[("supports_rdma_pull", "false")])
+        )));
+        // Missing label (older worker) reads as no.
+        assert!(!worker_supports_rdma_pull(Some(
+            &single_worker_with_labels(&[])
+        )));
+        assert!(!worker_supports_rdma_pull(None));
+    }
+
+    #[test]
+    fn resolve_mm_rdma_enabled_requires_exporter() {
+        // Even a capable worker cannot RDMA without the gateway exporter, which is
+        // never built in the default (stub) test build -> the gate stays off.
+        let workers = single_worker_with_labels(&[("supports_rdma_pull", "true")]);
+        assert!(!resolve_mm_rdma_enabled(Some(&workers)));
     }
 
     #[test]

@@ -9,6 +9,8 @@ import asyncio
 import hashlib
 import itertools
 import json
+import os
+import socket
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import datetime, timezone
@@ -38,6 +40,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
 from smg_grpc_servicer import mm_shm
+from smg_grpc_servicer.mm_rdma import RdmaPixelPuller
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 from smg_grpc_servicer.vllm.kv_events import (
     endpoint_for_rank,
@@ -69,13 +72,15 @@ def _filtered_sampling_defaults(params: dict | None) -> dict:
 # Proto dtype string → torch dtype
 _PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
     "int64": torch.int64,
     "uint32": torch.uint32,
 }
 
 
-def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
-    """Deserialize a TensorData proto message into a torch.Tensor."""
+def _inline_tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
+    """Deserialize an inline/SHM TensorData proto message into a torch.Tensor."""
     torch_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
     if torch_dtype is None:
         raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
@@ -151,7 +156,22 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Resolve KV-event publishing config from the engine. Non-None only when
         # vLLM was started with --kv-events-config enabling the ZMQ publisher.
         self._kv_events_config = resolve_kv_events_config(async_llm)
+        # No-op unless the RDMA lane is on (SMG_MM_TENSOR_TRANSPORT=rdma or legacy
+        # SMG_MM_PIXEL_RDMA); a unique agent name avoids NIXL metadata collisions
+        # since vLLM has no bootstrap host/port.
+        self._rdma_pixel_puller = RdmaPixelPuller(
+            agent_name=f"smg-vllm-{socket.gethostname()}-{os.getpid()}",
+            log_prefix="vLLM RDMA",
+        )
         logger.info("VllmEngineServicer initialized")
+
+    def _tensor_from_proto(self, td: vllm_engine_pb2.TensorData) -> torch.Tensor:
+        """Deserialize a TensorData proto; RDMA `remote` payloads are pulled via NIXL."""
+        if td.WhichOneof("payload") == "remote":
+            return self._rdma_pixel_puller.feature_from_remote(
+                td, explicit_room=None, cast_to=self.engine.model_config.dtype
+            )
+        return _inline_tensor_from_proto(td)
 
     async def Generate(
         self,
@@ -194,8 +214,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
                 # Token IDs already have expanded placeholders; tensors are
-                # ready for the model. Bypass the renderer entirely.
-                prompt = self._build_preprocessed_mm_inputs(request.tokenized, request.mm_inputs)
+                # ready for the model. Bypass the renderer entirely. Offloaded to
+                # a thread: the RDMA (remote) tensor pull does blocking NIXL waits
+                # that must not stall the asyncio event loop.
+                prompt = await asyncio.to_thread(
+                    self._build_preprocessed_mm_inputs,
+                    request.tokenized,
+                    request.mm_inputs,
+                )
                 prompt["arrival_time"] = arrival_time
             elif input_type == "tokenized":
                 prompt: TokensPrompt = {"prompt_token_ids": list(request.tokenized.input_ids)}
@@ -490,6 +516,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             kv_engine_id=kv_engine_id,
             data_parallel_size=parallel.data_parallel_size,
             shm_namespace_id=mm_shm.shm_namespace_id(),
+            supports_rdma_pull=self._rdma_pixel_puller.ready,
         )
 
     async def GetLoads(
@@ -628,12 +655,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 return "pixel_values_videos"
             return key
 
-        # Deserialize all tensors from proto
+        # Deserialize all tensors from proto (pixel_values may arrive over RDMA).
         hf_dict: dict[str, torch.Tensor] = {
-            mm_key("pixel_values"): _tensor_from_proto(mm_proto.pixel_values),
+            mm_key("pixel_values"): self._tensor_from_proto(mm_proto.pixel_values),
         }
         for key, td in mm_proto.model_specific_tensors.items():
-            hf_dict[mm_key(key)] = _tensor_from_proto(td)
+            hf_dict[mm_key(key)] = self._tensor_from_proto(td)
 
         # Cast floating-point tensors to model dtype (e.g. bfloat16).
         # This mirrors _postprocess_output in multimodal/processing/context.py
