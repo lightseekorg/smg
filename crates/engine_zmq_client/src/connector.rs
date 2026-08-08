@@ -5,7 +5,8 @@
 // - No client-side DP load balancing. SMG routing picks the rank and stamps
 //   `data_parallel_rank`; the connector consumes the piggybacked per-rank
 //   `scheduler_stats` as the load signal.
-// - No DP coordinator / wave protocol yet (single shared transport, DP=1).
+// - No DP coordinator process: for a lockstep engine group the connector plays
+//   the wake role itself, over the input socket each rank already listens on.
 // - No utility RPC (deferred).
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -21,7 +22,7 @@ use crate::{
     error::{Error, Result},
     protocol::{
         tokenspeed::TokenSpeedProtocol, vllm::VllmProtocol, EngineBatch, EngineLoad, EngineOutput,
-        EngineProtocol,
+        EngineProtocol, WaveEvent,
     },
     transport::{run_output_loop, send_message, ConnectedEngine, ConnectedTransport, EngineId},
 };
@@ -100,6 +101,14 @@ impl<O: EngineOutput> RequestRegistry<O> {
     }
 }
 
+/// Wave bookkeeping for a lockstep engine group, mirroring the state vLLM's DP
+/// coordinator keeps: which wave the group is on, and whether it is stepping.
+#[derive(Default)]
+struct WaveState {
+    current: u32,
+    running: bool,
+}
+
 struct ClientInner<P: EngineProtocol> {
     /// Shared input ROUTER send half (serialized across concurrent submits).
     input_send: tokio::sync::Mutex<RouterSendHalf>,
@@ -107,6 +116,9 @@ struct ClientInner<P: EngineProtocol> {
     registry: Mutex<RequestRegistry<P::Output>>,
     /// Latest per-rank load, keyed by engine index. SMG's DP load signal.
     load: Mutex<HashMap<u32, EngineLoad>>,
+    /// Wave state for a lockstep engine group; `None` when the ranks step
+    /// independently (dense DP, DP=1) and so never pause together.
+    wave: Option<Mutex<WaveState>>,
     /// Auto-abort channel fed by dropped streams.
     abort_tx: mpsc::UnboundedSender<(EngineId, String)>,
 }
@@ -157,6 +169,85 @@ impl<P: EngineProtocol> ClientInner<P> {
         .await
     }
 
+    /// Tell every rank but `exclude_index` to start `wave`. Does nothing for a
+    /// protocol without a wave protocol.
+    async fn broadcast_start_wave(&self, wave: u32, exclude_index: u32) -> Result<()> {
+        let Some((frame, payload)) = P::encode_start_wave(wave, exclude_index)? else {
+            return Ok(());
+        };
+        for engine in &self.engines {
+            if engine.engine_id.engine_index() == Some(exclude_index) {
+                continue;
+            }
+            self.send_to_engine(
+                &engine.engine_id,
+                frame.clone(),
+                payload.clone(),
+                Vec::new(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Wake a paused lockstep group so the rank now holding a request can make
+    /// progress: its peers must be stepping too, because every rank joins the
+    /// same all-reduce. Upstream vLLM has a DP coordinator process broadcast the
+    /// restart; SMG owns rank selection, so it sends the same signal over the
+    /// input socket each rank already listens on. A no-op for independent ranks
+    /// and for a group that is already running.
+    async fn wake_group(&self, holder_index: u32) -> Result<()> {
+        let Some(state) = self.wave.as_ref() else {
+            return Ok(());
+        };
+        let wave = {
+            let mut state = state.lock();
+            if state.running {
+                return Ok(());
+            }
+            state.running = true;
+            state.current
+        };
+        if let Err(error) = self.broadcast_start_wave(wave, holder_index).await {
+            // The group is still asleep, so let the next submit try again.
+            state.lock().running = false;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Fold a wave notification from an engine into the group's state.
+    async fn observe_wave(&self, event: WaveEvent, engine_index: u32) {
+        let Some(state) = self.wave.as_ref() else {
+            warn!(?event, "wave notification from independent ranks; ignoring");
+            return;
+        };
+        match event {
+            // The group drained the wave and parked itself; the engines have
+            // already moved on to the next one. The next submit wakes them.
+            WaveEvent::Complete(wave) => {
+                let mut state = state.lock();
+                if wave >= state.current {
+                    state.current = wave.saturating_add(1);
+                    state.running = false;
+                }
+            }
+            // A rank took a request for an already-drained wave and is asking
+            // for the rest of the group to catch up.
+            WaveEvent::Start(wave) => {
+                {
+                    let mut state = state.lock();
+                    state.current = state.current.max(wave);
+                    state.running = true;
+                }
+                if let Err(error) = self.broadcast_start_wave(wave, engine_index).await {
+                    warn!(%error, wave, "failed to start the requested wave");
+                    state.lock().running = false;
+                }
+            }
+        }
+    }
+
     /// Send an Abort for one request id to its engine.
     async fn abort(&self, engine_id: &EngineId, request_id: &str) -> Result<()> {
         let payload = P::encode_abort(request_id)?;
@@ -183,12 +274,21 @@ impl<P: EngineProtocol> Client<P> {
             ..
         } = transport;
 
+        // Only a group whose ranks step in lockstep pauses as a unit and needs
+        // waking. The engines report which they are at handshake: a lockstep
+        // group keeps its data-parallel size, while independent ranks are
+        // reconfigured to a size of one before they answer.
+        let lockstep = engines
+            .iter()
+            .any(|engine| engine.ready_response.data_parallel_size > 1);
+
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(ClientInner {
             input_send: tokio::sync::Mutex::new(input_send),
             engines,
             registry: Mutex::new(RequestRegistry::default()),
             load: Mutex::new(HashMap::new()),
+            wave: lockstep.then(|| Mutex::new(WaveState::default())),
             abort_tx,
         });
 
@@ -250,6 +350,21 @@ impl<P: EngineProtocol> Client<P> {
             return Err(error);
         }
 
+        // The rank now holds the request; its peers must be awake for it to
+        // step. Waking after the send keeps the group parked (and so unable to
+        // report another drained wave) for the whole window.
+        if let Err(error) = self
+            .inner
+            .wake_group(engine_id.engine_index().unwrap_or(u32::MAX))
+            .await
+        {
+            // The request can never make progress with its peers asleep, so
+            // take it back rather than leaving it stranded on the engine.
+            self.inner.registry.lock().remove_all([&request_id]);
+            let _ = self.inner.abort(&engine_id, &request_id).await;
+            return Err(error);
+        }
+
         Ok(RequestStream {
             request_id,
             engine_id,
@@ -299,6 +414,9 @@ async fn run_dispatcher<P: EngineProtocol>(
                     Some(Ok(batch)) => {
                         if let Some(load) = batch.load {
                             inner.load.lock().insert(batch.engine_index, load);
+                        }
+                        if let Some(event) = batch.wave {
+                            inner.observe_wave(event, batch.engine_index).await;
                         }
                         let mut registry = inner.registry.lock();
                         for output in batch.outputs {
@@ -419,13 +537,19 @@ mod tests {
     use super::*;
     use crate::{
         codec::{decode_msgpack, encode_msgpack},
-        mock_engine::{connect_to_frontend, default_ready_response, IpcNamespace, MockEngine},
-        protocol::vllm::{
-            output::{
-                EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+        mock_engine::{
+            connect_to_frontend, default_ready_response, EngineInbound, IpcNamespace, MockEngine,
+        },
+        protocol::{
+            handshake::EngineCoreReadyResponse,
+            vllm::{
+                output::{
+                    DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput,
+                    EngineCoreOutputs, RequestBatchOutputs,
+                },
+                request::EngineCoreRequest,
+                stats::SchedulerStats,
             },
-            request::EngineCoreRequest,
-            stats::SchedulerStats,
         },
         transport::{connect_handshake, ENGINE_CORE_DEAD_SENTINEL},
     };
@@ -461,6 +585,62 @@ mod tests {
             engine.unwrap(),
             ns,
         )
+    }
+
+    /// Connect `engine_count` mock ranks behind one transport. `lockstep`
+    /// controls the data-parallel size they report at handshake, which is how
+    /// the client tells a group that pauses as a unit (vLLM MoE DP) from ranks
+    /// that step independently.
+    async fn connect_ranks(
+        engine_count: usize,
+        lockstep: bool,
+    ) -> (EngineCoreClient, Vec<MockEngine>, IpcNamespace) {
+        let ns = IpcNamespace::new().unwrap();
+        let (handshake, input, output) = (
+            ns.handshake_endpoint(),
+            ns.input_endpoint(),
+            ns.output_endpoint(),
+        );
+        let ready = |rank: u32| EngineCoreReadyResponse {
+            data_parallel_size: if lockstep { engine_count as u64 } else { 1 },
+            data_parallel_rank: rank,
+            ..default_ready_response()
+        };
+        let engines = (0..engine_count as u32).map(|rank| {
+            connect_to_frontend(&handshake, EngineId::from_engine_index(rank), ready(rank))
+        });
+        let (transport, engines) = tokio::join!(
+            connect_handshake(
+                &handshake,
+                engine_count,
+                "127.0.0.1",
+                Some(&input),
+                Some(&output),
+                TIMEOUT
+            ),
+            futures::future::join_all(engines),
+        );
+        let engines = engines.into_iter().map(Result::unwrap).collect();
+        (EngineCoreClient::new(transport.unwrap()), engines, ns)
+    }
+
+    /// An add-request pinned to one rank.
+    fn request_for(request_id: &str, rank: u32) -> EngineCoreRequest {
+        EngineCoreRequest {
+            request_id: request_id.to_string(),
+            prompt_token_ids: Some(vec![1, 2, 3]),
+            data_parallel_rank: Some(rank),
+            ..EngineCoreRequest::default()
+        }
+    }
+
+    fn wave_control(engine_index: u32, control: DpControlMessage) -> Vec<Bytes> {
+        let outputs = EngineCoreOutputs::DpControl(DpControlOutput {
+            engine_index,
+            timestamp: 0.0,
+            control,
+        });
+        vec![Bytes::from(encode_msgpack(&outputs).unwrap())]
     }
 
     fn batch(engine_index: u32, output: EngineCoreOutput) -> Vec<Bytes> {
@@ -708,5 +888,85 @@ mod tests {
         assert!(second.finished());
         // Terminal output ends the stream.
         assert!(stream.next().await.is_none());
+    }
+
+    /// A lockstep group is paused when the client connects, so the first submit
+    /// must wake every rank except the one taking the request.
+    #[tokio::test]
+    async fn first_submit_wakes_the_paused_lockstep_group() {
+        let (client, mut engines, _ns) = connect_ranks(2, true).await;
+
+        let _stream = client.submit(request_for("req-1", 1)).await.unwrap();
+
+        match engines[1].recv().await.unwrap() {
+            EngineInbound::Add(request) => assert_eq!(request.request_id, "req-1"),
+            other => panic!("rank 1 expected the Add, got {other:?}"),
+        }
+        assert!(matches!(
+            engines[0].recv().await.unwrap(),
+            EngineInbound::StartDpWave {
+                wave: 0,
+                exclude_engine_index: 1,
+            }
+        ));
+    }
+
+    /// While the group runs, submits carry no wake; once it reports the wave
+    /// drained, the next submit wakes it again on the following wave.
+    #[tokio::test]
+    async fn a_drained_wave_re_arms_the_wake() {
+        let (client, mut engines, _ns) = connect_ranks(2, true).await;
+
+        let _first = client.submit(request_for("req-1", 1)).await.unwrap();
+        assert!(matches!(
+            engines[0].recv().await.unwrap(),
+            EngineInbound::StartDpWave { wave: 0, .. }
+        ));
+
+        // Running group: the second submit only sends the Add.
+        let _second = client.submit(request_for("req-2", 0)).await.unwrap();
+        match engines[0].recv().await.unwrap() {
+            EngineInbound::Add(request) => assert_eq!(request.request_id, "req-2"),
+            other => panic!("expected the Add with no wake, got {other:?}"),
+        }
+
+        // The group drains wave 0 and parks itself.
+        engines[0]
+            .send_output(wave_control(0, DpControlMessage::WaveComplete(0)))
+            .await
+            .unwrap();
+        // The notification travels through the dispatcher, so wait for it to
+        // land before submitting against the parked group.
+        tokio::time::timeout(TIMEOUT, async {
+            while client.inner.wave.as_ref().unwrap().lock().running {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the drained wave never parked the group");
+
+        let _third = client.submit(request_for("req-3", 1)).await.unwrap();
+        match engines[0].recv().await.unwrap() {
+            // The engines moved on to wave 1 as they paused, so that is the
+            // wave the wake must name.
+            EngineInbound::StartDpWave { wave, .. } => assert_eq!(wave, 1),
+            other => panic!("expected a wake for the next wave, got {other:?}"),
+        }
+    }
+
+    /// Independent ranks (dense DP) never pause as a group, so they are never
+    /// woken — each rank only ever sees its own requests.
+    #[tokio::test]
+    async fn independent_ranks_are_never_woken() {
+        let (client, mut engines, _ns) = connect_ranks(2, false).await;
+
+        let _first = client.submit(request_for("req-1", 1)).await.unwrap();
+        let _second = client.submit(request_for("req-2", 0)).await.unwrap();
+
+        // Rank 0's first message is its own Add, not a wake for rank 1's.
+        match engines[0].recv().await.unwrap() {
+            EngineInbound::Add(request) => assert_eq!(request.request_id, "req-2"),
+            other => panic!("independent rank expected only its Add, got {other:?}"),
+        }
     }
 }
