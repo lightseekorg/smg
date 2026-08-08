@@ -5,14 +5,12 @@ use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
 use openai_protocol::{
     chat::ChatCompletionStreamResponse,
-    common::{Usage, UsageInfo},
+    common::Usage,
     event_types::{
         ContentPartEvent, FunctionCallEvent, McpEvent, OutputItemEvent, OutputTextEvent,
         ResponseEvent,
     },
-    responses::{
-        ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
-    },
+    responses::{ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::json;
 use smg_mcp::{self as mcp};
@@ -21,6 +19,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
 use uuid::Uuid;
 
+use super::responses_usage_from_chat_usage;
 use crate::routers::{
     common::openai_bridge::{self, descriptor, ResponseFormat},
     grpc::harmony::responses::ToolResult,
@@ -690,19 +689,7 @@ impl ResponseStreamEventEmitter {
             .collect();
 
         // Convert Usage to ResponsesUsage
-        let responses_usage = usage.map(|u| {
-            let usage_info = UsageInfo {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                reasoning_tokens: u
-                    .completion_tokens_details
-                    .as_ref()
-                    .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: u.prompt_tokens_details.clone(),
-            };
-            ResponsesUsage::Modern(usage_info.to_response_usage())
-        });
+        let responses_usage = usage.as_ref().map(responses_usage_from_chat_usage);
 
         // Build response using builder
         ResponsesResponse::builder(&self.response_id, &self.model)
@@ -1027,10 +1014,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finalized_streaming_response_serializes_responses_api_usage() {
+    fn finalized_streaming_response_serializes_modern_usage_with_token_details() {
         let emitter =
             ResponseStreamEventEmitter::new("resp_test".to_string(), "test-model".to_string(), 1);
-
         let usage = Usage::from_counts(12, 7)
             .with_cached_tokens(3)
             .with_reasoning_tokens(2);

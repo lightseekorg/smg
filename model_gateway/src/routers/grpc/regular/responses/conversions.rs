@@ -9,18 +9,19 @@
 
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
+    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall},
     responses::{
         ReasoningEffort, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
         ResponseOutputItem, ResponseReasoningContent::ReasoningText, ResponseStatus,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig,
-        TextFormat,
+        ResponsesRequest, ResponsesResponse, StringOrContentParts, TextConfig, TextFormat,
     },
     UNKNOWN_MODEL_ID,
 };
 use tracing::warn;
 
-use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
+use crate::routers::grpc::common::responses::{
+    responses_usage_from_chat_usage, utils::extract_tools_from_response_tools,
+};
 
 /// Convert a ResponsesRequest to ChatCompletionRequest for processing through the chat pipeline
 ///
@@ -247,6 +248,8 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         tools,
         tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
+        separate_reasoning: true,
+        stream_reasoning: true,
         reasoning_effort: req
             .reasoning
             .as_ref()
@@ -261,10 +264,13 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
 /// string (verbatim snake_case, as the Chat pipeline expects).
 fn reasoning_effort_to_str(effort: &ReasoningEffort) -> &'static str {
     match effort {
+        ReasoningEffort::None => "none",
         ReasoningEffort::Minimal => "minimal",
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::Max => "max",
     }
 }
 
@@ -415,20 +421,11 @@ pub(crate) fn chat_to_responses(
         _ => ResponseStatus::Completed, // Default to completed
     };
 
-    // Convert usage from Usage to UsageInfo, then wrap in ResponsesUsage
-    let usage = chat_resp.usage.as_ref().map(|u| {
-        let usage_info = UsageInfo {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-            reasoning_tokens: u
-                .completion_tokens_details
-                .as_ref()
-                .and_then(|d| d.reasoning_tokens),
-            prompt_tokens_details: u.prompt_tokens_details.clone(),
-        };
-        ResponsesUsage::Modern(usage_info.to_response_usage())
-    });
+    // Convert usage to the modern Responses API shape.
+    let usage = chat_resp
+        .usage
+        .as_ref()
+        .map(responses_usage_from_chat_usage);
 
     // Generate response
     let response_id = response_id_override.unwrap_or_else(|| chat_resp.id.clone());
@@ -444,12 +441,50 @@ pub(crate) fn chat_to_responses(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use llm_tokenizer::huggingface::HuggingFaceTokenizer;
     use openai_protocol::{
         chat::{ChatChoice, ChatCompletionMessage},
         common::{StreamOptions, Usage},
     };
+    use tempfile::TempDir;
 
     use super::*;
+    use crate::routers::grpc::utils::{process_chat_messages, resolve_user_thinking};
+
+    const MIN_TOKENIZER_JSON: &str = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": { "type": "Whitespace" },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "vocab": { "hello": 0, "<s>": 1, "</s>": 2 },
+            "merges": []
+        }
+    }"#;
+
+    fn deepseek_v4_tokenizer() -> (TempDir, HuggingFaceTokenizer) {
+        let temp = TempDir::new().unwrap();
+        let tokenizer_path = temp.path().join("tokenizer.json");
+        fs::write(&tokenizer_path, MIN_TOKENIZER_JSON).unwrap();
+        fs::write(
+            temp.path().join("config.json"),
+            r#"{"architectures":["DeepseekV4ForCausalLM"]}"#,
+        )
+        .unwrap();
+        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template(
+            tokenizer_path.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        (temp, tokenizer)
+    }
 
     #[test]
     fn chat_to_responses_serializes_responses_api_usage() {
@@ -515,20 +550,46 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_effort_flows_through() {
+    fn responses_requests_enable_reasoning_separation_for_streaming_and_non_streaming() {
+        for stream in [false, true] {
+            let request = ResponsesRequest {
+                input: ResponseInput::Text("reason about this".to_string()),
+                stream: Some(stream),
+                ..Default::default()
+            };
+
+            let chat_request = responses_to_chat(&request).expect("request should convert");
+
+            assert!(chat_request.separate_reasoning);
+            assert!(chat_request.stream_reasoning);
+        }
+    }
+
+    #[test]
+    fn test_reasoning_effort_values_flow_through_verbatim() {
         use openai_protocol::responses::ResponseReasoningParam;
 
-        let req = ResponsesRequest {
-            input: ResponseInput::Text("hi".to_string()),
-            reasoning: Some(ResponseReasoningParam {
-                effort: Some(ReasoningEffort::High),
-                summary: None,
-            }),
-            ..Default::default()
-        };
+        for (effort, expected) in [
+            (ReasoningEffort::None, "none"),
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let req = ResponsesRequest {
+                input: ResponseInput::Text("hi".to_string()),
+                reasoning: Some(ResponseReasoningParam {
+                    effort: Some(effort),
+                    summary: None,
+                }),
+                ..Default::default()
+            };
 
-        let chat_req = responses_to_chat(&req).unwrap();
-        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("high"));
+            let chat_req = responses_to_chat(&req).unwrap();
+            assert_eq!(chat_req.reasoning_effort.as_deref(), Some(expected));
+        }
     }
 
     #[test]
@@ -540,6 +601,104 @@ mod tests {
 
         let chat_req = responses_to_chat(&req).unwrap();
         assert_eq!(chat_req.reasoning_effort, None);
+    }
+
+    #[test]
+    fn test_reasoning_effort_absent_when_reasoning_object_is_empty() {
+        use openai_protocol::responses::ResponseReasoningParam;
+
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            reasoning: Some(ResponseReasoningParam {
+                effort: None,
+                summary: None,
+            }),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.reasoning_effort, None);
+    }
+
+    #[test]
+    fn chat_responses_and_template_kwargs_render_the_same_deepseek_v4_prompt() {
+        use openai_protocol::responses::ResponseReasoningParam;
+
+        let (_temp, tokenizer) = deepseek_v4_tokenizer();
+        let responses_request = ResponsesRequest {
+            model: "deepseek-ai/DeepSeek-V4-Flash-0731".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            reasoning: Some(ResponseReasoningParam {
+                effort: Some(ReasoningEffort::Max),
+                summary: None,
+            }),
+            ..Default::default()
+        };
+        let responses_chat = responses_to_chat(&responses_request).unwrap();
+        let chat_request = ChatCompletionRequest {
+            model: responses_request.model.clone(),
+            messages: responses_chat.messages.clone(),
+            reasoning_effort: Some("max".to_string()),
+            ..Default::default()
+        };
+        let template_request = ChatCompletionRequest {
+            model: responses_request.model.clone(),
+            messages: responses_chat.messages.clone(),
+            chat_template_kwargs: Some(std::collections::HashMap::from([(
+                "reasoning_effort".to_string(),
+                serde_json::json!("max"),
+            )])),
+            ..Default::default()
+        };
+        let native_override_request = ChatCompletionRequest {
+            model: responses_request.model.clone(),
+            messages: responses_chat.messages.clone(),
+            reasoning_effort: Some("none".to_string()),
+            chat_template_kwargs: template_request.chat_template_kwargs.clone(),
+            ..Default::default()
+        };
+
+        let responses_prompt = process_chat_messages(&responses_chat, &tokenizer, None)
+            .unwrap()
+            .text;
+        let chat_prompt = process_chat_messages(&chat_request, &tokenizer, None)
+            .unwrap()
+            .text;
+        let template_prompt = process_chat_messages(&template_request, &tokenizer, None)
+            .unwrap()
+            .text;
+        let native_override_prompt =
+            process_chat_messages(&native_override_request, &tokenizer, None)
+                .unwrap()
+                .text;
+
+        assert_eq!(responses_prompt, chat_prompt);
+        assert_eq!(template_prompt, chat_prompt);
+        assert_eq!(native_override_prompt, chat_prompt);
+        assert!(chat_prompt.contains("Reasoning Effort: Beyond maximum"));
+        assert!(chat_prompt.ends_with("<think>"));
+    }
+
+    #[test]
+    fn deepseek_v4_template_effort_enables_response_reasoning_parsing() {
+        let (_temp, tokenizer) = deepseek_v4_tokenizer();
+        let native_effort = std::collections::HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("max"),
+        )]);
+        let explicit_off = std::collections::HashMap::from([
+            ("reasoning_effort".to_string(), serde_json::json!("max")),
+            ("thinking".to_string(), serde_json::json!(false)),
+        ]);
+
+        assert_eq!(
+            resolve_user_thinking(Some(&native_effort), Some("none"), &tokenizer),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_user_thinking(Some(&explicit_off), Some("max"), &tokenizer),
+            Some(false)
+        );
     }
 
     #[test]

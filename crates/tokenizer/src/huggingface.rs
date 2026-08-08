@@ -594,6 +594,11 @@ impl TokenizerTrait for HuggingFaceTokenizer {
             Renderer::Jinja => self.chat_template.thinking_key_name(),
         }
     }
+
+    fn template_reasoning_effort_enables_thinking(&self) -> bool {
+        matches!(self.renderer, Renderer::DeepseekV4)
+    }
+
     fn think_in_prefill(&self) -> bool {
         match self.renderer {
             // Both encoders emit `<｜Assistant｜><think>` at the end of the
@@ -731,16 +736,22 @@ fn apply_deepseek_v4(
 ) -> Result<String> {
     let owned = inject_tools_into_messages(messages, params.tools);
     let msgs: &[serde_json::Value] = owned.as_deref().unwrap_or(messages);
-    let thinking_mode = derive_thinking_mode(params);
-    let reasoning_effort = params
+    let reasoning_effort = resolve_deepseek_v4_reasoning_effort(params)?;
+    let explicit_thinking = params
         .template_kwargs
-        .and_then(|k| k.get("reasoning_effort"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "max" => Some(deepseek_v4::ReasoningEffort::Max),
-            "high" => Some(deepseek_v4::ReasoningEffort::High),
-            _ => None,
-        });
+        .and_then(|kwargs| kwargs.get("thinking"))
+        .and_then(serde_json::Value::as_bool);
+    let has_native_effort = params.template_reasoning_effort.is_some()
+        || (params.reasoning_effort.is_none()
+            && params
+                .template_kwargs
+                .is_some_and(|kwargs| kwargs.contains_key("reasoning_effort")));
+    let thinking_mode = match explicit_thinking {
+        Some(true) => deepseek_v32::ThinkingMode::Thinking,
+        Some(false) => deepseek_v32::ThinkingMode::Chat,
+        None if has_native_effort => deepseek_v32::ThinkingMode::Thinking,
+        None => derive_thinking_mode(params),
+    };
     let encode_params = deepseek_v4::EncodeParams {
         add_default_bos_token: true,
         drop_thinking: resolve_drop_thinking(msgs),
@@ -748,6 +759,40 @@ fn apply_deepseek_v4(
     };
     deepseek_v4::encode_messages(msgs, thinking_mode, &encode_params)
         .map_err(|e| Error::msg(format!("DeepSeek V4 encode failed: {e}")))
+}
+
+fn resolve_deepseek_v4_reasoning_effort(
+    params: &ChatTemplateParams,
+) -> Result<Option<deepseek_v4::ReasoningEffort>> {
+    let combined_effort = params
+        .template_kwargs
+        .and_then(|kwargs| kwargs.get("reasoning_effort"));
+    let template_effort = params.template_reasoning_effort.or_else(|| {
+        if params.reasoning_effort.is_none() {
+            combined_effort
+        } else {
+            None
+        }
+    });
+    template_effort
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(deepseek_v4::ReasoningEffort::from_native)
+                .ok_or_else(|| {
+                    Error::msg(
+                        "chat_template_kwargs.reasoning_effort must be one of low, high, max",
+                    )
+                })
+        })
+        .transpose()
+        .map(|effort| {
+            effort.or_else(|| {
+                params
+                    .reasoning_effort
+                    .and_then(deepseek_v4::ReasoningEffort::from_openai)
+            })
+        })
 }
 
 #[cfg(test)]

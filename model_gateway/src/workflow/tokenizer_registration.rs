@@ -124,8 +124,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                         &source,
                         chat_template.as_deref(),
                     )
-                    .await
-                    {
+                    .await {
                         Ok(tok) => tok,
                         Err(local_err) => {
                             debug!(
@@ -436,7 +435,48 @@ pub fn create_tokenizer_workflow_data(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write};
+
+    use llm_tokenizer::chat_template::ChatTemplateParams;
+    use serde_json::json;
+    use zip::{write::SimpleFileOptions, ZipWriter};
+
     use super::*;
+
+    const MIN_TOKENIZER_JSON: &str = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": { "type": "Whitespace" },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "vocab": { "hello": 0, "<s>": 1, "</s>": 2 },
+            "merges": []
+        }
+    }"#;
+
+    fn deepseek_v4_bundle() -> StreamBundle {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        writer
+            .start_file("tokenizer.json", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(MIN_TOKENIZER_JSON.as_bytes()).unwrap();
+        writer
+            .start_file("config.json", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(br#"{"architectures":["DeepseekV4ForCausalLM"]}"#)
+            .unwrap();
+        StreamBundle {
+            sha256: String::new(),
+            compressed_data: writer.finish().unwrap().into_inner(),
+        }
+    }
 
     #[test]
     fn test_tokenizer_config_request_serialization() {
@@ -522,5 +562,26 @@ mod tests {
         workflow
             .validate()
             .expect("Workflow validation should pass");
+    }
+
+    #[test]
+    fn grpc_bundle_load_uses_deepseek_v4_effort_encoding() {
+        let bundle = deepseek_v4_bundle();
+        let (tokenizer, _) = load_tokenizer_from_bundle(&bundle).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let native_effort = json!("max");
+        let output = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    thinking: Some(true),
+                    template_reasoning_effort: Some(&native_effort),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(output.contains("Reasoning Effort: Beyond maximum"));
+        assert!(!output.contains("Reasoning Effort: Absolute maximum"));
     }
 }

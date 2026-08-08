@@ -445,11 +445,11 @@ impl HarmonyBuilder {
             .reasoning_effort
             .as_deref()
             .map(|effort| match effort {
-                "high" => ReasoningEffort::High,
+                "high" | "xhigh" | "max" => ReasoningEffort::High,
                 "medium" => ReasoningEffort::Medium,
-                "low" => ReasoningEffort::Low,
-                // Harmony does not support minimal reasoning effort
-                "minimal" => ReasoningEffort::Low,
+                // Harmony has no disabled or minimal bucket, so clamp both
+                // to its lowest supported effort.
+                "none" | "minimal" | "low" => ReasoningEffort::Low,
                 _ => ReasoningEffort::Medium,
             });
 
@@ -472,10 +472,13 @@ impl HarmonyBuilder {
             .as_ref()
             .and_then(|r| r.effort.as_ref())
             .map(|effort| match effort {
-                ResponsesReasoningEffort::High => ReasoningEffort::High,
+                ResponsesReasoningEffort::High
+                | ResponsesReasoningEffort::XHigh
+                | ResponsesReasoningEffort::Max => ReasoningEffort::High,
                 ResponsesReasoningEffort::Medium => ReasoningEffort::Medium,
-                ResponsesReasoningEffort::Low => ReasoningEffort::Low,
-                ResponsesReasoningEffort::Minimal => ReasoningEffort::Low,
+                ResponsesReasoningEffort::None
+                | ResponsesReasoningEffort::Minimal
+                | ResponsesReasoningEffort::Low => ReasoningEffort::Low,
             });
 
         self.build_system_message(reasoning_effort, with_custom_tools)
@@ -1207,10 +1210,45 @@ mod tests {
 
     use openai_protocol::{
         common::{AudioUrl, InputAudio},
-        responses::{ImageGenerationTool, ResponseInput, ResponseTool, ResponsesRequest},
+        responses::{
+            ImageGenerationTool, ResponseInput, ResponseReasoningParam, ResponseTool,
+            ResponsesRequest,
+        },
     };
 
     use super::*;
+
+    #[test]
+    fn chat_and_responses_reasoning_efforts_build_the_same_system_message() {
+        let builder = HarmonyBuilder::new();
+
+        for (chat_effort, responses_effort) in [
+            ("none", ResponsesReasoningEffort::None),
+            ("minimal", ResponsesReasoningEffort::Minimal),
+            ("low", ResponsesReasoningEffort::Low),
+            ("medium", ResponsesReasoningEffort::Medium),
+            ("high", ResponsesReasoningEffort::High),
+            ("xhigh", ResponsesReasoningEffort::XHigh),
+            ("max", ResponsesReasoningEffort::Max),
+        ] {
+            let chat_request = ChatCompletionRequest {
+                reasoning_effort: Some(chat_effort.to_string()),
+                ..Default::default()
+            };
+            let responses_request = ResponsesRequest {
+                reasoning: Some(ResponseReasoningParam {
+                    effort: Some(responses_effort),
+                    summary: None,
+                }),
+                ..Default::default()
+            };
+
+            let chat_message = builder.build_system_message_from_chat(&chat_request);
+            let responses_message =
+                builder.build_system_message_from_responses(&responses_request, false);
+            assert_eq!(chat_message, responses_message, "effort: {chat_effort}");
+        }
+    }
 
     #[test]
     fn chat_audio_is_explicitly_rejected() {

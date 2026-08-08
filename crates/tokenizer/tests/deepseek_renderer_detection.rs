@@ -41,6 +41,21 @@ mod tests {
         (temp, p)
     }
 
+    fn write_named_v4_dir(model_name: &str) -> (TempDir, String) {
+        let temp = TempDir::new().unwrap();
+        let model_dir = temp.path().join(model_name);
+        fs::create_dir(&model_dir).unwrap();
+        let tok_path = model_dir.join("tokenizer.json");
+        fs::write(&tok_path, MIN_TOKENIZER_JSON).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            json!({ "architectures": ["DeepseekV4ForCausalLM"] }).to_string(),
+        )
+        .unwrap();
+        let path = tok_path.to_str().unwrap().to_string();
+        (temp, path)
+    }
+
     #[test]
     fn config_with_deepseek_v32_arch_uses_v32_renderer() {
         let (_tmp, tok) = write_dir(Some(&["DeepseekV32ForCausalLM"]));
@@ -268,7 +283,7 @@ mod tests {
 
     #[test]
     fn deepseek_v4_renderer_passes_reasoning_effort() {
-        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
         let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
         let messages = vec![json!({ "role": "user", "content": "Hello" })];
         let mut kwargs: HashMap<String, serde_json::Value> = HashMap::new();
@@ -283,12 +298,307 @@ mod tests {
         };
         let out = tokenizer.apply_chat_template(&messages, params).unwrap();
         assert!(
-            out.contains("Reasoning Effort: Absolute maximum"),
-            "expected reasoning-effort prefix in V4 output"
+            out.contains("Reasoning Effort: Beyond maximum"),
+            "expected 0731 max reasoning-effort prefix in V4 output"
         );
         assert!(
             out.ends_with("<think>"),
             "thinking mode should leave a <think> token open"
         );
+    }
+
+    #[test]
+    fn deepseek_v4_maps_openai_efforts_to_0731_buckets() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+
+        for (effort, expected_prefix) in [
+            ("minimal", None),
+            ("low", None),
+            ("medium", Some("Reasoning Effort: Absolute maximum")),
+            ("high", Some("Reasoning Effort: Absolute maximum")),
+            ("xhigh", Some("Reasoning Effort: Beyond maximum")),
+            ("max", Some("Reasoning Effort: Beyond maximum")),
+        ] {
+            let out = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        thinking: Some(true),
+                        reasoning_effort: Some(effort),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            match expected_prefix {
+                Some(prefix) => assert!(out.contains(prefix), "effort {effort}: {out}"),
+                None => assert!(!out.contains("Reasoning Effort:"), "effort {effort}: {out}"),
+            }
+            assert!(out.ends_with("<think>"), "effort {effort}: {out}");
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_top_level_and_template_efforts_render_identically() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+
+        for (effort, expected_prefix) in [
+            ("low", None),
+            ("high", Some("Reasoning Effort: Absolute maximum")),
+            ("max", Some("Reasoning Effort: Beyond maximum")),
+        ] {
+            let top_level = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        thinking: Some(true),
+                        reasoning_effort: Some(effort),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let template_kwargs = HashMap::from([("reasoning_effort".to_string(), json!(effort))]);
+            let native = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        template_kwargs: Some(&template_kwargs),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(native, top_level, "effort {effort}");
+            assert!(native.ends_with("<think>"), "effort {effort}: {native}");
+            match expected_prefix {
+                Some(prefix) => assert!(native.contains(prefix), "effort {effort}: {native}"),
+                None => assert!(
+                    !native.contains("Reasoning Effort:"),
+                    "effort {effort}: {native}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_distinguishes_merged_public_effort_from_native_template_effort() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let kwargs = HashMap::from([("reasoning_effort".to_string(), json!("medium"))]);
+
+        let output = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    thinking: Some(true),
+                    reasoning_effort: Some("medium"),
+                    template_kwargs: Some(&kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(output.contains("Reasoning Effort: Absolute maximum"));
+        assert!(!output.contains("Reasoning Effort: Beyond maximum"));
+    }
+
+    #[test]
+    fn deepseek_v4_native_template_effort_overrides_openai_effort() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let native_effort = json!("max");
+
+        let out = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    thinking: Some(true),
+                    reasoning_effort: Some("medium"),
+                    template_reasoning_effort: Some(&native_effort),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(out.contains("Reasoning Effort: Beyond maximum"));
+        assert!(!out.contains("Reasoning Effort: Absolute maximum"));
+    }
+
+    #[test]
+    fn deepseek_v4_rejects_invalid_native_template_effort() {
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+
+        for model_name in [
+            "DeepSeek-V4-Flash",
+            "DeepSeek-V4-Flash-0731",
+            "DeepSeek-V4-Flash-DSpark",
+            "DeepSeek-V4-Pro",
+        ] {
+            let (_tmp, tok) = write_named_v4_dir(model_name);
+            let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+            for native_effort in [json!("medium"), json!(3)] {
+                let error = tokenizer
+                    .apply_chat_template(
+                        &messages,
+                        ChatTemplateParams {
+                            thinking: Some(true),
+                            template_reasoning_effort: Some(&native_effort),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains(
+                        "chat_template_kwargs.reasoning_effort must be one of low, high, max"
+                    ),
+                    "{model_name}: unexpected error: {error}"
+                );
+            }
+        }
+
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        for native_effort in [json!("medium"), json!(3)] {
+            let error = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        thinking: Some(true),
+                        template_reasoning_effort: Some(&native_effort),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(
+                    "chat_template_kwargs.reasoning_effort must be one of low, high, max"
+                ),
+                "anonymous V4: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_explicit_thinking_overrides_effort_defaults() {
+        let (_tmp, tok) = write_named_v4_dir("DeepSeek-V4-Flash-0731");
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+
+        let mut effort_only = HashMap::new();
+        effort_only.insert("reasoning_effort".to_string(), json!("max"));
+        let out = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    template_kwargs: Some(&effort_only),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.ends_with("<think>"));
+        assert!(out.contains("Reasoning Effort: Beyond maximum"));
+
+        let thinking_off = HashMap::from([("thinking".to_string(), json!(false))]);
+        let out = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    template_kwargs: Some(&thinking_off),
+                    thinking: Some(true),
+                    reasoning_effort: Some("max"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.ends_with("</think>"));
+        assert!(!out.contains("Reasoning Effort:"));
+
+        let thinking_on = HashMap::from([("thinking".to_string(), json!(true))]);
+        let out = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    template_kwargs: Some(&thinking_on),
+                    thinking: Some(false),
+                    reasoning_effort: Some("none"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.ends_with("<think>"));
+        assert!(!out.contains("Reasoning Effort:"));
+
+        let out = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    reasoning_effort: Some("turbo"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.ends_with("</think>"));
+        assert!(!out.contains("Reasoning Effort:"));
+    }
+
+    #[test]
+    fn deepseek_v4_effort_encoding_is_independent_of_local_model_path() {
+        for model_name in [
+            "DeepSeek-V4-Flash-0731",
+            "DeepSeek-V4-Flash",
+            "DeepSeek-V4-Flash-DSpark",
+            "DeepSeek-V4-Pro",
+        ] {
+            let (_tmp, tok) = write_named_v4_dir(model_name);
+            let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+            let messages = vec![json!({ "role": "user", "content": "Hello" })];
+            let native_effort = json!("max");
+            let output = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        thinking: Some(true),
+                        template_reasoning_effort: Some(&native_effort),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            assert!(
+                output.contains("Reasoning Effort: Beyond maximum"),
+                "{model_name}: {output}"
+            );
+            assert!(
+                !output.contains("Reasoning Effort: Absolute maximum"),
+                "{model_name}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_anonymous_renderer_uses_0731_effort_encoding() {
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let native_effort = json!("max");
+        let output = tokenizer
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    thinking: Some(true),
+                    template_reasoning_effort: Some(&native_effort),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(output.contains("Reasoning Effort: Beyond maximum"));
+        assert!(!output.contains("Reasoning Effort: Absolute maximum"));
     }
 }

@@ -167,7 +167,7 @@ fn auto_detect_tokenizer(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> 
 
     // Check for JSON (HuggingFace format)
     if is_likely_json(&buffer) {
-        let tokenizer = HuggingFaceTokenizer::from_file(file_path)?;
+        let tokenizer = HuggingFaceTokenizer::from_file_with_chat_template(file_path, None)?;
         return Ok(Arc::new(tokenizer));
     }
 
