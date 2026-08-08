@@ -28,11 +28,13 @@ use crate::{
     error::Result,
     protocol::{
         vllm::{
-            output::{decode_engine_core_outputs, EngineCoreOutput, EngineCoreOutputs},
+            output::{
+                decode_engine_core_outputs, DpControlMessage, EngineCoreOutput, EngineCoreOutputs,
+            },
             request::{EngineCoreRequest, EngineCoreRequestType},
             stats::SchedulerStats,
         },
-        EngineBatch, EngineLoad, EngineOutput, EngineProtocol,
+        EngineBatch, EngineLoad, EngineOutput, EngineProtocol, WaveEvent,
     },
 };
 
@@ -94,10 +96,19 @@ impl EngineProtocol for VllmProtocol {
         encode_msgpack(&[request_id.to_string()])
     }
 
+    fn encode_start_wave(wave: u32, exclude_engine_index: u32) -> Result<Option<(Bytes, Vec<u8>)>> {
+        // Python decodes this with the generic msgpack decoder and unpacks it
+        // positionally as `new_wave, exclude_eng_index`.
+        Ok(Some((
+            EngineCoreRequestType::StartDpWave.to_frame(),
+            encode_msgpack(&(wave, exclude_engine_index))?,
+        )))
+    }
+
     fn decode_batch(frames: &[Bytes]) -> Result<EngineBatch<Self::Output>> {
         // vLLM multiplexes request batches, utility RPCs, and DP control on one
-        // wire struct; only request batches carry per-request outputs (the
-        // others surface as an empty batch the dispatcher ignores).
+        // wire struct; only request batches carry per-request outputs (utility
+        // results surface as an empty batch the dispatcher ignores).
         match decode_engine_core_outputs(frames)? {
             EngineCoreOutputs::RequestBatch(batch) => Ok(EngineBatch {
                 engine_index: batch.engine_index,
@@ -107,10 +118,17 @@ impl EngineProtocol for VllmProtocol {
                     .map(|ids| ids.into_iter().collect())
                     .unwrap_or_default(),
                 load: batch.scheduler_stats.map(|stats| EngineLoad::from(*stats)),
+                wave: None,
             }),
-            EngineCoreOutputs::Utility(_) | EngineCoreOutputs::DpControl(_) => {
-                Ok(EngineBatch::default())
-            }
+            EngineCoreOutputs::DpControl(control) => Ok(EngineBatch {
+                engine_index: control.engine_index,
+                wave: Some(match control.control {
+                    DpControlMessage::WaveComplete(wave) => WaveEvent::Complete(wave),
+                    DpControlMessage::StartWave(wave) => WaveEvent::Start(wave),
+                }),
+                ..EngineBatch::default()
+            }),
+            EngineCoreOutputs::Utility(_) => Ok(EngineBatch::default()),
         }
     }
 }

@@ -121,6 +121,15 @@ impl EngineProtocol for TokenSpeedProtocol {
         encode_msgpack(&[request_id.to_string()])
     }
 
+    fn encode_start_wave(
+        _wave: u32,
+        _exclude_engine_index: u32,
+    ) -> Result<Option<(Bytes, Vec<u8>)>> {
+        // TokenSpeed has no wave protocol: its scheduler never pauses a group
+        // of ranks, so there is nothing to wake.
+        Ok(None)
+    }
+
     fn decode_batch(frames: &[Bytes]) -> Result<EngineBatch<Self::Output>> {
         // Output messages are `[payload, aux...]`. The slim batch carries no
         // tensor fields today, so aux frames are unexpected but not fatal.
@@ -146,6 +155,7 @@ impl EngineProtocol for TokenSpeedProtocol {
             outputs,
             finished_request_ids,
             load: None,
+            wave: None,
         })
     }
 }

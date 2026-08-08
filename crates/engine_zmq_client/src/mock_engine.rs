@@ -94,7 +94,13 @@ pub enum EngineInbound {
     Add(Box<EngineCoreRequest>),
     /// An abort for the given request ids (`EngineCoreRequestType::Abort`).
     Abort(Vec<String>),
-    /// Any other request type byte (StartDpWave / Utility), unhandled here.
+    /// A lockstep-group wake (`EngineCoreRequestType::StartDpWave`): start this
+    /// wave unless this engine is the excluded one.
+    StartDpWave {
+        wave: u32,
+        exclude_engine_index: u32,
+    },
+    /// Any other request type byte (Utility), unhandled here.
     Other(u8),
 }
 
@@ -124,6 +130,13 @@ impl MockEngineInput {
             }
             Some(EngineCoreRequestType::Abort) => {
                 Ok(EngineInbound::Abort(decode_msgpack(payload)?))
+            }
+            Some(EngineCoreRequestType::StartDpWave) => {
+                let (wave, exclude_engine_index) = decode_msgpack(payload)?;
+                Ok(EngineInbound::StartDpWave {
+                    wave,
+                    exclude_engine_index,
+                })
             }
             Some(other) => Ok(EngineInbound::Other(other as u8)),
             None => Err(Error::UnexpectedHandshakeMessage {
@@ -180,6 +193,12 @@ impl MockEngine {
     /// Receive one request's raw frames. Convenience for sequential test drivers.
     pub async fn recv_request(&mut self) -> Result<Vec<Bytes>> {
         self.input.recv_frames().await
+    }
+
+    /// Receive and classify the next request. Convenience for sequential test
+    /// drivers that care about the request type rather than the raw frames.
+    pub async fn recv(&mut self) -> Result<EngineInbound> {
+        self.input.recv().await
     }
 
     /// Push a raw multi-frame output. Convenience for sequential test drivers.
